@@ -197,9 +197,7 @@ class GenerationController(Controller):
 
             if prompt_id:
                 job_manager.set_queued(job.job_id, prompt_id)
-                job.input_images = [
-                    img for img in [uploaded_image_1, uploaded_image_2] if img
-                ]
+                job.input_images = [img for img in [uploaded_image_1, uploaded_image_2] if img]
             else:
                 job_manager.set_failed(job.job_id, "No prompt_id returned from ComfyUI")
 
