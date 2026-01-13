@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from src.api.schemas.generation import (
     AspectRatio,
     GenerationRequest,
+    GenerationType,
     ModelType,
 )
 
@@ -139,3 +140,21 @@ class TestGenerationRequest:
         # Valid range
         GenerationRequest(prompt="test", steps=1)
         GenerationRequest(prompt="test", steps=20)
+
+    def test_generation_type_default(self) -> None:
+        """Test generation_type defaults to t2i."""
+        request = GenerationRequest(prompt="test")
+        assert request.generation_type == GenerationType.T2I
+
+    def test_generation_type_explicit(self) -> None:
+        """Test explicit generation_type."""
+        request_t2i = GenerationRequest(prompt="test", generation_type=GenerationType.T2I)
+        assert request_t2i.generation_type == GenerationType.T2I
+
+        request_i2i = GenerationRequest(prompt="test", generation_type=GenerationType.I2I)
+        assert request_i2i.generation_type == GenerationType.I2I
+
+    def test_generation_type_from_string(self) -> None:
+        """Test generation_type from string value."""
+        request = GenerationRequest(prompt="test", generation_type="i2i")
+        assert request.generation_type == GenerationType.I2I

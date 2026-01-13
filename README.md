@@ -13,14 +13,15 @@ A Litestar-based REST API service for ComfyUI image generation workflows.
 ## Requirements
 
 - Python 3.10+
-- ComfyUI instance accessible (via SSH port forwarding for vast.ai)
-- `qwen_rapid_aio` workflow bundle
+- ComfyUI instance accessible (via SSH port forwarding for remote nodes)
+- A proper workflow bundle
 
 ## Installation
 
 ```bash
 # Clone and navigate to project
-cd comfyui-api
+git clone https://github.com/gearbox/apex.git
+cd apex
 
 # Install with uv (recommended)
 uv sync
@@ -44,10 +45,10 @@ Key settings:
 
 ## Usage
 
-### 1. Set up SSH tunnel to vast.ai instance
+### 1. Set up SSH tunnel to the GPU node instance
 
 ```bash
-ssh -L 18188:localhost:18188 root@<vast-ai-host> -p <ssh-port>
+ssh -L 18188:localhost:18188 root@<gpu-node-host> -p <ssh-port>
 ```
 
 ### 2. Start the API server

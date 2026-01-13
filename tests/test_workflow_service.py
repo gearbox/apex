@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.api.schemas.generation import AspectRatio, GenerationRequest, ModelType
+from src.api.schemas.generation import AspectRatio, GenerationRequest, GenerationType, ModelType
 from src.api.services.workflow_service import (
     NodeIDs,
     WorkflowNotFoundError,
@@ -79,7 +79,7 @@ class TestWorkflowService:
         """Test applying input images to workflow."""
         workflow = workflow_service.load_workflow(ModelType.AISHA)
 
-        request = GenerationRequest(prompt="test")
+        request = GenerationRequest(prompt="test", generation_type=GenerationType.I2I)
 
         modified = workflow_service.apply_parameters(
             workflow=workflow,
@@ -101,6 +101,103 @@ class TestWorkflowService:
 
         # Original should be unchanged
         assert workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"] == original_prompt
+
+    def test_apply_parameters_t2i_disconnects_images(
+        self, workflow_service: WorkflowService
+    ) -> None:
+        """Test that t2i mode disconnects image inputs."""
+        workflow = workflow_service.load_workflow(ModelType.AISHA)
+
+        request = GenerationRequest(
+            prompt="A beautiful cat",
+            generation_type=GenerationType.T2I,
+        )
+
+        modified = workflow_service.apply_parameters(
+            workflow=workflow,
+            request=request,
+        )
+
+        # Image inputs should be disconnected from positive prompt encoder
+        positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
+        assert "image1" not in positive_inputs
+        assert "image2" not in positive_inputs
+        assert "image3" not in positive_inputs
+
+    def test_apply_parameters_i2i_keeps_images(self, workflow_service: WorkflowService) -> None:
+        """Test that i2i mode preserves image connections for uploaded images."""
+        workflow = workflow_service.load_workflow(ModelType.AISHA)
+
+        request = GenerationRequest(
+            prompt="Transform this image",
+            generation_type=GenerationType.I2I,
+        )
+
+        modified = workflow_service.apply_parameters(
+            workflow=workflow,
+            request=request,
+            input_image_1="my_image.png",
+        )
+
+        # Image should be set in LoadImage node
+        assert modified[NodeIDs.LOAD_IMAGE_1]["inputs"]["image"] == "my_image.png"
+
+        # Connection should be restored to positive prompt encoder
+        positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
+        assert "image1" in positive_inputs
+        assert positive_inputs["image1"] == [NodeIDs.LOAD_IMAGE_1, 0]
+
+        # image2 should NOT be connected (not uploaded)
+        assert "image2" not in positive_inputs
+
+    def test_apply_parameters_i2i_with_two_images(self, workflow_service: WorkflowService) -> None:
+        """Test that i2i mode connects both images when both are provided."""
+        workflow = workflow_service.load_workflow(ModelType.AISHA)
+
+        request = GenerationRequest(
+            prompt="Blend these images",
+            generation_type=GenerationType.I2I,
+        )
+
+        modified = workflow_service.apply_parameters(
+            workflow=workflow,
+            request=request,
+            input_image_1="image_a.png",
+            input_image_2="image_b.png",
+        )
+
+        # Both images should be set in LoadImage nodes
+        assert modified[NodeIDs.LOAD_IMAGE_1]["inputs"]["image"] == "image_a.png"
+        assert modified[NodeIDs.LOAD_IMAGE_2]["inputs"]["image"] == "image_b.png"
+
+        # Both connections should be restored to positive prompt encoder
+        positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
+        assert positive_inputs["image1"] == [NodeIDs.LOAD_IMAGE_1, 0]
+        assert positive_inputs["image2"] == [NodeIDs.LOAD_IMAGE_2, 0]
+
+    def test_apply_parameters_i2i_second_image_only(
+        self, workflow_service: WorkflowService
+    ) -> None:
+        """Test that i2i mode works when only second image is provided."""
+        workflow = workflow_service.load_workflow(ModelType.AISHA)
+
+        request = GenerationRequest(
+            prompt="Use this reference",
+            generation_type=GenerationType.I2I,
+        )
+
+        modified = workflow_service.apply_parameters(
+            workflow=workflow,
+            request=request,
+            input_image_1=None,
+            input_image_2="only_second.png",
+        )
+
+        # Only image2 should be connected
+        positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
+        assert "image1" not in positive_inputs
+        assert positive_inputs["image2"] == [NodeIDs.LOAD_IMAGE_2, 0]
+        assert modified[NodeIDs.LOAD_IMAGE_2]["inputs"]["image"] == "only_second.png"
 
     def test_validate_workflow_valid(self, workflow_service: WorkflowService) -> None:
         """Test validation passes for valid workflow."""

@@ -3,16 +3,23 @@
 import logging
 import uuid
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Annotated
 
 from litestar import Controller, Response, get, post
 from litestar.datastructures import UploadFile
 from litestar.enums import RequestEncodingType
 from litestar.params import Body
-from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_404_NOT_FOUND
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_201_CREATED,
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+)
 
 from src.api.schemas.generation import (
     GenerationRequest,
+    GenerationType,
     HealthResponse,
     ImageUploadResponse,
     JobResponse,
@@ -124,11 +131,27 @@ class GenerationController(Controller):
         image1: UploadFile | None = None,
         image2: UploadFile | None = None,
     ) -> Response[JobResponse]:
-        """Submit a generation job with reference images.
+        """Submit a generation job with reference images (image-to-image).
 
         Accepts up to 2 reference images for image-to-image generation.
         Images are uploaded to ComfyUI and referenced in the workflow.
+
+        Note: If generation_type is 't2i', uploaded images will be ignored.
+        For i2i generation, at least one image is required.
         """
+        # Validate i2i requires at least one image
+        if data.generation_type == GenerationType.I2I and image1 is None and image2 is None:
+            return Response(
+                content=JobResponse(
+                    job_id="",
+                    status=JobStatus.FAILED,
+                    name=data.name or "Failed",
+                    created_at=datetime.now(timezone.utc),
+                    message="Image-to-image (i2i) generation requires at least one input image",
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
         job = job_manager.create_job(data)
 
         uploaded_image_1: str | None = None
@@ -174,7 +197,9 @@ class GenerationController(Controller):
 
             if prompt_id:
                 job_manager.set_queued(job.job_id, prompt_id)
-                job.input_images = [img for img in [uploaded_image_1, uploaded_image_2] if img]
+                job.input_images = [
+                    img for img in [uploaded_image_1, uploaded_image_2] if img
+                ]
             else:
                 job_manager.set_failed(job.job_id, "No prompt_id returned from ComfyUI")
 

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, ClassVar
 
-from src.api.schemas.generation import GenerationRequest, ModelType
+from src.api.schemas.generation import GenerationRequest, GenerationType, ModelType
 
 logger = logging.getLogger(__name__)
 
@@ -270,23 +270,82 @@ class WorkflowService:
             workflow[NodeIDs.KSAMPLER]["inputs"]["seed"] = request.seed
             workflow[NodeIDs.KSAMPLER]["inputs"]["steps"] = request.steps
 
-        # Apply input images if provided
-        if input_image_1 and NodeIDs.LOAD_IMAGE_1 in workflow:
-            workflow[NodeIDs.LOAD_IMAGE_1]["inputs"]["image"] = input_image_1
+        # Handle image inputs based on generation type
+        if request.generation_type == GenerationType.T2I:
+            # For t2i: disconnect all image inputs from the prompt encoder
+            self._disconnect_image_inputs(workflow)
+            logger.debug("T2I mode: disconnected all image input nodes")
+        else:
+            # For i2i: connect only the images that were actually uploaded
+            # First, disconnect all image inputs
+            self._disconnect_image_inputs(workflow)
 
-        if input_image_2 and NodeIDs.LOAD_IMAGE_2 in workflow:
-            workflow[NodeIDs.LOAD_IMAGE_2]["inputs"]["image"] = input_image_2
+            # Then, reconnect and set only the provided images
+            if input_image_1:
+                # Set the image filename in LoadImage node
+                if NodeIDs.LOAD_IMAGE_1 in workflow:
+                    workflow[NodeIDs.LOAD_IMAGE_1]["inputs"]["image"] = input_image_1
+
+                # Reconnect image1 to positive prompt encoder
+                if NodeIDs.POSITIVE_PROMPT in workflow:
+                    # Connection format: [source_node_id, output_slot]
+                    workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["image1"] = [
+                        NodeIDs.LOAD_IMAGE_1,
+                        0,
+                    ]
+
+            if input_image_2:
+                # Set the image filename in LoadImage node
+                if NodeIDs.LOAD_IMAGE_2 in workflow:
+                    workflow[NodeIDs.LOAD_IMAGE_2]["inputs"]["image"] = input_image_2
+
+                # Reconnect image2 to positive prompt encoder
+                if NodeIDs.POSITIVE_PROMPT in workflow:
+                    workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["image2"] = [
+                        NodeIDs.LOAD_IMAGE_2,
+                        0,
+                    ]
+
+            connected_count = sum(1 for img in [input_image_1, input_image_2] if img)
+            logger.debug(f"I2I mode: connected {connected_count} image input node(s)")
 
         # Apply output filename prefix
         if NodeIDs.SAVE_IMAGE in workflow:
             workflow[NodeIDs.SAVE_IMAGE]["inputs"]["filename_prefix"] = filename_prefix
 
         logger.debug(
-            f"Applied parameters: size={request.calculated_width}x{request.height}, "
+            f"Applied parameters: type={request.generation_type.value}, "
+            f"size={request.calculated_width}x{request.height}, "
             f"batch={request.max_images}, seed={request.seed}, steps={request.steps}"
         )
 
         return workflow
+
+    def _disconnect_image_inputs(self, workflow: dict[str, Any]) -> None:
+        """Disconnect image inputs from the positive prompt encoder for t2i mode.
+
+        This prevents the workflow from using default/placeholder images
+        when doing pure text-to-image generation.
+
+        Args:
+            workflow: Workflow in API format (modified in place).
+        """
+        # Remove image input connections from positive prompt encoder
+        if NodeIDs.POSITIVE_PROMPT in workflow:
+            inputs = workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]
+
+            # Remove image1, image2, image3 connections if they exist
+            for image_key in ["image1", "image2", "image3"]:
+                if image_key in inputs:
+                    del inputs[image_key]
+
+        # Also disconnect from negative prompt encoder if it has image inputs
+        if NodeIDs.NEGATIVE_PROMPT in workflow:
+            inputs = workflow[NodeIDs.NEGATIVE_PROMPT]["inputs"]
+
+            for image_key in ["image1", "image2", "image3"]:
+                if image_key in inputs:
+                    del inputs[image_key]
 
     def validate_workflow(self, workflow: dict[str, Any]) -> bool:
         """Validate that workflow has required nodes.

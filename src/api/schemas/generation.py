@@ -17,6 +17,13 @@ class ModelType(str, Enum):
     # Z_IMAGE = "z-image"
 
 
+class GenerationType(str, Enum):
+    """Generation type - text-to-image or image-to-image."""
+
+    T2I = "t2i"
+    I2I = "i2i"
+
+
 class AspectRatio(str, Enum):
     """Supported aspect ratios."""
 
@@ -95,6 +102,11 @@ class GenerationRequest(BaseModel):
         default=ModelType.AISHA,
         description="Model type to use for generation",
         examples=["aisha"],
+    )
+    generation_type: GenerationType = Field(
+        default=GenerationType.T2I,
+        description="Generation type: t2i (text-to-image) or i2i (image-to-image)",
+        examples=["t2i", "i2i"],
     )
     max_images: Annotated[int, Field(ge=1, le=4)] = Field(
         default=1,

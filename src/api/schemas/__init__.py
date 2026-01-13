@@ -3,6 +3,7 @@
 from .generation import (
     AspectRatio,
     GenerationRequest,
+    GenerationType,
     HealthResponse,
     ImageUploadResponse,
     JobResponse,
@@ -14,6 +15,7 @@ from .generation import (
 __all__ = [
     "AspectRatio",
     "GenerationRequest",
+    "GenerationType",
     "HealthResponse",
     "ImageUploadResponse",
     "JobResponse",

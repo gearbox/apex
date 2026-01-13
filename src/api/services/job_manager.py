@@ -209,13 +209,17 @@ class JobManager:
                 pending = queue.get("queue_pending", [])
 
                 # Check if in running queue
-                is_running = any(item[1] == job.prompt_id for item in running if len(item) > 1)
+                is_running = any(
+                    item[1] == job.prompt_id for item in running if len(item) > 1
+                )
 
                 if is_running:
                     self.set_running(job_id, 50.0)  # Approximate progress
                 else:
                     # Check if still pending
-                    is_pending = any(item[1] == job.prompt_id for item in pending if len(item) > 1)
+                    is_pending = any(
+                        item[1] == job.prompt_id for item in pending if len(item) > 1
+                    )
                     if is_pending:
                         job.status = JobStatus.QUEUED
 
@@ -265,7 +269,11 @@ class JobManager:
         from datetime import timedelta
 
         cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
-        old_jobs = [job_id for job_id, job in self._jobs.items() if job.created_at < cutoff]
+        old_jobs = [
+            job_id
+            for job_id, job in self._jobs.items()
+            if job.created_at < cutoff
+        ]
 
         for job_id in old_jobs:
             job = self._jobs.pop(job_id, None)
