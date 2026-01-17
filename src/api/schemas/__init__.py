@@ -1,6 +1,7 @@
 """API schemas module."""
 
 from .generation import (
+    DEFAULT_NEGATIVE_PROMPT,
     AspectRatio,
     GenerationRequest,
     GenerationType,
@@ -13,6 +14,7 @@ from .generation import (
 )
 
 __all__ = [
+    "DEFAULT_NEGATIVE_PROMPT",
     "AspectRatio",
     "GenerationRequest",
     "GenerationType",

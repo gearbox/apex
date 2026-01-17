@@ -1,11 +1,13 @@
-"""Pydantic schemas for generation API."""
+"""API schemas using msgspec for high-performance serialization."""
+
+from __future__ import annotations
 
 import random
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+import msgspec
 
 
 class ModelType(str, Enum):
@@ -67,68 +69,40 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
-class GenerationRequest(BaseModel):
+# Type aliases for validation constraints (used by Litestar's OpenAPI generation)
+PromptStr = Annotated[str, msgspec.Meta(min_length=1, max_length=4096)]
+NegativePromptStr = Annotated[str, msgspec.Meta(max_length=2048)]
+Height = Annotated[int, msgspec.Meta(ge=256, le=2048)]
+MaxImages = Annotated[int, msgspec.Meta(ge=1, le=4)]
+Steps = Annotated[int, msgspec.Meta(ge=1, le=20)]
+Progress = Annotated[float, msgspec.Meta(ge=0.0, le=100.0)]
+
+
+# Default negative prompt constant
+DEFAULT_NEGATIVE_PROMPT = (
+    "waxy texture, blurry face, over-sharpening, unrealistic symmetry, "
+    "flat lighting, low detail skin, extra fingers, distorted anatomy, deformed"
+)
+
+
+class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request schema for image generation."""
 
-    name: str | None = Field(
-        default=None,
-        description="Name of the text to image task (auto-generated if not provided)",
-        examples=["My Generated Image"],
-    )
-    prompt: str = Field(
-        ...,
-        min_length=1,
-        max_length=4096,
-        description="Text prompt for image generation",
-        examples=["A beautiful sunset over mountains"],
-    )
-    negative_prompt: str = Field(
-        default="waxy texture, blurry face, over-sharpening, unrealistic symmetry, "
-        "flat lighting, low detail skin, extra fingers, distorted anatomy, deformed",
-        max_length=2048,
-        description="Text negative prompt for image generation",
-    )
-    height: Annotated[int, Field(ge=256, le=2048)] = Field(
-        default=1024,
-        description="Image height in pixels",
-        examples=[1024],
-    )
-    aspect_ratio: AspectRatio = Field(
-        default=AspectRatio.RATIO_1_1,
-        description="Aspect ratio for the generated image",
-        examples=["1:1", "16:9"],
-    )
-    model_type: ModelType = Field(
-        default=ModelType.AISHA,
-        description="Model type to use for generation",
-        examples=["aisha"],
-    )
-    generation_type: GenerationType = Field(
-        default=GenerationType.T2I,
-        description="Generation type: t2i (text-to-image) or i2i (image-to-image)",
-        examples=["t2i", "i2i"],
-    )
-    max_images: Annotated[int, Field(ge=1, le=4)] = Field(
-        default=1,
-        description="Number of images to generate in batch",
-        examples=[1],
-    )
-    seed: int | None = Field(
-        default=None,
-        description="Seed for reproducible generation (auto-generated if not provided)",
-        examples=[74137893],
-    )
-    steps: Annotated[int, Field(ge=1, le=20)] = Field(
-        default=12,
-        description="Number of generation steps",
-        examples=[4, 12],
-    )
+    prompt: PromptStr
+    name: str | None = None
+    negative_prompt: NegativePromptStr = DEFAULT_NEGATIVE_PROMPT
+    height: Height = 1024
+    aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1
+    model_type: ModelType = ModelType.AISHA
+    generation_type: GenerationType = GenerationType.T2I
+    max_images: MaxImages = 1
+    seed: int | None = None
+    steps: Steps = 12
 
-    @model_validator(mode="after")
-    def generate_name_if_none(self) -> "GenerationRequest":
-        """Generate task name from prompt if not provided."""
+    def __post_init__(self) -> None:
+        """Generate name from prompt and seed if not provided."""
+        # Generate name from prompt if not provided
         if self.name is None:
-            # Truncate prompt for name
             truncated = self.prompt[:50].strip()
             if len(self.prompt) > 50:
                 truncated += "..."
@@ -138,49 +112,46 @@ class GenerationRequest(BaseModel):
         if self.seed is None:
             self.seed = random.randint(0, 2**31 - 1)
 
-        return self
-
-    @property
-    def calculated_width(self) -> int:
+    def get_calculated_width(self) -> int:
         """Calculate width from height and aspect ratio."""
         return self.aspect_ratio.calculate_width(self.height)
 
 
-class JobResponse(BaseModel):
+class JobResponse(msgspec.Struct, kw_only=True):
     """Response schema for job creation."""
 
-    job_id: str = Field(..., description="Unique job identifier")
-    status: JobStatus = Field(..., description="Current job status")
-    name: str = Field(..., description="Task name")
-    created_at: datetime = Field(..., description="Job creation timestamp")
-    message: str | None = Field(default=None, description="Status message")
+    job_id: str
+    status: JobStatus
+    name: str
+    created_at: datetime
+    message: str | None = None
 
 
-class JobStatusResponse(BaseModel):
+class JobStatusResponse(msgspec.Struct, kw_only=True):
     """Response schema for job status query."""
 
-    job_id: str = Field(..., description="Unique job identifier")
-    status: JobStatus = Field(..., description="Current job status")
-    name: str = Field(..., description="Task name")
-    created_at: datetime = Field(..., description="Job creation timestamp")
-    started_at: datetime | None = Field(default=None, description="Processing start time")
-    completed_at: datetime | None = Field(default=None, description="Completion timestamp")
-    progress: float = Field(default=0.0, ge=0.0, le=100.0, description="Progress percentage")
-    images: list[str] = Field(default_factory=list, description="Generated image URLs")
-    error: str | None = Field(default=None, description="Error message if failed")
+    job_id: str
+    status: JobStatus
+    name: str
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    progress: Progress = 0.0
+    images: list[str] = msgspec.field(default_factory=list)
+    error: str | None = None
 
 
-class ImageUploadResponse(BaseModel):
+class ImageUploadResponse(msgspec.Struct, kw_only=True):
     """Response schema for image upload."""
 
-    filename: str = Field(..., description="Uploaded filename on ComfyUI server")
-    subfolder: str = Field(default="", description="Subfolder path")
-    type: Literal["input", "temp"] = Field(default="input", description="Image type")
+    filename: str
+    subfolder: str = ""
+    type: Literal["input", "temp"] = "input"
 
 
-class HealthResponse(BaseModel):
+class HealthResponse(msgspec.Struct, kw_only=True):
     """Health check response."""
 
-    status: Literal["healthy", "unhealthy"] = Field(..., description="Service health status")
-    comfyui_connected: bool = Field(..., description="ComfyUI connection status")
-    version: str = Field(default="0.1.0", description="API version")
+    status: Literal["healthy", "unhealthy"]
+    comfyui_connected: bool
+    version: str = "0.1.0"

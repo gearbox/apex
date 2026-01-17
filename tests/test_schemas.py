@@ -1,7 +1,7 @@
 """Tests for API schemas."""
 
+import msgspec
 import pytest
-from pydantic import ValidationError
 
 from src.api.schemas.generation import (
     AspectRatio,
@@ -15,7 +15,7 @@ class TestAspectRatio:
     """Tests for AspectRatio enum."""
 
     @pytest.mark.parametrize(
-        "ratio,height,expected_width",
+        ("ratio", "height", "expected_width"),
         [
             (AspectRatio.RATIO_1_1, 1024, 1024),
             (AspectRatio.RATIO_16_9, 1080, 1920),
@@ -68,6 +68,7 @@ class TestGenerationRequest:
         # Long prompt gets truncated
         long_prompt = "A" * 100
         request = GenerationRequest(prompt=long_prompt)
+        assert request.name is not None
         assert len(request.name) <= 53  # 50 chars + "..."
         assert request.name.endswith("...")
 
@@ -85,61 +86,111 @@ class TestGenerationRequest:
         assert request.seed == 42
 
     def test_calculated_width(self) -> None:
-        """Test width calculation property."""
+        """Test width calculation method."""
         request = GenerationRequest(
             prompt="test",
             height=1080,
             aspect_ratio=AspectRatio.RATIO_16_9,
         )
-        assert request.calculated_width == 1920
+        assert request.get_calculated_width() == 1920
 
     def test_validation_prompt_required(self) -> None:
         """Test prompt is required."""
-        with pytest.raises(ValidationError):
-            GenerationRequest()
+        with pytest.raises(TypeError):
+            GenerationRequest()  # type: ignore[call-arg]
 
     def test_validation_prompt_min_length(self) -> None:
-        """Test prompt minimum length."""
-        with pytest.raises(ValidationError):
-            GenerationRequest(prompt="")
+        """Test prompt minimum length via msgspec decode."""
+        # Direct construction doesn't validate constraints,
+        # but decoding does
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": ""}',
+                type=GenerationRequest,
+            )
 
     def test_validation_height_range(self) -> None:
-        """Test height validation."""
+        """Test height validation via msgspec decode."""
         # Too small
-        with pytest.raises(ValidationError):
-            GenerationRequest(prompt="test", height=100)
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "height": 100}',
+                type=GenerationRequest,
+            )
 
         # Too large
-        with pytest.raises(ValidationError):
-            GenerationRequest(prompt="test", height=3000)
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "height": 3000}',
+                type=GenerationRequest,
+            )
 
-        # Valid range
-        GenerationRequest(prompt="test", height=256)
-        GenerationRequest(prompt="test", height=2048)
+        # Valid range - should work
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "height": 256}',
+            type=GenerationRequest,
+        )
+        assert result.height == 256
+
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "height": 2048}',
+            type=GenerationRequest,
+        )
+        assert result.height == 2048
 
     def test_validation_max_images(self) -> None:
-        """Test max_images validation."""
-        with pytest.raises(ValidationError):
-            GenerationRequest(prompt="test", max_images=0)
+        """Test max_images validation via msgspec decode."""
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "max_images": 0}',
+                type=GenerationRequest,
+            )
 
-        with pytest.raises(ValidationError):
-            GenerationRequest(prompt="test", max_images=5)
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "max_images": 5}',
+                type=GenerationRequest,
+            )
 
         # Valid range
-        GenerationRequest(prompt="test", max_images=1)
-        GenerationRequest(prompt="test", max_images=4)
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "max_images": 1}',
+            type=GenerationRequest,
+        )
+        assert result.max_images == 1
+
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "max_images": 4}',
+            type=GenerationRequest,
+        )
+        assert result.max_images == 4
 
     def test_validation_steps(self) -> None:
-        """Test steps validation."""
-        with pytest.raises(ValidationError):
-            GenerationRequest(prompt="test", steps=0)
+        """Test steps validation via msgspec decode."""
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "steps": 0}',
+                type=GenerationRequest,
+            )
 
-        with pytest.raises(ValidationError):
-            GenerationRequest(prompt="test", steps=25)
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "steps": 25}',
+                type=GenerationRequest,
+            )
 
         # Valid range
-        GenerationRequest(prompt="test", steps=1)
-        GenerationRequest(prompt="test", steps=20)
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "steps": 1}',
+            type=GenerationRequest,
+        )
+        assert result.steps == 1
+
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "steps": 20}',
+            type=GenerationRequest,
+        )
+        assert result.steps == 20
 
     def test_generation_type_default(self) -> None:
         """Test generation_type defaults to t2i."""
@@ -155,6 +206,37 @@ class TestGenerationRequest:
         assert request_i2i.generation_type == GenerationType.I2I
 
     def test_generation_type_from_string(self) -> None:
-        """Test generation_type from string value."""
-        request = GenerationRequest(prompt="test", generation_type="i2i")
-        assert request.generation_type == GenerationType.I2I
+        """Test generation_type from string value via msgspec decode."""
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "generation_type": "i2i"}',
+            type=GenerationRequest,
+        )
+        assert result.generation_type == GenerationType.I2I
+
+    def test_forbid_unknown_fields(self) -> None:
+        """Test that unknown fields are rejected."""
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "unknown_field": "value"}',
+                type=GenerationRequest,
+            )
+
+    def test_json_roundtrip(self) -> None:
+        """Test JSON serialization roundtrip."""
+        request = GenerationRequest(
+            prompt="A beautiful sunset",
+            height=1080,
+            aspect_ratio=AspectRatio.RATIO_16_9,
+            seed=42,
+        )
+
+        # Serialize
+        encoded = msgspec.json.encode(request)
+        assert isinstance(encoded, bytes)
+
+        # Deserialize
+        decoded = msgspec.json.decode(encoded, type=GenerationRequest)
+        assert decoded.prompt == request.prompt
+        assert decoded.height == request.height
+        assert decoded.aspect_ratio == request.aspect_ratio
+        assert decoded.seed == request.seed

@@ -1,5 +1,9 @@
 """Pytest configuration and fixtures."""
 
+from __future__ import annotations
+
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -36,13 +40,9 @@ def workflow_service(tmp_path: Path) -> WorkflowService:
     )
 
     if source_workflow.exists():
-        import shutil
-
         shutil.copy(source_workflow, bundle_dir / "workflow.json")
     else:
-        # Create minimal test workflow
-        import json
-
+        # Create minimal test workflow with all required nodes
         test_workflow = {
             "nodes": [
                 {
@@ -68,6 +68,24 @@ def workflow_service(tmp_path: Path) -> WorkflowService:
                     "type": "KSampler",
                     "inputs": [],
                     "widgets_values": [12345, "fixed", 12, 1.1, "euler", "beta", 1],
+                },
+                {
+                    "id": 7,
+                    "type": "LoadImage",
+                    "inputs": [],
+                    "widgets_values": ["input_image_1.png", "image"],
+                },
+                {
+                    "id": 8,
+                    "type": "LoadImage",
+                    "inputs": [],
+                    "widgets_values": ["input_image_2.png", "image"],
+                },
+                {
+                    "id": 11,
+                    "type": "SaveImage",
+                    "inputs": [],
+                    "widgets_values": ["output"],
                 },
             ],
             "links": [],

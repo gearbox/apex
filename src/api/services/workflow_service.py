@@ -1,5 +1,7 @@
 """Workflow manipulation service for ComfyUI workflows."""
 
+from __future__ import annotations
+
 import copy
 import json
 import logging
@@ -14,22 +16,15 @@ logger = logging.getLogger(__name__)
 class WorkflowError(Exception):
     """Base exception for workflow errors."""
 
-    pass
-
 
 class WorkflowNotFoundError(WorkflowError):
     """Raised when workflow file is not found."""
-
-    pass
 
 
 class WorkflowValidationError(WorkflowError):
     """Raised when workflow validation fails."""
 
-    pass
 
-
-# Node IDs from the qwen_rapid_aio workflow
 class NodeIDs:
     """Node IDs for qwen_rapid_aio workflow."""
 
@@ -97,32 +92,52 @@ class WorkflowService:
             WorkflowNotFoundError: If workflow file doesn't exist.
             WorkflowValidationError: If workflow JSON is invalid.
         """
-        cache_key = model_type.value
-
-        if cache_key in self._workflow_cache:
-            logger.debug(f"Using cached workflow for {model_type}")
-            return copy.deepcopy(self._workflow_cache[cache_key])
-
         workflow_path = self.get_workflow_path(model_type)
+        cache_key = str(workflow_path)
 
-        if not workflow_path.exists():
-            raise WorkflowNotFoundError(f"Workflow file not found: {workflow_path}")
+        if cache_key not in self._workflow_cache:
+            if not workflow_path.exists():
+                raise WorkflowNotFoundError(f"Workflow not found: {workflow_path}")
 
-        try:
-            with open(workflow_path) as f:
-                gui_workflow = json.load(f)
-        except json.JSONDecodeError as e:
-            raise WorkflowValidationError(f"Invalid workflow JSON: {e}") from e
+            try:
+                with workflow_path.open() as f:
+                    gui_workflow = json.load(f)
 
-        # Convert GUI format to API format
-        api_workflow = self._convert_gui_to_api(gui_workflow)
-        self._workflow_cache[cache_key] = api_workflow
+                # Convert from GUI format to API format
+                api_workflow = self._convert_gui_to_api_format(gui_workflow)
+                self._workflow_cache[cache_key] = api_workflow
 
-        logger.info(f"Loaded and cached workflow for {model_type} from {workflow_path}")
-        return copy.deepcopy(api_workflow)
+            except json.JSONDecodeError as e:
+                raise WorkflowValidationError(f"Invalid workflow JSON: {e}") from e
 
-    def _convert_gui_to_api(self, gui_workflow: dict[str, Any]) -> dict[str, Any]:
-        """Convert ComfyUI GUI workflow format to API format.
+        # Return a deep copy to prevent mutation of cached workflow
+        return copy.deepcopy(self._workflow_cache[cache_key])
+
+    def validate_workflow(self, workflow: dict[str, Any]) -> bool:
+        """Validate workflow has required nodes.
+
+        Args:
+            workflow: Workflow dictionary to validate.
+
+        Returns:
+            True if workflow is valid.
+
+        Raises:
+            WorkflowValidationError: If required nodes are missing.
+        """
+        required_nodes = [
+            NodeIDs.EMPTY_LATENT,
+            NodeIDs.POSITIVE_PROMPT,
+            NodeIDs.KSAMPLER,
+        ]
+
+        if missing := [node for node in required_nodes if node not in workflow]:
+            raise WorkflowValidationError(f"Workflow missing required nodes: {missing}")
+
+        return True
+
+    def _convert_gui_to_api_format(self, gui_workflow: dict[str, Any]) -> dict[str, Any]:
+        """Convert GUI workflow format to API format.
 
         GUI format: {"nodes": [...], "links": [...]}
         API format: {"node_id": {"class_type": ..., "inputs": {...}}}
@@ -253,7 +268,7 @@ class WorkflowService:
 
         # Apply image dimensions and batch size
         if NodeIDs.EMPTY_LATENT in workflow:
-            workflow[NodeIDs.EMPTY_LATENT]["inputs"]["width"] = request.calculated_width
+            workflow[NodeIDs.EMPTY_LATENT]["inputs"]["width"] = request.get_calculated_width()
             workflow[NodeIDs.EMPTY_LATENT]["inputs"]["height"] = request.height
             workflow[NodeIDs.EMPTY_LATENT]["inputs"]["batch_size"] = request.max_images
 
@@ -269,6 +284,10 @@ class WorkflowService:
         if NodeIDs.KSAMPLER in workflow:
             workflow[NodeIDs.KSAMPLER]["inputs"]["seed"] = request.seed
             workflow[NodeIDs.KSAMPLER]["inputs"]["steps"] = request.steps
+
+        # Apply output filename prefix
+        if NodeIDs.SAVE_IMAGE in workflow:
+            workflow[NodeIDs.SAVE_IMAGE]["inputs"]["filename_prefix"] = filename_prefix
 
         # Handle image inputs based on generation type
         if request.generation_type == GenerationType.T2I:
@@ -306,68 +325,23 @@ class WorkflowService:
                         0,
                     ]
 
-            connected_count = sum(1 for img in [input_image_1, input_image_2] if img)
-            logger.debug(f"I2I mode: connected {connected_count} image input node(s)")
-
-        # Apply output filename prefix
-        if NodeIDs.SAVE_IMAGE in workflow:
-            workflow[NodeIDs.SAVE_IMAGE]["inputs"]["filename_prefix"] = filename_prefix
-
-        logger.debug(
-            f"Applied parameters: type={request.generation_type.value}, "
-            f"size={request.calculated_width}x{request.height}, "
-            f"batch={request.max_images}, seed={request.seed}, steps={request.steps}"
-        )
+            logger.debug(
+                f"I2I mode: connected images - image1={input_image_1}, image2={input_image_2}"
+            )
 
         return workflow
 
     def _disconnect_image_inputs(self, workflow: dict[str, Any]) -> None:
-        """Disconnect image inputs from the positive prompt encoder for t2i mode.
-
-        This prevents the workflow from using default/placeholder images
-        when doing pure text-to-image generation.
+        """Disconnect image inputs from the positive prompt encoder.
 
         Args:
-            workflow: Workflow in API format (modified in place).
+            workflow: Workflow to modify in place.
         """
-        # Remove image input connections from positive prompt encoder
-        if NodeIDs.POSITIVE_PROMPT in workflow:
-            inputs = workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]
+        if NodeIDs.POSITIVE_PROMPT not in workflow:
+            return
 
-            # Remove image1, image2, image3 connections if they exist
-            for image_key in ["image1", "image2", "image3"]:
-                if image_key in inputs:
-                    del inputs[image_key]
+        inputs = workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]
 
-        # Also disconnect from negative prompt encoder if it has image inputs
-        if NodeIDs.NEGATIVE_PROMPT in workflow:
-            inputs = workflow[NodeIDs.NEGATIVE_PROMPT]["inputs"]
-
-            for image_key in ["image1", "image2", "image3"]:
-                if image_key in inputs:
-                    del inputs[image_key]
-
-    def validate_workflow(self, workflow: dict[str, Any]) -> bool:
-        """Validate that workflow has required nodes.
-
-        Args:
-            workflow: Workflow in API format.
-
-        Returns:
-            True if valid, raises exception otherwise.
-
-        Raises:
-            WorkflowValidationError: If required nodes are missing.
-        """
-        required_nodes = [
-            NodeIDs.EMPTY_LATENT,
-            NodeIDs.POSITIVE_PROMPT,
-            NodeIDs.KSAMPLER,
-        ]
-
-        missing = [node_id for node_id in required_nodes if node_id not in workflow]
-
-        if missing:
-            raise WorkflowValidationError(f"Workflow missing required nodes: {missing}")
-
-        return True
+        # Remove image connection keys if present
+        for key in ["image1", "image2", "image3"]:
+            inputs.pop(key, None)

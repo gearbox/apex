@@ -1,25 +1,24 @@
 [project]
 name = "apex"
 version = "0.1.0"
-description = "Litestar API service for ComfyUI workflow execution"
+description = "Litestar-based REST API service for ComfyUI generation workflows"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "litestar[standard]>=2.15.0",
-    "httpx>=0.28.0",
-    "pydantic>=2.10.0",
-    "pydantic-settings>=2.7.0",
-    "uvicorn>=0.34.0",
-    "python-multipart>=0.0.20",
+    "litestar>=2.0.0",
+    "msgspec>=0.18.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.25.0",
+    "uvicorn>=0.24.0",
+    "python-multipart>=0.0.6",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.25.0",
-    "pytest-httpx>=0.35.0",
-    "ruff>=0.9.0",
-    "mypy>=1.14.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
 ]
 
 [build-system]
@@ -34,13 +33,28 @@ target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "RUF"]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "ARG",  # flake8-unused-arguments
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 strict = true
-plugins = ["pydantic.mypy"]
+warn_return_any = true
+warn_unused_ignores = true
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
