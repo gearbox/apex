@@ -1,6 +1,4 @@
-"""Pytest configuration and fixtures."""
-
-from __future__ import annotations
+"""Pytest configuration and shared fixtures."""
 
 import json
 import shutil
@@ -93,3 +91,9 @@ def workflow_service(tmp_path: Path) -> WorkflowService:
         (bundle_dir / "workflow.json").write_text(json.dumps(test_workflow))
 
     return WorkflowService(base_path=tmp_path)
+
+
+@pytest.fixture(scope="session")
+def anyio_backend() -> str:
+    """Use asyncio as the async backend."""
+    return "asyncio"

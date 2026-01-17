@@ -1,0 +1,122 @@
+# Apex API - Docker Compose Configuration
+# Usage:
+#   Development: docker compose up -d
+#   Production:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  # ===========================================================================
+  # PostgreSQL Database
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: apex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apex}
+      POSTGRES_DB: ${POSTGRES_DB:-apex}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apex} -d ${POSTGRES_DB:-apex}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - apex-network
+
+  # ===========================================================================
+  # Apex API Service
+  # ===========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apex-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # API Settings
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      DEBUG: ${DEBUG:-false}
+      
+      # Database - connects to postgres service
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:-apex}@postgres:5432/${POSTGRES_DB:-apex}"
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_ECHO: ${DB_ECHO:-false}
+      
+      # ComfyUI Connection (external - via SSH tunnel or direct)
+      COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
+      COMFYUI_PORT: ${COMFYUI_PORT:-18188}
+      
+      # Cloudflare R2 Storage
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-apex-user-content}
+      R2_PUBLIC_URL_BASE: ${R2_PUBLIC_URL_BASE:-}
+      
+      # Content Settings
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-20}
+      
+      # Generation Defaults
+      DEFAULT_STEPS: ${DEFAULT_STEPS:-12}
+      MAX_STEPS: ${MAX_STEPS:-20}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Mount config for workflow bundles (read-only in container)
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - apex-network
+    # Allow connecting to host network (for ComfyUI via SSH tunnel)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ===========================================================================
+  # Database Migrations (run once)
+  # ===========================================================================
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apex-migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:-apex}@postgres:5432/${POSTGRES_DB:-apex}"
+    command: ["alembic", "upgrade", "head"]
+    networks:
+      - apex-network
+    # Only run once, don't restart
+    restart: "no"
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  apex-network:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local

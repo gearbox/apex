@@ -1,25 +1,47 @@
 [project]
 name = "apex"
-version = "0.1.0"
+version = "0.2.0"
 description = "Litestar-based REST API service for ComfyUI generation workflows"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # Web framework
     "litestar>=2.0.0",
-    "msgspec>=0.18.0",
-    "pydantic-settings>=2.0.0",
-    "httpx>=0.25.0",
     "uvicorn>=0.24.0",
     "python-multipart>=0.0.6",
+    
+    # Serialization
+    "msgspec>=0.18.0",
+    
+    # Configuration
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    
+    # HTTP client
+    "httpx>=0.25.0",
+    
+    # Database
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    
+    # Cloud storage (Cloudflare R2 / S3-compatible)
+    "aioboto3>=12.0.0",
+    "types-aiobotocore[s3]>=2.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
+    "moto[s3]>=5.0.0",  # For mocking S3/R2 in tests
 ]
+
+[project.scripts]
+apex = "src.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -49,12 +71,39 @@ ignore = [
     "B008",   # do not perform function calls in argument defaults
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+
+[[tool.mypy.overrides]]
+module = [
+    "aioboto3.*",
+    "botocore.*",
+    "moto.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

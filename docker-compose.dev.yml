@@ -1,0 +1,38 @@
+# Apex API - Development Overrides
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Features:
+# - Hot reload via volume mount
+# - Debug mode enabled
+# - Exposed database port for local tools
+
+services:
+  postgres:
+    # Expose port for local database tools (DBeaver, pgAdmin, etc.)
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      DEBUG: "true"
+      DB_ECHO: "true"
+    volumes:
+      # Mount source code for hot reload
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./alembic:/app/alembic:ro
+    # Override command to use uvicorn with reload
+    command: >
+      uvicorn src.api.app:app 
+      --host 0.0.0.0 
+      --port 8000 
+      --reload 
+      --reload-dir /app/src
+
+  # Don't need separate migrations container in dev - run manually
+  migrations:
+    profiles:
+      - tools

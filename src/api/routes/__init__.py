@@ -6,10 +6,12 @@ from .generation import (
     ImageController,
     JobController,
 )
+from .storage import StorageController
 
 __all__ = [
     "GenerationController",
     "HealthController",
     "ImageController",
     "JobController",
+    "StorageController",
 ]
