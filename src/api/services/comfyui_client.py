@@ -137,10 +137,7 @@ class ComfyUIClient:
         try:
             response = await self.client.get(f"/history/{prompt_id}")
 
-            if response.status_code == 200:
-                return response.json()
-            return {}
-
+            return response.json() if response.status_code == 200 else {}
         except httpx.RequestError as e:
             logger.warning(f"Failed to get history for {prompt_id}: {e}")
             return {}

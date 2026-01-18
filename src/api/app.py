@@ -7,6 +7,7 @@ from pathlib import Path
 
 from litestar import Litestar
 from litestar.config.cors import CORSConfig
+from litestar.datastructures import UploadFile
 from litestar.logging import LoggingConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
@@ -17,6 +18,7 @@ from src.api.routes import (
     HealthController,
     ImageController,
     JobController,
+    StorageController,
 )
 from src.core.config import get_settings
 
@@ -127,6 +129,7 @@ def create_app() -> Litestar:
             GenerationController,
             JobController,
             ImageController,
+            StorageController,
         ],
         dependencies=dependencies,
         lifespan=[lifespan],
@@ -134,6 +137,7 @@ def create_app() -> Litestar:
         logging_config=logging_config,
         openapi_config=openapi_config,
         debug=settings.debug,
+        signature_types=[UploadFile],
     )
 
     return app

@@ -207,6 +207,45 @@ uv run mypy src/
 uv run ruff check src/
 ```
 
-## License
+## Quick Start
 
-MIT
+# Copy and edit environment
+cp .env.example .env
+# Edit .env with your R2 credentials
+
+# Start development environment
+make dev
+
+# Run migrations
+make migrate
+
+# View logs
+make logs
+```
+
+## Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `make dev` | Start dev environment (hot reload) |
+| `make prod` | Start production environment |
+| `make down` | Stop all containers |
+| `make logs` | Follow container logs |
+| `make migrate` | Run database migrations |
+| `make shell` | Open shell in API container |
+| `make db-shell` | Open PostgreSQL shell |
+| `make test` | Run tests |
+
+## Architecture
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Client    │────▶│  Apex API   │────▶│ PostgreSQL  │
+└─────────────┘     │  :8000      │     │  :5432      │
+                    └──────┬──────┘     └─────────────┘
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+      ┌─────────────┐           ┌─────────────┐
+      │ Cloudflare  │           │  ComfyUI    │
+      │     R2      │           │ (external)  │
+      └─────────────┘           └─────────────┘

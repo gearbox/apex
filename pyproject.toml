@@ -2,11 +2,10 @@
 name = "apex"
 version = "0.2.0"
 description = "Litestar-based REST API service for ComfyUI generation workflows"
-readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     # Web framework
-    "litestar>=2.0.0",
+    "litestar>=2.5.1",
     "uvicorn>=0.24.0",
     "python-multipart>=0.0.6",
     

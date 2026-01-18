@@ -234,7 +234,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "litestar", specifier = ">=2.0.0" },
+    { name = "litestar", specifier = ">=2.5.1" },
     { name = "moto", extras = ["s3"], marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "msgspec", specifier = ">=0.18.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },

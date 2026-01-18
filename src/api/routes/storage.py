@@ -16,6 +16,7 @@ import msgspec
 from litestar import Controller, Response, delete, get, post
 from litestar.datastructures import UploadFile
 from litestar.enums import RequestEncodingType
+from litestar.exceptions import NotFoundException
 from litestar.params import Body, Parameter
 from litestar.status_codes import (
     HTTP_200_OK,
@@ -143,7 +144,9 @@ class StorageController(Controller):
     async def upload_image(
         self,
         user_content: UserContentService,
-        file: UploadFile,
+        data: Annotated[
+            UploadFile, Body(media_type=RequestEncodingType.MULTI_PART, title="file")
+        ],
         user_id: Annotated[
             UUID,
             Parameter(
@@ -161,7 +164,7 @@ class StorageController(Controller):
         Images are automatically deleted after the retention period.
         """
         # Validate content type
-        content_type = file.content_type or "application/octet-stream"
+        content_type = data.content_type or "application/octet-stream"
         if content_type not in ALLOWED_CONTENT_TYPES:
             return Response(
                 content=ErrorResponse(
@@ -170,12 +173,13 @@ class StorageController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
+        logger.debug(f"Uploading image with content type: {content_type}")
 
         # Read file data
-        data = await file.read()
+        file_bytes = await data.read()
 
         # Validate size
-        if len(data) > MAX_UPLOAD_SIZE:
+        if len(file_bytes) > MAX_UPLOAD_SIZE:
             return Response(
                 content=ErrorResponse(
                     error="File too large",
@@ -184,17 +188,19 @@ class StorageController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
-        if len(data) == 0:
+        if len(file_bytes) == 0:
             return Response(
                 content=ErrorResponse(error="Empty file"),
                 status_code=HTTP_400_BAD_REQUEST,
             )
+        logger.debug(f"Uploading image of size: {len(file_bytes)} bytes")
 
         try:
+            logger.debug("!!!Uploading image for user %s: %s (%d bytes)", user_id, data.filename, len(file_bytes))
             result = await user_content.upload_image(
                 user_id=user_id,
-                data=data,
-                filename=file.filename or "upload.png",
+                data=file_bytes,
+                filename=data.filename or "upload.png",
                 content_type=content_type,
             )
 
@@ -302,12 +308,12 @@ class StorageController(Controller):
                 status_code=HTTP_404_NOT_FOUND,
             )
 
-    @delete("/uploads/{image_id:uuid}")
+    @delete("/uploads/{image_id:uuid}", status_code=HTTP_204_NO_CONTENT)
     async def delete_upload(
         self,
         user_content: UserContentService,
         image_id: UUID,
-    ) -> Response[None | ErrorResponse]:
+    ) -> None:
         """Delete an uploaded image.
 
         Removes the image from storage immediately.
@@ -316,12 +322,7 @@ class StorageController(Controller):
         deleted = await user_content.delete_upload(image_id)
 
         if not deleted:
-            return Response(
-                content=ErrorResponse(error="Image not found"),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-        return Response(content=None, status_code=HTTP_204_NO_CONTENT)
+            raise NotFoundException(detail="Image not found")
 
     @get("/uploads")
     async def list_uploads(

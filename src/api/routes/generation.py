@@ -92,9 +92,7 @@ class GenerationController(Controller):
 
             # Queue with ComfyUI
             result = await comfyui_client.queue_prompt(configured_workflow)
-            prompt_id = result.get("prompt_id")
-
-            if prompt_id:
+            if prompt_id := result.get("prompt_id"):
                 job_manager.set_queued(job.job_id, prompt_id)
             else:
                 job_manager.set_failed(job.job_id, "No prompt_id returned from ComfyUI")
@@ -193,9 +191,7 @@ class GenerationController(Controller):
 
             # Queue with ComfyUI
             result = await comfyui_client.queue_prompt(configured_workflow)
-            prompt_id = result.get("prompt_id")
-
-            if prompt_id:
+            if prompt_id := result.get("prompt_id"):
                 job_manager.set_queued(job.job_id, prompt_id)
                 job.input_images = [img for img in [uploaded_image_1, uploaded_image_2] if img]
             else:
@@ -307,17 +303,18 @@ class ImageController(Controller):
     async def upload_image(
         self,
         comfyui_client: ComfyUIClient,
-        file: UploadFile,
+        data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART)],
     ) -> Response[ImageUploadResponse]:
         """Upload an image to ComfyUI for use in generation.
 
         Returns the filename that can be referenced in generation requests.
         """
         try:
-            image_data = await file.read()
+            image_data = await data.read()
 
             # Generate unique filename preserving extension
-            ext = file.filename.rsplit(".", 1)[-1] if file.filename else "png"
+            ext = data.filename.rsplit(".", 1)[-1] if data.filename else "png"
+            logger.debug(f"Uploading image with extension: {ext}")
             unique_filename = f"upload_{uuid.uuid4().hex[:12]}.{ext}"
 
             result = await comfyui_client.upload_image(image_data, unique_filename)
