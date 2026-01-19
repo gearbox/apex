@@ -209,19 +209,17 @@ uv run ruff check src/
 
 ## Quick Start
 
-# Copy and edit environment
-cp .env.example .env
-# Edit .env with your R2 credentials
+### Copy and edit environment
+cp .env.example .env  # Edit .env with your R2 credentials
 
-# Start development environment
+### Start development environment
 make dev
 
-# Run migrations
+### Run migrations
 make migrate
 
-# View logs
+### View logs
 make logs
-```
 
 ## Available Commands
 
@@ -249,3 +247,4 @@ make logs
       │ Cloudflare  │           │  ComfyUI    │
       │     R2      │           │ (external)  │
       └─────────────┘           └─────────────┘
+```
