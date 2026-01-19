@@ -3,7 +3,7 @@
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from src.api.schemas.generation import GenerationRequest, JobStatus
@@ -67,7 +67,7 @@ class JobManager:
             name=request.name or "Untitled",
             request=request,
             status=JobStatus.PENDING,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         self._jobs[job_id] = job
         logger.info(f"Created job {job_id}: {job.name}")
@@ -114,11 +114,10 @@ class JobManager:
             job_id: Job identifier.
             prompt_id: ComfyUI prompt ID.
         """
-        job = self._jobs.get(job_id)
-        if job:
+        if job := self._jobs.get(job_id):
             job.prompt_id = prompt_id
             job.status = JobStatus.QUEUED
-            job.started_at = datetime.utcnow()
+            job.started_at = datetime.now(timezone.utc)
             self._prompt_to_job[prompt_id] = job_id
             logger.debug(f"Job {job_id} queued with prompt_id {prompt_id}")
 
@@ -129,12 +128,11 @@ class JobManager:
             job_id: Job identifier.
             progress: Progress percentage (0-100).
         """
-        job = self._jobs.get(job_id)
-        if job:
+        if job := self._jobs.get(job_id):
             job.status = JobStatus.RUNNING
             job.progress = progress
             if job.started_at is None:
-                job.started_at = datetime.utcnow()
+                job.started_at = datetime.now(timezone.utc)
 
     def set_completed(self, job_id: str, images: list[str]) -> None:
         """Mark job as completed with result images.
@@ -143,11 +141,10 @@ class JobManager:
             job_id: Job identifier.
             images: List of image URLs.
         """
-        job = self._jobs.get(job_id)
-        if job:
+        if job := self._jobs.get(job_id):
             job.status = JobStatus.COMPLETED
             job.progress = 100.0
-            job.completed_at = datetime.utcnow()
+            job.completed_at = datetime.now(timezone.utc)
             job.images = images
             logger.info(f"Job {job_id} completed with {len(images)} images")
 
@@ -158,10 +155,9 @@ class JobManager:
             job_id: Job identifier.
             error: Error description.
         """
-        job = self._jobs.get(job_id)
-        if job:
+        if job := self._jobs.get(job_id):
             job.status = JobStatus.FAILED
-            job.completed_at = datetime.utcnow()
+            job.completed_at = datetime.now(timezone.utc)
             job.error = error
             logger.error(f"Job {job_id} failed: {error}")
 
@@ -264,7 +260,7 @@ class JobManager:
         """
         from datetime import timedelta
 
-        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         old_jobs = [job_id for job_id, job in self._jobs.items() if job.created_at < cutoff]
 
         for job_id in old_jobs:

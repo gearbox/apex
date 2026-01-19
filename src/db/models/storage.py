@@ -10,36 +10,33 @@ file storage in R2. This enables:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
-    Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
     String,
+    Text,
     text,
 )
+
+# from sqlalchemy import (
+#     Enum as SQLEnum,
+# )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncAttrs
+from src.core.enums import GenerationType, JobStatus
 
 
 class Base(DeclarativeBase):
     """Base class for all database models."""
 
     pass
-
-
-class StorageTypeEnum(str):
-    """Storage type for database enum."""
-
-    UPLOAD = "upload"
-    OUTPUT = "output"
 
 
 class UserImage(Base):
@@ -87,7 +84,7 @@ class UserImage(Base):
     )
 
     # Relationships
-    generation_outputs: Mapped[list["GenerationOutput"]] = relationship(
+    generation_outputs: Mapped[list[GenerationOutput]] = relationship(
         "GenerationOutput",
         back_populates="input_image",
         foreign_keys="GenerationOutput.input_image_id",
@@ -121,13 +118,28 @@ class GenerationJob(Base):
     )
 
     # Job metadata
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    prompt: Mapped[str] = mapped_column(String(4096), nullable=False)
-    status: Mapped[str] = mapped_column(
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="Untitled Job")
+    status: Mapped[JobStatus] = mapped_column(
         String(20),
+        default=JobStatus.PENDING.value,
+        index=True,
         nullable=False,
-        default="pending",
     )
+    worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generation_type: Mapped[GenerationType] = mapped_column(String(20), index=True, nullable=False)
+
+    # Prompts
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    enhanced_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    negative_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Analytics (populated on completion or by background job)
+    theme_detected: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
+    theme_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_nsfw: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_minor_suspected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # ComfyUI tracking
     comfyui_prompt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -148,7 +160,7 @@ class GenerationJob(Base):
     )
 
     # Relationships
-    outputs: Mapped[list["GenerationOutput"]] = relationship(
+    outputs: Mapped[list[GenerationOutput]] = relationship(
         "GenerationOutput",
         back_populates="job",
         cascade="all, delete-orphan",
@@ -222,11 +234,11 @@ class GenerationOutput(Base):
     )
 
     # Relationships
-    job: Mapped["GenerationJob"] = relationship(
+    job: Mapped[GenerationJob] = relationship(
         "GenerationJob",
         back_populates="outputs",
     )
-    input_image: Mapped["UserImage | None"] = relationship(
+    input_image: Mapped[UserImage | None] = relationship(
         "UserImage",
         back_populates="generation_outputs",
         foreign_keys=[input_image_id],

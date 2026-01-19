@@ -136,8 +136,14 @@ class StorageRepository:
         Returns:
             True if deleted, False if not found.
         """
-        result = await self._session.execute(delete(UserImage).where(UserImage.id == image_id))
-        return result.rowcount > 0
+        image = await self._session.get(UserImage, image_id)
+        if image is None:
+            return False
+
+        await self._session.delete(image)
+        # Flush to ensure the delete is issued; commit is handled by caller.
+        await self._session.flush()
+        return True
 
     async def get_expired_images(
         self,
@@ -167,7 +173,7 @@ class StorageRepository:
     # -------------------------------------------------------------------------
     # GenerationJob operations
     # -------------------------------------------------------------------------
-
+    # FIXME: Use generation_type and JobStatus enums instead of str where applicable.
     async def create_job(
         self,
         *,
@@ -175,6 +181,7 @@ class StorageRepository:
         user_id: UUID,
         name: str,
         prompt: str,
+        generation_type: str = "i2i",
         status: str = "pending",
     ) -> GenerationJob:
         """Create a new generation job.
@@ -195,6 +202,7 @@ class StorageRepository:
             name=name,
             prompt=prompt,
             status=status,
+            generation_type=generation_type,
         )
         self._session.add(job)
         await self._session.flush()
@@ -232,11 +240,13 @@ class StorageRepository:
         Returns:
             Updated GenerationJob if found, None otherwise.
         """
+        from src.api.schemas import JobStatus
+
         job = await self.get_job(job_id)
         if job is None:
             return None
 
-        job.status = status
+        job.status = JobStatus(status)
         if comfyui_prompt_id is not None:
             job.comfyui_prompt_id = comfyui_prompt_id
         if started_at is not None:
@@ -417,10 +427,18 @@ class StorageRepository:
         if not output_ids:
             return 0
 
-        result = await self._session.execute(
+        # First count how many rows match, using typed SQLAlchemy APIs
+        count_result = await self._session.execute(
+            select(func.count(GenerationOutput.id)).where(GenerationOutput.id.in_(output_ids))
+        )
+        (count,) = count_result.one()
+
+        # Then perform the actual delete
+        await self._session.execute(
             delete(GenerationOutput).where(GenerationOutput.id.in_(output_ids))
         )
-        return result.rowcount
+
+        return int(count)
 
     # -------------------------------------------------------------------------
     # Statistics

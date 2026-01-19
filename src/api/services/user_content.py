@@ -159,7 +159,7 @@ class UserContentService:
             )
 
             logger.info(
-                f"Uploaded image {result.id} for user {user_id}: " f"{filename} ({len(data)} bytes)"
+                f"Uploaded image {result.id} for user {user_id}: {filename} ({len(data)} bytes)"
             )
 
             return UploadedImage(
@@ -362,8 +362,7 @@ class UserContentService:
         )
 
         logger.info(
-            f"Stored output {result.id} for job {job_id}: "
-            f"index={output_index} ({len(data)} bytes)"
+            f"Stored output {result.id} for job {job_id}: index={output_index} ({len(data)} bytes)"
         )
 
         return GeneratedImage(

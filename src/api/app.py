@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: Litestar) -> AsyncGenerator[None, None]:
+async def lifespan(app: Litestar) -> AsyncGenerator[None, None]:  # noqa: ARG001
     """Application lifespan manager.
 
     Initializes services on startup and cleans up on shutdown.
@@ -65,6 +65,7 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None, None]:
 
 
 def create_app() -> Litestar:
+    # sourcery skip: inline-immediately-returned-variable
     """Create and configure Litestar application.
 
     Returns:

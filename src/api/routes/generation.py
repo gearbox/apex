@@ -19,16 +19,15 @@ from litestar.status_codes import (
 
 from src.api.schemas.generation import (
     GenerationRequest,
-    GenerationType,
     HealthResponse,
     ImageUploadResponse,
     JobResponse,
-    JobStatus,
     JobStatusResponse,
 )
 from src.api.services.comfyui_client import ComfyUIClient, ComfyUIClientError
 from src.api.services.job_manager import JobManager
 from src.api.services.workflow_service import WorkflowError, WorkflowService
+from src.core.enums import GenerationType, JobStatus
 
 logger = logging.getLogger(__name__)
 

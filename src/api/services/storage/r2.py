@@ -30,9 +30,20 @@ from .schemas import (
 )
 
 if TYPE_CHECKING:
-    from types_aiobotocore_s3 import S3Client
+    from types_aiobotocore_s3.client import S3Client
 
 logger = logging.getLogger(__name__)
+
+
+def _get_error_code(e: ClientError) -> str:
+    """Safely extract error code from ClientError."""
+    return e.response.get("Error", {}).get("Code", "Unknown")
+
+
+def _get_error_message(e: ClientError) -> str:
+    """Safely extract error message from ClientError."""
+    return e.response.get("Error", {}).get("Message", str(e))
+
 
 # Constants
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
@@ -102,7 +113,7 @@ class R2StorageService:
             aws_secret_access_key=self._settings.secret_access_key,
             config=self._client_config,
         ) as client:
-            yield client
+            yield client  # type: ignore[misc]
 
     def _validate_upload(
         self,
@@ -222,9 +233,7 @@ class R2StorageService:
                     Metadata=metadata,
                 )
 
-            logger.info(
-                f"Uploaded file to R2: {storage_key} " f"({len(data)} bytes, user={user_id})"
-            )
+            logger.info(f"Uploaded file to R2: {storage_key} ({len(data)} bytes, user={user_id})")
 
             return UploadResult(
                 id=file_id,
@@ -235,7 +244,7 @@ class R2StorageService:
         except ClientError as e:
             logger.error(f"R2 upload failed for {storage_key}: {e}")
             raise StorageUploadError(
-                f"Failed to upload file: {e.response['Error']['Message']}",
+                f"Failed to upload file: {_get_error_message(e)}",
                 cause=e,
             ) from e
         except Exception as e:
@@ -255,12 +264,12 @@ class R2StorageService:
                 return data
 
         except ClientError as e:
-            error_code = e.response["Error"]["Code"]
+            error_code = _get_error_code(e)
             if error_code in ("NoSuchKey", "404"):
                 raise StorageNotFoundError(f"File not found: {storage_key}") from e
             logger.error(f"R2 download failed for {storage_key}: {e}")
             raise StorageDownloadError(
-                f"Failed to download file: {e.response['Error']['Message']}",
+                f"Failed to download file: {_get_error_message(e)}",
                 cause=e,
             ) from e
         except Exception as e:
@@ -301,12 +310,12 @@ class R2StorageService:
                 )
 
         except ClientError as e:
-            error_code = e.response["Error"]["Code"]
+            error_code = _get_error_code(e)
             if error_code in ("NoSuchKey", "404"):
                 raise StorageNotFoundError(f"File not found: {storage_key}") from e
             logger.error(f"Failed to generate presigned URL for {storage_key}: {e}")
             raise StorageDownloadError(
-                f"Failed to generate URL: {e.response['Error']['Message']}",
+                f"Failed to generate URL: {_get_error_message(e)}",
                 cause=e,
             ) from e
 
@@ -321,7 +330,7 @@ class R2StorageService:
                         Key=storage_key,
                     )
                 except ClientError as e:
-                    if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                    if _get_error_code(e) in ("NoSuchKey", "404"):
                         return False
                     raise
 
@@ -336,7 +345,7 @@ class R2StorageService:
         except ClientError as e:
             logger.error(f"R2 delete failed for {storage_key}: {e}")
             raise StorageDeleteError(
-                f"Failed to delete file: {e.response['Error']['Message']}",
+                f"Failed to delete file: {_get_error_message(e)}",
                 cause=e,
             ) from e
 
@@ -366,7 +375,7 @@ class R2StorageService:
         except ClientError as e:
             logger.error(f"R2 batch delete failed: {e}")
             raise StorageDeleteError(
-                f"Failed to delete files: {e.response['Error']['Message']}",
+                f"Failed to delete files: {_get_error_message(e)}",
                 cause=e,
             ) from e
 
@@ -380,7 +389,7 @@ class R2StorageService:
                 )
                 return True
         except ClientError as e:
-            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+            if _get_error_code(e) in ("NoSuchKey", "404"):
                 return False
             logger.error(f"R2 exists check failed for {storage_key}: {e}")
             raise StorageConnectionError(
@@ -411,11 +420,13 @@ class R2StorageService:
                 async for page in paginator.paginate(
                     Bucket=self._settings.bucket_name,
                     Prefix=prefix,
-                    MaxKeys=limit,
+                    PaginationConfig={"MaxItems": limit},
                 ):
                     for obj in page.get("Contents", []):
                         # Parse the storage key to extract metadata
-                        storage_key = obj["Key"]
+                        storage_key = obj.get("Key")
+                        if not storage_key:
+                            continue
                         if stored_file := self._parse_storage_key(
                             storage_key=storage_key,
                             size_bytes=obj.get("Size", 0),

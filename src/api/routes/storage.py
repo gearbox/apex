@@ -144,9 +144,7 @@ class StorageController(Controller):
     async def upload_image(
         self,
         user_content: UserContentService,
-        data: Annotated[
-            UploadFile, Body(media_type=RequestEncodingType.MULTI_PART, title="file")
-        ],
+        data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART, title="file")],
         user_id: Annotated[
             UUID,
             Parameter(
@@ -196,7 +194,12 @@ class StorageController(Controller):
         logger.debug(f"Uploading image of size: {len(file_bytes)} bytes")
 
         try:
-            logger.debug("!!!Uploading image for user %s: %s (%d bytes)", user_id, data.filename, len(file_bytes))
+            logger.debug(
+                "!!!Uploading image for user %s: %s (%d bytes)",
+                user_id,
+                data.filename,
+                len(file_bytes),
+            )
             result = await user_content.upload_image(
                 user_id=user_id,
                 data=file_bytes,

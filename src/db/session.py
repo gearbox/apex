@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -102,7 +103,7 @@ class DatabaseManager:
         """
         try:
             async with self._engine.connect() as conn:
-                await conn.execute("SELECT 1")
+                await conn.execute(select(1))
             return True
         except Exception:
             return False
