@@ -14,11 +14,13 @@ from litestar.openapi.spec import Contact, Server
 
 from src.api.dependencies import dependencies, init_services, shutdown_services
 from src.api.routes import (
+    AuthController,
     GenerationController,
     HealthController,
     ImageController,
     JobController,
     StorageController,
+    UserController,
 )
 from src.core.config import get_settings
 
@@ -55,7 +57,10 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None, None]:  # noqa: ARG001
 
     logger.info(f"Starting Apex API service, connecting to {settings.comfyui_base_url}")
 
-    await init_services(settings, base_path=base_path)
+    jwt_service = await init_services(settings, base_path=base_path)
+
+    # Store JWT service in app state for auth guards
+    app.state["jwt_service"] = jwt_service
 
     try:
         yield
@@ -127,9 +132,15 @@ def create_app() -> Litestar:
     app = Litestar(
         route_handlers=[
             HealthController,
+            # Authentication (public)
+            AuthController,
+            # User management (authenticated)
+            UserController,
+            # Generation (TODO: add auth_guard later)
             GenerationController,
             JobController,
             ImageController,
+            # Storage (TODO: add auth_guard later)
             StorageController,
         ],
         dependencies=dependencies,

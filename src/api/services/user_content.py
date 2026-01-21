@@ -21,7 +21,7 @@ from src.api.services.storage import (
     StorageType,
     StorageValidationError,
 )
-from src.db.repository import StorageRepository
+from src.db.repositories.storage import StorageRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession

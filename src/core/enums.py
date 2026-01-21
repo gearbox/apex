@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import Enum, StrEnum
 
 
 class ModelType(str, Enum):
@@ -61,3 +61,12 @@ class AspectRatio(str, Enum):
         width = int(height * ratio)
         # Round to nearest multiple of 8
         return (width + 4) // 8 * 8
+
+
+class SubscriptionTier(StrEnum):
+    """User subscription tiers."""
+
+    FREE = "free"
+    BASIC = "basic"
+    PRO = "pro"
+    ENTERPRISE = "enterprise"

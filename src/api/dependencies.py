@@ -9,13 +9,17 @@ from pathlib import Path
 from litestar.di import Provide
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.security import JWTConfig, JWTService, PasswordService
+from src.api.services.auth import AuthService
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.job_manager import JobManager
 from src.api.services.storage import R2StorageService, R2StorageSettings
+from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
 from src.api.services.workflow_service import WorkflowService
 from src.core.config import Settings, get_settings
 from src.db import DatabaseManager, init_db
+from src.db.repositories import UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,8 @@ _job_manager: JobManager | None = None
 _workflow_service: WorkflowService | None = None
 _r2_storage: R2StorageService | None = None
 _db_manager: DatabaseManager | None = None
+_jwt_service: JWTService | None = None
+_password_service: PasswordService | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -131,6 +137,72 @@ async def get_user_content(
 
 
 # -----------------------------------------------------------------------------
+# Auth & User dependencies
+# -----------------------------------------------------------------------------
+
+
+def get_jwt_service() -> JWTService:
+    """Provide JWT service singleton.
+
+    Returns:
+        JWTService instance.
+
+    Raises:
+        RuntimeError: If not initialized.
+    """
+    if _jwt_service is None:
+        raise RuntimeError("JWT service not initialized")
+    return _jwt_service
+
+
+def get_password_service() -> PasswordService:
+    """Provide password service singleton.
+
+    Returns:
+        PasswordService instance.
+
+    Raises:
+        RuntimeError: If not initialized.
+    """
+    if _password_service is None:
+        raise RuntimeError("Password service not initialized")
+    return _password_service
+
+
+async def get_auth_service(session: AsyncSession) -> AuthService:
+    """Provide auth service for request scope.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        AuthService instance.
+    """
+    repository = UserRepository(session)
+    return AuthService(
+        repository=repository,
+        jwt_service=get_jwt_service(),
+        password_service=get_password_service(),
+    )
+
+
+async def get_user_service(session: AsyncSession) -> UserService:
+    """Provide user service for request scope.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        UserService instance.
+    """
+    repository = UserRepository(session)
+    return UserService(
+        repository=repository,
+        password_service=get_password_service(),
+    )
+
+
+# -----------------------------------------------------------------------------
 # Settings
 # -----------------------------------------------------------------------------
 
@@ -149,7 +221,7 @@ def provide_settings() -> Settings:
 # -----------------------------------------------------------------------------
 
 
-async def init_services(settings: Settings, base_path: Path | None = None) -> None:
+async def init_services(settings: Settings, base_path: Path | None = None) -> JWTService:
     """Initialize all service singletons.
 
     Called during application startup.
@@ -158,7 +230,14 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> No
         settings: Application settings.
         base_path: Base path for workflow files.
     """
-    global _comfyui_client, _job_manager, _workflow_service, _r2_storage, _db_manager
+    global \
+        _comfyui_client, \
+        _job_manager, \
+        _workflow_service, \
+        _r2_storage, \
+        _db_manager, \
+        _jwt_service, \
+        _password_service
 
     # Initialize ComfyUI client
     _comfyui_client = ComfyUIClient(settings)
@@ -195,13 +274,34 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> No
     else:
         logger.warning("R2 storage not configured - storage endpoints will be unavailable")
 
+    # Initialize authentication services
+    jwt_config = JWTConfig(
+        secret_key=settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+        access_token_expire_minutes=settings.jwt_access_token_expire_minutes,
+        refresh_token_expire_days=settings.jwt_refresh_token_expire_days,
+        issuer=settings.jwt_issuer,
+    )
+    _jwt_service = JWTService(jwt_config)
+    _password_service = PasswordService()
+    logger.info("Authentication services initialized")
+
+    return _jwt_service  # Return for storing in app.state
+
 
 async def shutdown_services() -> None:
     """Cleanup service resources.
 
     Called during application shutdown.
     """
-    global _comfyui_client, _job_manager, _workflow_service, _r2_storage, _db_manager
+    global \
+        _comfyui_client, \
+        _job_manager, \
+        _workflow_service, \
+        _r2_storage, \
+        _db_manager, \
+        _jwt_service, \
+        _password_service
 
     if _comfyui_client is not None:
         await _comfyui_client.close()
@@ -220,10 +320,15 @@ async def shutdown_services() -> None:
 
     _job_manager = None
     _workflow_service = None
+    _jwt_service = None
+    _password_service = None
 
 
 # Dependency providers for Litestar
 dependencies = {
+    # Authentication services
+    "auth_service": Provide(get_auth_service),
+    "user_service": Provide(get_user_service),
     # Core services
     "comfyui_client": Provide(get_comfyui_client),
     "job_manager": Provide(get_job_manager),

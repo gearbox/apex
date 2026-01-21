@@ -1,41 +1,43 @@
 [project]
 name = "apex"
-version = "0.2.0"
-description = "Litestar-based REST API service for ComfyUI generation workflows"
+version = "0.3.0"
+description = "Apex REST API service for ComfyUI generation workflows"
 requires-python = ">=3.12"
 dependencies = [
     # Web framework
-    "litestar>=2.5.1",
-    "uvicorn>=0.24.0",
-    "python-multipart>=0.0.6",
-    
-    # Serialization
-    "msgspec>=0.18.0",
-    
-    # Configuration
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    
-    # HTTP client
-    "httpx>=0.25.0",
+    "litestar>=2.19.0",
+    "uvicorn[standard]>=0.30.0",
+    "msgspec>=0.20.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
     
     # Database
-    "sqlalchemy[asyncio]>=2.0.0",
-    "asyncpg>=0.29.0",
-    "alembic>=1.13.0",
+    "sqlalchemy[asyncio]>=2.0.45",
+    "asyncpg>=0.31.0",
+    "alembic>=1.18.1",
     
-    # Cloud storage (Cloudflare R2 / S3-compatible)
-    "aioboto3>=12.0.0",
-    "types-aiobotocore[s3]>=2.0.0",
+    # Storage
+    "aioboto3>=15.5.0",
+    "types-aiobotocore[s3]>=3.1.0",
+    "boto3-stubs[s3]>=1.42.30",
+
+    # Utilities
+    "httpx>=0.28.1",
+    "python-multipart>=0.0.21",
+    "rich>=14.2.0",
+
+    # Authentication
+    "argon2-cffi>=25.1.0",
+    "PyJWT>=2.10.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "mypy>=1.0.0",
-    "ruff>=0.1.0",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.8.0",
+    "ruff>=0.14.13",
     "moto[s3]>=5.0.0",  # For mocking S3/R2 in tests
 ]
 
@@ -78,11 +80,15 @@ python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
-plugins = ["sqlalchemy.ext.mypy.plugin"]
+plugins = [
+    "sqlalchemy.ext.mypy.plugin",
+    "pydantic.mypy"
+]
 
 [[tool.mypy.overrides]]
 module = [
     "aioboto3.*",
+    "boto3.*",
     "botocore.*",
     "moto.*",
 ]
@@ -91,6 +97,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "-v"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]

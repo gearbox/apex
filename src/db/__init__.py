@@ -1,10 +1,12 @@
-"""Database module.
-
-Provides async SQLAlchemy session management and models.
-"""
-
-from .models import Base, GenerationJob, GenerationOutput, UserImage
-from .repository import StorageRepository
+from .models import (
+    Base,
+    GenerationJob,
+    GenerationOutput,
+    RefreshToken,
+    User,
+    UserImage,
+)
+from .repositories import StorageRepository, UserRepository
 from .session import (
     DatabaseManager,
     close_db,
@@ -17,9 +19,12 @@ __all__ = [
     "Base",
     "GenerationJob",
     "GenerationOutput",
+    "RefreshToken",
+    "User",
     "UserImage",
-    # Repository
+    # Repositories
     "StorageRepository",
+    "UserRepository",
     # Session management
     "DatabaseManager",
     "close_db",
