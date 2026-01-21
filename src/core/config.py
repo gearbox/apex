@@ -77,6 +77,32 @@ class Settings(BaseSettings):
         description="Maximum upload file size in MB",
     )
 
+    # JWT Authentication Settings
+    jwt_secret_key: str = Field(
+        default="CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
+        description="Secret key for JWT signing (use strong random key in production)",
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT signing algorithm",
+    )
+    jwt_access_token_expire_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=60,
+        description="Access token expiration in minutes",
+    )
+    jwt_refresh_token_expire_days: int = Field(
+        default=7,
+        ge=1,
+        le=30,
+        description="Refresh token expiration in days",
+    )
+    jwt_issuer: str | None = Field(
+        default="apex-api",
+        description="JWT issuer claim",
+    )
+
     @computed_field
     @property
     def comfyui_base_url(self) -> str:
