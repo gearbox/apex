@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.enums import JobStatus, SubscriptionTier
 from src.db.models import GenerationJob, GenerationOutput, RefreshToken, User, UserImage
 
 if TYPE_CHECKING:
@@ -132,7 +133,7 @@ class UserRepository:
         if exclude_user_id:
             query = query.where(User.id != exclude_user_id)
         result = await self._session.execute(query)
-        return (result.scalar() or 0) > 0
+        return int(result.scalar() or 0) > 0
 
     async def update_user(
         self,
@@ -168,7 +169,7 @@ class UserRepository:
         if display_name is not None:
             user.display_name = display_name
         if subscription_tier is not None:
-            user.subscription_tier = subscription_tier
+            user.subscription_tier = SubscriptionTier(subscription_tier)
         if is_active is not None:
             user.is_active = is_active
 
@@ -271,12 +272,15 @@ class UserRepository:
         Returns:
             True if revoked, False if not found.
         """
-        result = await self._session.execute(
-            update(RefreshToken)
-            .where(RefreshToken.id == token_id)
-            .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+        result = cast(
+            CursorResult[tuple[()]],
+            await self._session.execute(
+                update(RefreshToken)
+                .where(RefreshToken.id == token_id)
+                .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+            ),
         )
-        return result.rowcount > 0
+        return (result.rowcount or 0) > 0
 
     async def revoke_token_family(self, family_id: UUID) -> int:
         """Revoke all tokens in a family.
@@ -289,15 +293,18 @@ class UserRepository:
         Returns:
             Number of tokens revoked.
         """
-        result = await self._session.execute(
-            update(RefreshToken)
-            .where(
-                RefreshToken.family_id == family_id,
-                RefreshToken.is_revoked == False,  # noqa: E712
-            )
-            .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+        result = cast(
+            CursorResult[tuple[()]],
+            await self._session.execute(
+                update(RefreshToken)
+                .where(
+                    RefreshToken.family_id == family_id,
+                    RefreshToken.is_revoked == False,  # noqa: E712
+                )
+                .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+            ),
         )
-        return result.rowcount
+        return result.rowcount or 0
 
     async def revoke_all_user_tokens(self, user_id: UUID) -> int:
         """Revoke all refresh tokens for a user.
@@ -310,15 +317,18 @@ class UserRepository:
         Returns:
             Number of tokens revoked.
         """
-        result = await self._session.execute(
-            update(RefreshToken)
-            .where(
-                RefreshToken.user_id == user_id,
-                RefreshToken.is_revoked == False,  # noqa: E712
-            )
-            .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+        result = cast(
+            CursorResult[tuple[()]],
+            await self._session.execute(
+                update(RefreshToken)
+                .where(
+                    RefreshToken.user_id == user_id,
+                    RefreshToken.is_revoked == False,  # noqa: E712
+                )
+                .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+            ),
         )
-        return result.rowcount
+        return result.rowcount or 0
 
     async def cleanup_expired_tokens(self) -> int:
         """Delete expired tokens.
@@ -329,10 +339,11 @@ class UserRepository:
             Number of tokens deleted.
         """
         now = datetime.now(timezone.utc)
-        result = await self._session.execute(
-            delete(RefreshToken).where(RefreshToken.expires_at < now)
+        result = cast(
+            CursorResult[tuple[()]],
+            await self._session.execute(delete(RefreshToken).where(RefreshToken.expires_at < now)),
         )
-        return result.rowcount
+        return result.rowcount or 0
 
     # -------------------------------------------------------------------------
     # User statistics
@@ -347,30 +358,65 @@ class UserRepository:
         Returns:
             Dict with total, completed, failed counts.
         """
+        query = (
+            select(
+                GenerationJob.status,
+                func.count().label("count"),
+            )
+            .where(GenerationJob.user_id == user_id)
+            .group_by(GenerationJob.status)
+        )
+        result = await self._session.execute(query)
+        rows = result.all()
+
+        total = 0
+        completed = 0
+        failed = 0
+
+        for row in rows:
+            status, count = row
+            total += count
+            if status == JobStatus.COMPLETED.value:
+                completed = count
+            elif status == JobStatus.FAILED.value:
+                failed = count
+
+        return {"total": total, "completed": completed, "failed": failed}
+
+    async def _get_user_job_count_(self, user_id: UUID) -> dict[str, int]:
+        """Get job counts by status for a user.
+
+        Args:
+            user_id: User ID.
+
+        Returns:
+            Dict with total, completed, failed counts.
+        """
+        # TODO: doublecheck if this method is needed
         total_result = await self._session.execute(
             select(func.count()).select_from(GenerationJob).where(GenerationJob.user_id == user_id)
         )
-        total = total_result.scalar() or 0
+        total = int(total_result.scalar() or 0)
 
         completed_result = await self._session.execute(
             select(func.count())
             .select_from(GenerationJob)
             .where(
                 GenerationJob.user_id == user_id,
-                GenerationJob.status == "completed",
+                GenerationJob.status == JobStatus.COMPLETED.value,
             )
         )
-        completed = completed_result.scalar() or 0
+        completed = int(completed_result.scalar() or 0)
 
         failed_result = await self._session.execute(
             select(func.count())
             .select_from(GenerationJob)
             .where(
                 GenerationJob.user_id == user_id,
-                GenerationJob.status == "failed",
+                GenerationJob.status == JobStatus.FAILED.value,
             )
         )
-        failed = failed_result.scalar() or 0
+        failed = int(failed_result.scalar() or 0)
 
         return {"total": total, "completed": completed, "failed": failed}
 
@@ -388,7 +434,7 @@ class UserRepository:
             .select_from(GenerationOutput)
             .where(GenerationOutput.user_id == user_id)
         )
-        return result.scalar() or 0
+        return int(result.scalar() or 0)
 
     async def get_user_upload_count(self, user_id: UUID) -> int:
         """Get total upload count for a user.
@@ -402,7 +448,7 @@ class UserRepository:
         result = await self._session.execute(
             select(func.count()).select_from(UserImage).where(UserImage.user_id == user_id)
         )
-        return result.scalar() or 0
+        return int(result.scalar() or 0)
 
     async def get_user_storage_bytes(self, user_id: UUID) -> int:
         """Get total storage used by a user.
@@ -418,14 +464,14 @@ class UserRepository:
                 UserImage.user_id == user_id
             )
         )
-        uploads_bytes = uploads_result.scalar() or 0
+        uploads_bytes = int(uploads_result.scalar() or 0)
 
         outputs_result = await self._session.execute(
             select(func.coalesce(func.sum(GenerationOutput.size_bytes), 0)).where(
                 GenerationOutput.user_id == user_id
             )
         )
-        outputs_bytes = outputs_result.scalar() or 0
+        outputs_bytes = int(outputs_result.scalar() or 0)
 
         return uploads_bytes + outputs_bytes
 
@@ -467,7 +513,7 @@ class UserRepository:
         result = await self._session.execute(
             select(func.count()).select_from(GenerationJob).where(GenerationJob.user_id == user_id)
         )
-        return result.scalar() or 0
+        return int(result.scalar() or 0)
 
     async def count_job_outputs(self, job_id: UUID) -> int:
         """Count outputs for a job.
@@ -483,4 +529,4 @@ class UserRepository:
             .select_from(GenerationOutput)
             .where(GenerationOutput.job_id == job_id)
         )
-        return result.scalar() or 0
+        return int(result.scalar() or 0)

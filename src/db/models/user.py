@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -68,7 +68,7 @@ class User(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
-        onupdate=datetime.utcnow,
+        onupdate=datetime.now(timezone.utc),
     )
 
     # Relationships
