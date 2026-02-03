@@ -10,6 +10,7 @@ file storage in R2. This enables:
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import (
@@ -23,14 +24,13 @@ from sqlalchemy import (
     Text,
     text,
 )
-
-# from sqlalchemy import (
-#     Enum as SQLEnum,
-# )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from src.core.enums import GenerationType, JobStatus
+
+if TYPE_CHECKING:
+    from .user import User
 
 
 class Base(DeclarativeBase):
@@ -54,6 +54,7 @@ class UserImage(Base):
     )
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -84,6 +85,10 @@ class UserImage(Base):
     )
 
     # Relationships
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="user_images",
+    )
     generation_outputs: Mapped[list[GenerationOutput]] = relationship(
         "GenerationOutput",
         back_populates="input_image",
@@ -113,6 +118,7 @@ class GenerationJob(Base):
     )
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -160,6 +166,10 @@ class GenerationJob(Base):
     )
 
     # Relationships
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="generation_jobs",
+    )
     outputs: Mapped[list[GenerationOutput]] = relationship(
         "GenerationOutput",
         back_populates="job",
@@ -190,6 +200,7 @@ class GenerationOutput(Base):
     )
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -234,6 +245,10 @@ class GenerationOutput(Base):
     )
 
     # Relationships
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="generation_outputs",
+    )
     job: Mapped[GenerationJob] = relationship(
         "GenerationJob",
         back_populates="outputs",
