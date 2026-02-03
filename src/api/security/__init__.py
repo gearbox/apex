@@ -1,4 +1,8 @@
-"""Security module for authentication and authorization."""
+"""Security module - authentication and authorization.
+
+This module provides implementations only. For DI providers,
+use src.api.dependencies.
+"""
 
 from .guards import (
     AuthenticatedUser,
@@ -13,12 +17,8 @@ from .jwt import (
     TokenExpiredError,
     TokenPayload,
 )
-from .password import (
-    PasswordService,
-    generate_token,
-    get_password_service,
-    hash_token,
-)
+from .password import PasswordService
+from .utils import generate_token, hash_token
 
 __all__ = [
     # Guards
@@ -35,6 +35,5 @@ __all__ = [
     # Password
     "PasswordService",
     "generate_token",
-    "get_password_service",
     "hash_token",
 ]

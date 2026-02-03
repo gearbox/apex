@@ -112,10 +112,7 @@ class UserRepository:
             User if found and active, None otherwise.
         """
         result = await self._session.execute(
-            select(User).where(
-                User.email == email.lower(),
-                User.is_active == True,  # noqa: E712
-            )
+            select(User).where(User.email == email.lower(), User.is_active == True)  # noqa: E712
         )
         return result.scalar_one_or_none()
 
@@ -530,3 +527,29 @@ class UserRepository:
             .where(GenerationOutput.job_id == job_id)
         )
         return int(result.scalar() or 0)
+
+    async def count_outputs_for_jobs(self, job_ids: list[UUID]) -> dict[UUID, int]:
+        """Count outputs for multiple jobs in a single query.
+
+        Args:
+            job_ids: List of job IDs.
+
+        Returns:
+            Dict mapping job_id to output count.
+        """
+        if not job_ids:
+            return {}
+
+        result = await self._session.execute(
+            select(GenerationOutput.job_id, func.count().label("count"))
+            .where(GenerationOutput.job_id.in_(job_ids))
+            .group_by(GenerationOutput.job_id)
+        )
+        rows = result.all()
+
+        # Initialize all job_ids with 0, then update with actual counts
+        counts: dict[UUID, int] = dict.fromkeys(job_ids, 0)
+        for job_id, count in rows:
+            counts[job_id] = count
+
+        return counts

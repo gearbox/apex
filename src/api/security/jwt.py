@@ -9,7 +9,7 @@ from uuid import UUID
 
 import jwt
 
-from .password import generate_token
+from .utils import generate_token
 
 
 @dataclass

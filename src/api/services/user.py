@@ -250,21 +250,23 @@ class UserService:
         jobs = await self._repo.list_user_jobs(user_id, limit=limit, offset=offset)
         total = await self._repo.count_user_jobs(user_id)
 
-        items = []
-        for job in jobs:
-            output_count = await self._repo.count_job_outputs(job.id)
-            items.append(
-                JobSummaryResponse(
-                    id=str(job.id),
-                    name=job.name,
-                    status=str(job.status),
-                    generation_type=str(job.generation_type),
-                    prompt=(f"{job.prompt[:200]}..." if len(job.prompt) > 200 else job.prompt),
-                    output_count=output_count,
-                    created_at=job.created_at,
-                    completed_at=job.completed_at,
-                )
+        # Fetch all output counts in a single query to avoid N+1
+        job_ids = [job.id for job in jobs]
+        output_counts = await self._repo.count_outputs_for_jobs(job_ids)
+
+        items = [
+            JobSummaryResponse(
+                id=str(job.id),
+                name=job.name,
+                status=str(job.status),
+                generation_type=str(job.generation_type),
+                prompt=(f"{job.prompt[:200]}..." if len(job.prompt) > 200 else job.prompt),
+                output_count=output_counts.get(job.id, 0),
+                created_at=job.created_at,
+                completed_at=job.completed_at,
             )
+            for job in jobs
+        ]
 
         return UserJobsResponse(items=items, total=total)
 

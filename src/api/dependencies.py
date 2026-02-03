@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from pathlib import Path
 
 from litestar.di import Provide
@@ -23,14 +24,29 @@ from src.db.repositories import UserRepository
 
 logger = logging.getLogger(__name__)
 
-# Global singleton instances (created at app startup)
-_comfyui_client: ComfyUIClient | None = None
-_job_manager: JobManager | None = None
-_workflow_service: WorkflowService | None = None
-_r2_storage: R2StorageService | None = None
-_db_manager: DatabaseManager | None = None
-_jwt_service: JWTService | None = None
-_password_service: PasswordService | None = None
+# -----------------------------------------------------------------------------
+# Service container (single global, initialized at app startup)
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class ServiceContainer:
+    """Container for all singleton services.
+
+    Centralizes service instances in a single object, avoiding
+    multiple module-level globals and long `global` declarations.
+    """
+
+    comfyui_client: ComfyUIClient | None = None
+    job_manager: JobManager | None = None
+    workflow_service: WorkflowService | None = None
+    r2_storage: R2StorageService | None = None
+    db_manager: DatabaseManager | None = None
+    jwt_service: JWTService | None = None
+    password_service: PasswordService | None = None
+
+
+_services = ServiceContainer()
 
 
 # -----------------------------------------------------------------------------
@@ -47,9 +63,9 @@ async def get_comfyui_client() -> ComfyUIClient:
     Raises:
         RuntimeError: If client not initialized.
     """
-    if _comfyui_client is None:
+    if _services.comfyui_client is None:
         raise RuntimeError("ComfyUI client not initialized")
-    return _comfyui_client
+    return _services.comfyui_client
 
 
 async def get_job_manager() -> JobManager:
@@ -61,9 +77,9 @@ async def get_job_manager() -> JobManager:
     Raises:
         RuntimeError: If manager not initialized.
     """
-    if _job_manager is None:
+    if _services.job_manager is None:
         raise RuntimeError("Job manager not initialized")
-    return _job_manager
+    return _services.job_manager
 
 
 async def get_workflow_service() -> WorkflowService:
@@ -75,9 +91,9 @@ async def get_workflow_service() -> WorkflowService:
     Raises:
         RuntimeError: If service not initialized.
     """
-    if _workflow_service is None:
+    if _services.workflow_service is None:
         raise RuntimeError("Workflow service not initialized")
-    return _workflow_service
+    return _services.workflow_service
 
 
 # -----------------------------------------------------------------------------
@@ -94,9 +110,9 @@ async def get_r2_storage() -> R2StorageService:
     Raises:
         RuntimeError: If storage not initialized.
     """
-    if _r2_storage is None:
+    if _services.r2_storage is None:
         raise RuntimeError("R2 storage not initialized")
-    return _r2_storage
+    return _services.r2_storage
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -105,10 +121,10 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     Yields:
         Database session that auto-commits on success.
     """
-    if _db_manager is None:
+    if _services.db_manager is None:
         raise RuntimeError("Database not initialized")
 
-    async with _db_manager.session() as session:
+    async with _services.db_manager.session() as session:
         yield session
 
 
@@ -150,9 +166,9 @@ def get_jwt_service() -> JWTService:
     Raises:
         RuntimeError: If not initialized.
     """
-    if _jwt_service is None:
+    if _services.jwt_service is None:
         raise RuntimeError("JWT service not initialized")
-    return _jwt_service
+    return _services.jwt_service
 
 
 def get_password_service() -> PasswordService:
@@ -164,9 +180,9 @@ def get_password_service() -> PasswordService:
     Raises:
         RuntimeError: If not initialized.
     """
-    if _password_service is None:
+    if _services.password_service is None:
         raise RuntimeError("Password service not initialized")
-    return _password_service
+    return _services.password_service
 
 
 async def get_auth_service(session: AsyncSession) -> AuthService:
@@ -229,35 +245,28 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     Args:
         settings: Application settings.
         base_path: Base path for workflow files.
+    Returns:
+        JWT service for storing in app state.
     """
-    global \
-        _comfyui_client, \
-        _job_manager, \
-        _workflow_service, \
-        _r2_storage, \
-        _db_manager, \
-        _jwt_service, \
-        _password_service
-
-    # Initialize ComfyUI client
-    _comfyui_client = ComfyUIClient(settings)
-    await _comfyui_client.connect()
-    logger.info(f"Connected to ComfyUI at {settings.comfyui_base_url}")
-
-    # Initialize job manager with client
-    _job_manager = JobManager(_comfyui_client)
-
-    # Initialize workflow service
-    _workflow_service = WorkflowService(base_path=base_path)
-
     # Initialize database
-    _db_manager = init_db(
+    _services.db_manager = init_db(
         settings.database_url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         echo=settings.db_echo,
     )
     logger.info("Database connection pool initialized")
+
+    # Initialize ComfyUI client
+    _services.comfyui_client = ComfyUIClient(settings)
+    await _services.comfyui_client.connect()
+    logger.info(f"Connected to ComfyUI at {settings.comfyui_base_url}")
+
+    # Initialize job manager with client
+    _services.job_manager = JobManager(_services.comfyui_client)
+
+    # Initialize workflow service
+    _services.workflow_service = WorkflowService(base_path=base_path)
 
     # Initialize R2 storage (if configured)
     if settings.r2_configured:
@@ -269,7 +278,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             public_url_base=settings.r2_public_url_base,
             retention_days=settings.retention_days,
         )
-        _r2_storage = R2StorageService(r2_settings)
+        _services.r2_storage = R2StorageService(r2_settings)
         logger.info(f"R2 storage initialized for bucket: {settings.r2_bucket_name}")
     else:
         logger.warning("R2 storage not configured - storage endpoints will be unavailable")
@@ -282,11 +291,11 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         refresh_token_expire_days=settings.jwt_refresh_token_expire_days,
         issuer=settings.jwt_issuer,
     )
-    _jwt_service = JWTService(jwt_config)
-    _password_service = PasswordService()
+    _services.jwt_service = JWTService(jwt_config)
+    _services.password_service = PasswordService()
     logger.info("Authentication services initialized")
 
-    return _jwt_service  # Return for storing in app.state
+    return _services.jwt_service  # Return for storing in app.state
 
 
 async def shutdown_services() -> None:
@@ -294,34 +303,22 @@ async def shutdown_services() -> None:
 
     Called during application shutdown.
     """
-    global \
-        _comfyui_client, \
-        _job_manager, \
-        _workflow_service, \
-        _r2_storage, \
-        _db_manager, \
-        _jwt_service, \
-        _password_service
+    global _services
 
-    if _comfyui_client is not None:
-        await _comfyui_client.close()
-        _comfyui_client = None
+    if _services.comfyui_client is not None:
+        await _services.comfyui_client.close()
         logger.info("ComfyUI client closed")
 
-    if _r2_storage is not None:
-        await _r2_storage.close()
-        _r2_storage = None
+    if _services.r2_storage is not None:
+        await _services.r2_storage.close()
         logger.info("R2 storage closed")
 
-    if _db_manager is not None:
-        await _db_manager.close()
-        _db_manager = None
+    if _services.db_manager is not None:
+        await _services.db_manager.close()
         logger.info("Database connections closed")
 
-    _job_manager = None
-    _workflow_service = None
-    _jwt_service = None
-    _password_service = None
+    # Reset container to clean state
+    _services = ServiceContainer()
 
 
 # Dependency providers for Litestar

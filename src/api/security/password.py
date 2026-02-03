@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import secrets
-
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
@@ -14,6 +11,14 @@ class PasswordService:
 
     Argon2id is the recommended algorithm for password hashing,
     combining resistance to both side-channel and GPU attacks.
+
+    Example:
+        >>> service = PasswordService()
+        >>> hashed = service.hash("secret123")
+        >>> service.verify(hashed, "secret123")
+        True
+        >>> service.verify(hashed, "wrong")
+        False
     """
 
     def __init__(
@@ -74,46 +79,3 @@ class PasswordService:
             True if hash should be rehashed with current parameters.
         """
         return self._hasher.check_needs_rehash(hash)
-
-
-def generate_token(nbytes: int = 32) -> str:
-    """Generate a cryptographically secure random token.
-
-    Args:
-        nbytes: Number of random bytes (default 32 = 256 bits).
-
-    Returns:
-        URL-safe base64 encoded token.
-    """
-    return secrets.token_urlsafe(nbytes)
-
-
-def hash_token(token: str) -> str:
-    """Hash a token for storage.
-
-    Uses SHA-256 for fast, non-reversible hashing of tokens.
-    Unlike passwords, tokens are already high-entropy random strings.
-
-    Args:
-        token: Token to hash.
-
-    Returns:
-        Hex-encoded SHA-256 hash.
-    """
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
-# Default instance
-_password_service: PasswordService | None = None
-
-
-def get_password_service() -> PasswordService:
-    """Get the default password service instance.
-
-    Returns:
-        Singleton PasswordService.
-    """
-    global _password_service
-    if _password_service is None:
-        _password_service = PasswordService()
-    return _password_service
