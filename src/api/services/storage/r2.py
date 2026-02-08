@@ -23,7 +23,7 @@ from .exceptions import (
 )
 from .schemas import (
     DownloadResult,
-    ImageFormat,
+    MediaFormat,
     StorageType,
     StoredFile,
     UploadResult,
@@ -120,7 +120,7 @@ class R2StorageService:
         data: bytes,
         content_type: str,
         _filename: str,
-    ) -> ImageFormat:
+    ) -> MediaFormat:
         """Validate upload parameters.
 
         Args:
@@ -153,7 +153,7 @@ class R2StorageService:
 
         # Determine format
         try:
-            return ImageFormat.from_content_type(content_type)
+            return MediaFormat.from_content_type(content_type)
         except ValueError as e:
             raise StorageValidationError(str(e)) from e
 
@@ -163,7 +163,7 @@ class R2StorageService:
         user_id: UUID,
         file_id: UUID,
         storage_type: StorageType,
-        format: ImageFormat,
+        format: MediaFormat,
         job_id: UUID | None = None,
     ) -> str:
         """Build the storage key for a file.
@@ -473,7 +473,7 @@ class R2StorageService:
 
             file_part, ext = filename_with_ext.rsplit(".", 1)
             file_id = UUID(file_part)
-            image_format = ImageFormat.from_extension(ext)
+            image_format = MediaFormat.from_extension(ext)
 
             created_at = last_modified or datetime.now(timezone.utc)
 

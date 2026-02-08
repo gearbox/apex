@@ -16,7 +16,7 @@ from .exceptions import (
 from .r2 import R2StorageService, R2StorageSettings
 from .schemas import (
     DownloadResult,
-    ImageFormat,
+    MediaFormat,
     StorageStats,
     StorageType,
     StoredFile,
@@ -31,7 +31,7 @@ __all__ = [
     "R2StorageSettings",
     # Schemas
     "DownloadResult",
-    "ImageFormat",
+    "MediaFormat",
     "StorageStats",
     "StorageType",
     "StoredFile",

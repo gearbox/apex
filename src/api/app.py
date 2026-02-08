@@ -13,15 +13,21 @@ from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
 
 from src.api.dependencies import dependencies, init_services, shutdown_services
-from src.api.routes import (
-    AuthController,
+from src.api.routes.auth import AuthController
+from src.api.routes.generation import (
     GenerationController,
     HealthController,
     ImageController,
     JobController,
-    StorageController,
-    UserController,
 )
+from src.api.routes.grok import (
+    GrokImageController,
+    GrokJobController,
+    GrokProviderController,
+    GrokVideoController,
+)
+from src.api.routes.storage import StorageController
+from src.api.routes.user import UserController
 from src.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -111,14 +117,25 @@ def create_app() -> Litestar:
                 "level": "WARNING",
                 "propagate": False,
             },
+            "xai_sdk": {
+                "level": "INFO",
+                "propagate": False,
+            },
         },
     )
 
     # OpenAPI documentation configuration
     openapi_config = OpenAPIConfig(
         title="Apex Generation API",
-        version="0.1.0",
-        description="Apex REST API for ComfyUI generation workflows",
+        version="0.2.0",
+        description=(
+            "Apex REST API for AI content generation.\n\n"
+            "## Providers\n\n"
+            "- **ComfyUI**: Custom workflow-based generation (T2I, I2I)\n"
+            "- **Grok**: xAI's image and video generation (T2I, I2I, T2V, I2V)\n\n"
+            "## Authentication\n\n"
+            "Authentication is handled via OAuth2/JWT (implementation pending).\n"
+        ),
         contact=Contact(name="API Support"),
         servers=[
             Server(
@@ -142,6 +159,11 @@ def create_app() -> Litestar:
             ImageController,
             # Storage (TODO: add auth_guard later)
             StorageController,
+            # Grok generation
+            GrokProviderController,
+            GrokImageController,
+            GrokVideoController,
+            GrokJobController,
         ],
         dependencies=dependencies,
         lifespan=[lifespan],

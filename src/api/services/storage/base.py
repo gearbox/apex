@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from .schemas import DownloadResult, ImageFormat, StorageType, StoredFile, UploadResult
+    from src.core.enums import MediaFormat
+
+    from .schemas import DownloadResult, StorageType, StoredFile, UploadResult
 
 
 @runtime_checkable
@@ -158,7 +160,7 @@ class StorageService(Protocol):
         user_id: UUID,
         file_id: UUID,
         storage_type: StorageType,
-        format: ImageFormat,
+        format: MediaFormat,
         job_id: UUID | None = None,
     ) -> str:
         """Build the storage key for a file.

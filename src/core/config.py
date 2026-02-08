@@ -20,6 +20,36 @@ class Settings(BaseSettings):
     comfyui_host: str = Field(default="127.0.0.1", description="ComfyUI server host")
     comfyui_port: int = Field(default=18188, description="ComfyUI server port")
 
+    # xAI Grok API settings
+    xai_api_key: str = Field(
+        default="",
+        description="xAI API key for Grok image/video generation",
+    )
+    xai_api_base_url: str = Field(
+        default="https://api.x.ai",
+        description="xAI API base URL",
+    )
+    xai_timeout: int = Field(
+        default=300,
+        ge=30,
+        le=900,
+        description="xAI API timeout in seconds",
+    )
+
+    # Grok video polling settings
+    grok_video_poll_interval: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        description="Seconds between video status polls",
+    )
+    grok_video_max_poll_time: int = Field(
+        default=600,
+        ge=60,
+        le=1800,
+        description="Maximum seconds to poll for video completion",
+    )
+
     # API settings
     api_host: str = Field(default="0.0.0.0", description="API server host")
     api_port: int = Field(default=8000, description="API server port")
@@ -103,6 +133,10 @@ class Settings(BaseSettings):
         description="JWT issuer claim",
     )
 
+    # -------------------------------------------------------------------------
+    # Computed fields
+    # -------------------------------------------------------------------------
+
     @computed_field
     @property
     def comfyui_base_url(self) -> str:
@@ -125,6 +159,12 @@ class Settings(BaseSettings):
     def r2_configured(self) -> bool:
         """Check if R2 is properly configured."""
         return bool(self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key)
+
+    @computed_field
+    @property
+    def grok_configured(self) -> bool:
+        """Check if Grok API is configured."""
+        return bool(self.xai_api_key)
 
 
 @lru_cache

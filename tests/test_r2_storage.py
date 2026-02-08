@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.storage import (
-    ImageFormat,
+    MediaFormat,
     R2StorageService,
     R2StorageSettings,
     StorageType,
@@ -43,7 +43,7 @@ class TestR2StorageKeyBuilding:
             user_id=user_id,
             file_id=file_id,
             storage_type=StorageType.UPLOAD,
-            format=ImageFormat.PNG,
+            format=MediaFormat.PNG,
         )
 
         assert key == f"users/{user_id}/uploads/{file_id}.png"
@@ -57,7 +57,7 @@ class TestR2StorageKeyBuilding:
             user_id=user_id,
             file_id=file_id,
             storage_type=StorageType.UPLOAD,
-            format=ImageFormat.JPEG,
+            format=MediaFormat.JPEG,
         )
 
         assert key == f"users/{user_id}/uploads/{file_id}.jpeg"
@@ -72,7 +72,7 @@ class TestR2StorageKeyBuilding:
             user_id=user_id,
             file_id=file_id,
             storage_type=StorageType.OUTPUT,
-            format=ImageFormat.PNG,
+            format=MediaFormat.PNG,
             job_id=job_id,
         )
 
@@ -85,7 +85,7 @@ class TestR2StorageKeyBuilding:
                 user_id=uuid4(),
                 file_id=uuid4(),
                 storage_type=StorageType.OUTPUT,
-                format=ImageFormat.PNG,
+                format=MediaFormat.PNG,
                 job_id=None,
             )
 
@@ -115,23 +115,23 @@ class TestR2ValidationRules:
     def test_validate_valid_png(self, r2_service: R2StorageService) -> None:
         """Test that valid PNG is accepted."""
         result = r2_service._validate_upload(b"test", "image/png", "test.png")
-        assert result == ImageFormat.PNG
+        assert result == MediaFormat.PNG
 
     def test_validate_valid_jpeg(self, r2_service: R2StorageService) -> None:
         """Test that valid JPEG is accepted."""
         result = r2_service._validate_upload(b"test", "image/jpeg", "test.jpg")
-        assert result == ImageFormat.JPEG
+        assert result == MediaFormat.JPEG
 
     def test_validate_valid_webp(self, r2_service: R2StorageService) -> None:
         """Test that valid WebP is accepted."""
         result = r2_service._validate_upload(b"test", "image/webp", "test.webp")
-        assert result == ImageFormat.WEBP
+        assert result == MediaFormat.WEBP
 
     def test_validate_max_size_boundary(self, r2_service: R2StorageService) -> None:
         """Test file at exactly max size is accepted."""
         max_data = b"x" * (20 * 1024 * 1024)  # Exactly 20MB
         result = r2_service._validate_upload(max_data, "image/png", "test.png")
-        assert result == ImageFormat.PNG
+        assert result == MediaFormat.PNG
 
 
 class TestStorageKeyParsing:
@@ -153,7 +153,7 @@ class TestStorageKeyParsing:
         assert result.user_id == user_id
         assert result.id == file_id
         assert result.storage_type == StorageType.UPLOAD
-        assert result.format == ImageFormat.PNG
+        assert result.format == MediaFormat.PNG
         assert result.size_bytes == 1024
 
     def test_parse_output_key(self, r2_service: R2StorageService) -> None:
@@ -174,7 +174,7 @@ class TestStorageKeyParsing:
         assert result.job_id == job_id
         assert result.id == file_id
         assert result.storage_type == StorageType.OUTPUT
-        assert result.format == ImageFormat.JPEG
+        assert result.format == MediaFormat.JPEG
 
     def test_parse_invalid_key(self, r2_service: R2StorageService) -> None:
         """Test parsing invalid storage key returns None."""

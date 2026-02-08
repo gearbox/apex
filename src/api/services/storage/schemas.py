@@ -9,63 +9,14 @@ from uuid import UUID
 
 import msgspec
 
+from src.core.enums import MediaFormat
+
 
 class StorageType(str, Enum):
     """Type of stored content."""
 
     UPLOAD = "upload"  # User-uploaded input images
     OUTPUT = "output"  # Generated output images
-
-
-class ImageFormat(str, Enum):
-    """Supported image formats (ComfyUI compatible)."""
-
-    PNG = "png"
-    JPEG = "jpeg"
-    WEBP = "webp"
-
-    @classmethod
-    def from_content_type(cls, content_type: str) -> ImageFormat:
-        """Get format from MIME type."""
-        mapping = {
-            "image/png": cls.PNG,
-            "image/jpeg": cls.JPEG,
-            "image/jpg": cls.JPEG,
-            "image/webp": cls.WEBP,
-        }
-        fmt = mapping.get(content_type.lower())
-        if fmt is None:
-            raise ValueError(f"Unsupported content type: {content_type}")
-        return fmt
-
-    @classmethod
-    def from_extension(cls, ext: str) -> ImageFormat:
-        """Get format from file extension."""
-        ext = ext.lower().lstrip(".")
-        mapping = {
-            "png": cls.PNG,
-            "jpeg": cls.JPEG,
-            "jpg": cls.JPEG,
-            "webp": cls.WEBP,
-        }
-        fmt = mapping.get(ext)
-        if fmt is None:
-            raise ValueError(f"Unsupported extension: {ext}")
-        return fmt
-
-    @property
-    def content_type(self) -> str:
-        """Get MIME type for format."""
-        return {
-            self.PNG: "image/png",
-            self.JPEG: "image/jpeg",
-            self.WEBP: "image/webp",
-        }[self]
-
-    @property
-    def extension(self) -> str:
-        """Get file extension for format."""
-        return self.value
 
 
 # Validation constraints
@@ -80,7 +31,7 @@ class StoredFile(msgspec.Struct, kw_only=True):
     storage_type: StorageType
     storage_key: str  # Full R2 key: users/{user_id}/uploads/{uuid}.{ext}
     filename: str  # Original filename
-    format: ImageFormat
+    format: MediaFormat
     size_bytes: int
     content_type: str
     created_at: datetime

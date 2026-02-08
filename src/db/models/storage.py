@@ -27,7 +27,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, Provider
 
 if TYPE_CHECKING:
     from .user import User
@@ -122,7 +122,18 @@ class GenerationJob(Base):
         nullable=False,
         index=True,
     )
-
+    # Provider and model tracking
+    provider: Mapped[str] = mapped_column(
+        String(20),
+        default=Provider.COMFYUI.value,
+        index=True,
+        nullable=False,
+    )
+    model: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        index=True,
+    )
     # Job metadata
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="Untitled Job")
     status: Mapped[JobStatus] = mapped_column(
@@ -147,8 +158,22 @@ class GenerationJob(Base):
     is_nsfw: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_minor_suspected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # External provider tracking
+    # For ComfyUI: stores prompt_id
+    # For Grok: stores request_id (for video polling)
+    external_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # ComfyUI tracking
-    comfyui_prompt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Legacy alias for backwards compatibility
+    @property
+    def comfyui_prompt_id(self) -> str | None:
+        """Alias for external_request_id (backwards compatibility)."""
+        return self.external_request_id
+
+    @comfyui_prompt_id.setter
+    def comfyui_prompt_id(self, value: str | None) -> None:
+        """Set external_request_id via legacy alias."""
+        self.external_request_id = value
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
@@ -179,6 +204,7 @@ class GenerationJob(Base):
     __table_args__ = (
         Index("ix_generation_jobs_user_status", "user_id", "status"),
         Index("ix_generation_jobs_user_created", "user_id", "created_at"),
+        Index("ix_generation_jobs_provider_status", "provider", "status"),
     )
 
     def __repr__(self) -> str:

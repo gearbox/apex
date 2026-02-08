@@ -15,7 +15,7 @@ from uuid import UUID
 import msgspec
 
 from src.api.services.storage import (
-    ImageFormat,
+    MediaFormat,
     R2StorageService,
     StorageNotFoundError,
     StorageType,
@@ -142,7 +142,7 @@ class UserContentService:
             )
 
             # Determine format for DB
-            image_format = ImageFormat.from_content_type(content_type)
+            image_format = MediaFormat.from_content_type(content_type)
             now = datetime.now(timezone.utc)
             expires_at = now + timedelta(days=self._retention_days)
 
@@ -343,7 +343,7 @@ class UserContentService:
         )
 
         # Determine format
-        image_format = ImageFormat.from_content_type(content_type)
+        image_format = MediaFormat.from_content_type(content_type)
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(days=self._retention_days)
 
@@ -484,7 +484,7 @@ class UserContentService:
     # Storage key utilities (for ComfyUI integration)
     # -------------------------------------------------------------------------
 
-    def get_upload_storage_key(self, image_id: UUID, user_id: UUID, format: ImageFormat) -> str:
+    def get_upload_storage_key(self, image_id: UUID, user_id: UUID, format: MediaFormat) -> str:
         """Get the R2 storage key for an upload.
 
         Useful for passing to ComfyUI S3 nodes.
@@ -509,7 +509,7 @@ class UserContentService:
         output_id: UUID,
         user_id: UUID,
         job_id: UUID,
-        format: ImageFormat,
+        format: MediaFormat,
     ) -> str:
         """Get the R2 storage key for an output.
 

@@ -1,0 +1,595 @@
+"""Grok job service for orchestrating generation and storage.
+
+Handles the full lifecycle of Grok generation jobs:
+- Job creation and tracking in database
+- Calling Grok API for generation
+- Downloading results and storing in R2
+- Status updates and error handling
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+from uuid import UUID, uuid4
+
+import httpx
+
+from src.api.services.grok import (
+    GrokAPIError,
+    GrokClient,
+    GrokImageResult,
+    GrokVideoJobStarted,
+    GrokVideoResult,
+)
+from src.api.services.storage import R2StorageService, StorageType
+from src.core.enums import (
+    AspectRatio,
+    GenerationType,
+    JobStatus,
+    MediaFormat,
+    ModelType,
+    VideoResolution,
+)
+from src.db import StorageRepository
+
+from .enums import ResponseImageFormat
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.models import GenerationJob
+
+logger = logging.getLogger(__name__)
+
+
+class GrokJobError(Exception):
+    """Base exception for Grok job service errors."""
+
+    pass
+
+
+class GrokJobNotFoundError(GrokJobError):
+    """Raised when a job is not found."""
+
+    pass
+
+
+class GrokJobService:
+    """Service for managing Grok generation jobs.
+
+    Orchestrates:
+    - Creating jobs in database
+    - Calling Grok API
+    - Downloading generated content
+    - Storing results in R2
+    - Updating job status
+    """
+
+    def __init__(
+        self,
+        grok_client: GrokClient,
+        storage: R2StorageService,
+        retention_days: int = 7,
+    ) -> None:
+        """Initialize Grok job service.
+
+        Args:
+            grok_client: Grok API client.
+            storage: R2 storage service for persisting results.
+            retention_days: Days to retain generated content.
+        """
+        self._grok = grok_client
+        self._storage = storage
+        self._retention_days = retention_days
+        self._http_client: httpx.AsyncClient | None = None
+
+    async def connect(self) -> None:
+        """Initialize HTTP client for downloading media."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=10.0),
+                follow_redirects=True,
+            )
+
+    async def close(self) -> None:
+        """Close HTTP client."""
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    @property
+    def http_client(self) -> httpx.AsyncClient:
+        """Get HTTP client for downloads."""
+        if self._http_client is None:
+            raise GrokJobError("HTTP client not initialized. Call connect() first.")
+        return self._http_client
+
+    # -------------------------------------------------------------------------
+    # Image Generation
+    # -------------------------------------------------------------------------
+
+    async def create_image_job(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        prompt: str,
+        model: ModelType,
+        generation_type: GenerationType,
+        n: int = 1,
+        aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1,
+        name: str | None = None,
+        negative_prompt: str | None = None,
+        input_image_url: str | None = None,
+        input_image_id: UUID | None = None,
+    ) -> GenerationJob | None:
+        """Create and execute an image generation job.
+
+        This method:
+        1. Creates job record in database
+        2. Calls Grok API for generation
+        3. Downloads generated images
+        4. Stores images in R2
+        5. Creates output records in database
+        6. Updates job status
+
+        Args:
+            session: Database session.
+            user_id: Owner of the job.
+            prompt: Generation prompt.
+            model: Grok model to use.
+            generation_type: T2I or I2I.
+            n: Number of images to generate.
+            aspect_ratio: Image aspect ratio.
+            name: Job name (auto-generated if not provided).
+            negative_prompt: Negative prompt (stored but not used by Grok).
+            input_image_url: Source image URL for I2I.
+            input_image_id: Database ID of input image.
+
+        Returns:
+            Created and processed GenerationJob.
+
+        Raises:
+            GrokJobError: If job creation or processing fails.
+        """
+        repo = StorageRepository(session)
+
+        # Generate job name from prompt if not provided
+        if name is None:
+            name = prompt[:50].strip()
+            if len(prompt) > 50:
+                name += "..."
+
+        # Create job record
+        job_id = uuid4()
+        job: GenerationJob | None = await repo.create_job(
+            id=job_id,
+            user_id=user_id,
+            name=name,
+            prompt=prompt,
+            generation_type=generation_type.value,
+            status=JobStatus.PENDING.value,
+        )
+
+        # Update with negative prompt if provided
+        if negative_prompt and job is not None:
+            job.negative_prompt = negative_prompt
+            await session.flush()
+
+        try:
+            # Update status to running
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.RUNNING.value,
+                started_at=datetime.now(timezone.utc),
+            )
+
+            # Call Grok API
+            if generation_type == GenerationType.I2I and input_image_url:
+                # Image editing
+                result = await self._grok.edit_image(
+                    prompt=prompt,
+                    image_url=input_image_url,
+                    model=model,
+                    image_format=ResponseImageFormat.URL,
+                )
+                results = [result]
+            else:
+                # Text-to-image
+                results = await self._grok.generate_image(
+                    prompt=prompt,
+                    model=model,
+                    n=n,
+                    aspect_ratio=aspect_ratio,
+                    image_format=ResponseImageFormat.URL,
+                )
+
+            # Store revised prompt if available
+            if results and results[0].revised_prompt and job is not None:
+                job.enhanced_prompt = results[0].revised_prompt
+                await session.flush()
+
+            # Download and store each result
+            for idx, image_result in enumerate(results):
+                await self._store_image_result(
+                    session=session,
+                    repo=repo,
+                    user_id=user_id,
+                    job_id=job_id,
+                    result=image_result,
+                    output_index=idx,
+                    input_image_id=input_image_id,
+                )
+
+            # Mark job complete
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.COMPLETED.value,
+                completed_at=datetime.now(timezone.utc),
+            )
+
+            logger.info(f"Grok image job {job_id} completed with {len(results)} outputs")
+            return job
+
+        except GrokAPIError as e:
+            logger.error(f"Grok API error for job {job_id}: {e}")
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.FAILED.value,
+                completed_at=datetime.now(timezone.utc),
+            )
+            if job is not None:
+                job.error_message = str(e)
+                await session.flush()
+            raise GrokJobError(f"Image generation failed: {e}") from e
+
+        except Exception as e:
+            logger.exception(f"Unexpected error for job {job_id}: {e}")
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.FAILED.value,
+                completed_at=datetime.now(timezone.utc),
+            )
+            if job is not None:
+                job.error_message = str(e)
+                await session.flush()
+            raise GrokJobError(f"Unexpected error: {e}") from e
+
+    async def _store_image_result(
+        self,
+        *,
+        session: AsyncSession,  # noqa: ARG002
+        repo: StorageRepository,
+        user_id: UUID,
+        job_id: UUID,
+        result: GrokImageResult,
+        output_index: int,
+        input_image_id: UUID | None,
+    ) -> None:
+        """Download and store an image result in R2."""
+        if not result.has_url:
+            logger.warning(f"Image result {output_index} has no URL, skipping")
+            return
+
+        # Download image from xAI CDN
+        assert result.url is not None  # Checked by has_url above
+        response = await self.http_client.get(result.url)
+        response.raise_for_status()
+        image_data = response.content
+
+        # Determine format from content-type
+        content_type = response.headers.get("content-type", "image/jpeg")
+        if "png" in content_type:
+            image_format = MediaFormat.PNG
+        elif "webp" in content_type:
+            image_format = MediaFormat.WEBP
+        else:
+            image_format = MediaFormat.JPEG
+
+        # Upload to R2
+        output_id = uuid4()
+        storage_key = self._storage.build_storage_key(
+            user_id=user_id,
+            file_id=output_id,
+            storage_type=StorageType.OUTPUT,
+            format=image_format,
+            job_id=job_id,
+        )
+
+        # Upload directly using the storage key
+        async with self._storage._get_client() as client:
+            await client.put_object(
+                Bucket=self._storage._settings.bucket_name,
+                Key=storage_key,
+                Body=image_data,
+                ContentType=image_format.content_type,
+            )
+
+        # Create output record
+        expires_at = datetime.now(timezone.utc) + timedelta(days=self._retention_days)
+        await repo.create_output(
+            id=output_id,
+            user_id=user_id,
+            job_id=job_id,
+            storage_key=storage_key,
+            content_type=image_format.content_type,
+            size_bytes=len(image_data),
+            format=image_format.value,
+            output_index=output_index,
+            expires_at=expires_at,
+            input_image_id=input_image_id,
+        )
+
+        logger.debug(f"Stored image output {output_id} for job {job_id}")
+
+    # -------------------------------------------------------------------------
+    # Video Generation (Async Start)
+    # -------------------------------------------------------------------------
+
+    async def start_video_job(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: UUID,
+        prompt: str,
+        model: ModelType = ModelType.GROK_IMAGINE_VIDEO,
+        generation_type: GenerationType = GenerationType.T2V,
+        duration: int = 5,
+        aspect_ratio: AspectRatio = AspectRatio.RATIO_16_9,
+        resolution: VideoResolution = VideoResolution.RES_720P,
+        name: str | None = None,
+        input_image_url: str | None = None,
+        input_video_url: str | None = None,
+    ) -> GenerationJob | None:
+        """Start an async video generation job.
+
+        Creates the job and initiates generation with Grok API.
+        The actual video result must be polled using poll_video_job().
+
+        Args:
+            session: Database session.
+            user_id: Owner of the job.
+            prompt: Generation prompt.
+            model: Grok model (must be grok-imagine-video).
+            generation_type: T2V or I2V.
+            duration: Video duration in seconds (1-15).
+            aspect_ratio: Video aspect ratio.
+            resolution: Video resolution.
+            name: Job name.
+            input_image_url: Source image URL for I2V.
+            input_image_id: Database ID of input image.
+            input_video_url: Source video URL for editing.
+
+        Returns:
+            Created GenerationJob with status QUEUED.
+        """
+        repo = StorageRepository(session)
+
+        # Generate job name
+        if name is None:
+            name = prompt[:50].strip()
+            if len(prompt) > 50:
+                name += "..."
+
+        # Create job record
+        job_id = uuid4()
+        job: GenerationJob | None = await repo.create_job(
+            id=job_id,
+            user_id=user_id,
+            name=name,
+            prompt=prompt,
+            generation_type=generation_type.value,
+            status=JobStatus.PENDING.value,
+        )
+
+        try:
+            # Start async video generation
+            started: GrokVideoJobStarted = await self._grok.start_video_generation(
+                prompt=prompt,
+                model=model,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                image_url=input_image_url,
+                video_url=input_video_url,
+            )
+
+            # Store xAI request ID for polling (reusing comfyui_prompt_id field)
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.QUEUED.value,
+                comfyui_prompt_id=started.request_id,
+                started_at=datetime.now(timezone.utc),
+            )
+
+            logger.info(f"Started Grok video job {job_id}, xAI request: {started.request_id}")
+            return job
+
+        except GrokAPIError as e:
+            logger.error(f"Failed to start video job {job_id}: {e}")
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.FAILED.value,
+                completed_at=datetime.now(timezone.utc),
+            )
+            if job is not None:
+                job.error_message = str(e)
+                await session.flush()
+            raise GrokJobError(f"Failed to start video generation: {e}") from e
+
+    async def poll_video_job(
+        self,
+        session: AsyncSession,
+        job_id: UUID,
+    ) -> GenerationJob | None:
+        """Poll a video job for completion.
+
+        Checks xAI API for result and stores video if ready.
+
+        Args:
+            session: Database session.
+            job_id: Job ID to poll.
+
+        Returns:
+            Updated GenerationJob.
+
+        Raises:
+            GrokJobNotFoundError: If job doesn't exist.
+            GrokJobError: If job is not a video job or polling fails.
+        """
+        repo = StorageRepository(session)
+        job = await repo.get_job(job_id)
+
+        if job is None:
+            raise GrokJobNotFoundError(f"Job {job_id} not found")
+
+        # Only poll queued/running jobs
+        if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+            return job
+
+        # Get xAI request ID
+        request_id = job.comfyui_prompt_id
+        if not request_id:
+            raise GrokJobError(f"Job {job_id} has no xAI request ID")
+
+        try:
+            # Check for result
+            result: GrokVideoResult | None = await self._grok.get_video_result(request_id)
+
+            if result is None:
+                # Still processing, update to running if needed
+                if job.status == JobStatus.QUEUED.value:
+                    job = await repo.update_job_status(job_id, JobStatus.RUNNING.value)
+                return job
+
+            # Video is ready, download and store
+            await self._store_video_result(
+                session=session,
+                repo=repo,
+                user_id=job.user_id,
+                job_id=job_id,
+                result=result,
+            )
+
+            # Mark complete
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.COMPLETED.value,
+                completed_at=datetime.now(timezone.utc),
+            )
+
+            logger.info(f"Grok video job {job_id} completed")
+            return job
+
+        except GrokAPIError as e:
+            logger.error(f"Failed to poll video job {job_id}: {e}")
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.FAILED.value,
+                completed_at=datetime.now(timezone.utc),
+            )
+            if job is not None:
+                job.error_message = str(e)
+                await session.flush()
+            raise GrokJobError(f"Video polling failed: {e}") from e
+
+    async def _store_video_result(
+        self,
+        *,
+        session: AsyncSession,  # noqa: ARG002
+        repo: StorageRepository,
+        user_id: UUID,
+        job_id: UUID,
+        result: GrokVideoResult,
+    ) -> None:
+        """Download and store a video result in R2."""
+        # Download video from xAI CDN
+        response = await self.http_client.get(result.url)
+        response.raise_for_status()
+        video_data = response.content
+
+        # Upload to R2
+        output_id = uuid4()
+        storage_key = self._storage.build_storage_key(
+            user_id=user_id,
+            file_id=output_id,
+            storage_type=StorageType.OUTPUT,
+            format=MediaFormat.MP4,
+            job_id=job_id,
+        )
+
+        # Upload directly using the storage key
+        async with self._storage._get_client() as client:
+            await client.put_object(
+                Bucket=self._storage._settings.bucket_name,
+                Key=storage_key,
+                Body=video_data,
+                ContentType=MediaFormat.MP4.content_type,
+            )
+
+        # Create output record
+        expires_at = datetime.now(timezone.utc) + timedelta(days=self._retention_days)
+        await repo.create_output(
+            id=output_id,
+            user_id=user_id,
+            job_id=job_id,
+            storage_key=storage_key,
+            content_type=MediaFormat.MP4.content_type,
+            size_bytes=len(video_data),
+            format=MediaFormat.MP4.value,
+            output_index=0,
+            expires_at=expires_at,
+            input_image_id=None,
+        )
+
+        logger.debug(f"Stored video output {output_id} for job {job_id}")
+
+    # -------------------------------------------------------------------------
+    # Job Status
+    # -------------------------------------------------------------------------
+
+    async def get_job(
+        self,
+        session: AsyncSession,
+        job_id: UUID,
+    ) -> GenerationJob | None:
+        """Get a job by ID.
+
+        Args:
+            session: Database session.
+            job_id: Job ID.
+
+        Returns:
+            GenerationJob if found, None otherwise.
+        """
+        repo = StorageRepository(session)
+        return await repo.get_job(job_id)
+
+    async def get_job_outputs(
+        self,
+        session: AsyncSession,
+        job_id: UUID,
+    ) -> list[str]:
+        """Get presigned URLs for job outputs.
+
+        Args:
+            session: Database session.
+            job_id: Job ID.
+
+        Returns:
+            List of presigned URLs for accessing outputs.
+        """
+        repo = StorageRepository(session)
+        outputs = await repo.list_job_outputs(job_id)
+
+        urls = []
+        for output in outputs:
+            result = await self._storage.get_presigned_url(
+                output.storage_key,
+                expires_in=3600,
+            )
+            urls.append(result.presigned_url)
+
+        return urls
