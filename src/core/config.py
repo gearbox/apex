@@ -2,8 +2,20 @@
 
 from functools import lru_cache
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Unsafe placeholder that ships as the default – reject it at startup
+_INSECURE_JWT_DEFAULTS: frozenset[str] = frozenset(
+    {
+        "CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
+        "change_me",
+        "secret",
+        "your-secret-key",
+        "your-secure-random-key-here-use-secrets-module",
+    }
+)
+_MIN_JWT_SECRET_BYTES = 32
 
 
 class Settings(BaseSettings):
@@ -110,7 +122,11 @@ class Settings(BaseSettings):
     # JWT Authentication Settings
     jwt_secret_key: str = Field(
         default="CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
-        description="Secret key for JWT signing (use strong random key in production)",
+        description=(
+            "Secret key for JWT signing. "
+            "Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\". "
+            "Must be at least 32 bytes. No safe default — must be set explicitly."
+        ),
     )
     jwt_algorithm: str = Field(
         default="HS256",
@@ -132,6 +148,42 @@ class Settings(BaseSettings):
         default="apex-api",
         description="JWT issuer claim",
     )
+
+    # -------------------------------------------------------------------------
+    # Validators
+    # -------------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def validate_jwt_secret_key(self) -> "Settings":
+        """Reject insecure JWT secret keys at startup.
+
+        Prevents the service from running with the shipped placeholder value
+        or any key that is too short to provide adequate security.
+
+        Raises:
+            ValueError: If the key is a known placeholder or shorter than
+                        _MIN_JWT_SECRET_BYTES bytes.
+        """
+        key = self.jwt_secret_key
+
+        if key in _INSECURE_JWT_DEFAULTS:
+            raise ValueError(
+                "JWT_SECRET_KEY is set to an insecure placeholder. "
+                "Generate a strong key with:\n"
+                "  python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
+                "and set it in your .env file or environment."
+            )
+
+        if len(key.encode()) < _MIN_JWT_SECRET_BYTES:
+            raise ValueError(
+                f"JWT_SECRET_KEY must be at least {_MIN_JWT_SECRET_BYTES} bytes "
+                f"(got {len(key.encode())} bytes). "
+                "Generate a strong key with:\n"
+                "  python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+
+        return self
+
 
     # -------------------------------------------------------------------------
     # Computed fields

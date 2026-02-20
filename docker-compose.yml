@@ -56,6 +56,14 @@ services:
       # ComfyUI Connection (external - via SSH tunnel or direct)
       COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
       COMFYUI_PORT: ${COMFYUI_PORT:-18188}
+
+      # JWT Authentication
+      # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required - see CONFIGURATION.md}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      JWT_ISSUER: ${JWT_ISSUER:-apex-api}
       
       # xAI Grok API
       XAI_API_KEY: ${XAI_API_KEY:-}
@@ -78,6 +86,9 @@ services:
       # Generation Defaults
       DEFAULT_STEPS: ${DEFAULT_STEPS:-12}
       MAX_STEPS: ${MAX_STEPS:-20}
+      DEFAULT_CFG: ${DEFAULT_CFG:-1.1}
+      DEFAULT_SAMPLER: ${DEFAULT_SAMPLER:-euler}
+      DEFAULT_SCHEDULER: ${DEFAULT_SCHEDULER:-beta}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:

@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.auth import AuthService
 from src.api.services.comfyui_client import ComfyUIClient
+from src.api.services.grok import GrokClient
+from src.api.services.grok.job_service import GrokJobService
 from src.api.services.job_manager import JobManager
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.api.services.user import UserService
@@ -44,6 +46,7 @@ class ServiceContainer:
     db_manager: DatabaseManager | None = None
     jwt_service: JWTService | None = None
     password_service: PasswordService | None = None
+    grok_job_service: GrokJobService | None = None
 
 
 _services = ServiceContainer()
@@ -219,6 +222,16 @@ async def get_user_service(session: AsyncSession) -> UserService:
 
 
 # -----------------------------------------------------------------------------
+# Grok dependency providers
+# -----------------------------------------------------------------------------
+
+
+async def get_grok_job_service() -> GrokJobService | None:
+    """Provide Grok job service (None if not configured)."""
+    return _services.grok_job_service
+
+
+# -----------------------------------------------------------------------------
 # Settings
 # -----------------------------------------------------------------------------
 
@@ -283,6 +296,21 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     else:
         logger.warning("R2 storage not configured - storage endpoints will be unavailable")
 
+    # Initialize Grok provider (if configured)
+    if settings.grok_configured and _services.r2_storage is not None:
+        grok_client = GrokClient(settings)
+        await grok_client.connect()
+
+        _services.grok_job_service = GrokJobService(
+            grok_client=grok_client,
+            storage=_services.r2_storage,
+            retention_days=settings.retention_days,
+        )
+        await _services.grok_job_service.connect()
+        logger.info("Grok provider initialized")
+    else:
+        logger.warning("Grok provider not configured - XAI_API_KEY not set or R2 not available")
+
     # Initialize authentication services
     jwt_config = JWTConfig(
         secret_key=settings.jwt_secret_key,
@@ -317,6 +345,10 @@ async def shutdown_services() -> None:
         await _services.db_manager.close()
         logger.info("Database connections closed")
 
+    if _services.grok_job_service is not None:
+        await _services.grok_job_service.close()
+        logger.info("Grok job service closed")
+
     # Reset container to clean state
     _services = ServiceContainer()
 
@@ -335,4 +367,6 @@ dependencies = {
     "r2_storage": Provide(get_r2_storage),
     "session": Provide(get_db_session),
     "user_content": Provide(get_user_content),
+    # Grok services
+    "grok_job_service": Provide(get_grok_job_service),
 }

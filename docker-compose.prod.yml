@@ -20,7 +20,12 @@ services:
     image: ${API_IMAGE:-apex-api:latest}
     build: []
     environment:
+
       DEBUG: "false"
+      # JWT — must be set explicitly in production; no fallback allowed
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required in production}
+      JWT_ISSUER: ${JWT_ISSUER:-apex-api}
+
       # Require R2 credentials in production
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:?R2_ACCOUNT_ID is required}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID is required}
