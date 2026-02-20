@@ -95,8 +95,7 @@ class GrokImageController(Controller):
         try:
             # TODO: Get user_id from auth context
             # For now, use a placeholder
-            # user_id = UUID("00000000-0000-0000-0000-000000000001")
-            user_id = UUID("393132ed-0cb2-4642-877c-f8dc562bffb6")
+            user_id = UUID("00000000-0000-0000-0000-000000000001")
 
             job = await grok_job_service.create_image_job(
                 session=session,
