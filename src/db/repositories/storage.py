@@ -22,6 +22,13 @@ class StorageRepository:
     Provides data access methods for UserImage, GenerationJob, and
     GenerationOutput models. All methods are async and use the
     provided session for transaction management.
+
+    Single-resource lookup methods accept an optional ``user_id``
+    keyword argument. When provided, the query includes a compound
+    WHERE clause so that ownership is enforced at the database level.
+    When omitted (``None``), these methods fall back to a plain
+    primary-key lookup — suitable for internal / system operations
+    such as cleanup jobs and background polling.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -31,6 +38,41 @@ class StorageRepository:
             session: Async SQLAlchemy session.
         """
         self._session = session
+
+    # -------------------------------------------------------------------------
+    # Private helpers
+    # -------------------------------------------------------------------------
+
+    async def _get_by_id_with_optional_owner(
+        self,
+        model: type[UserImage] | type[GenerationOutput] | type[GenerationJob],
+        pk: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> UserImage | GenerationOutput | GenerationJob | None:
+        """Fetch a single record by PK, optionally scoped to a user.
+
+        When ``user_id`` is ``None`` this delegates to ``session.get()``
+        which benefits from SQLAlchemy's identity map cache.  When
+        ``user_id`` is provided a compound ``WHERE`` is issued instead
+        so that ownership is checked by the database in a single round
+        trip.
+
+        Args:
+            model: SQLAlchemy model class.
+            pk: Primary key value.
+            user_id: Optional owner filter.
+
+        Returns:
+            Model instance or ``None``.
+        """
+        if user_id is None:
+            return await self._session.get(model, pk)
+
+        result = await self._session.execute(
+            select(model).where(model.id == pk, model.user_id == user_id)
+        )
+        return result.scalar_one_or_none()
 
     # -------------------------------------------------------------------------
     # UserImage operations
@@ -77,16 +119,26 @@ class StorageRepository:
         await self._session.flush()
         return upload
 
-    async def get_user_image(self, image_id: UUID) -> UserImage | None:
+    async def get_user_image(
+        self,
+        image_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> UserImage | None:
         """Get a user image by ID.
 
         Args:
             image_id: Image ID to look up.
+            user_id: When provided, only returns the image if owned
+                by this user. ``None`` skips the ownership check
+                (for internal / system use).
 
         Returns:
             UserImage if found, None otherwise.
         """
-        return await self._session.get(UserImage, image_id)
+        return await self._get_by_id_with_optional_owner(  # type: ignore[return-value]
+            UserImage, image_id, user_id=user_id
+        )
 
     async def get_user_image_by_key(self, storage_key: str) -> UserImage | None:
         """Get a user image by storage key.
@@ -128,16 +180,22 @@ class StorageRepository:
         )
         return result.scalars().all()
 
-    async def delete_user_image(self, image_id: UUID) -> bool:
+    async def delete_user_image(
+        self,
+        image_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> bool:
         """Delete a user image record.
 
         Args:
             image_id: Image ID to delete.
+            user_id: When provided, only deletes if owned by this user.
 
         Returns:
             True if deleted, False if not found.
         """
-        image = await self._session.get(UserImage, image_id)
+        image = await self.get_user_image(image_id, user_id=user_id)
         if image is None:
             return False
 
@@ -171,16 +229,26 @@ class StorageRepository:
         )
         return result.scalars().all()
 
-    async def get_upload(self, upload_id: UUID) -> UserImage | None:
+    async def get_upload(
+        self,
+        upload_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> UserImage | None:
         """Get an upload by ID.
 
         Args:
             upload_id: Upload ID to look up.
+            user_id: When provided, only returns if owned by this user.
 
         Returns:
             UserImage if found, None otherwise.
         """
-        return await self._session.get(UserImage, upload_id)
+        return await self._get_by_id_with_optional_owner(  # type: ignore[return-value]
+            UserImage,
+            upload_id,
+            user_id=user_id,
+        )
 
     async def list_user_uploads(
         self,
@@ -208,16 +276,22 @@ class StorageRepository:
         )
         return result.scalars().all()
 
-    async def delete_upload(self, upload_id: UUID) -> bool:
+    async def delete_upload(
+        self,
+        upload_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> bool:
         """Delete an upload record.
 
         Args:
             upload_id: Upload ID to delete.
+            user_id: When provided, only deletes if owned by this user.
 
         Returns:
             True if deleted, False if not found.
         """
-        upload = await self.get_upload(upload_id)
+        upload = await self.get_upload(upload_id, user_id=user_id)
         if upload is None:
             return False
         await self._session.delete(upload)
@@ -297,16 +371,28 @@ class StorageRepository:
         await self._session.flush()
         return job
 
-    async def get_job(self, job_id: UUID) -> GenerationJob | None:
+    async def get_job(
+        self,
+        job_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> GenerationJob | None:
         """Get a job by ID.
 
         Args:
             job_id: Job ID to look up.
+            user_id: When provided, only returns if owned by this user.
+                by this user. ``None`` skips the ownership check
+                (for internal use, e.g. background polling).
 
         Returns:
             GenerationJob if found, None otherwise.
         """
-        return await self._session.get(GenerationJob, job_id)
+        return await self._get_by_id_with_optional_owner(  # type: ignore[return-value]
+            GenerationJob,
+            job_id,
+            user_id=user_id,
+        )
 
     async def update_job_status(
         self,
@@ -458,16 +544,26 @@ class StorageRepository:
         await self._session.flush()
         return output
 
-    async def get_output(self, output_id: UUID) -> GenerationOutput | None:
+    async def get_output(
+        self,
+        output_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> GenerationOutput | None:
         """Get an output by ID.
 
         Args:
             output_id: Output ID to look up.
+            user_id: When provided, only returns if owned by this user.
 
         Returns:
             GenerationOutput if found, None otherwise.
         """
-        return await self._session.get(GenerationOutput, output_id)
+        return await self._get_by_id_with_optional_owner(  # type: ignore[return-value]
+            GenerationOutput,
+            output_id,
+            user_id=user_id,
+        )
 
     async def list_job_outputs(self, job_id: UUID) -> Sequence[GenerationOutput]:
         """List outputs for a job.
@@ -562,16 +658,22 @@ class StorageRepository:
 
         return int(count)
 
-    async def delete_output(self, output_id: UUID) -> bool:
+    async def delete_output(
+        self,
+        output_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> bool:
         """Delete an output record.
 
         Args:
             output_id: Output ID to delete.
+            user_id: When provided, only deletes if owned by this user.
 
         Returns:
             True if deleted, False if not found.
         """
-        output = await self.get_output(output_id)
+        output = await self.get_output(output_id, user_id=user_id)
         if output is None:
             return False
         await self._session.delete(output)

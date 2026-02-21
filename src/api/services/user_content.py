@@ -72,46 +72,6 @@ class UserContentService:
         self._retention_days = retention_days
 
     # -------------------------------------------------------------------------
-    # Ownership helpers
-    # -------------------------------------------------------------------------
-
-    def _verify_upload_ownership(
-        self,
-        image: UserImage,
-        user_id: UUID,
-    ) -> None:
-        """Verify that an upload belongs to the given user.
-
-        Args:
-            image: UserImage record.
-            user_id: Expected owner.
-
-        Raises:
-            UserContentNotFoundError: If ownership check fails.
-                Returns 'not found' rather than 'forbidden' to avoid
-                leaking existence of other users' resources.
-        """
-        if image.user_id != user_id:
-            raise UserContentNotFoundError(f"Image not found: {image.id}")
-
-    def _verify_output_ownership(
-        self,
-        output: GenerationOutput,
-        user_id: UUID,
-    ) -> None:
-        """Verify that an output belongs to the given user.
-
-        Args:
-            output: GenerationOutput record.
-            user_id: Expected owner.
-
-        Raises:
-            UserContentNotFoundError: If ownership check fails.
-        """
-        if output.user_id != user_id:
-            raise UserContentNotFoundError(f"Output not found: {output.id}")
-
-    # -------------------------------------------------------------------------
     # Upload operations
     # -------------------------------------------------------------------------
 
@@ -193,8 +153,7 @@ class UserContentService:
         Returns:
             UserImage if found, None otherwise.
         """
-        image = await self._repo.get_user_image(image_id)
-        return None if image is None or image.user_id != user_id else image
+        return await self._repo.get_user_image(image_id, user_id=user_id)
 
     async def get_upload_by_key(self, storage_key: str) -> UserImage | None:
         """Get upload metadata by storage key.
@@ -227,11 +186,9 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If image doesn't exist.
         """
-        image = await self._repo.get_user_image(image_id)
+        image = await self._repo.get_user_image(image_id, user_id=user_id)
         if image is None:
             raise UserContentNotFoundError(f"Image not found: {image_id}")
-
-        self._verify_upload_ownership(image, user_id)
 
         result = await self._storage.get_presigned_url(
             image.storage_key,
@@ -259,11 +216,9 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If image doesn't exist.
         """
-        image = await self._repo.get_user_image(image_id)
+        image = await self._repo.get_user_image(image_id, user_id=user_id)
         if image is None:
             raise UserContentNotFoundError(f"Image not found: {image_id}")
-
-        self._verify_upload_ownership(image, user_id)
 
         try:
             return await self._storage.download(image.storage_key)
@@ -308,15 +263,15 @@ class UserContentService:
         Returns:
             True if deleted, False if not found.
         """
-        image = await self._repo.get_user_image(image_id)
-        if image is None or image.user_id != user_id:
+        image = await self._repo.get_user_image(image_id, user_id=user_id)
+        if image is None:
             return False
 
         # Delete from R2 first
         await self._storage.delete(image.storage_key)
 
         # Then delete DB record
-        await self._repo.delete_user_image(image_id)
+        await self._repo.delete_user_image(image_id, user_id=user_id)
 
         logger.info(f"Deleted upload {image_id}")
         return True
@@ -404,8 +359,7 @@ class UserContentService:
         Returns:
             GenerationOutput if found, None otherwise.
         """
-        output = await self._repo.get_output(output_id)
-        return None if output is None or output.user_id != user_id else output
+        return await self._repo.get_output(output_id, user_id=user_id)
 
     async def get_output_access(
         self,
@@ -427,11 +381,9 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If output doesn't exist.
         """
-        output = await self._repo.get_output(output_id)
+        output = await self._repo.get_output(output_id, user_id=user_id)
         if output is None:
             raise UserContentNotFoundError(f"Output not found: {output_id}")
-
-        self._verify_output_ownership(output, user_id)
 
         result = await self._storage.get_presigned_url(
             output.storage_key,
@@ -458,11 +410,9 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If output doesn't exist or is not owned by the user.
         """
-        output = await self._repo.get_output(output_id)
+        output = await self._repo.get_output(output_id, user_id=user_id)
         if output is None:
             raise UserContentNotFoundError(f"Output not found: {output_id}")
-
-        self._verify_output_ownership(output, user_id)
 
         try:
             return await self._storage.download(output.storage_key)
@@ -486,8 +436,8 @@ class UserContentService:
             List of GenerationOutput metadata ordered by index.
         """
         # Verify job ownership
-        job = await self._repo.get_job(job_id)
-        if job is None or job.user_id != user_id:
+        job = await self._repo.get_job(job_id, user_id=user_id)
+        if job is None:
             raise UserContentNotFoundError(f"Job not found: {job_id}")
 
         outputs = await self._repo.list_job_outputs(job_id)
