@@ -4,7 +4,7 @@
 # ============================================================================
 # Build stage - install dependencies
 # ============================================================================
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /app
 
@@ -28,7 +28,7 @@ RUN uv pip install --no-cache .
 # ============================================================================
 # Runtime stage - minimal image
 # ============================================================================
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 WORKDIR /app
 

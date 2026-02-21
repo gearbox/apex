@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -161,7 +161,7 @@ class StorageRepository:
             List of expired UserImage instances.
         """
         if before is None:
-            before = datetime.now(timezone.utc)
+            before = datetime.now(UTC)
 
         result = await self._session.execute(
             select(UserImage)
@@ -240,7 +240,7 @@ class StorageRepository:
             List of expired UserImage instances.
         """
         if before is None:
-            before = datetime.now(timezone.utc)
+            before = datetime.now(UTC)
 
         result = await self._session.execute(
             select(UserImage)
@@ -526,7 +526,7 @@ class StorageRepository:
             List of expired GenerationOutput instances.
         """
         if before is None:
-            before = datetime.now(timezone.utc)
+            before = datetime.now(UTC)
 
         result = await self._session.execute(
             select(GenerationOutput)

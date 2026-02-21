@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: Litestar) -> AsyncGenerator[None, None]:  # noqa: ARG001
+async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
     """Application lifespan manager.
 
     Initializes services on startup and cleans up on shutdown.

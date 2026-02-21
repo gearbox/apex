@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -188,7 +188,7 @@ class UserService:
         # Revoke all tokens
         await self._repo.revoke_all_user_tokens(user_id)
 
-        deactivated_at = datetime.now(timezone.utc)
+        deactivated_at = datetime.now(UTC)
         logger.info(f"Account deactivated for user {user_id}")
 
         return deactivated_at

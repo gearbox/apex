@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -154,7 +154,7 @@ class GenerationController(Controller):
                     job_id="",
                     status=JobStatus.FAILED,
                     name=data.name or "Failed",
-                    created_at=datetime.now(timezone.utc),
+                    created_at=datetime.now(UTC),
                     message="Image-to-image (i2i) generation requires at least one input image",
                 ),
                 status_code=HTTP_400_BAD_REQUEST,

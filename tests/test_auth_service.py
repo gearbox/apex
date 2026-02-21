@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -104,7 +104,7 @@ class TestJWTService:
 
         assert token is not None
         assert len(token) > 50  # JWT tokens are long
-        assert expires_at > datetime.now(timezone.utc)
+        assert expires_at > datetime.now(UTC)
 
     def test_decode_valid_token(self, jwt_service: JWTService) -> None:
         """Test decoding a valid token."""
@@ -312,7 +312,7 @@ class TestAuthServiceRefresh:
         mock_token.user_id = user_id
         mock_token.family_id = family_id
         mock_token.is_revoked = False
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(days=1)
         mock_repository.get_refresh_token_by_hash.return_value = mock_token
 
         # Mock: user is active
@@ -366,7 +366,7 @@ class TestAuthServiceRefresh:
         """Test that expired token is rejected."""
         mock_token = MagicMock(spec=RefreshToken)
         mock_token.is_revoked = False
-        mock_token.expires_at = datetime.now(timezone.utc) - timedelta(days=1)  # Expired
+        mock_token.expires_at = datetime.now(UTC) - timedelta(days=1)  # Expired
         mock_repository.get_refresh_token_by_hash.return_value = mock_token
 
         with pytest.raises(InvalidRefreshTokenError):

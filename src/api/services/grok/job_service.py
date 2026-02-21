@@ -10,7 +10,7 @@ Handles the full lifecycle of Grok generation jobs:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -183,7 +183,7 @@ class GrokJobService:
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.RUNNING.value,
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
             )
 
             # Call Grok API
@@ -227,7 +227,7 @@ class GrokJobService:
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.COMPLETED.value,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(UTC),
             )
 
             logger.info(f"Grok image job {job_id} completed with {len(results)} outputs")
@@ -238,7 +238,7 @@ class GrokJobService:
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(UTC),
             )
             if job is not None:
                 job.error_message = str(e)
@@ -250,7 +250,7 @@ class GrokJobService:
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(UTC),
             )
             if job is not None:
                 job.error_message = str(e)
@@ -308,7 +308,7 @@ class GrokJobService:
             )
 
         # Create output record
-        expires_at = datetime.now(timezone.utc) + timedelta(days=self._retention_days)
+        expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
         await repo.create_output(
             id=output_id,
             user_id=user_id,
@@ -401,7 +401,7 @@ class GrokJobService:
                 job_id,
                 JobStatus.QUEUED.value,
                 comfyui_prompt_id=started.request_id,
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
             )
 
             logger.info(f"Started Grok video job {job_id}, xAI request: {started.request_id}")
@@ -412,7 +412,7 @@ class GrokJobService:
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(UTC),
             )
             if job is not None:
                 job.error_message = str(e)
@@ -477,7 +477,7 @@ class GrokJobService:
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.COMPLETED.value,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(UTC),
             )
 
             logger.info(f"Grok video job {job_id} completed")
@@ -488,7 +488,7 @@ class GrokJobService:
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(UTC),
             )
             if job is not None:
                 job.error_message = str(e)
@@ -530,7 +530,7 @@ class GrokJobService:
             )
 
         # Create output record
-        expires_at = datetime.now(timezone.utc) + timedelta(days=self._retention_days)
+        expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
         await repo.create_output(
             id=output_id,
             user_id=user_id,

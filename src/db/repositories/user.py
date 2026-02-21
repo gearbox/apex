@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
@@ -170,7 +170,7 @@ class UserRepository:
         if is_active is not None:
             user.is_active = is_active
 
-        user.updated_at = datetime.now(timezone.utc)
+        user.updated_at = datetime.now(UTC)
         await self._session.flush()
         return user
 
@@ -250,7 +250,7 @@ class UserRepository:
         Returns:
             RefreshToken if valid, None otherwise.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result = await self._session.execute(
             select(RefreshToken).where(
                 RefreshToken.token_hash == token_hash,
@@ -274,7 +274,7 @@ class UserRepository:
             await self._session.execute(
                 update(RefreshToken)
                 .where(RefreshToken.id == token_id)
-                .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+                .values(is_revoked=True, revoked_at=datetime.now(UTC))
             ),
         )
         return (result.rowcount or 0) > 0
@@ -298,7 +298,7 @@ class UserRepository:
                     RefreshToken.family_id == family_id,
                     RefreshToken.is_revoked == False,  # noqa: E712
                 )
-                .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+                .values(is_revoked=True, revoked_at=datetime.now(UTC))
             ),
         )
         return result.rowcount or 0
@@ -322,7 +322,7 @@ class UserRepository:
                     RefreshToken.user_id == user_id,
                     RefreshToken.is_revoked == False,  # noqa: E712
                 )
-                .values(is_revoked=True, revoked_at=datetime.now(timezone.utc))
+                .values(is_revoked=True, revoked_at=datetime.now(UTC))
             ),
         )
         return result.rowcount or 0
@@ -335,7 +335,7 @@ class UserRepository:
         Returns:
             Number of tokens deleted.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result = cast(
             CursorResult[tuple[()]],
             await self._session.execute(delete(RefreshToken).where(RefreshToken.expires_at < now)),

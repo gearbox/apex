@@ -118,7 +118,7 @@ async def get_r2_storage() -> R2StorageService:
     return _services.r2_storage
 
 
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_db_session() -> AsyncGenerator[AsyncSession]:
     """Provide database session for request scope.
 
     Yields:

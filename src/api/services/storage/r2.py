@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -210,7 +210,7 @@ class R2StorageService:
         )
 
         # Calculate expiration
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + timedelta(days=self._settings.retention_days)
 
         # Build metadata
@@ -475,7 +475,7 @@ class R2StorageService:
             file_id = UUID(file_part)
             image_format = MediaFormat.from_extension(ext)
 
-            created_at = last_modified or datetime.now(timezone.utc)
+            created_at = last_modified or datetime.now(UTC)
 
             return StoredFile(
                 id=file_id,

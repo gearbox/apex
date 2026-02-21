@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 import msgspec
@@ -282,8 +283,6 @@ class TestGrokJobResponse:
 
     def test_valid_response(self) -> None:
         """Test valid response creation."""
-        from datetime import datetime, timezone
-
         job_id = UUID("12345678-1234-1234-1234-123456789012")
         response = GrokJobResponse(
             job_id=job_id,
@@ -291,7 +290,7 @@ class TestGrokJobResponse:
             name="Test Job",
             model=ModelType.GROK_IMAGINE_IMAGE,
             generation_type=GenerationType.T2I,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             message="Generation completed",
         )
         assert response.job_id == job_id

@@ -66,7 +66,7 @@ class DatabaseManager:
         return self._engine
 
     @asynccontextmanager
-    async def session(self) -> AsyncGenerator[AsyncSession, None]:
+    async def session(self) -> AsyncGenerator[AsyncSession]:
         """Get a database session with automatic cleanup.
 
         Yields:
@@ -86,7 +86,7 @@ class DatabaseManager:
         finally:
             await session.close()
 
-    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
+    async def get_session(self) -> AsyncGenerator[AsyncSession]:
         """Dependency provider for Litestar DI.
 
         Yields:

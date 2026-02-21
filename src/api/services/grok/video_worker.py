@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -131,12 +131,12 @@ class GrokVideoWorker:
 
         # Check for timeout
         if job.started_at:
-            elapsed = (datetime.now(timezone.utc) - job.started_at).total_seconds()
+            elapsed = (datetime.now(UTC) - job.started_at).total_seconds()
             if elapsed > self._max_poll_time:
                 logger.warning(f"Video job {job_id} timed out after {elapsed:.0f}s")
                 job.status = JobStatus.FAILED
                 job.error_message = f"Video generation timed out after {elapsed:.0f} seconds"
-                job.completed_at = datetime.now(timezone.utc)
+                job.completed_at = datetime.now(UTC)
                 await session.commit()
                 return
 

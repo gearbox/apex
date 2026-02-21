@@ -3,7 +3,7 @@
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from src.api.schemas.generation import GenerationRequest, JobStatus
@@ -67,7 +67,7 @@ class JobManager:
             name=request.name or "Untitled",
             request=request,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         self._jobs[job_id] = job
         logger.info(f"Created job {job_id}: {job.name}")
@@ -117,7 +117,7 @@ class JobManager:
         if job := self._jobs.get(job_id):
             job.prompt_id = prompt_id
             job.status = JobStatus.QUEUED
-            job.started_at = datetime.now(timezone.utc)
+            job.started_at = datetime.now(UTC)
             self._prompt_to_job[prompt_id] = job_id
             logger.debug(f"Job {job_id} queued with prompt_id {prompt_id}")
 
@@ -132,7 +132,7 @@ class JobManager:
             job.status = JobStatus.RUNNING
             job.progress = progress
             if job.started_at is None:
-                job.started_at = datetime.now(timezone.utc)
+                job.started_at = datetime.now(UTC)
 
     def set_completed(self, job_id: str, images: list[str]) -> None:
         """Mark job as completed with result images.
@@ -144,7 +144,7 @@ class JobManager:
         if job := self._jobs.get(job_id):
             job.status = JobStatus.COMPLETED
             job.progress = 100.0
-            job.completed_at = datetime.now(timezone.utc)
+            job.completed_at = datetime.now(UTC)
             job.images = images
             logger.info(f"Job {job_id} completed with {len(images)} images")
 
@@ -157,7 +157,7 @@ class JobManager:
         """
         if job := self._jobs.get(job_id):
             job.status = JobStatus.FAILED
-            job.completed_at = datetime.now(timezone.utc)
+            job.completed_at = datetime.now(UTC)
             job.error = error
             logger.error(f"Job {job_id} failed: {error}")
 
@@ -260,7 +260,7 @@ class JobManager:
         """
         from datetime import timedelta
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
         old_jobs = [job_id for job_id, job in self._jobs.items() if job.created_at < cutoff]
 
         for job_id in old_jobs:

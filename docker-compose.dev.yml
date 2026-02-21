@@ -24,6 +24,7 @@ services:
       - ./src:/app/src:ro
       - ./config:/app/config:ro
       - ./alembic:/app/alembic:ro
+      - ./tests:/app/tests:ro
     # Override command to use uvicorn with reload
     command: >
       uvicorn src.api.app:app 

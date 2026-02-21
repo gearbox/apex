@@ -12,7 +12,7 @@ a route guard is misconfigured, the service layer will reject cross-user access.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -151,7 +151,7 @@ class UserContentService:
 
             # Determine format for DB
             image_format = MediaFormat.from_content_type(content_type)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             expires_at = now + timedelta(days=self._retention_days)
 
             # Create database record
@@ -362,7 +362,7 @@ class UserContentService:
 
         # Determine format
         image_format = MediaFormat.from_content_type(content_type)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + timedelta(days=self._retention_days)
 
         # Create database record

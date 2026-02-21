@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -237,7 +237,7 @@ class AuthService:
             )
 
         # Check expiration
-        if stored_token.expires_at < datetime.now(timezone.utc):
+        if stored_token.expires_at < datetime.now(UTC):
             raise InvalidRefreshTokenError("Refresh token has expired")
 
         # Verify user is still active
@@ -319,7 +319,7 @@ class AuthService:
         # Create refresh token
         refresh_token = generate_token(32)
         refresh_token_hash = hash_token(refresh_token)
-        refresh_expires_at = datetime.now(timezone.utc) + self._jwt.refresh_token_lifetime
+        refresh_expires_at = datetime.now(UTC) + self._jwt.refresh_token_lifetime
 
         await self._repo.create_refresh_token(
             id=uuid4(),
