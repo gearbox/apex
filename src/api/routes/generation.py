@@ -1,13 +1,14 @@
 """Generation API routes."""
 
 import logging
-import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Annotated
+from uuid import UUID, uuid4
 
 from litestar import Controller, Response, get, post
 from litestar.datastructures import UploadFile
+from litestar.di import Provide
 from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.status_codes import (
@@ -17,6 +18,7 @@ from litestar.status_codes import (
     HTTP_404_NOT_FOUND,
 )
 
+from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.generation import (
     GenerationRequest,
     HealthResponse,
@@ -24,6 +26,7 @@ from src.api.schemas.generation import (
     JobResponse,
     JobStatusResponse,
 )
+from src.api.security import auth_guard
 from src.api.services.comfyui_client import ComfyUIClient, ComfyUIClientError
 from src.api.services.job_manager import JobManager
 from src.api.services.workflow_service import WorkflowError, WorkflowService
@@ -55,15 +58,22 @@ class HealthController(Controller):
         )
 
 
+# TODO: JobManager has no concept of user_id and should be refactored to support user context for multi-user environments.
+# WorkflowService may also need adjustments to support user-specific workflows or parameters in the future.
+# For now, we will pass current_user_id to the controllers and services that need it,
+# but it is not yet integrated into the JobManager or WorkflowService logic.
 class GenerationController(Controller):
     """Image generation endpoints."""
 
     path = "/api/v1/generate"
     tags: Sequence[str] | None = ["Generation"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     @post("/")
     async def create_generation(
         self,
+        current_user_id: UUID,  # will be used when persisting to DB
         data: GenerationRequest,
         comfyui_client: ComfyUIClient,
         job_manager: JobManager,
@@ -118,6 +128,7 @@ class GenerationController(Controller):
     @post("/with-images")
     async def create_generation_with_images(
         self,
+        current_user_id: UUID,  # will be used when persisting to DB
         comfyui_client: ComfyUIClient,
         job_manager: JobManager,
         workflow_service: WorkflowService,
@@ -221,10 +232,13 @@ class JobController(Controller):
 
     path = "/api/v1/jobs"
     tags: Sequence[str] | None = ["Jobs"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     @get("/{job_id:str}")
     async def get_job_status(
         self,
+        current_user_id: UUID,  # will filter by user when jobs are persisted
         job_id: str,
         job_manager: JobManager,
     ) -> Response[JobStatusResponse]:
@@ -266,6 +280,7 @@ class JobController(Controller):
     @get("/")
     async def list_jobs(
         self,
+        current_user_id: UUID,  # will filter by user when jobs are persisted
         job_manager: JobManager,
         status: JobStatus | None = None,
         limit: int = 50,
@@ -297,10 +312,13 @@ class ImageController(Controller):
 
     path = "/api/v1/images"
     tags: Sequence[str] | None = ["Images"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     @post("/upload")
     async def upload_image(
         self,
+        current_user_id: UUID,  # will be used for tracking uploads
         comfyui_client: ComfyUIClient,
         data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART)],
     ) -> Response[ImageUploadResponse]:
@@ -314,7 +332,7 @@ class ImageController(Controller):
             # Generate unique filename preserving extension
             ext = data.filename.rsplit(".", 1)[-1] if data.filename else "png"
             logger.debug(f"Uploading image with extension: {ext}")
-            unique_filename = f"upload_{uuid.uuid4().hex[:12]}.{ext}"
+            unique_filename = f"upload_{uuid4().hex[:12]}.{ext}"
 
             result = await comfyui_client.upload_image(image_data, unique_filename)
 

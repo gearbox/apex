@@ -3,6 +3,10 @@
 This is the main service layer for handling user content (uploads and outputs).
 It coordinates between R2 storage for actual file storage and PostgreSQL
 for metadata tracking and efficient queries.
+
+All single-resource access methods require a user_id parameter and verify
+ownership before returning data. This ensures defense-in-depth: even if
+a route guard is misconfigured, the service layer will reject cross-user access.
 """
 
 from __future__ import annotations
@@ -12,8 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-import msgspec
-
+from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
 from src.api.services.storage import (
     MediaFormat,
     R2StorageService,
@@ -43,41 +46,6 @@ class UserContentValidationError(UserContentError):
     """Raised when content validation fails."""
 
 
-class UploadedImage(msgspec.Struct, kw_only=True):
-    """Result of uploading an image."""
-
-    id: UUID
-    storage_key: str
-    filename: str
-    content_type: str
-    size_bytes: int
-    created_at: datetime
-    expires_at: datetime
-
-
-class GeneratedImage(msgspec.Struct, kw_only=True):
-    """Result of storing a generated image."""
-
-    id: UUID
-    job_id: UUID
-    storage_key: str
-    content_type: str
-    size_bytes: int
-    output_index: int
-    created_at: datetime
-    expires_at: datetime
-
-
-class ImageAccess(msgspec.Struct, kw_only=True):
-    """Access information for an image."""
-
-    storage_key: str
-    presigned_url: str
-    content_type: str
-    size_bytes: int
-    expires_in_seconds: int
-
-
 class UserContentService:
     """Service for managing user-uploaded and generated content.
 
@@ -102,6 +70,46 @@ class UserContentService:
         self._storage = storage
         self._repo = StorageRepository(session)
         self._retention_days = retention_days
+
+    # -------------------------------------------------------------------------
+    # Ownership helpers
+    # -------------------------------------------------------------------------
+
+    def _verify_upload_ownership(
+        self,
+        image: UserImage,
+        user_id: UUID,
+    ) -> None:
+        """Verify that an upload belongs to the given user.
+
+        Args:
+            image: UserImage record.
+            user_id: Expected owner.
+
+        Raises:
+            UserContentNotFoundError: If ownership check fails.
+                Returns 'not found' rather than 'forbidden' to avoid
+                leaking existence of other users' resources.
+        """
+        if image.user_id != user_id:
+            raise UserContentNotFoundError(f"Image not found: {image.id}")
+
+    def _verify_output_ownership(
+        self,
+        output: GenerationOutput,
+        user_id: UUID,
+    ) -> None:
+        """Verify that an output belongs to the given user.
+
+        Args:
+            output: GenerationOutput record.
+            user_id: Expected owner.
+
+        Raises:
+            UserContentNotFoundError: If ownership check fails.
+        """
+        if output.user_id != user_id:
+            raise UserContentNotFoundError(f"Output not found: {output.id}")
 
     # -------------------------------------------------------------------------
     # Upload operations
@@ -175,16 +183,18 @@ class UserContentService:
         except StorageValidationError as e:
             raise UserContentValidationError(str(e)) from e
 
-    async def get_upload(self, image_id: UUID) -> UserImage | None:
+    async def get_upload(self, image_id: UUID, *, user_id: UUID) -> UserImage | None:
         """Get upload metadata by ID.
 
         Args:
             image_id: Image ID to look up.
+            user_id: Requesting user (must be owner).
 
         Returns:
             UserImage if found, None otherwise.
         """
-        return await self._repo.get_user_image(image_id)
+        image = await self._repo.get_user_image(image_id)
+        return None if image is None or image.user_id != user_id else image
 
     async def get_upload_by_key(self, storage_key: str) -> UserImage | None:
         """Get upload metadata by storage key.
@@ -201,12 +211,14 @@ class UserContentService:
         self,
         image_id: UUID,
         *,
+        user_id: UUID,
         expires_in: int = 3600,
     ) -> ImageAccess:
         """Get presigned URL for accessing an upload.
 
         Args:
             image_id: Image ID to access.
+            user_id: Requesting user (must be owner).
             expires_in: URL validity in seconds.
 
         Returns:
@@ -218,6 +230,8 @@ class UserContentService:
         image = await self._repo.get_user_image(image_id)
         if image is None:
             raise UserContentNotFoundError(f"Image not found: {image_id}")
+
+        self._verify_upload_ownership(image, user_id)
 
         result = await self._storage.get_presigned_url(
             image.storage_key,
@@ -232,11 +246,12 @@ class UserContentService:
             expires_in_seconds=result.expires_in_seconds,
         )
 
-    async def download_upload(self, image_id: UUID) -> bytes:
+    async def download_upload(self, image_id: UUID, *, user_id: UUID) -> bytes:
         """Download upload content.
 
         Args:
             image_id: Image ID to download.
+            user_id: Requesting user (must be owner).
 
         Returns:
             Raw image bytes.
@@ -247,6 +262,8 @@ class UserContentService:
         image = await self._repo.get_user_image(image_id)
         if image is None:
             raise UserContentNotFoundError(f"Image not found: {image_id}")
+
+        self._verify_upload_ownership(image, user_id)
 
         try:
             return await self._storage.download(image.storage_key)
@@ -279,19 +296,20 @@ class UserContentService:
         )
         return list(images)
 
-    async def delete_upload(self, image_id: UUID) -> bool:
+    async def delete_upload(self, image_id: UUID, *, user_id: UUID) -> bool:
         """Delete an uploaded image.
 
         Removes from both R2 and database.
 
         Args:
             image_id: Image ID to delete.
+            user_id: Requesting user (must be owner).
 
         Returns:
             True if deleted, False if not found.
         """
         image = await self._repo.get_user_image(image_id)
-        if image is None:
+        if image is None or image.user_id != user_id:
             return False
 
         # Delete from R2 first
@@ -376,27 +394,31 @@ class UserContentService:
             expires_at=db_output.expires_at,
         )
 
-    async def get_output(self, output_id: UUID) -> GenerationOutput | None:
+    async def get_output(self, output_id: UUID, *, user_id: UUID) -> GenerationOutput | None:
         """Get output metadata by ID.
 
         Args:
             output_id: Output ID to look up.
+            user_id: Requesting user (must be owner).
 
         Returns:
             GenerationOutput if found, None otherwise.
         """
-        return await self._repo.get_output(output_id)
+        output = await self._repo.get_output(output_id)
+        return None if output is None or output.user_id != user_id else output
 
     async def get_output_access(
         self,
         output_id: UUID,
         *,
+        user_id: UUID,
         expires_in: int = 3600,
     ) -> ImageAccess:
         """Get presigned URL for accessing an output.
 
         Args:
             output_id: Output ID to access.
+            user_id: Requesting user (must be owner).
             expires_in: URL validity in seconds.
 
         Returns:
@@ -408,6 +430,8 @@ class UserContentService:
         output = await self._repo.get_output(output_id)
         if output is None:
             raise UserContentNotFoundError(f"Output not found: {output_id}")
+
+        self._verify_output_ownership(output, user_id)
 
         result = await self._storage.get_presigned_url(
             output.storage_key,
@@ -422,21 +446,23 @@ class UserContentService:
             expires_in_seconds=result.expires_in_seconds,
         )
 
-    async def download_output(self, output_id: UUID) -> bytes:
+    async def download_output(self, output_id: UUID, *, user_id: UUID) -> bytes:
         """Download output content.
 
         Args:
             output_id: Output ID to download.
-
+            user_id: Requesting user (must be owner).
         Returns:
             Raw image bytes.
 
         Raises:
-            UserContentNotFoundError: If output doesn't exist.
+            UserContentNotFoundError: If output doesn't exist or is not owned by the user.
         """
         output = await self._repo.get_output(output_id)
         if output is None:
             raise UserContentNotFoundError(f"Output not found: {output_id}")
+
+        self._verify_output_ownership(output, user_id)
 
         try:
             return await self._storage.download(output.storage_key)
@@ -444,15 +470,26 @@ class UserContentService:
             logger.error(f"R2 file missing for output {output_id}: {output.storage_key}")
             raise UserContentNotFoundError(f"Output file not found: {output_id}") from e
 
-    async def list_job_outputs(self, job_id: UUID) -> list[GenerationOutput]:
+    async def list_job_outputs(
+        self,
+        job_id: UUID,
+        *,
+        user_id: UUID,
+    ) -> list[GenerationOutput]:
         """List outputs for a job.
 
         Args:
             job_id: Job to list outputs for.
+            user_id: Requesting user (must be owner of the outputs).
 
         Returns:
             List of GenerationOutput metadata ordered by index.
         """
+        # Verify job ownership
+        job = await self._repo.get_job(job_id)
+        if job is None or job.user_id != user_id:
+            raise UserContentNotFoundError(f"Job not found: {job_id}")
+
         outputs = await self._repo.list_job_outputs(job_id)
         return list(outputs)
 

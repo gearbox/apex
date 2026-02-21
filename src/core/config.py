@@ -124,7 +124,7 @@ class Settings(BaseSettings):
         default="CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
         description=(
             "Secret key for JWT signing. "
-            "Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\". "
+            'Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))". '
             "Must be at least 32 bytes. No safe default — must be set explicitly."
         ),
     )
@@ -170,7 +170,7 @@ class Settings(BaseSettings):
             raise ValueError(
                 "JWT_SECRET_KEY is set to an insecure placeholder. "
                 "Generate a strong key with:\n"
-                "  python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
+                '  python -c "import secrets; print(secrets.token_urlsafe(32))"\n'
                 "and set it in your .env file or environment."
             )
 
@@ -179,11 +179,10 @@ class Settings(BaseSettings):
                 f"JWT_SECRET_KEY must be at least {_MIN_JWT_SECRET_BYTES} bytes "
                 f"(got {len(key.encode())} bytes). "
                 "Generate a strong key with:\n"
-                "  python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+                '  python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
 
         return self
-
 
     # -------------------------------------------------------------------------
     # Computed fields

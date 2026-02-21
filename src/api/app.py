@@ -12,7 +12,7 @@ from litestar.logging import LoggingConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
 
-from src.api.dependencies import dependencies, init_services, shutdown_services
+from src.api.dependencies.common import dependencies, init_services, shutdown_services
 from src.api.routes.auth import AuthController
 from src.api.routes.generation import (
     GenerationController,

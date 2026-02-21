@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from litestar import Controller, Response, get, post
+from litestar.di import Provide
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_201_CREATED,
@@ -17,6 +18,7 @@ from litestar.status_codes import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.grok import (
     GROK_MODELS,
     GrokImageEditRequest,
@@ -28,6 +30,7 @@ from src.api.schemas.grok import (
     GrokVideoFromImageRequest,
     GrokVideoRequest,
 )
+from src.api.security import auth_guard
 from src.api.services.grok.job_service import GrokJobError, GrokJobService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus
@@ -61,10 +64,13 @@ class GrokImageController(Controller):
 
     path = "/api/v1/grok/image"
     tags: Sequence[str] | None = ["Grok Image"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     @post("/")
     async def generate_image(
         self,
+        current_user_id: UUID,
         data: GrokImageRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
@@ -93,13 +99,9 @@ class GrokImageController(Controller):
             )
 
         try:
-            # TODO: Get user_id from auth context
-            # For now, use a placeholder
-            user_id = UUID("00000000-0000-0000-0000-000000000001")
-
             job = await grok_job_service.create_image_job(
                 session=session,
-                user_id=user_id,
+                user_id=current_user_id,
                 prompt=data.prompt,
                 model=data.model,
                 generation_type=GenerationType.T2I,
@@ -157,6 +159,7 @@ class GrokImageController(Controller):
     @post("/edit")
     async def edit_image(
         self,
+        current_user_id: UUID,
         data: GrokImageEditRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
@@ -182,9 +185,6 @@ class GrokImageController(Controller):
             )
 
         try:
-            # TODO: Get user_id from auth context
-            user_id = UUID("00000000-0000-0000-0000-000000000001")
-
             # Get input image URL from storage
             # TODO: Look up the image record and get its storage key
             from src.db import StorageRepository
@@ -215,7 +215,7 @@ class GrokImageController(Controller):
 
             job = await grok_job_service.create_image_job(
                 session=session,
-                user_id=user_id,
+                user_id=current_user_id,
                 prompt=data.prompt,
                 model=data.model,
                 generation_type=GenerationType.I2I,
@@ -277,10 +277,13 @@ class GrokVideoController(Controller):
 
     path = "/api/v1/grok/video"
     tags: Sequence[str] | None = ["Grok Video"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     @post("/")
     async def generate_video(
         self,
+        current_user_id: UUID,
         data: GrokVideoRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
@@ -308,12 +311,9 @@ class GrokVideoController(Controller):
             )
 
         try:
-            # TODO: Get user_id from auth context
-            user_id = UUID("00000000-0000-0000-0000-000000000001")
-
             job = await grok_job_service.start_video_job(
                 session=session,
-                user_id=user_id,
+                user_id=current_user_id,
                 prompt=data.prompt,
                 model=data.model,
                 generation_type=GenerationType.T2V,
@@ -370,6 +370,7 @@ class GrokVideoController(Controller):
     @post("/from-image")
     async def generate_video_from_image(
         self,
+        current_user_id: UUID,
         data: GrokVideoFromImageRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
@@ -395,9 +396,6 @@ class GrokVideoController(Controller):
             )
 
         try:
-            # TODO: Get user_id from auth context
-            user_id = UUID("00000000-0000-0000-0000-000000000001")
-
             # Get input image URL from storage
             from src.db import StorageRepository
 
@@ -427,7 +425,7 @@ class GrokVideoController(Controller):
 
             job = await grok_job_service.start_video_job(
                 session=session,
-                user_id=user_id,
+                user_id=current_user_id,
                 prompt=data.prompt,
                 model=data.model,
                 generation_type=GenerationType.I2V,
@@ -485,6 +483,7 @@ class GrokVideoController(Controller):
     @post("/edit")
     async def edit_video(
         self,
+        current_user_id: UUID,
         data: GrokVideoEditRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
@@ -510,12 +509,9 @@ class GrokVideoController(Controller):
             )
 
         try:
-            # TODO: Get user_id from auth context
-            user_id = UUID("00000000-0000-0000-0000-000000000001")
-
             job = await grok_job_service.start_video_job(
                 session=session,
-                user_id=user_id,
+                user_id=current_user_id,
                 prompt=data.prompt,
                 model=data.model,
                 generation_type=GenerationType.V2V,
@@ -573,10 +569,13 @@ class GrokJobController(Controller):
 
     path = "/api/v1/grok/jobs"
     tags: Sequence[str] | None = ["Grok Jobs"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     @get("/{job_id:uuid}")
     async def get_job_status(
         self,
+        current_user_id: UUID,
         job_id: UUID,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
@@ -585,6 +584,7 @@ class GrokJobController(Controller):
 
         Returns job details including progress and output URLs.
         For video jobs, this may trigger a poll to check completion status.
+        Only returns jobs owned by the authenticated user.
         """
         if grok_job_service is None:
             return Response(
@@ -602,7 +602,7 @@ class GrokJobController(Controller):
 
         job = await grok_job_service.get_job(session, job_id)
 
-        if job is None:
+        if job is None or job.user_id != current_user_id:
             return Response(
                 content=GrokJobStatusResponse(
                     job_id=job_id,

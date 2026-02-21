@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-import msgspec
 from litestar import Controller, Response, delete, get, post
 from litestar.datastructures import UploadFile
+from litestar.di import Provide
 from litestar.enums import RequestEncodingType
 from litestar.exceptions import NotFoundException
 from litestar.params import Body, Parameter
@@ -26,6 +25,18 @@ from litestar.status_codes import (
     HTTP_404_NOT_FOUND,
 )
 
+from src.api.dependencies.auth import get_current_user_id
+from src.api.schemas.storage import (
+    ErrorResponse,
+    ImageAccessResponse,
+    ImageListItem,
+    ImageListResponse,
+    OutputListItem,
+    OutputListResponse,
+    StorageStatsResponse,
+    UploadResponse,
+)
+from src.api.security import auth_guard
 from src.api.services.user_content import (
     UserContentError,
     UserContentNotFoundError,
@@ -34,88 +45,6 @@ from src.api.services.user_content import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# -----------------------------------------------------------------------------
-# Response schemas
-# -----------------------------------------------------------------------------
-
-
-class UploadResponse(msgspec.Struct, kw_only=True):
-    """Response for successful image upload."""
-
-    id: str
-    storage_key: str
-    filename: str
-    content_type: str
-    size_bytes: int
-    created_at: datetime
-    expires_at: datetime
-
-
-class ImageAccessResponse(msgspec.Struct, kw_only=True):
-    """Response with presigned URL for image access."""
-
-    id: str
-    storage_key: str
-    presigned_url: str
-    content_type: str
-    size_bytes: int
-    expires_in_seconds: int
-
-
-class ImageListItem(msgspec.Struct, kw_only=True):
-    """Item in image list response."""
-
-    id: str
-    filename: str
-    content_type: str
-    size_bytes: int
-    created_at: datetime
-    expires_at: datetime
-
-
-class ImageListResponse(msgspec.Struct, kw_only=True):
-    """Response for listing images."""
-
-    items: list[ImageListItem]
-    count: int
-
-
-class OutputListItem(msgspec.Struct, kw_only=True):
-    """Item in output list response."""
-
-    id: str
-    job_id: str
-    content_type: str
-    size_bytes: int
-    output_index: int
-    created_at: datetime
-    expires_at: datetime
-
-
-class OutputListResponse(msgspec.Struct, kw_only=True):
-    """Response for listing outputs."""
-
-    items: list[OutputListItem]
-    count: int
-
-
-class StorageStatsResponse(msgspec.Struct, kw_only=True):
-    """Response for storage statistics."""
-
-    upload_count: int
-    output_count: int
-    total_bytes: int
-    total_mb: float
-
-
-class ErrorResponse(msgspec.Struct, kw_only=True):
-    """Error response."""
-
-    error: str
-    detail: str | None = None
-
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -139,19 +68,15 @@ class StorageController(Controller):
 
     path = "/api/v1/storage"
     tags: Sequence[str] | None = ["Storage"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     @post("/upload")
     async def upload_image(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
         data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART, title="file")],
-        user_id: Annotated[
-            UUID,
-            Parameter(
-                description="User ID (will come from auth in production)",
-                required=True,
-            ),
-        ],
     ) -> Response[UploadResponse | ErrorResponse]:
         """Upload an image for use in generation.
 
@@ -195,13 +120,13 @@ class StorageController(Controller):
 
         try:
             logger.debug(
-                "!!!Uploading image for user %s: %s (%d bytes)",
-                user_id,
+                "Uploading image for user %s: %s (%d bytes)",
+                current_user_id,
                 data.filename,
                 len(file_bytes),
             )
             result = await user_content.upload_image(
-                user_id=user_id,
+                user_id=current_user_id,
                 data=file_bytes,
                 filename=data.filename or "upload.png",
                 content_type=content_type,
@@ -236,6 +161,7 @@ class StorageController(Controller):
     @get("/uploads/{image_id:uuid}")
     async def get_upload_access(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
         image_id: UUID,
         expires_in: Annotated[
@@ -251,11 +177,12 @@ class StorageController(Controller):
         """Get a presigned URL to access an uploaded image.
 
         Returns a temporary URL valid for the specified duration.
-        Use this URL to download the image or pass to external services.
+        Only returns URLs for images owned by the authenticated user.
         """
         try:
             access = await user_content.get_upload_access(
                 image_id,
+                user_id=current_user_id,
                 expires_in=expires_in,
             )
 
@@ -280,6 +207,7 @@ class StorageController(Controller):
     @get("/uploads/{image_id:uuid}/download")
     async def download_upload(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
         image_id: UUID,
     ) -> Response[bytes | ErrorResponse]:
@@ -290,14 +218,14 @@ class StorageController(Controller):
         """
         try:
             # Get metadata for content type
-            image = await user_content.get_upload(image_id)
+            image = await user_content.get_upload(image_id, user_id=current_user_id)
             if image is None:
                 return Response(
                     content=ErrorResponse(error="Image not found"),
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
-            data = await user_content.download_upload(image_id)
+            data = await user_content.download_upload(image_id, user_id=current_user_id)
 
             return Response(
                 content=data,
@@ -314,6 +242,7 @@ class StorageController(Controller):
     @delete("/uploads/{image_id:uuid}", status_code=HTTP_204_NO_CONTENT)
     async def delete_upload(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
         image_id: UUID,
     ) -> None:
@@ -322,7 +251,7 @@ class StorageController(Controller):
         Removes the image from storage immediately.
         This action cannot be undone.
         """
-        deleted = await user_content.delete_upload(image_id)
+        deleted = await user_content.delete_upload(image_id, user_id=current_user_id)
 
         if not deleted:
             raise NotFoundException(detail="Image not found")
@@ -330,14 +259,8 @@ class StorageController(Controller):
     @get("/uploads")
     async def list_uploads(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
-        user_id: Annotated[
-            UUID,
-            Parameter(
-                description="User ID (will come from auth in production)",
-                required=True,
-            ),
-        ],
         limit: Annotated[int, Parameter(ge=1, le=100, default=50)] = 50,
         offset: Annotated[int, Parameter(ge=0, default=0)] = 0,
     ) -> ImageListResponse:
@@ -346,7 +269,7 @@ class StorageController(Controller):
         Returns paginated list of uploads ordered by creation date (newest first).
         """
         images = await user_content.list_user_uploads(
-            user_id,
+            current_user_id,
             limit=limit,
             offset=offset,
         )
@@ -372,6 +295,7 @@ class StorageController(Controller):
     @get("/outputs/{output_id:uuid}")
     async def get_output_access(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
         output_id: UUID,
         expires_in: Annotated[
@@ -391,6 +315,7 @@ class StorageController(Controller):
         try:
             access = await user_content.get_output_access(
                 output_id,
+                user_id=current_user_id,
                 expires_in=expires_in,
             )
 
@@ -415,6 +340,7 @@ class StorageController(Controller):
     @get("/outputs/{output_id:uuid}/download")
     async def download_output(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
         output_id: UUID,
     ) -> Response[bytes | ErrorResponse]:
@@ -423,14 +349,14 @@ class StorageController(Controller):
         Returns the raw image bytes with appropriate content type.
         """
         try:
-            output = await user_content.get_output(output_id)
+            output = await user_content.get_output(output_id, user_id=current_user_id)
             if output is None:
                 return Response(
                     content=ErrorResponse(error="Output not found"),
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
-            data = await user_content.download_output(output_id)
+            data = await user_content.download_output(output_id, user_id=current_user_id)
 
             return Response(
                 content=data,
@@ -447,14 +373,8 @@ class StorageController(Controller):
     @get("/outputs")
     async def list_outputs(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
-        user_id: Annotated[
-            UUID,
-            Parameter(
-                description="User ID",
-                required=True,
-            ),
-        ],
         limit: Annotated[int, Parameter(ge=1, le=100, default=50)] = 50,
         offset: Annotated[int, Parameter(ge=0, default=0)] = 0,
     ) -> OutputListResponse:
@@ -463,7 +383,7 @@ class StorageController(Controller):
         Returns paginated list ordered by creation date (newest first).
         """
         outputs = await user_content.list_user_outputs(
-            user_id,
+            current_user_id,
             limit=limit,
             offset=offset,
         )
@@ -486,14 +406,22 @@ class StorageController(Controller):
     @get("/jobs/{job_id:uuid}/outputs")
     async def list_job_outputs(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
         job_id: UUID,
-    ) -> OutputListResponse:
+    ) -> Response[OutputListResponse | ErrorResponse]:
         """List outputs for a specific job.
 
         Returns outputs ordered by output index (batch order).
+        Only accessible by the job owner.
         """
-        outputs = await user_content.list_job_outputs(job_id)
+        try:
+            outputs = await user_content.list_job_outputs(job_id, user_id=current_user_id)
+        except UserContentNotFoundError:
+            return Response(
+                content=ErrorResponse(error="Job outputs not found"),
+                status_code=HTTP_404_NOT_FOUND,
+            )
 
         items = [
             OutputListItem(
@@ -508,7 +436,10 @@ class StorageController(Controller):
             for out in outputs
         ]
 
-        return OutputListResponse(items=items, count=len(items))
+        return Response(
+            content=OutputListResponse(items=items, count=len(items)),
+            status_code=HTTP_200_OK,
+        )
 
     # -------------------------------------------------------------------------
     # Statistics
@@ -517,17 +448,14 @@ class StorageController(Controller):
     @get("/stats")
     async def get_storage_stats(
         self,
+        current_user_id: UUID,
         user_content: UserContentService,
-        user_id: Annotated[
-            UUID,
-            Parameter(description="User ID", required=True),
-        ],
     ) -> StorageStatsResponse:
         """Get storage usage statistics for a user.
 
         Returns counts and total size of uploads and outputs.
         """
-        stats = await user_content.get_user_stats(user_id)
+        stats = await user_content.get_user_stats(current_user_id)
 
         return StorageStatsResponse(
             upload_count=stats["upload_count"],
