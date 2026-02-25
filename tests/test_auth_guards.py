@@ -146,8 +146,9 @@ class TestGetCurrentUserIdDependency:
     async def test_raises_when_no_user_id(self) -> None:
         """Verify 401 raised when user_id is missing from state."""
         from types import SimpleNamespace
-        from litestar.exceptions import NotAuthorizedException
         from unittest.mock import MagicMock
+
+        from litestar.exceptions import NotAuthorizedException
 
         empty_dict: dict[str, Any] = {}
         mock_request = MagicMock()
@@ -221,7 +222,7 @@ class TestAuthGuardIntegration:
 
     def test_protected_route_returns_401_with_wrong_secret(self, jwt_service: JWTService) -> None:
         """Token signed with different secret is rejected."""
-        other_service = JWTService(JWTConfig(secret_key="different_secret_key_entirely"))
+        other_service = JWTService(JWTConfig(secret_key="different_secret_for_wrong_key_test_32b"))
         token, _ = other_service.create_access_token(uuid4())
 
         app = _create_test_app(jwt_service)
@@ -292,6 +293,7 @@ class TestGrokControllersAuth:
 
     def _create_grok_app(self, jwt_service: JWTService) -> Litestar:
         from unittest.mock import AsyncMock, MagicMock
+
         from src.api.routes.grok import (
             GrokImageController,
             GrokJobController,
@@ -628,17 +630,23 @@ class TestControllerGuardDeclarations:
     def test_grok_image_controller_has_guard(self) -> None:
         from src.api.routes.grok import GrokImageController
 
-        assert auth_guard in GrokImageController.guards
+        guards = GrokImageController.guards
+        assert guards is not None
+        assert auth_guard in guards
 
     def test_grok_video_controller_has_guard(self) -> None:
         from src.api.routes.grok import GrokVideoController
 
-        assert auth_guard in GrokVideoController.guards
+        guards = GrokVideoController.guards
+        assert guards is not None
+        assert auth_guard in guards
 
     def test_grok_job_controller_has_guard(self) -> None:
         from src.api.routes.grok import GrokJobController
 
-        assert auth_guard in GrokJobController.guards
+        guards = GrokJobController.guards
+        assert guards is not None
+        assert auth_guard in guards
 
     def test_grok_provider_controller_has_no_guard(self) -> None:
         from src.api.routes.grok import GrokProviderController
@@ -650,22 +658,30 @@ class TestControllerGuardDeclarations:
     def test_storage_controller_has_guard(self) -> None:
         from src.api.routes.storage import StorageController
 
-        assert auth_guard in StorageController.guards
+        guards = StorageController.guards
+        assert guards is not None
+        assert auth_guard in guards
 
     def test_generation_controller_has_guard(self) -> None:
         from src.api.routes.generation import GenerationController
 
-        assert auth_guard in GenerationController.guards
+        guards = GenerationController.guards
+        assert guards is not None
+        assert auth_guard in guards
 
     def test_job_controller_has_guard(self) -> None:
         from src.api.routes.generation import JobController
 
-        assert auth_guard in JobController.guards
+        guards = JobController.guards
+        assert guards is not None
+        assert auth_guard in guards
 
     def test_image_controller_has_guard(self) -> None:
         from src.api.routes.generation import ImageController
 
-        assert auth_guard in ImageController.guards
+        guards = ImageController.guards
+        assert guards is not None
+        assert auth_guard in guards
 
     def test_health_controller_has_no_guard(self) -> None:
         from src.api.routes.generation import HealthController

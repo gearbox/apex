@@ -12,10 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.auth import AuthService
+from src.api.services.billing import BillingService
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.job_manager import JobManager
+from src.api.services.organization import OrganizationService
+from src.api.services.payment import PaymentService
+from src.api.services.pricing import PricingService
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
@@ -202,6 +206,7 @@ async def get_auth_service(session: AsyncSession) -> AuthService:
         repository=repository,
         jwt_service=get_jwt_service(),
         password_service=get_password_service(),
+        session=session,
     )
 
 
@@ -229,6 +234,34 @@ async def get_user_service(session: AsyncSession) -> UserService:
 async def get_grok_job_service() -> GrokJobService | None:
     """Provide Grok job service (None if not configured)."""
     return _services.grok_job_service
+
+
+# -----------------------------------------------------------------------------
+# Billing dependencies
+# -----------------------------------------------------------------------------
+
+
+def get_billing_service() -> BillingService:
+    """Provide BillingService singleton."""
+    return BillingService()
+
+
+def get_pricing_service() -> PricingService:
+    """Provide PricingService singleton."""
+    return PricingService()
+
+
+def get_organization_service() -> OrganizationService:
+    """Provide OrganizationService singleton."""
+    return OrganizationService()
+
+
+def get_payment_service() -> PaymentService:
+    """Provide PaymentService singleton."""
+    return PaymentService(
+        billing_service=get_billing_service(),
+        settings=get_settings(),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -369,4 +402,9 @@ dependencies = {
     "user_content": Provide(get_user_content),
     # Grok services
     "grok_job_service": Provide(get_grok_job_service),
+    # Billing services
+    "billing_service": Provide(get_billing_service, sync_to_thread=False),
+    "pricing_service": Provide(get_pricing_service, sync_to_thread=False),
+    "organization_service": Provide(get_organization_service, sync_to_thread=False),
+    "payment_service": Provide(get_payment_service, sync_to_thread=False),
 }

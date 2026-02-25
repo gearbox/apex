@@ -126,7 +126,7 @@ class TestJWTService:
         """Test that expired tokens are rejected."""
         # Create a service with very short expiration
         config = JWTConfig(
-            secret_key="test_secret",
+            secret_key="test_secret_key_for_testing_only_256bits",
             access_token_expire_minutes=-1,  # Already expired
         )
         short_jwt = JWTService(config)

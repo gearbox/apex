@@ -158,6 +158,14 @@ class GenerationJob(Base):
     is_nsfw: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_minor_suspected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # Billing
+    token_cost: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    debit_transaction_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("token_transactions.id"),
+        nullable=True,
+    )
+
     # External provider tracking
     # For ComfyUI: stores prompt_id
     # For Grok: stores request_id (for video polling)

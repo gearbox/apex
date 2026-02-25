@@ -1,5 +1,13 @@
 """Database models module."""
 
+from .billing import (
+    Organization,
+    OrganizationMember,
+    Payment,
+    PricingRule,
+    TokenAccount,
+    TokenTransaction,
+)
 from .storage import Base, GenerationJob, GenerationOutput, UserImage
 from .user import RefreshToken, User
 
@@ -7,7 +15,13 @@ __all__ = [
     "Base",
     "GenerationJob",
     "GenerationOutput",
+    "Organization",
+    "OrganizationMember",
+    "Payment",
+    "PricingRule",
     "RefreshToken",
+    "TokenAccount",
+    "TokenTransaction",
     "User",
     "UserImage",
 ]
