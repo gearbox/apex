@@ -1,12 +1,12 @@
 [project]
 name = "apex"
-version = "0.3.1"
+version = "0.4.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
 dependencies = [
     # Web framework
-    "litestar>=2.19.0",
+    "litestar>=2.21.0",
     "uvicorn[standard]>=0.30.0",
     "msgspec>=0.20.0",
     "pydantic>=2.12.5",
