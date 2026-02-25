@@ -1,0 +1,270 @@
+"""Organization API routes."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from uuid import UUID
+
+from litestar import Controller, Response, delete, get, patch, post
+from litestar.di import Provide
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_201_CREATED,
+    HTTP_404_NOT_FOUND,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.api.dependencies.auth import get_current_user_id
+from src.api.schemas.organization import (
+    AccountSummary,
+    AddMemberRequest,
+    ChangeMemberRoleRequest,
+    CreateOrganizationRequest,
+    MemberResponse,
+    OrgCreateResponse,
+    OrgDetailResponse,
+    OrgResponse,
+)
+from src.api.security import auth_guard
+from src.api.services.billing import BillingService
+from src.api.services.organization import OrganizationService
+
+logger = logging.getLogger(__name__)
+
+
+class OrganizationController(Controller):
+    """Organization management endpoints."""
+
+    path = "/api/v1/organizations"
+    tags: Sequence[str] | None = ["Organizations"]
+    guards = [auth_guard]
+    dependencies = {"current_user_id": Provide(get_current_user_id)}
+
+    @post("/")
+    async def create_organization(
+        self,
+        current_user_id: UUID,
+        data: CreateOrganizationRequest,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+        billing_service: BillingService,
+    ) -> Response[OrgCreateResponse]:
+        """Create a new organization."""
+        org, account = await organization_service.create_organization(
+            data.name, current_user_id, session=session
+        )
+        balance = await billing_service.get_balance(account.id, session=session)
+
+        # Get the owner membership
+        members = await organization_service.list_members(org.id, session=session)
+        owner_member = next(m for m in members if m.user_id == current_user_id)
+
+        await session.commit()
+
+        return Response(
+            content=OrgCreateResponse(
+                organization=OrgResponse(
+                    id=org.id,
+                    name=org.name,
+                    slug=org.slug,
+                    owner_id=org.owner_id,
+                    is_active=org.is_active,
+                    created_at=org.created_at,
+                ),
+                account=AccountSummary(
+                    account_id=account.id,
+                    account_type=account.account_type,
+                    balance=balance,
+                ),
+                membership=MemberResponse(
+                    id=owner_member.id,
+                    user_id=owner_member.user_id,
+                    role=owner_member.role,
+                    joined_at=owner_member.joined_at,
+                ),
+            ),
+            status_code=HTTP_201_CREATED,
+        )
+
+    @get("/me")
+    async def get_my_organization(
+        self,
+        current_user_id: UUID,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+        billing_service: BillingService,
+    ) -> Response[OrgDetailResponse]:
+        """Get current user's organization, role, and balance."""
+        org = await organization_service.get_user_organization(current_user_id, session=session)
+        if org is None:
+            return Response(
+                content=OrgDetailResponse(
+                    organization=OrgResponse(
+                        id=UUID("00000000-0000-0000-0000-000000000000"),
+                        name="",
+                        slug="",
+                        owner_id=UUID("00000000-0000-0000-0000-000000000000"),
+                        is_active=False,
+                        created_at=org.created_at if org else None,  # type: ignore[arg-type]
+                    ),
+                    role="",
+                    balance=0,
+                ),
+                status_code=HTTP_404_NOT_FOUND,
+            )
+
+        membership = await organization_service.get_membership(
+            org.id, current_user_id, session=session
+        )
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        balance = await billing_service.get_balance(account.id, session=session)
+
+        return Response(
+            content=OrgDetailResponse(
+                organization=OrgResponse(
+                    id=org.id,
+                    name=org.name,
+                    slug=org.slug,
+                    owner_id=org.owner_id,
+                    is_active=org.is_active,
+                    created_at=org.created_at,
+                ),
+                role=membership.role if membership else "",
+                balance=balance,
+            ),
+            status_code=HTTP_200_OK,
+        )
+
+    @get("/{org_id:uuid}")
+    async def get_organization(
+        self,
+        current_user_id: UUID,
+        org_id: UUID,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+    ) -> Response[OrgResponse]:
+        """Get organization by ID. Requires membership."""
+        membership = await organization_service.get_membership(
+            org_id, current_user_id, session=session
+        )
+        if membership is None:
+            return Response(content=None, status_code=HTTP_404_NOT_FOUND)  # type: ignore[arg-type]
+
+        org = await organization_service.get_organization(org_id, session=session)
+        if org is None:
+            return Response(content=None, status_code=HTTP_404_NOT_FOUND)  # type: ignore[arg-type]
+
+        return Response(
+            content=OrgResponse(
+                id=org.id,
+                name=org.name,
+                slug=org.slug,
+                owner_id=org.owner_id,
+                is_active=org.is_active,
+                created_at=org.created_at,
+            ),
+            status_code=HTTP_200_OK,
+        )
+
+    @get("/{org_id:uuid}/members")
+    async def list_members(
+        self,
+        current_user_id: UUID,
+        org_id: UUID,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+    ) -> Response[list[MemberResponse]]:
+        """List organization members. Requires membership."""
+        membership = await organization_service.get_membership(
+            org_id, current_user_id, session=session
+        )
+        if membership is None:
+            return Response(content=None, status_code=HTTP_404_NOT_FOUND)  # type: ignore[arg-type]
+
+        members = await organization_service.list_members(org_id, session=session)
+        return Response(
+            content=[
+                MemberResponse(
+                    id=m.id,
+                    user_id=m.user_id,
+                    role=m.role,
+                    joined_at=m.joined_at,
+                )
+                for m in members
+            ],
+            status_code=HTTP_200_OK,
+        )
+
+    @post("/{org_id:uuid}/members")
+    async def add_member(
+        self,
+        current_user_id: UUID,
+        org_id: UUID,
+        data: AddMemberRequest,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+    ) -> Response[MemberResponse]:
+        """Add a member. Requires admin or owner role."""
+        member = await organization_service.add_member(
+            org_id,
+            data.user_id,
+            data.role,
+            actor_id=current_user_id,
+            session=session,
+        )
+        await session.commit()
+        return Response(
+            content=MemberResponse(
+                id=member.id,
+                user_id=member.user_id,
+                role=member.role,
+                joined_at=member.joined_at,
+            ),
+            status_code=HTTP_201_CREATED,
+        )
+
+    @delete("/{org_id:uuid}/members/{user_id:uuid}", status_code=HTTP_200_OK)
+    async def remove_member(
+        self,
+        current_user_id: UUID,
+        org_id: UUID,
+        user_id: UUID,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+    ) -> dict:
+        """Remove a member. Requires admin or owner role. Cannot remove owner."""
+        await organization_service.remove_member(
+            org_id, user_id, actor_id=current_user_id, session=session
+        )
+        await session.commit()
+        return {"message": "Member removed"}
+
+    @patch("/{org_id:uuid}/members/{user_id:uuid}")
+    async def change_member_role(
+        self,
+        current_user_id: UUID,
+        org_id: UUID,
+        user_id: UUID,
+        data: ChangeMemberRoleRequest,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+    ) -> Response[MemberResponse]:
+        """Change member role. Requires owner role only."""
+        member = await organization_service.change_role(
+            org_id,
+            user_id,
+            data.role,
+            actor_id=current_user_id,
+            session=session,
+        )
+        await session.commit()
+        return Response(
+            content=MemberResponse(
+                id=member.id,
+                user_id=member.user_id,
+                role=member.role,
+                joined_at=member.joined_at,
+            ),
+            status_code=HTTP_200_OK,
+        )

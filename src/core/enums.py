@@ -83,6 +83,7 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    MODERATED = "moderated"
 
 
 class AspectRatio(str, Enum):
@@ -192,3 +193,49 @@ class SubscriptionTier(StrEnum):
     BASIC = "basic"
     PRO = "pro"
     ENTERPRISE = "enterprise"
+
+
+class AccountType(str, Enum):
+    """Token account types."""
+
+    PERSONAL = "personal"
+    ENTERPRISE = "enterprise"
+
+
+class TransactionType(str, Enum):
+    """Token transaction types."""
+
+    CREDIT = "credit"
+    DEBIT = "debit"
+    REFUND = "refund"
+    ADMIN_ADJUSTMENT = "admin_adjustment"
+
+
+class PaymentStatus(str, Enum):
+    """Payment processing status."""
+
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REFUNDED = "refunded"
+
+
+class OrgRole(str, Enum):
+    """Organization member roles."""
+
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+class UserRole(str, Enum):
+    """User account roles.
+
+    SYSTEM — internal sentinel user (seeded by migration, cannot authenticate).
+    ADMIN  — full administrative access to the platform.
+    USER   — standard authenticated user (default for all registrations).
+    """
+
+    SYSTEM = "system"
+    ADMIN = "admin"
+    USER = "user"

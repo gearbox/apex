@@ -10,10 +10,11 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.core.enums import SubscriptionTier
+from src.core.enums import SubscriptionTier, UserRole
 from src.db.models.storage import Base
 
 if TYPE_CHECKING:
+    from src.db.models.billing import TokenAccount
     from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 
 
@@ -48,6 +49,12 @@ class User(Base):
         String(20),
         nullable=False,
         default=SubscriptionTier.FREE.value,
+    )
+
+    role: Mapped[UserRole] = mapped_column(
+        String(20),
+        nullable=False,
+        default=UserRole.USER.value,
     )
 
     # Account status
@@ -94,6 +101,12 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
         foreign_keys="GenerationOutput.user_id",
+    )
+    token_account: Mapped[TokenAccount | None] = relationship(
+        "TokenAccount",
+        back_populates="user",
+        uselist=False,
+        foreign_keys="TokenAccount.user_id",
     )
 
     __table_args__ = (Index("ix_users_email_active", "email", "is_active"),)

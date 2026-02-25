@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -31,7 +32,9 @@ from src.api.schemas.grok import (
     GrokVideoRequest,
 )
 from src.api.security import auth_guard
+from src.api.services.billing import BillingService
 from src.api.services.grok.job_service import GrokJobError, GrokJobService
+from src.api.services.pricing import PricingService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus
 
@@ -74,6 +77,8 @@ class GrokImageController(Controller):
         data: GrokImageRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
+        billing_service: BillingService,
+        pricing_service: PricingService,
     ) -> Response[GrokJobResponse]:
         """Generate images from text prompt.
 
@@ -98,6 +103,13 @@ class GrokImageController(Controller):
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # --- Billing pre-flight ---
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        token_cost = await pricing_service.get_price(
+            "grok", GenerationType.T2I.value, data.model.value, session=session
+        )
+
+        job = None
         try:
             job = await grok_job_service.create_image_job(
                 session=session,
@@ -109,8 +121,6 @@ class GrokImageController(Controller):
                 aspect_ratio=data.aspect_ratio,
                 name=data.name,
             )
-
-            await session.commit()
 
             if job is None:
                 return Response(
@@ -126,6 +136,25 @@ class GrokImageController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
+            # Reserve tokens after job creation
+            txn = await billing_service.check_and_reserve(
+                account.id,
+                token_cost,
+                job.id,
+                metadata={
+                    "provider": "grok",
+                    "generation_type": GenerationType.T2I.value,
+                    "model": data.model.value,
+                },
+                session=session,
+            )
+            job.token_cost = token_cost
+            job.debit_transaction_id = txn.id
+
+            await session.commit()
+
+            balance = await billing_service.get_balance(account.id, session=session)
+
             return Response(
                 content=GrokJobResponse(
                     job_id=job.id,
@@ -134,6 +163,8 @@ class GrokImageController(Controller):
                     model=data.model,
                     generation_type=GenerationType.T2I,
                     created_at=job.created_at,
+                    tokens_charged=token_cost,
+                    balance_remaining=balance,
                     message="Image generation completed"
                     if job.status == JobStatus.COMPLETED.value
                     else None,
@@ -142,7 +173,18 @@ class GrokImageController(Controller):
             )
 
         except GrokJobError as e:
-            logger.error(f"Grok image generation failed: {e}")
+            logger.error("Grok image generation failed: %s", e)
+            # Refund on provider error
+            if job is not None:
+                try:
+                    await billing_service.refund(
+                        job.id,
+                        description=f"Provider error refund: {e}",
+                        session=session,
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.exception("Failed to refund for job %s", job.id)
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -164,6 +206,8 @@ class GrokImageController(Controller):
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
         r2_storage: R2StorageService,
+        billing_service: BillingService,
+        pricing_service: PricingService,
     ) -> Response[GrokJobResponse]:
         """Edit an existing image with a text prompt.
 
@@ -184,9 +228,15 @@ class GrokImageController(Controller):
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # --- Billing pre-flight ---
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        token_cost = await pricing_service.get_price(
+            "grok", GenerationType.I2I.value, data.model.value, session=session
+        )
+
+        job = None
         try:
             # Get input image URL from storage
-            # TODO: Look up the image record and get its storage key
             from src.db import StorageRepository
 
             repo = StorageRepository(session)
@@ -225,8 +275,6 @@ class GrokImageController(Controller):
                 input_image_id=data.input_image_id,
             )
 
-            await session.commit()
-
             if job is None:
                 return Response(
                     content=GrokJobResponse(
@@ -241,6 +289,24 @@ class GrokImageController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
+            # Reserve tokens
+            txn = await billing_service.check_and_reserve(
+                account.id,
+                token_cost,
+                job.id,
+                metadata={
+                    "provider": "grok",
+                    "generation_type": GenerationType.I2I.value,
+                    "model": data.model.value,
+                },
+                session=session,
+            )
+            job.token_cost = token_cost
+            job.debit_transaction_id = txn.id
+
+            await session.commit()
+            balance = await billing_service.get_balance(account.id, session=session)
+
             return Response(
                 content=GrokJobResponse(
                     job_id=job.id,
@@ -249,6 +315,8 @@ class GrokImageController(Controller):
                     model=data.model,
                     generation_type=GenerationType.I2I,
                     created_at=job.created_at,
+                    tokens_charged=token_cost,
+                    balance_remaining=balance,
                     message="Image editing completed"
                     if job.status == JobStatus.COMPLETED.value
                     else None,
@@ -257,7 +325,17 @@ class GrokImageController(Controller):
             )
 
         except GrokJobError as e:
-            logger.error(f"Grok image editing failed: {e}")
+            logger.error("Grok image editing failed: %s", e)
+            if job is not None:
+                try:
+                    await billing_service.refund(
+                        job.id,
+                        description=f"Provider error refund: {e}",
+                        session=session,
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.exception("Failed to refund for job %s", job.id)
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -287,6 +365,8 @@ class GrokVideoController(Controller):
         data: GrokVideoRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
+        billing_service: BillingService,
+        pricing_service: PricingService,
     ) -> Response[GrokJobResponse]:
         """Generate video from text prompt.
 
@@ -310,6 +390,13 @@ class GrokVideoController(Controller):
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # --- Billing pre-flight ---
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        token_cost = await pricing_service.get_price(
+            "grok", GenerationType.T2V.value, data.model.value, session=session
+        )
+
+        job = None
         try:
             job = await grok_job_service.start_video_job(
                 session=session,
@@ -322,8 +409,6 @@ class GrokVideoController(Controller):
                 resolution=data.resolution,
                 name=data.name,
             )
-
-            await session.commit()
 
             if job is None:
                 return Response(
@@ -339,6 +424,24 @@ class GrokVideoController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
+            # Reserve tokens
+            txn = await billing_service.check_and_reserve(
+                account.id,
+                token_cost,
+                job.id,
+                metadata={
+                    "provider": "grok",
+                    "generation_type": GenerationType.T2V.value,
+                    "model": data.model.value,
+                },
+                session=session,
+            )
+            job.token_cost = token_cost
+            job.debit_transaction_id = txn.id
+
+            await session.commit()
+            balance = await billing_service.get_balance(account.id, session=session)
+
             return Response(
                 content=GrokJobResponse(
                     job_id=job.id,
@@ -347,13 +450,25 @@ class GrokVideoController(Controller):
                     model=data.model,
                     generation_type=GenerationType.T2V,
                     created_at=job.created_at,
+                    tokens_charged=token_cost,
+                    balance_remaining=balance,
                     message="Video generation started. Poll job status for results.",
                 ),
                 status_code=HTTP_201_CREATED,
             )
 
         except GrokJobError as e:
-            logger.error(f"Grok video generation failed to start: {e}")
+            logger.error("Grok video generation failed to start: %s", e)
+            if job is not None:
+                try:
+                    await billing_service.refund(
+                        job.id,
+                        description=f"Provider error refund: {e}",
+                        session=session,
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.exception("Failed to refund for job %s", job.id)
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -375,6 +490,8 @@ class GrokVideoController(Controller):
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
         r2_storage: R2StorageService,
+        billing_service: BillingService,
+        pricing_service: PricingService,
     ) -> Response[GrokJobResponse]:
         """Generate video from an image (image-to-video).
 
@@ -395,6 +512,13 @@ class GrokVideoController(Controller):
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # --- Billing pre-flight ---
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        token_cost = await pricing_service.get_price(
+            "grok", GenerationType.I2V.value, data.model.value, session=session
+        )
+
+        job = None
         try:
             # Get input image URL from storage
             from src.db import StorageRepository
@@ -436,8 +560,6 @@ class GrokVideoController(Controller):
                 input_image_url=input_image_url,
             )
 
-            await session.commit()
-
             if job is None:
                 return Response(
                     content=GrokJobResponse(
@@ -452,6 +574,24 @@ class GrokVideoController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
+            # Reserve tokens
+            txn = await billing_service.check_and_reserve(
+                account.id,
+                token_cost,
+                job.id,
+                metadata={
+                    "provider": "grok",
+                    "generation_type": GenerationType.I2V.value,
+                    "model": data.model.value,
+                },
+                session=session,
+            )
+            job.token_cost = token_cost
+            job.debit_transaction_id = txn.id
+
+            await session.commit()
+            balance = await billing_service.get_balance(account.id, session=session)
+
             return Response(
                 content=GrokJobResponse(
                     job_id=job.id,
@@ -460,13 +600,25 @@ class GrokVideoController(Controller):
                     model=data.model,
                     generation_type=GenerationType.I2V,
                     created_at=job.created_at,
+                    tokens_charged=token_cost,
+                    balance_remaining=balance,
                     message="Video generation started. Poll job status for results.",
                 ),
                 status_code=HTTP_201_CREATED,
             )
 
         except GrokJobError as e:
-            logger.error(f"Grok I2V generation failed to start: {e}")
+            logger.error("Grok I2V generation failed to start: %s", e)
+            if job is not None:
+                try:
+                    await billing_service.refund(
+                        job.id,
+                        description=f"Provider error refund: {e}",
+                        session=session,
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.exception("Failed to refund for job %s", job.id)
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -487,6 +639,8 @@ class GrokVideoController(Controller):
         data: GrokVideoEditRequest,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
+        billing_service: BillingService,
+        pricing_service: PricingService,
     ) -> Response[GrokJobResponse]:
         """Edit an existing video with a text prompt (V2V).
 
@@ -508,6 +662,13 @@ class GrokVideoController(Controller):
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # --- Billing pre-flight ---
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        token_cost = await pricing_service.get_price(
+            "grok", GenerationType.V2V.value, data.model.value, session=session
+        )
+
+        job = None
         try:
             job = await grok_job_service.start_video_job(
                 session=session,
@@ -518,8 +679,6 @@ class GrokVideoController(Controller):
                 name=data.name,
                 input_video_url=data.input_video_url,
             )
-
-            await session.commit()
 
             if job is None:
                 return Response(
@@ -535,6 +694,24 @@ class GrokVideoController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
+            # Reserve tokens
+            txn = await billing_service.check_and_reserve(
+                account.id,
+                token_cost,
+                job.id,
+                metadata={
+                    "provider": "grok",
+                    "generation_type": GenerationType.V2V.value,
+                    "model": data.model.value,
+                },
+                session=session,
+            )
+            job.token_cost = token_cost
+            job.debit_transaction_id = txn.id
+
+            await session.commit()
+            balance = await billing_service.get_balance(account.id, session=session)
+
             return Response(
                 content=GrokJobResponse(
                     job_id=job.id,
@@ -543,13 +720,25 @@ class GrokVideoController(Controller):
                     model=data.model,
                     generation_type=GenerationType.V2V,
                     created_at=job.created_at,
+                    tokens_charged=token_cost,
+                    balance_remaining=balance,
                     message="Video editing started. Poll job status for results.",
                 ),
                 status_code=HTTP_201_CREATED,
             )
 
         except GrokJobError as e:
-            logger.error(f"Grok V2V editing failed to start: {e}")
+            logger.error("Grok V2V editing failed to start: %s", e)
+            if job is not None:
+                try:
+                    await billing_service.refund(
+                        job.id,
+                        description=f"Provider error refund: {e}",
+                        session=session,
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.exception("Failed to refund for job %s", job.id)
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -579,6 +768,7 @@ class GrokJobController(Controller):
         job_id: UUID,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
+        billing_service: BillingService,
     ) -> Response[GrokJobStatusResponse]:
         """Get current status of a Grok generation job.
 
@@ -621,6 +811,14 @@ class GrokJobController(Controller):
         if job.status == JobStatus.COMPLETED.value:
             outputs = await grok_job_service.get_job_outputs(session, job_id)
 
+        # Get billing info
+        balance: int | None = None
+        if job.token_cost is not None:
+            with contextlib.suppress(Exception):
+                account = await billing_service.resolve_account_for_user(
+                    current_user_id, session=session
+                )
+                balance = await billing_service.get_balance(account.id, session=session)
         return Response(
             content=GrokJobStatusResponse(
                 job_id=job.id,
@@ -634,6 +832,8 @@ class GrokJobController(Controller):
                 completed_at=job.completed_at,
                 outputs=outputs,
                 error=job.error_message,
+                tokens_charged=job.token_cost,
+                balance_remaining=balance,
             ),
             status_code=HTTP_200_OK,
         )

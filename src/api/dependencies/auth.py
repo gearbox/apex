@@ -10,6 +10,11 @@ from uuid import UUID
 
 from litestar import Request
 from litestar.exceptions import NotAuthorizedException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.core.enums import UserRole
+from src.db.models import User
+from src.db.repositories import UserRepository
 
 
 async def get_current_user_id(request: Request) -> UUID:
@@ -31,3 +36,33 @@ async def get_current_user_id(request: Request) -> UUID:
     if user_id is None:
         raise NotAuthorizedException(detail="Not authenticated")
     return user_id
+
+
+async def get_current_admin_user(request: Request, session: AsyncSession) -> User:
+    """Load and verify the current user is an admin.
+
+    Uses the request-scoped session and UserRepository to load the
+    user from DB and check the is_admin flag. Replaces the old
+    admin_guard which created a separate session outside DI.
+
+    Args:
+        request: Litestar request.
+        session: Request-scoped database session.
+
+    Returns:
+        Verified admin User model.
+
+    Raises:
+        NotAuthorizedException: If not authenticated or not admin.
+    """
+    user_id = request.state.get("user_id")
+    if user_id is None:
+        raise NotAuthorizedException(detail="Not authenticated")
+
+    repo = UserRepository(session)
+    user = await repo.get_active_user(user_id)
+
+    if user is None or user.role != UserRole.ADMIN:
+        raise NotAuthorizedException(detail="Admin access required")
+
+    return user

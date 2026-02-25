@@ -169,7 +169,6 @@ class StorageController(Controller):
             Parameter(
                 ge=60,
                 le=86400,
-                default=3600,
                 description="URL validity in seconds (1 min to 24 hours)",
             ),
         ] = 3600,
@@ -261,8 +260,8 @@ class StorageController(Controller):
         self,
         current_user_id: UUID,
         user_content: UserContentService,
-        limit: Annotated[int, Parameter(ge=1, le=100, default=50)] = 50,
-        offset: Annotated[int, Parameter(ge=0, default=0)] = 0,
+        limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
+        offset: Annotated[int, Parameter(ge=0)] = 0,
     ) -> ImageListResponse:
         """List uploaded images for a user.
 
@@ -303,7 +302,6 @@ class StorageController(Controller):
             Parameter(
                 ge=60,
                 le=86400,
-                default=3600,
                 description="URL validity in seconds",
             ),
         ] = 3600,
@@ -375,8 +373,8 @@ class StorageController(Controller):
         self,
         current_user_id: UUID,
         user_content: UserContentService,
-        limit: Annotated[int, Parameter(ge=1, le=100, default=50)] = 50,
-        offset: Annotated[int, Parameter(ge=0, default=0)] = 0,
+        limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
+        offset: Annotated[int, Parameter(ge=0)] = 0,
     ) -> OutputListResponse:
         """List generated outputs for a user.
 

@@ -1,9 +1,49 @@
 """Application configuration using pydantic-settings."""
 
+import dataclasses
+from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import Field, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class GrokBillingConfig(BaseModel):
+    """Grok moderation billing policy configuration."""
+
+    moderation_billing_policy: Literal["charge", "refund"] = "charge"
+    # "charge" = no refund when respect_moderation=False
+    #            (default — conservative, matches xAI's stated text API policy)
+    # "refund" = refund when respect_moderation=False
+    #            (use if xAI formally confirms no charge for image/video moderation)
+
+
+@dataclasses.dataclass(frozen=True)
+class TokenPackage:
+    """Definition of a purchasable token package."""
+
+    id: str
+    name: str
+    tokens: int
+    price_usd: Decimal
+    bonus_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.tokens + self.bonus_tokens
+
+
+TOKEN_PACKAGES: dict[str, TokenPackage] = {
+    p.id: p
+    for p in [
+        TokenPackage("starter", "Starter", 1_000, Decimal("9.99")),
+        TokenPackage("basic", "Basic", 5_000, Decimal("39.99")),
+        TokenPackage("pro", "Pro", 15_000, Decimal("99.99"), bonus_tokens=1_500),
+        TokenPackage("enterprise", "Enterprise", 50_000, Decimal("299.99"), bonus_tokens=10_000),
+    ]
+}
+
 
 # Unsafe placeholder that ships as the default – reject it at startup
 _INSECURE_JWT_DEFAULTS: frozenset[str] = frozenset(
@@ -149,6 +189,32 @@ class Settings(BaseSettings):
         description="JWT issuer claim",
     )
 
+    # Billing & Payment settings
+    grok_moderation_billing_policy: Literal["charge", "refund"] = Field(
+        default="charge",
+        description="Policy for Grok moderation: 'charge' or 'refund'",
+    )
+
+    # Stripe
+    stripe_secret_key: str = Field(
+        default="",
+        description="Stripe secret API key",
+    )
+    stripe_webhook_secret: str = Field(
+        default="",
+        description="Stripe webhook endpoint signing secret",
+    )
+
+    # NowPayments
+    nowpayments_api_key: str = Field(
+        default="",
+        description="NowPayments API key",
+    )
+    nowpayments_ipn_secret: str = Field(
+        default="",
+        description="NowPayments IPN HMAC secret",
+    )
+
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
@@ -216,6 +282,23 @@ class Settings(BaseSettings):
     def grok_configured(self) -> bool:
         """Check if Grok API is configured."""
         return bool(self.xai_api_key)
+
+    @property
+    def grok_billing(self) -> GrokBillingConfig:
+        """Get Grok billing configuration."""
+        return GrokBillingConfig(
+            moderation_billing_policy=self.grok_moderation_billing_policy,
+        )
+
+    @property
+    def stripe_configured(self) -> bool:
+        """Check if Stripe is configured."""
+        return bool(self.stripe_secret_key and self.stripe_webhook_secret)
+
+    @property
+    def nowpayments_configured(self) -> bool:
+        """Check if NowPayments is configured."""
+        return bool(self.nowpayments_api_key and self.nowpayments_ipn_secret)
 
 
 @lru_cache

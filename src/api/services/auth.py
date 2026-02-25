@@ -15,8 +15,11 @@ from src.api.security import (
     hash_token,
 )
 from src.db.repositories import UserRepository
+from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from src.db.models import User
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,7 @@ class AuthService:
         repository: UserRepository,
         jwt_service: JWTService,
         password_service: PasswordService,
+        session: AsyncSession | None = None,
     ) -> None:
         """Initialize auth service.
 
@@ -94,10 +98,12 @@ class AuthService:
             repository: User repository.
             jwt_service: JWT token service.
             password_service: Password hashing service.
+            session: Database session (for billing account creation).
         """
         self._repo = repository
         self._jwt = jwt_service
         self._password = password_service
+        self._session = session
 
     async def register(
         self,
@@ -134,7 +140,13 @@ class AuthService:
             display_name=display_name,
         )
 
-        logger.info(f"User registered: {user_id} ({email})")
+        # Create personal token account in the same transaction
+        if self._session is not None:
+            billing_repo = BillingRepository(self._session)
+            await billing_repo.create_personal_account(id=uuid4(), user_id=user_id)
+            logger.info("Created personal token account for user %s", user_id)
+
+        logger.info("User registered: %s (%s)", user_id, email)
 
         # Generate tokens
         tokens = await self._create_token_pair(user_id)

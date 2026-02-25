@@ -194,6 +194,12 @@ class GrokJobResponse(msgspec.Struct, kw_only=True):
     message: str | None = None
     """Optional status message."""
 
+    tokens_charged: int | None = None
+    """Tokens charged for this generation."""
+
+    balance_remaining: int | None = None
+    """Token balance remaining after charge."""
+
 
 class GrokJobStatusResponse(msgspec.Struct, kw_only=True):
     """Response schema for job status query."""
@@ -233,6 +239,12 @@ class GrokJobStatusResponse(msgspec.Struct, kw_only=True):
 
     error: str | None = None
     """Error message if job failed."""
+
+    tokens_charged: int | None = None
+    """Tokens charged for this generation."""
+
+    balance_remaining: int | None = None
+    """Token balance remaining after charge."""
 
 
 # -----------------------------------------------------------------------------
