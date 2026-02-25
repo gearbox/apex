@@ -62,6 +62,19 @@ class BillingService:
         repo = BillingRepository(session)
         return await repo.get_balance(account_id)
 
+    async def assert_sufficient_balance(
+        self, account_id: UUID, token_cost: int, *, session: AsyncSession
+    ) -> None:
+        """Pre-flight balance check — must be called before any provider API call.
+
+        Raises InsufficientBalanceError if the current balance is below token_cost.
+        This is a non-locking read; the atomic debit is still performed afterwards
+        via check_and_reserve once the provider call succeeds.
+        """
+        balance = await self.get_balance(account_id, session=session)
+        if balance < token_cost:
+            raise InsufficientBalanceError(balance=balance, required=token_cost)
+
     async def check_and_reserve(
         self,
         account_id: UUID,

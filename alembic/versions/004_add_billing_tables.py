@@ -9,9 +9,9 @@ Create Date: 2026-02-23 12:00:00.000000
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 from src.core.constants import SYSTEM_USER_ID
 
 # revision identifiers, used by Alembic.
@@ -448,4 +448,3 @@ def downgrade() -> None:
 
     # Drop organizations
     op.drop_table("organizations")
-

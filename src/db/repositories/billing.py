@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from src.core.enums import AccountType, TransactionType
 from src.db.models.billing import (
@@ -54,7 +55,9 @@ class BillingRepository:
 
     async def get_account_by_organization(self, organization_id: UUID) -> TokenAccount | None:
         result = await self._session.execute(
-            select(TokenAccount).where(
+            select(TokenAccount)
+            .options(joinedload(TokenAccount.organization))
+            .where(
                 TokenAccount.organization_id == organization_id,
                 TokenAccount.account_type == AccountType.ENTERPRISE.value,
             )

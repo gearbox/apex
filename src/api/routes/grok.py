@@ -108,6 +108,7 @@ class GrokImageController(Controller):
         token_cost = await pricing_service.get_price(
             "grok", GenerationType.T2I.value, data.model.value, session=session
         )
+        await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
 
         job = None
         try:
@@ -233,6 +234,7 @@ class GrokImageController(Controller):
         token_cost = await pricing_service.get_price(
             "grok", GenerationType.I2I.value, data.model.value, session=session
         )
+        await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
 
         job = None
         try:
@@ -395,6 +397,7 @@ class GrokVideoController(Controller):
         token_cost = await pricing_service.get_price(
             "grok", GenerationType.T2V.value, data.model.value, session=session
         )
+        await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
 
         job = None
         try:
@@ -517,6 +520,7 @@ class GrokVideoController(Controller):
         token_cost = await pricing_service.get_price(
             "grok", GenerationType.I2V.value, data.model.value, session=session
         )
+        await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
 
         job = None
         try:
@@ -667,6 +671,7 @@ class GrokVideoController(Controller):
         token_cost = await pricing_service.get_price(
             "grok", GenerationType.V2V.value, data.model.value, session=session
         )
+        await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
 
         job = None
         try:
