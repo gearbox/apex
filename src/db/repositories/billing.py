@@ -37,6 +37,15 @@ class BillingRepository:
     async def get_account(self, account_id: UUID) -> TokenAccount | None:
         return await self._session.get(TokenAccount, account_id)
 
+    async def get_account_with_organization(self, account_id: UUID) -> TokenAccount | None:
+        """Get a TokenAccount with its organization eagerly loaded."""
+        result = await self._session.execute(
+            select(TokenAccount)
+            .where(TokenAccount.id == account_id)
+            .options(joinedload(TokenAccount.organization))
+        )
+        return result.scalar_one_or_none()
+
     async def get_account_for_update(self, account_id: UUID) -> TokenAccount | None:
         """Get account with FOR UPDATE lock for balance operations."""
         result = await self._session.execute(

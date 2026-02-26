@@ -8,6 +8,7 @@ from uuid import UUID
 
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
+from litestar.exceptions import NotFoundException
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,7 +60,7 @@ class AdminController(Controller):
         """Get balance for any account."""
         logger.info("Admin %s viewing balance for account %s", admin_user.id, account_id)
         repo = BillingRepository(session)
-        account = await repo.get_account(account_id)
+        account = await repo.get_account_with_organization(account_id)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found")
 
@@ -295,8 +296,6 @@ class AdminController(Controller):
         repo = BillingRepository(session)
         payment = await repo.get_payment(payment_id)
         if payment is None:
-            from litestar.exceptions import NotFoundException
-
             raise NotFoundException(detail=f"Payment {payment_id} not found")
         return PaymentResponse(
             id=payment.id,
@@ -329,6 +328,31 @@ class AdminController(Controller):
         org_name: str | None = None
         if account.account_type == "enterprise" and account.organization is not None:
             org_name = account.organization.name
+
+        return BalanceResponse(
+            account_id=account.id,
+            account_type=account.account_type,
+            balance=balance,
+            organization_name=org_name,
+        )
+
+    @get("/organizations/{org_id:uuid}/account")
+    async def get_org_account(
+        self,
+        admin_user: User,
+        org_id: UUID,
+        session: AsyncSession,
+        billing_service: BillingService,
+    ) -> BalanceResponse:
+        """Get the enterprise token account and balance for an organization."""
+        logger.info("Admin %s viewing account for org %s", admin_user.id, org_id)
+        repo = BillingRepository(session)
+        account = await repo.get_account_by_organization(org_id)
+        if account is None:
+            raise NotFoundException(detail=f"No token account found for organization {org_id}")
+
+        balance = await billing_service.get_balance(account.id, session=session)
+        org_name = account.organization.name if account.organization is not None else None
 
         return BalanceResponse(
             account_id=account.id,
