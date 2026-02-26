@@ -149,6 +149,30 @@ POST /api/v1/images/upload
 Content-Type: multipart/form-data
 ```
 
+### Get Token Balance
+```
+GET /api/v1/billing/balance
+Authorization: Bearer <token>
+```
+
+### Get / Set Billing Account Preference
+```
+GET  /api/v1/billing/account
+POST /api/v1/billing/account
+Authorization: Bearer <token>
+```
+
+`POST` body:
+```json
+{ "account": "personal" }
+```
+or
+```json
+{ "account": "enterprise" }
+```
+
+By default the system charges the enterprise (org) account when the user has an active org membership, and falls back to personal otherwise. This endpoint lets users pin the preference permanently. Enterprise requires active org membership (HTTP 403 if not a member). Invalid values return HTTP 400.
+
 ## Parameters Reference
 
 | Parameter | Type | Default | Description |

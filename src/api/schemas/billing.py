@@ -7,6 +7,8 @@ from uuid import UUID
 
 import msgspec
 
+from src.core.enums import AccountType
+
 # --- Response structs ---
 
 
@@ -106,6 +108,22 @@ class NowPaymentsInvoiceResponse(msgspec.Struct, kw_only=True):
 
     invoice_url: str
     payment_id: UUID
+
+
+# --- Account preference structs ---
+
+
+class SetBillingAccountRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Request to set the preferred billing account."""
+
+    account: AccountType
+
+
+class BillingAccountResponse(msgspec.Struct, kw_only=True):
+    """Response for billing account preference queries."""
+
+    preferred_account: str | None
+    message: str
 
 
 # --- Request structs ---

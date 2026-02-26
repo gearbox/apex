@@ -8,14 +8,17 @@ from uuid import UUID
 
 from litestar import Controller, Request, Response, get, post
 from litestar.di import Provide
+from litestar.exceptions import PermissionDeniedException
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.billing import (
     BalanceResponse,
+    BillingAccountResponse,
     NowPaymentsInvoiceResponse,
     PricingRuleResponse,
+    SetBillingAccountRequest,
     StripeCheckoutResponse,
     TokenPackageResponse,
     TopUpNowPaymentsRequest,
@@ -25,6 +28,7 @@ from src.api.schemas.billing import (
 )
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
+from src.api.services.billing_errors import OrganizationPermissionError
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
 from src.core.config import TOKEN_PACKAGES
@@ -142,6 +146,49 @@ class BillingController(Controller):
             )
             for p in TOKEN_PACKAGES.values()
         ]
+
+    @get("/account")
+    async def get_billing_account(
+        self,
+        current_user_id: UUID,
+        session: AsyncSession,
+        billing_service: BillingService,
+    ) -> BillingAccountResponse:
+        """Get the current billing account preference."""
+        preference = await billing_service.get_billing_account_preference(
+            current_user_id, session=session
+        )
+        return BillingAccountResponse(
+            preferred_account=preference,
+            message="Current billing account preference",
+        )
+
+    @post("/account")
+    async def set_billing_account(
+        self,
+        current_user_id: UUID,
+        data: SetBillingAccountRequest,
+        session: AsyncSession,
+        billing_service: BillingService,
+    ) -> BillingAccountResponse:
+        """Set the preferred billing account (personal or enterprise).
+
+        Persists the choice permanently until changed.
+        Raises HTTP 400 if account type is invalid.
+        Raises HTTP 403 if enterprise selected but user has no org membership.
+        """
+        try:
+            await billing_service.set_billing_account_preference(
+                current_user_id, data.account, session=session
+            )
+        except OrganizationPermissionError as exc:
+            raise PermissionDeniedException(detail=str(exc)) from exc
+
+        await session.commit()
+        return BillingAccountResponse(
+            preferred_account=data.account.value,
+            message=f"Billing account preference set to '{data.account.value}'",
+        )
 
     @post("/topup/stripe")
     async def topup_stripe(

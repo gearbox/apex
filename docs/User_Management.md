@@ -92,6 +92,7 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     display_name VARCHAR(100),
     subscription_tier VARCHAR(20) DEFAULT 'free',
+    preferred_billing_account VARCHAR(20),  -- NULL = system default; values enforced by AccountType enum in app layer
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP

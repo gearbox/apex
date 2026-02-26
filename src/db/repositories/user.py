@@ -346,6 +346,34 @@ class UserRepository:
     # User statistics
     # -------------------------------------------------------------------------
 
+    async def set_preferred_billing_account(
+        self,
+        user_id: UUID,
+        account_type: str | None,
+    ) -> User | None:
+        """Set or clear the preferred billing account for a user.
+
+        Returns the updated User, or None if not found.
+        """
+        result = await self._session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(preferred_billing_account=account_type, updated_at=datetime.now(UTC))
+            .returning(User)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_preferred_billing_account(self, user_id: UUID) -> str | None:
+        """Fetch only the preferred_billing_account field for a user.
+
+        Returns the preference string, or None if not set or user not found.
+        """
+        result = await self._session.execute(
+            select(User.preferred_billing_account).where(User.id == user_id)
+        )
+        row = result.one_or_none()
+        return None if row is None else row[0]
+
     async def get_user_job_count(self, user_id: UUID) -> dict[str, int]:
         """Get job counts by status for a user.
 

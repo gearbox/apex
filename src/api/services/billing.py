@@ -10,10 +10,12 @@ from src.api.services.billing_errors import (
     AccountInactiveError,
     AccountNotFoundError,
     InsufficientBalanceError,
+    OrganizationPermissionError,
     RefundNotEligibleError,
 )
-from src.core.enums import TransactionType
+from src.core.enums import AccountType, TransactionType
 from src.db.repositories.billing import BillingRepository
+from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -41,12 +43,40 @@ class BillingService:
     async def resolve_account_for_user(
         self, user_id: UUID, *, session: AsyncSession
     ) -> TokenAccount:
-        """Returns org TokenAccount if user has membership, else personal.
+        """Returns the appropriate TokenAccount for the user.
+
+        If the user has a stored preference, honours it strictly (no silent fallback).
+        If no preference is set, defaults to enterprise account when org member,
+        else personal account.
 
         Raises:
             AccountNotFoundError: If no account found.
         """
+        user_repo = UserRepository(session)
+        preference = await user_repo.get_preferred_billing_account(user_id)
+
         repo = BillingRepository(session)
+
+        if preference == AccountType.PERSONAL.value:
+            account = await repo.get_account_by_user(user_id)
+            if account is None:
+                raise AccountNotFoundError(f"No personal token account found for user {user_id}")
+            return account
+
+        if preference == AccountType.ENTERPRISE.value:
+            membership = await repo.get_active_membership(user_id)
+            if membership is None:
+                raise AccountNotFoundError(
+                    f"No active org membership found for user {user_id} (stale preference)"
+                )
+            account = await repo.get_account_by_organization(membership.organization_id)
+            if account is None:
+                raise AccountNotFoundError(
+                    f"No enterprise token account found for org {membership.organization_id}"
+                )
+            return account
+
+        # No preference — default: enterprise if member, else personal
         membership = await repo.get_active_membership(user_id)
         if membership:
             account = await repo.get_account_by_organization(membership.organization_id)
@@ -56,6 +86,58 @@ class BillingService:
         if account is None:
             raise AccountNotFoundError(f"No token account found for user {user_id}")
         return account
+
+    async def set_billing_account_preference(
+        self,
+        user_id: UUID,
+        account_type: AccountType,
+        *,
+        session: AsyncSession,
+    ) -> None:
+        """Persist the user's preferred billing account.
+
+        Validates that:
+        - For AccountType.ENTERPRISE: user must have an active org membership,
+          else raise OrganizationPermissionError.
+        - For AccountType.PERSONAL: always valid.
+
+        Raises:
+            OrganizationPermissionError: If enterprise chosen but no membership.
+            AccountNotFoundError: If user not found.
+        """
+        if account_type == AccountType.ENTERPRISE:
+            repo = BillingRepository(session)
+            membership = await repo.get_active_membership(user_id)
+            if membership is None:
+                raise OrganizationPermissionError(
+                    "Cannot set enterprise billing preference: user has no active org membership"
+                )
+
+        user_repo = UserRepository(session)
+        user = await user_repo.set_preferred_billing_account(user_id, account_type.value)
+        if user is None:
+            raise AccountNotFoundError(f"User {user_id} not found")
+
+        logger.info(
+            "billing_account_preference_set user_id=%s account_type=%s",
+            user_id,
+            account_type.value,
+            extra={
+                "event": "billing_account_preference_set",
+                "user_id": str(user_id),
+                "account_type": account_type.value,
+            },
+        )
+
+    async def get_billing_account_preference(
+        self,
+        user_id: UUID,
+        *,
+        session: AsyncSession,
+    ) -> str | None:
+        """Return the user's stored billing account preference, or None if unset."""
+        user_repo = UserRepository(session)
+        return await user_repo.get_preferred_billing_account(user_id)
 
     async def get_balance(self, account_id: UUID, *, session: AsyncSession) -> int:
         """Authoritative: SELECT COALESCE(SUM(amount), 0) FROM token_transactions."""
