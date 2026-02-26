@@ -8,9 +8,10 @@ import unicodedata
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from src.api.services.billing_errors import OrganizationPermissionError
-from src.core.enums import OrgRole
+from src.api.services.billing_errors import OrganizationBalanceError, OrganizationPermissionError
+from src.core.enums import OrgRole, TransactionType, UserRole
 from src.db.repositories.billing import BillingRepository
+from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -221,6 +222,76 @@ class OrganizationService:
     ) -> OrganizationMember | None:
         repo = BillingRepository(session)
         return await repo.get_membership(org_id, user_id)
+
+    async def delete_organization(
+        self,
+        org_id: UUID,
+        actor_id: UUID,
+        *,
+        force_delete: bool = False,
+        session: AsyncSession,
+    ) -> None:
+        """Soft-delete an organization. Only owner or system admin may do this.
+
+        If the organization's token account has a positive balance and
+        force_delete is False, raises OrganizationBalanceError. When
+        force_delete is True a negative ADMIN_ADJUSTMENT transaction is
+        created to zero out the balance before the soft-delete.
+
+        Args:
+            org_id: Organization to delete.
+            actor_id: User performing the action.
+            force_delete: When True, zeroes the balance and proceeds.
+            session: Database session.
+
+        Raises:
+            OrganizationPermissionError: If actor is not the owner or a system admin.
+            OrganizationBalanceError: If balance > 0 and force_delete is False.
+        """
+        repo = BillingRepository(session)
+        user_repo = UserRepository(session)
+
+        # System admin bypasses the membership/owner requirement
+        actor = await user_repo.get_active_user(actor_id)
+        is_admin = actor is not None and actor.role == UserRole.ADMIN
+
+        if not is_admin:
+            membership = await repo.get_membership(org_id, actor_id)
+            if membership is None or membership.role != OrgRole.OWNER.value:
+                raise OrganizationPermissionError(
+                    "Only the organization owner or system admin can delete the organization"
+                )
+
+        # Check balance on the enterprise token account
+        account = await repo.get_account_by_organization(org_id)
+        if account is not None:
+            balance = await repo.get_balance(account.id)
+            if balance > 0:
+                if not force_delete:
+                    raise OrganizationBalanceError(balance)
+                # Zero out the balance with an adjustment transaction
+                await repo.create_transaction(
+                    id=uuid4(),
+                    account_id=account.id,
+                    transaction_type=TransactionType.ADMIN_ADJUSTMENT.value,
+                    amount=-balance,
+                    balance_after=0,
+                    description="Organization is force deleted by owner",
+                    created_by=actor_id,
+                )
+
+        # Soft-delete the organization
+        org = await repo.get_organization(org_id)
+        if org is not None:
+            org.is_active = False
+            await session.flush()
+
+        logger.info(
+            "organization_deleted org_id=%s actor_id=%s force_delete=%s",
+            org_id,
+            actor_id,
+            force_delete,
+        )
 
     async def _require_admin_or_owner(
         self,

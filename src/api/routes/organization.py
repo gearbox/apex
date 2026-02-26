@@ -224,6 +224,36 @@ class OrganizationController(Controller):
             status_code=HTTP_201_CREATED,
         )
 
+    @delete("/{org_id:uuid}", status_code=HTTP_200_OK)
+    async def delete_organization(
+        self,
+        current_user_id: UUID,
+        org_id: UUID,
+        session: AsyncSession,
+        organization_service: OrganizationService,
+        force_delete: bool = False,
+    ) -> dict:
+        """Delete an organization (soft-delete). Only the owner or a system admin may call this.
+
+        Returns 409 if the org has a positive token balance. Pass
+        ``force_delete=true`` to zero out the balance and proceed.
+        """
+        org = await organization_service.get_organization(org_id, session=session)
+        if org is None:
+            return Response(  # type: ignore[return-value]
+                content={"detail": "Organization not found"},
+                status_code=HTTP_404_NOT_FOUND,
+            )
+
+        await organization_service.delete_organization(
+            org_id,
+            current_user_id,
+            force_delete=force_delete,
+            session=session,
+        )
+        await session.commit()
+        return {"message": "Organization deleted"}
+
     @delete("/{org_id:uuid}/members/{user_id:uuid}", status_code=HTTP_200_OK)
     async def remove_member(
         self,

@@ -45,3 +45,14 @@ class PaymentVerificationError(Exception):
 
 class OrganizationPermissionError(Exception):
     """Insufficient org role for this action. → HTTP 403"""
+
+
+class OrganizationBalanceError(BillingError):
+    """Organization has a non-zero balance and cannot be deleted. → HTTP 409"""
+
+    def __init__(self, balance: int) -> None:
+        self.balance = balance
+        super().__init__(
+            f"Organization balance is not 0 (current: {balance}). "
+            "Use force_delete=true to override."
+        )

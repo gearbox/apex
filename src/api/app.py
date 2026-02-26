@@ -44,6 +44,7 @@ from src.api.services.billing_errors import (
     AccountNotFoundError,
     InsufficientBalanceError,
     ModerationError,
+    OrganizationBalanceError,
     OrganizationPermissionError,
     PaymentVerificationError,
     PriceNotFoundError,
@@ -103,6 +104,13 @@ def payment_verification_handler(request: Request, exc: PaymentVerificationError
 
 def organization_permission_handler(request: Request, exc: OrganizationPermissionError) -> Response:
     return _billing_error_response(request, exc, HTTP_403_FORBIDDEN)
+
+
+def organization_balance_handler(request: Request, exc: OrganizationBalanceError) -> Response:  # noqa: ARG001
+    return Response(
+        content={"detail": str(exc), "balance": exc.balance},
+        status_code=HTTP_409_CONFLICT,
+    )
 
 
 @asynccontextmanager
@@ -253,6 +261,7 @@ def create_app() -> Litestar:
             ModerationError: moderation_error_handler,
             PaymentVerificationError: payment_verification_handler,
             OrganizationPermissionError: organization_permission_handler,
+            OrganizationBalanceError: organization_balance_handler,
         },
         dependencies=dependencies,
         lifespan=[lifespan],
