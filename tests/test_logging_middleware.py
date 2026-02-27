@@ -39,7 +39,7 @@ async def _noop_receive() -> Any:
     return {}
 
 
-async def _noop_send(message: Any) -> None:
+async def _noop_send(message: Any) -> None:  # noqa: ARG001
     pass
 
 

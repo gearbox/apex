@@ -8,6 +8,7 @@ import structlog
 from litestar import Litestar, Request, Response
 from litestar.config.cors import CORSConfig
 from litestar.datastructures import UploadFile
+from litestar.middleware import DefineMiddleware
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
 from litestar.status_codes import (
@@ -21,6 +22,7 @@ from litestar.status_codes import (
 
 from src.api.dependencies.common import dependencies, init_services, shutdown_services
 from src.api.middleware.logging import RequestLoggingMiddleware
+from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_config
 from src.api.routes.admin import AdminController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
@@ -234,7 +236,13 @@ def create_app() -> Litestar:
         },
         dependencies=dependencies,
         lifespan=[lifespan],
-        middleware=[RequestLoggingMiddleware],
+        middleware=[
+            RequestLoggingMiddleware,
+            DefineMiddleware(
+                RateLimitMiddleware,
+                config=build_rate_limit_config(settings),
+            ),
+        ],
         cors_config=cors_config,
         openapi_config=openapi_config,
         debug=settings.debug,

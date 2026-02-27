@@ -109,6 +109,25 @@ class AuthTokenRepository:
         await self._session.flush()
         return token.user_id
 
+    async def cleanup_expired_email_verification_tokens(self) -> int:
+        """Delete expired/used email verification tokens. Returns count deleted."""
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            select(EmailVerificationToken)
+            .where(
+                (EmailVerificationToken.expires_at < now)
+                | (EmailVerificationToken.used_at.is_not(None))
+            )
+        )
+        tokens_to_delete = result.scalars().all()
+        count = len(tokens_to_delete)
+
+        for token in tokens_to_delete:
+            await self._session.delete(token)
+
+        await self._session.flush()
+        return count
+
     # -------------------------------------------------------------------------
     # Password reset
     # -------------------------------------------------------------------------
@@ -174,3 +193,23 @@ class AuthTokenRepository:
         token.used_at = now
         await self._session.flush()
         return token.user_id
+
+    async def cleanup_expired_password_reset_tokens(self) -> int:
+        """Delete expired/used password reset tokens. Returns count deleted."""
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            select(PasswordResetToken)
+            .where(
+                (PasswordResetToken.expires_at < now)
+                | (PasswordResetToken.used_at.is_not(None))
+            )
+        )
+        tokens_to_delete = result.scalars().all()
+        count = len(tokens_to_delete)
+
+        for token in tokens_to_delete:
+            await self._session.delete(token)
+
+        await self._session.flush()
+        return count
+

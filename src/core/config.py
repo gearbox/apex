@@ -114,6 +114,14 @@ class Settings(BaseSettings):
         description="Log output format: 'json' for production, 'console' for development",
     )
 
+    # Worker Settings
+    token_cleanup_interval_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Seconds between expired token cleanup runs.",
+    )
+
     # App URL (used for building verification / reset links)
     app_url: str = Field(
         default="http://localhost:3000",
@@ -130,6 +138,31 @@ class Settings(BaseSettings):
     default_cfg: float = Field(default=1.1, description="Default CFG scale")
     default_sampler: str = Field(default="euler", description="Default sampler")
     default_scheduler: str = Field(default="beta", description="Default scheduler")
+
+    # Rate Limiting
+    redis_url: str | None = Field(
+        default=None,
+        description=(
+            "Redis URL for rate limiting, e.g. redis://localhost:6379/0. "
+            "When None, falls back to in-memory storage (single-process only)."
+        ),
+    )
+    rate_limit_register: str = Field(
+        default="5/hour",
+        description="Register endpoint rate limit.",
+    )
+    rate_limit_login: str = Field(
+        default="10/minute",
+        description="Login endpoint rate limit.",
+    )
+    rate_limit_forgot_password: str = Field(
+        default="3/hour",
+        description="Forgot-password endpoint rate limit.",
+    )
+    rate_limit_resend_verification: str = Field(
+        default="3/hour",
+        description="Resend-verification endpoint rate limit.",
+    )
 
     # Database settings
     database_url: str = Field(

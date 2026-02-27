@@ -67,7 +67,7 @@ class ComfyUIModerationDetector:
 
     def classify(
         self,
-        provider_response: dict | None,
+        provider_response: dict | None,  # noqa: ARG002
         exception: Exception | None,
     ) -> ModerationResult:
         if exception is not None:

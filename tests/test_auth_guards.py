@@ -17,7 +17,6 @@ from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_201_CREATED,
     HTTP_401_UNAUTHORIZED,
-    HTTP_503_SERVICE_UNAVAILABLE,
 )
 from litestar.testing import TestClient
 

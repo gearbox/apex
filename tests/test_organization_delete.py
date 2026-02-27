@@ -144,13 +144,13 @@ def _create_org_app(
     """Build a minimal Litestar app wrapping OrganizationController for route testing."""
 
     def _org_permission_handler(
-        request: object,
+        request: object,  # noqa: ARG001
         exc: OrganizationPermissionError,  # noqa: ARG001
     ) -> Response:
-        return Response(content={"detail": str(exc)}, status_code=HTTP_403_FORBIDDEN)
+        return Response(content={"detail": "Forbidden"}, status_code=403)
 
     def _org_balance_handler(
-        request: object,
+        request: object,  # noqa: ARG001
         exc: OrganizationBalanceError,  # noqa: ARG001
     ) -> Response:
         return Response(

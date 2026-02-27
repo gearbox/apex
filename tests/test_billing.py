@@ -18,7 +18,6 @@ from src.api.services.billing_errors import (
 from src.api.services.moderation import (
     ComfyUIModerationDetector,
     GrokModerationDetector,
-    ModerationResult,
 )
 from src.api.services.pricing import PricingService
 from src.core.enums import TransactionType
@@ -316,8 +315,7 @@ class TestAdminAdjust:
             repo.get_account_for_update = AsyncMock(return_value=account)
             repo.get_balance = AsyncMock(return_value=50)
             repo.create_transaction = AsyncMock(return_value=txn)
-
-            result = await billing_service.admin_adjust(
+            await billing_service.admin_adjust(
                 account_id,
                 100,
                 admin_id,

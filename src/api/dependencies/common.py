@@ -10,6 +10,7 @@ import structlog
 from litestar.di import Provide
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.middleware.rate_limit import init_rate_limiter
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
@@ -30,6 +31,7 @@ from src.api.services.workflow_service import WorkflowService
 from src.core.config import Settings, get_settings
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
+from src.workers.token_cleanup import TokenCleanupWorker
 
 logger = structlog.get_logger(__name__)
 
@@ -57,6 +59,7 @@ class ServiceContainer:
     email_service: EmailService | None = None
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
+    token_cleanup_worker: TokenCleanupWorker | None = None
 
 
 _services = ServiceContainer()
@@ -343,6 +346,9 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     )
     logger.info("db.pool_initialized")
 
+    # Initialize rate limiter
+    init_rate_limiter(settings)
+
     # Initialize ComfyUI client
     _services.comfyui_client = ComfyUIClient(settings)
     await _services.comfyui_client.connect()
@@ -421,6 +427,13 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     )
     logger.info("unified_job_service.initialized")
 
+    # Initialize and start token cleanup worker
+    _services.token_cleanup_worker = TokenCleanupWorker(
+        db_manager=_services.db_manager,
+        interval=settings.token_cleanup_interval_seconds,
+    )
+    await _services.token_cleanup_worker.start()
+
     return _services.jwt_service  # Return for storing in app.state
 
 
@@ -446,6 +459,9 @@ async def shutdown_services() -> None:
     if _services.grok_job_service is not None:
         await _services.grok_job_service.close()
         logger.info("grok.closed")
+
+    if _services.token_cleanup_worker is not None:
+        await _services.token_cleanup_worker.stop()
 
     # Reset container to clean state
     _services = ServiceContainer()

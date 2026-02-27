@@ -118,6 +118,20 @@ Obtain credentials from **Cloudflare Dashboard → R2 → Manage R2 API Tokens**
 
 ---
 
+### Rate Limiting
+
+Controls rate limits for authentication endpoints using Redis sliding-window counters (or fallback to memory).
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `REDIS_URL` | `None` | `str \| None` | Redis URL (e.g., `redis://localhost:6379/0`). If missing, falls back to single-process in-memory limits. |
+| `RATE_LIMIT_REGISTER` | `5/hour` | `str` | Limit on register endpoint per IP. |
+| `RATE_LIMIT_LOGIN` | `10/minute` | `str` | Limit on login endpoint per IP. |
+| `RATE_LIMIT_FORGOT_PASSWORD` | `3/hour` | `str` | Limit on forgot-password endpoint per IP. |
+| `RATE_LIMIT_RESEND_VERIFICATION` | `3/hour` | `str` | Limit on resend-verification endpoint per IP. |
+
+---
+
 ### xAI Grok API
 
 Used for AI image and video generation via the xAI SDK (gRPC). When `XAI_API_KEY` is empty

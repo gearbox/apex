@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.5.1"
+version = "0.6.2"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -32,6 +32,9 @@ dependencies = [
     "stripe>=14.3.0",
     "resend>=2.23.0",
     "ffmpeg-python>=0.2.0",
+    "limits>=5.8.0",
+    "pytest-asyncio>=0.23",
+    "aiosqlite>=0.22.1",
 ]
 
 [project.optional-dependencies]
