@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import httpx
 import structlog
 
+from src.api.services.billing import BillingService
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
@@ -125,16 +126,20 @@ class GrokJobService:
         negative_prompt: str | None = None,
         input_image_url: str | None = None,
         input_image_id: UUID | None = None,
+        billing_service: BillingService,
+        account_id: UUID,
+        token_cost: int,
     ) -> GenerationJob | None:
         """Create and execute an image generation job.
 
-        This method:
+        This method follows the Saga pattern:
         1. Creates job record in database
-        2. Calls Grok API for generation
-        3. Downloads generated images
-        4. Stores images in R2
-        5. Creates output records in database
-        6. Updates job status
+        2. Deducts tokens pre-flight
+        3. Calls Grok API for generation
+        4. Downloads generated images
+        5. Stores images in R2
+        6. Creates output records in database
+        7. Updates job status (or refunds tokens on error)
 
         Args:
             session: Database session.
@@ -148,6 +153,9 @@ class GrokJobService:
             negative_prompt: Negative prompt (stored but not used by Grok).
             input_image_url: Source image URL for I2I.
             input_image_id: Database ID of input image.
+            billing_service: Service to handle token deductions.
+            account_id: Pre-resolved token account ID for the user.
+            token_cost: Pre-calculated token cost for this generation.
 
         Returns:
             Created and processed GenerationJob.
@@ -186,6 +194,23 @@ class GrokJobService:
                 JobStatus.RUNNING.value,
                 started_at=datetime.now(UTC),
             )
+
+            # --- SAGA: Pre-flight token deduction ---
+            txn = await billing_service.check_and_reserve(
+                account_id,
+                token_cost,
+                job_id,
+                metadata={
+                    "provider": "grok",
+                    "generation_type": generation_type.value,
+                    "model": model.value,
+                },
+                session=session,
+            )
+            if job is not None:
+                job.token_cost = token_cost
+                job.debit_transaction_id = txn.id
+            await session.flush()
 
             # Call Grok API
             if generation_type == GenerationType.I2I and input_image_url:
@@ -244,6 +269,18 @@ class GrokJobService:
             if job is not None:
                 job.error_message = str(e)
                 await session.flush()
+
+            # --- SAGA: Compensation on API Error ---
+            try:
+                await billing_service.refund(
+                    job_id,
+                    description=f"Provider error refund: {getattr(e, 'message', str(e))}",
+                    session=session,
+                )
+                await session.flush()
+            except Exception as refund_error:
+                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+
             raise GrokJobError(f"Image generation failed: {e}") from e
 
         except Exception as e:
@@ -256,6 +293,18 @@ class GrokJobService:
             if job is not None:
                 job.error_message = str(e)
                 await session.flush()
+
+            # --- SAGA: Compensation on Unexpected Error ---
+            try:
+                await billing_service.refund(
+                    job_id,
+                    description=f"Unexpected error refund: {str(e)}",
+                    session=session,
+                )
+                await session.flush()
+            except Exception as refund_error:
+                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+
             raise GrokJobError(f"Unexpected error: {e}") from e
 
     async def _store_image_result(
@@ -343,10 +392,14 @@ class GrokJobService:
         name: str | None = None,
         input_image_url: str | None = None,
         input_video_url: str | None = None,
+        billing_service: BillingService,
+        account_id: UUID,
+        token_cost: int,
     ) -> GenerationJob | None:
         """Start an async video generation job.
 
         Creates the job and initiates generation with Grok API.
+        This method follows the Saga pattern for token billing.
         The actual video result must be polled using poll_video_job().
 
         Args:
@@ -362,6 +415,9 @@ class GrokJobService:
             input_image_url: Source image URL for I2V.
             input_image_id: Database ID of input image.
             input_video_url: Source video URL for editing.
+            billing_service: Service to handle token deductions.
+            account_id: Pre-resolved token account ID for the user.
+            token_cost: Pre-calculated token cost for this generation.
 
         Returns:
             Created GenerationJob with status QUEUED.
@@ -386,6 +442,23 @@ class GrokJobService:
         )
 
         try:
+            # --- SAGA: Pre-flight token deduction ---
+            txn = await billing_service.check_and_reserve(
+                account_id,
+                token_cost,
+                job_id,
+                metadata={
+                    "provider": "grok",
+                    "generation_type": generation_type.value,
+                    "model": model.value,
+                },
+                session=session,
+            )
+            if job is not None:
+                job.token_cost = token_cost
+                job.debit_transaction_id = txn.id
+            await session.flush()
+
             # Start async video generation
             started: GrokVideoJobStarted = await self._grok.start_video_generation(
                 prompt=prompt,
@@ -418,7 +491,43 @@ class GrokJobService:
             if job is not None:
                 job.error_message = str(e)
                 await session.flush()
+
+            # --- SAGA: Compensation on API Error ---
+            try:
+                await billing_service.refund(
+                    job_id,
+                    description=f"Provider error refund: {getattr(e, 'message', str(e))}",
+                    session=session,
+                )
+                await session.flush()
+            except Exception as refund_error:
+                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+
             raise GrokJobError(f"Failed to start video generation: {e}") from e
+
+        except Exception as e:
+            logger.exception("grok.unexpected_error", job_id=str(job_id))
+            job = await repo.update_job_status(
+                job_id,
+                JobStatus.FAILED.value,
+                completed_at=datetime.now(UTC),
+            )
+            if job is not None:
+                job.error_message = str(e)
+                await session.flush()
+
+            # --- SAGA: Compensation on Unexpected Error ---
+            try:
+                await billing_service.refund(
+                    job_id,
+                    description=f"Unexpected error refund: {str(e)}",
+                    session=session,
+                )
+                await session.flush()
+            except Exception as refund_error:
+                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+
+            raise GrokJobError(f"Unexpected error: {e}") from e
 
     async def poll_video_job(
         self,

@@ -209,11 +209,11 @@ def create_app() -> Litestar:
             OrganizationController,
             # Admin
             AdminController,
-            # Generation (TODO: add auth_guard later)
+            # Generation
             GenerationController,
             JobController,
             ImageController,
-            # Storage (TODO: add auth_guard later)
+            # Storage
             StorageController,
             # Grok generation
             GrokProviderController,

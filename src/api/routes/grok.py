@@ -121,6 +121,9 @@ class GrokImageController(Controller):
                 n=data.n,
                 aspect_ratio=data.aspect_ratio,
                 name=data.name,
+                billing_service=billing_service,
+                account_id=account.id,
+                token_cost=token_cost,
             )
 
             if job is None:
@@ -137,21 +140,7 @@ class GrokImageController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
-            # Reserve tokens after job creation
-            txn = await billing_service.check_and_reserve(
-                account.id,
-                token_cost,
-                job.id,
-                metadata={
-                    "provider": "grok",
-                    "generation_type": GenerationType.T2I.value,
-                    "model": data.model.value,
-                },
-                session=session,
-            )
-            job.token_cost = token_cost
-            job.debit_transaction_id = txn.id
-
+            # Tokens are now reserved inside create_image_job safely before the API call
             await session.commit()
 
             balance = await billing_service.get_balance(account.id, session=session)
@@ -175,17 +164,7 @@ class GrokImageController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.image_generation_failed", error=str(e))
-            # Refund on provider error
-            if job is not None:
-                try:
-                    await billing_service.refund(
-                        job.id,
-                        description=f"Provider error refund: {e}",
-                        session=session,
-                    )
-                    await session.commit()
-                except Exception:
-                    logger.exception("grok.refund_failed", job_id=str(job.id))
+            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -275,6 +254,9 @@ class GrokImageController(Controller):
                 name=data.name,
                 input_image_url=input_image_url,
                 input_image_id=data.input_image_id,
+                billing_service=billing_service,
+                account_id=account.id,
+                token_cost=token_cost,
             )
 
             if job is None:
@@ -291,21 +273,7 @@ class GrokImageController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
-            # Reserve tokens
-            txn = await billing_service.check_and_reserve(
-                account.id,
-                token_cost,
-                job.id,
-                metadata={
-                    "provider": "grok",
-                    "generation_type": GenerationType.I2I.value,
-                    "model": data.model.value,
-                },
-                session=session,
-            )
-            job.token_cost = token_cost
-            job.debit_transaction_id = txn.id
-
+            # Tokens are now reserved inside create_image_job safely before the API call
             await session.commit()
             balance = await billing_service.get_balance(account.id, session=session)
 
@@ -328,16 +296,7 @@ class GrokImageController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.image_editing_failed", error=str(e))
-            if job is not None:
-                try:
-                    await billing_service.refund(
-                        job.id,
-                        description=f"Provider error refund: {e}",
-                        session=session,
-                    )
-                    await session.commit()
-                except Exception:
-                    logger.exception("grok.refund_failed", job_id=str(job.id))
+            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -411,6 +370,9 @@ class GrokVideoController(Controller):
                 aspect_ratio=data.aspect_ratio,
                 resolution=data.resolution,
                 name=data.name,
+                billing_service=billing_service,
+                account_id=account.id,
+                token_cost=token_cost,
             )
 
             if job is None:
@@ -427,21 +389,7 @@ class GrokVideoController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
-            # Reserve tokens
-            txn = await billing_service.check_and_reserve(
-                account.id,
-                token_cost,
-                job.id,
-                metadata={
-                    "provider": "grok",
-                    "generation_type": GenerationType.T2V.value,
-                    "model": data.model.value,
-                },
-                session=session,
-            )
-            job.token_cost = token_cost
-            job.debit_transaction_id = txn.id
-
+            # Tokens are now reserved inside start_video_job safely before the API call
             await session.commit()
             balance = await billing_service.get_balance(account.id, session=session)
 
@@ -462,16 +410,7 @@ class GrokVideoController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.video_generation_failed", error=str(e))
-            if job is not None:
-                try:
-                    await billing_service.refund(
-                        job.id,
-                        description=f"Provider error refund: {e}",
-                        session=session,
-                    )
-                    await session.commit()
-                except Exception:
-                    logger.exception("grok.refund_failed", job_id=str(job.id))
+            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -562,6 +501,9 @@ class GrokVideoController(Controller):
                 resolution=data.resolution,
                 name=data.name,
                 input_image_url=input_image_url,
+                billing_service=billing_service,
+                account_id=account.id,
+                token_cost=token_cost,
             )
 
             if job is None:
@@ -578,21 +520,7 @@ class GrokVideoController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
-            # Reserve tokens
-            txn = await billing_service.check_and_reserve(
-                account.id,
-                token_cost,
-                job.id,
-                metadata={
-                    "provider": "grok",
-                    "generation_type": GenerationType.I2V.value,
-                    "model": data.model.value,
-                },
-                session=session,
-            )
-            job.token_cost = token_cost
-            job.debit_transaction_id = txn.id
-
+            # Tokens are now reserved inside start_video_job safely before the API call
             await session.commit()
             balance = await billing_service.get_balance(account.id, session=session)
 
@@ -613,16 +541,7 @@ class GrokVideoController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.i2v_generation_failed", error=str(e))
-            if job is not None:
-                try:
-                    await billing_service.refund(
-                        job.id,
-                        description=f"Provider error refund: {e}",
-                        session=session,
-                    )
-                    await session.commit()
-                except Exception:
-                    logger.exception("grok.refund_failed", job_id=str(job.id))
+            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -683,6 +602,9 @@ class GrokVideoController(Controller):
                 generation_type=GenerationType.V2V,
                 name=data.name,
                 input_video_url=data.input_video_url,
+                billing_service=billing_service,
+                account_id=account.id,
+                token_cost=token_cost,
             )
 
             if job is None:
@@ -699,21 +621,7 @@ class GrokVideoController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 )
 
-            # Reserve tokens
-            txn = await billing_service.check_and_reserve(
-                account.id,
-                token_cost,
-                job.id,
-                metadata={
-                    "provider": "grok",
-                    "generation_type": GenerationType.V2V.value,
-                    "model": data.model.value,
-                },
-                session=session,
-            )
-            job.token_cost = token_cost
-            job.debit_transaction_id = txn.id
-
+            # Tokens are now reserved inside start_video_job safely before the API call
             await session.commit()
             balance = await billing_service.get_balance(account.id, session=session)
 
@@ -734,16 +642,7 @@ class GrokVideoController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.v2v_editing_failed", error=str(e))
-            if job is not None:
-                try:
-                    await billing_service.refund(
-                        job.id,
-                        description=f"Provider error refund: {e}",
-                        session=session,
-                    )
-                    await session.commit()
-                except Exception:
-                    logger.exception("grok.refund_failed", job_id=str(job.id))
+            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),

@@ -17,6 +17,7 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.generation import (
@@ -27,8 +28,10 @@ from src.api.schemas.generation import (
     JobStatusResponse,
 )
 from src.api.security import auth_guard
+from src.api.services.billing import BillingService
 from src.api.services.comfyui_client import ComfyUIClient, ComfyUIClientError
 from src.api.services.job_manager import JobManager
+from src.api.services.pricing import PricingService
 from src.api.services.workflow_service import WorkflowError, WorkflowService
 from src.core.enums import GenerationType, JobStatus
 
@@ -75,19 +78,54 @@ class GenerationController(Controller):
         self,
         current_user_id: UUID,  # will be used when persisting to DB
         data: GenerationRequest,
+        session: AsyncSession,
         comfyui_client: ComfyUIClient,
         job_manager: JobManager,
         workflow_service: WorkflowService,
+        billing_service: BillingService,
+        pricing_service: PricingService,
     ) -> Response[JobResponse]:
         """Submit a new image generation job.
 
         Creates a generation job and queues it with ComfyUI.
+        Follows the Saga pattern for token billing deduction.
         Returns immediately with job ID for status polling.
         """
-        # Create job entry
+        # --- SAGA: Pre-flight check ---
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        token_cost = await pricing_service.get_price(
+            "comfyui", GenerationType.T2I.value, data.model_type.value, session=session
+        )
+        await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
+
+        # Create job entry (in-memory job manager for now)
         job = job_manager.create_job(data)
 
+        # We need a proper UUID to persist for token reservation, but job_manager gives strings.
+        # Fall back to a UUID for DB purposes if job_manager doesn't generate one natively.
         try:
+            db_job_id = UUID(job.job_id)
+        except ValueError:
+            db_job_id = uuid4()
+            # If the job manager changes later, we should ideally use its real UUID.
+
+        txn = None
+        try:
+            # --- SAGA: Pre-flight deduction ---
+            txn = await billing_service.check_and_reserve(
+                account.id,
+                token_cost,
+                db_job_id,
+                metadata={
+                    "provider": "comfyui",
+                    "generation_type": data.generation_type.value,
+                    "model": data.model_type.value,
+                    "prompt": data.prompt[:100],
+                },
+                session=session,
+            )
+            await session.commit()
+
             # Load and configure workflow
             workflow = workflow_service.load_workflow(data.model_type)
             workflow_service.validate_workflow(workflow)
@@ -109,10 +147,27 @@ class GenerationController(Controller):
         except WorkflowError as e:
             logger.error("workflow.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
+            if txn:
+                await billing_service.refund(db_job_id, description=f"Workflow error: {e}", session=session)
+                await session.commit()
 
         except ComfyUIClientError as e:
             logger.error("comfyui.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
+            if txn:
+                await billing_service.refund(db_job_id, description=f"ComfyUI error: {e}", session=session)
+                await session.commit()
+
+        except Exception as e:
+            logger.exception("generation.unexpected_error", job_id=job.job_id)
+            job_manager.set_failed(job.job_id, str(e))
+            if txn:
+                try:
+                    await billing_service.refund(db_job_id, description=f"Unexpected generation error: {e}", session=session)
+                    await session.commit()
+                except Exception as refund_error:
+                    logger.exception("generation.refund_failed", job_id=job.job_id, error=str(refund_error))
+            raise
 
         return Response(
             content=JobResponse(
@@ -129,9 +184,12 @@ class GenerationController(Controller):
     async def create_generation_with_images(
         self,
         current_user_id: UUID,  # will be used when persisting to DB
+        session: AsyncSession,
         comfyui_client: ComfyUIClient,
         job_manager: JobManager,
         workflow_service: WorkflowService,
+        billing_service: BillingService,
+        pricing_service: PricingService,
         data: Annotated[
             GenerationRequest,
             Body(media_type=RequestEncodingType.MULTI_PART),
@@ -143,6 +201,7 @@ class GenerationController(Controller):
 
         Accepts up to 2 reference images for image-to-image generation.
         Images are uploaded to ComfyUI and referenced in the workflow.
+        Follows the Saga pattern for pre-flight token billing based on i2i.
 
         Note: If generation_type is 't2i', uploaded images will be ignored.
         For i2i generation, at least one image is required.
@@ -160,12 +219,40 @@ class GenerationController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
+        # --- SAGA: Pre-flight check ---
+        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
+        # Assuming we charge based on generation type requested (I2I vs T2I)
+        token_cost = await pricing_service.get_price(
+            "comfyui", data.generation_type.value, data.model_type.value, session=session
+        )
+        await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
+
         job = job_manager.create_job(data)
+        try:
+            db_job_id = UUID(job.job_id)
+        except ValueError:
+            db_job_id = uuid4()
 
         uploaded_image_1: str | None = None
         uploaded_image_2: str | None = None
 
+        txn = None
         try:
+            # --- SAGA: Pre-flight deduction ---
+            txn = await billing_service.check_and_reserve(
+                account.id,
+                token_cost,
+                db_job_id,
+                metadata={
+                    "provider": "comfyui",
+                    "generation_type": data.generation_type.value,
+                    "model": data.model_type.value,
+                    "prompt": data.prompt[:100],
+                },
+                session=session,
+            )
+            await session.commit()
+
             # Upload images if provided
             if image1 is not None:
                 image_data = await image1.read()
@@ -210,10 +297,27 @@ class GenerationController(Controller):
         except WorkflowError as e:
             logger.error("workflow.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
+            if txn:
+                await billing_service.refund(db_job_id, description=f"Workflow error: {e}", session=session)
+                await session.commit()
 
         except ComfyUIClientError as e:
             logger.error("comfyui.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
+            if txn:
+                await billing_service.refund(db_job_id, description=f"ComfyUI error: {e}", session=session)
+                await session.commit()
+
+        except Exception as e:
+            logger.exception("generation.unexpected_error", job_id=job.job_id)
+            job_manager.set_failed(job.job_id, str(e))
+            if txn:
+                try:
+                    await billing_service.refund(db_job_id, description=f"Unexpected generation error: {e}", session=session)
+                    await session.commit()
+                except Exception as refund_error:
+                    logger.exception("generation.refund_failed", job_id=job.job_id, error=str(refund_error))
+            raise
 
         return Response(
             content=JobResponse(
