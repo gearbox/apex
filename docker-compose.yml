@@ -89,6 +89,14 @@ services:
       DEFAULT_CFG: ${DEFAULT_CFG:-1.1}
       DEFAULT_SAMPLER: ${DEFAULT_SAMPLER:-euler}
       DEFAULT_SCHEDULER: ${DEFAULT_SCHEDULER:-beta}
+
+      # Email Settings (Resend)
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-noreply@apex.ai}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Apex}
+
+      # App frontend URL (used for building verification/reset links)
+      APP_URL: ${APP_URL:-http://localhost:3000}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:

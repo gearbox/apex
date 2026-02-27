@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000, description="API server port")
     debug: bool = Field(default=False, description="Enable debug mode")
 
+    # App URL (used for building verification / reset links)
+    app_url: str = Field(
+        default="http://localhost:3000",
+        description=(
+            "Base URL of the frontend application. "
+            "Used to build verification and password reset links. "
+            "Must be set to the real frontend URL in production."
+        ),
+    )
+
     # Generation defaults
     default_steps: int = Field(default=12, description="Default generation steps")
     max_steps: int = Field(default=20, description="Maximum generation steps")
@@ -187,6 +197,23 @@ class Settings(BaseSettings):
     jwt_issuer: str | None = Field(
         default="apex-api",
         description="JWT issuer claim",
+    )
+
+    # Email
+    resend_api_key: str = Field(
+        default="",
+        description=(
+            "Resend API key (re_...). "
+            "When empty, LogEmailService is used — emails are logged to stdout only."
+        ),
+    )
+    email_from_address: str = Field(
+        default="noreply@apex.ai",
+        description="Sender email address. Must be verified in your Resend dashboard.",
+    )
+    email_from_name: str = Field(
+        default="Apex",
+        description="Sender display name shown in email clients.",
     )
 
     # Billing & Payment settings
@@ -299,6 +326,11 @@ class Settings(BaseSettings):
     def nowpayments_configured(self) -> bool:
         """Check if NowPayments is configured."""
         return bool(self.nowpayments_api_key and self.nowpayments_ipn_secret)
+
+    @property
+    def email_configured(self) -> bool:
+        """Return True when a real email provider is configured."""
+        return bool(self.resend_api_key)
 
 
 @lru_cache

@@ -8,18 +8,11 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.billing import BillingService
-from src.api.services.billing_errors import AccountNotFoundError
+from src.db.repositories.billing import BillingRepository
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_admin_user() -> MagicMock:
-    user = MagicMock()
-    user.id = uuid4()
-    user.is_admin = True
-    return user
 
 
 def _make_account(
@@ -55,9 +48,7 @@ def mock_session() -> AsyncMock:
 
 
 class TestGetAccountBalance:
-    async def test_enterprise_account_returns_org_name(
-        self, billing_service: BillingService, mock_session: AsyncMock
-    ) -> None:
+    async def test_enterprise_account_returns_org_name(self, mock_session: AsyncMock) -> None:
         """Enterprise account with eager-loaded organization no longer raises 500."""
         account_id = uuid4()
         account = _make_account(account_id=account_id, account_type="enterprise", org_name="Acme")
@@ -83,9 +74,8 @@ class TestGetAccountBalance:
         assert balance == 500
         assert org_name == "Acme"
 
-    async def test_account_not_found_raises_error(
-        self, mock_session: AsyncMock
-    ) -> None:
+    async def test_account_not_found_repo_returns_none(self) -> None:
+        """get_account_with_organization returns None for an unknown account_id."""
         with patch("src.api.routes.admin.BillingRepository") as MockRepo:
             repo = MockRepo.return_value
             repo.get_account_with_organization = AsyncMock(return_value=None)
@@ -93,9 +83,7 @@ class TestGetAccountBalance:
             found = await repo.get_account_with_organization(uuid4())
             assert found is None
 
-    async def test_personal_account_no_org_name(
-        self, billing_service: BillingService, mock_session: AsyncMock
-    ) -> None:
+    async def test_personal_account_no_org_name(self) -> None:
         account_id = uuid4()
         account = _make_account(account_id=account_id, account_type="personal", org_name=None)
 
@@ -142,9 +130,7 @@ class TestGetOrgAccount:
         assert balance == 1234
         assert org_name == "Acme"
 
-    async def test_org_has_no_token_account_returns_none(
-        self, mock_session: AsyncMock
-    ) -> None:
+    async def test_org_has_no_token_account_returns_none(self) -> None:
         """Org with no enterprise account causes handler to raise NotFoundException."""
         org_id = uuid4()
 
@@ -157,8 +143,6 @@ class TestGetOrgAccount:
 
     async def test_repo_uses_eager_loading(self, mock_session: AsyncMock) -> None:
         """get_account_by_organization must eagerly load the organization relationship."""
-        from src.db.repositories.billing import BillingRepository
-
         org_id = uuid4()
         account = _make_account(account_type="enterprise", org_name="EagerCorp")
 
@@ -182,8 +166,6 @@ class TestGetOrgAccount:
 
 class TestGetAccountWithOrganization:
     async def test_returns_account_with_org(self, mock_session: AsyncMock) -> None:
-        from src.db.repositories.billing import BillingRepository
-
         account_id = uuid4()
         account = _make_account(account_id=account_id)
 
@@ -198,8 +180,6 @@ class TestGetAccountWithOrganization:
         mock_session.execute.assert_awaited_once()
 
     async def test_returns_none_when_not_found(self, mock_session: AsyncMock) -> None:
-        from src.db.repositories.billing import BillingRepository
-
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute = AsyncMock(return_value=mock_result)

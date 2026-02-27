@@ -25,7 +25,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.db.models.storage import Base
+from src.db.models.base import Base
 
 if TYPE_CHECKING:
     from src.db.models.user import User

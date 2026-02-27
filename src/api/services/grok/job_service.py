@@ -24,6 +24,7 @@ from src.api.services.grok import (
     GrokVideoResult,
 )
 from src.api.services.storage import R2StorageService, StorageType
+from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
     AspectRatio,
     GenerationType,
@@ -504,7 +505,7 @@ class GrokJobService:
         job_id: UUID,
         result: GrokVideoResult,
     ) -> None:
-        """Download and store a video result in R2."""
+        """Download, store a video result in R2, and extract a thumbnail frame."""
         # Download video from xAI CDN
         response = await self.http_client.get(result.url)
         response.raise_for_status()
@@ -542,9 +543,45 @@ class GrokJobService:
             output_index=0,
             expires_at=expires_at,
             input_image_id=None,
+            is_thumbnail=False,
         )
 
         logger.debug(f"Stored video output {output_id} for job {job_id}")
+
+        thumbnail_bytes = await extract_video_thumbnail(video_data)
+        if thumbnail_bytes:
+            thumb_id = uuid4()
+            thumb_key = self._storage.build_storage_key(
+                user_id=user_id,
+                file_id=thumb_id,
+                storage_type=StorageType.OUTPUT,
+                format=MediaFormat.JPEG,
+                job_id=job_id,
+            )
+            async with self._storage._get_client() as client:
+                await client.put_object(
+                    Bucket=self._storage._settings.bucket_name,
+                    Key=thumb_key,
+                    Body=thumbnail_bytes,
+                    ContentType=MediaFormat.JPEG.content_type,
+                )
+
+            await repo.create_output(
+                id=thumb_id,
+                user_id=user_id,
+                job_id=job_id,
+                storage_key=thumb_key,
+                content_type=MediaFormat.JPEG.content_type,
+                size_bytes=len(thumbnail_bytes),
+                format=MediaFormat.JPEG.value,
+                output_index=-1,  # sentinel: thumbnail
+                expires_at=expires_at,
+                input_image_id=None,
+                is_thumbnail=True,  # <-- marks this as poster frame
+            )
+            logger.debug("stored video thumbnail %s for job %s", thumb_id, job_id)
+        else:
+            logger.warning("thumbnail_extraction_skipped job_id=%s", job_id)
 
     # -------------------------------------------------------------------------
     # Job Status

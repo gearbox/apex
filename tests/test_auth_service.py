@@ -15,7 +15,6 @@ from src.api.services.auth import (
     InvalidCredentialsError,
     InvalidRefreshTokenError,
     TokenReuseDetectedError,
-    UserInactiveError,
 )
 from src.db.models import RefreshToken, User
 
@@ -222,7 +221,7 @@ class TestAuthServiceLogin:
         mock_user.email = email
         mock_user.password_hash = password_hash
         mock_user.is_active = True
-        mock_repository.get_user_by_email.return_value = mock_user
+        mock_repository.get_active_user_by_email.return_value = mock_user
 
         # Mock: refresh token creation
         mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
@@ -249,7 +248,7 @@ class TestAuthServiceLogin:
         mock_user.id = uuid4()
         mock_user.password_hash = password_hash
         mock_user.is_active = True
-        mock_repository.get_user_by_email.return_value = mock_user
+        mock_repository.get_active_user_by_email.return_value = mock_user
 
         with pytest.raises(InvalidCredentialsError):
             await auth_service.login(
@@ -264,7 +263,7 @@ class TestAuthServiceLogin:
         mock_repository: AsyncMock,
     ) -> None:
         """Test login fails if user doesn't exist."""
-        mock_repository.get_user_by_email.return_value = None
+        mock_repository.get_active_user_by_email.return_value = None
 
         with pytest.raises(InvalidCredentialsError):
             await auth_service.login(
@@ -277,15 +276,12 @@ class TestAuthServiceLogin:
         self,
         auth_service: AuthService,
         mock_repository: AsyncMock,
-        password_service: PasswordService,
+        password_service: PasswordService,  # noqa: ARG002
     ) -> None:
-        """Test login fails for inactive user."""
-        mock_user = MagicMock(spec=User)
-        mock_user.password_hash = password_service.hash("password")
-        mock_user.is_active = False
-        mock_repository.get_user_by_email.return_value = mock_user
+        """Test login fails for inactive user (treated as not found via active-only lookup)."""
+        mock_repository.get_active_user_by_email.return_value = None
 
-        with pytest.raises(UserInactiveError):
+        with pytest.raises(InvalidCredentialsError):
             await auth_service.login(
                 email="inactive@example.com",
                 password="password",

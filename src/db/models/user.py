@@ -11,7 +11,8 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.core.enums import SubscriptionTier, UserRole
-from src.db.models.storage import Base
+from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
+from src.db.models.base import Base
 
 if TYPE_CHECKING:
     from src.db.models.billing import TokenAccount
@@ -33,9 +34,7 @@ class User(Base):
     )
     email: Mapped[str] = mapped_column(
         String(255),
-        unique=True,
         nullable=False,
-        index=True,
     )
     password_hash: Mapped[str] = mapped_column(
         String(255),
@@ -69,6 +68,11 @@ class User(Base):
         nullable=False,
         default=True,
         index=True,
+    )
+
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     # Timestamps
@@ -115,7 +119,28 @@ class User(Base):
         foreign_keys="TokenAccount.user_id",
     )
 
-    __table_args__ = (Index("ix_users_email_active", "email", "is_active"),)
+    email_verification_tokens: Mapped[list[EmailVerificationToken]] = relationship(
+        "EmailVerificationToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    password_reset_tokens: Mapped[list[PasswordResetToken]] = relationship(
+        "PasswordResetToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        # Partial unique index: only active users must have a unique email.
+        # Allows re-registration after account deletion (is_active=False).
+        Index(
+            "ix_users_email",
+            "email",
+            unique=True,
+            postgresql_where=text("is_active = TRUE"),
+        ),
+        Index("ix_users_email_active", "email", "is_active"),
+    )
 
     def __repr__(self) -> str:
         return f"<User {self.id} email={self.email} tier={self.subscription_tier}>"

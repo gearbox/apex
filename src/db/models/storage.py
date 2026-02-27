@@ -25,18 +25,13 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.core.enums import GenerationType, JobStatus, Provider
+from src.db.models.base import Base
 
 if TYPE_CHECKING:
     from .user import User
-
-
-class Base(DeclarativeBase):
-    """Base class for all database models."""
-
-    pass
 
 
 class UserImage(Base):
@@ -263,6 +258,14 @@ class GenerationOutput(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     format: Mapped[str] = mapped_column(String(10), nullable=False)
 
+    # Thumbnail flag — True for extracted video poster frames
+    is_thumbnail: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+
     # Output index (for batch generation)
     output_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -297,6 +300,7 @@ class GenerationOutput(Base):
         Index("ix_generation_outputs_job", "job_id"),
         Index("ix_generation_outputs_user_created", "user_id", "created_at"),
         Index("ix_generation_outputs_cleanup", "expires_at"),
+        Index("ix_generation_outputs_thumbnail", "job_id", "is_thumbnail"),
     )
 
     def __repr__(self) -> str:

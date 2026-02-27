@@ -20,6 +20,7 @@ from src.db.repositories.billing import BillingRepository
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.services.email_verification import EmailVerificationService
     from src.db.models import User
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ class AuthService:
         jwt_service: JWTService,
         password_service: PasswordService,
         session: AsyncSession | None = None,
+        email_verification_service: EmailVerificationService | None = None,
     ) -> None:
         """Initialize auth service.
 
@@ -99,11 +101,15 @@ class AuthService:
             jwt_service: JWT token service.
             password_service: Password hashing service.
             session: Database session (for billing account creation).
+            email_verification_service: Optional — when provided, sends a
+                verification email immediately after successful registration.
+                Pass ``None`` to skip email sending (e.g. in tests).
         """
         self._repo = repository
         self._jwt = jwt_service
         self._password = password_service
         self._session = session
+        self._email_verification = email_verification_service
 
     async def register(
         self,
@@ -151,6 +157,20 @@ class AuthService:
         # Generate tokens
         tokens = await self._create_token_pair(user_id)
 
+        # Send verification email — non-blocking failure: if the email provider
+        # is down we still complete registration and let the user resend manually.
+        if self._email_verification is not None and self._session is not None:
+            try:
+                await self._email_verification.send_verification_email(
+                    user_id, session=self._session
+                )
+            except Exception:
+                logger.exception(
+                    "verification_email_failed_on_register user_id=%s email=%s",
+                    user_id,
+                    email,
+                )
+
         return user, tokens
 
     async def login(
@@ -176,15 +196,12 @@ class AuthService:
             InvalidCredentialsError: If email or password is wrong.
             UserInactiveError: If user account is deactivated.
         """
-        user = await self._repo.get_user_by_email(email)
+        user = await self._repo.get_active_user_by_email(email)
 
         if user is None:
-            # Prevent timing attacks
+            # Prevent timing attacks — covers both not-found and inactive accounts
             self._password.hash("dummy_password")
             raise InvalidCredentialsError("Invalid email or password")
-
-        if not user.is_active:
-            raise UserInactiveError("User account is deactivated")
 
         if not self._password.verify(user.password_hash, password):
             raise InvalidCredentialsError("Invalid email or password")
@@ -240,8 +257,10 @@ class AuthService:
             # Revoke entire token family as precaution
             revoked_count = await self._repo.revoke_token_family(stored_token.family_id)
             logger.warning(
-                f"Token reuse detected for user {stored_token.user_id}. "
-                f"Revoked {revoked_count} tokens in family {stored_token.family_id}"
+                "token_reuse_detected user_id=%s revoked=%d family=%s",
+                stored_token.user_id,
+                revoked_count,
+                stored_token.family_id,
             )
             raise TokenReuseDetectedError(
                 "Security alert: This refresh token was already used. "

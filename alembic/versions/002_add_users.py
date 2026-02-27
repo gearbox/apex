@@ -45,7 +45,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(op.f("ix_users_email"), "users", ["email"], unique=True)
+    # Partial unique index: only active users must have unique emails.
+    # Deleted (is_active=False) users do not block re-registration with the same address.
+    op.execute("CREATE UNIQUE INDEX ix_users_email ON users(email) WHERE is_active = TRUE")
     op.create_index("ix_users_email_active", "users", ["email", "is_active"], unique=False)
     op.create_index(op.f("ix_users_is_active"), "users", ["is_active"], unique=False)
     op.create_table(
@@ -130,6 +132,6 @@ def downgrade() -> None:
     op.drop_table("refresh_tokens")
     op.drop_index(op.f("ix_users_is_active"), table_name="users")
     op.drop_index("ix_users_email_active", table_name="users")
-    op.drop_index(op.f("ix_users_email"), table_name="users")
+    op.execute("DROP INDEX ix_users_email")
     op.drop_table("users")
     # ### end Alembic commands ###

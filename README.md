@@ -252,11 +252,13 @@ make logs
 | `make dev` | Start dev environment (hot reload) |
 | `make prod` | Start production environment |
 | `make down` | Stop all containers |
+| `make down && make dev` | Recreate dev containers and environment |
 | `make logs` | Follow container logs |
 | `make migrate` | Run database migrations |
 | `make shell` | Open shell in API container |
 | `make db-shell` | Open PostgreSQL shell |
 | `make test` | Run tests |
+| `make test-cov` | Run test coverage check |
 
 ## Architecture
 ```

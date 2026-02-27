@@ -510,6 +510,7 @@ class StorageRepository:
         output_index: int,
         expires_at: datetime,
         input_image_id: UUID | None = None,
+        is_thumbnail: bool = False,
     ) -> GenerationOutput:
         """Create a new generation output record.
 
@@ -524,6 +525,7 @@ class StorageRepository:
             output_index: Index in batch (0-based).
             expires_at: When the output should be cleaned up.
             input_image_id: Associated input image (for i2i).
+            is_thumbnail: Whether this output is a thumbnail (e.g. video poster frame).
 
         Returns:
             Created GenerationOutput instance.
@@ -539,6 +541,7 @@ class StorageRepository:
             output_index=output_index,
             expires_at=expires_at,
             input_image_id=input_image_id,
+            is_thumbnail=is_thumbnail,
         )
         self._session.add(output)
         await self._session.flush()

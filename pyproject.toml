@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.4.1"
+version = "0.5.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -28,6 +28,8 @@ dependencies = [
     "argon2-cffi>=25.1.0",
     "PyJWT>=2.10.1",
     "stripe>=14.3.0",
+    "resend>=2.23.0",
+    "ffmpeg-python>=0.2.0",
 ]
 
 [project.optional-dependencies]

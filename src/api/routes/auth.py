@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from typing import Annotated
+from uuid import UUID
 
 from litestar import Controller, Request, Response, post
+from litestar.di import Provide
 from litestar.params import Body
 from litestar.status_codes import (
     HTTP_200_OK,
@@ -14,15 +16,21 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.auth import (
     AuthErrorResponse,
+    ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
     RefreshTokenRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     TokenResponse,
+    VerifyEmailRequest,
 )
+from src.api.security import auth_guard
 from src.api.services.auth import (
     AuthService,
     EmailAlreadyExistsError,
@@ -31,6 +39,12 @@ from src.api.services.auth import (
     TokenReuseDetectedError,
     UserInactiveError,
 )
+from src.api.services.email_verification import (
+    EmailVerificationService,
+    InvalidTokenError,
+    UserNotFoundError,
+)
+from src.db.repositories.user import UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +87,87 @@ class AuthController(Controller):
                 content=AuthErrorResponse(
                     error="email_exists",
                     error_description=str(e),
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+    @post("/verify-email")
+    async def verify_email(
+        self,
+        data: Annotated[VerifyEmailRequest, Body()],
+        session: AsyncSession,
+        email_verification_service: EmailVerificationService,
+    ) -> Response[MessageResponse | AuthErrorResponse]:
+        """Verify a user's email address using a token from the verification link.
+
+        The token is single-use and expires after 24 hours.
+        Returns 400 for invalid, expired, or already-used tokens.
+        """
+        try:
+            await email_verification_service.verify_email(data.token, session=session)
+            await session.commit()
+            return Response(
+                content=MessageResponse(message="Email verified successfully"),
+                status_code=HTTP_200_OK,
+            )
+        except InvalidTokenError:
+            return Response(
+                content=AuthErrorResponse(
+                    error="invalid_token",
+                    error_description="This verification link is invalid or has expired.",
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+    @post(
+        "/resend-verification",
+        guards=[auth_guard],
+        dependencies={"current_user_id": Provide(get_current_user_id)},
+    )
+    async def resend_verification(
+        self,
+        current_user_id: UUID,
+        session: AsyncSession,
+        email_verification_service: EmailVerificationService,
+    ) -> Response[MessageResponse | AuthErrorResponse]:
+        """Resend the email verification link to the authenticated user.
+
+        Rate limiting should be applied externally (e.g. nginx / middleware).
+        Returns 200 even if the email is already verified — silent no-op.
+        """
+        user_id: UUID = current_user_id
+
+        user_repo = UserRepository(session)
+        user = await user_repo.get_active_user(user_id)
+
+        if user is None:
+            return Response(
+                content=AuthErrorResponse(
+                    error="user_not_found",
+                    error_description="User not found.",
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        if user.email_verified_at is not None:
+            # Already verified — silent success, no new email
+            return Response(
+                content=MessageResponse(message="Email is already verified"),
+                status_code=HTTP_200_OK,
+            )
+
+        try:
+            await email_verification_service.send_verification_email(user_id, session=session)
+            await session.commit()
+            return Response(
+                content=MessageResponse(message="Verification email sent"),
+                status_code=HTTP_200_OK,
+            )
+        except UserNotFoundError:
+            return Response(
+                content=AuthErrorResponse(
+                    error="user_not_found",
+                    error_description="User not found.",
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -212,3 +307,72 @@ class AuthController(Controller):
             content=MessageResponse(message="Successfully logged out"),
             status_code=HTTP_200_OK,
         )
+
+    @post("/forgot-password")
+    async def forgot_password(
+        self,
+        request: Request,
+        data: Annotated[ForgotPasswordRequest, Body()],
+        session: AsyncSession,
+        email_verification_service: EmailVerificationService,
+    ) -> Response[MessageResponse]:
+        """Request a password reset email.
+
+        **Always returns 200** — does not reveal whether the email is registered.
+        The reset link expires in 30 minutes.
+        """
+        ip_address = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+            request.client.host if request.client else None
+        )
+
+        # Fire and forget — any error is logged inside the service
+        try:
+            await email_verification_service.send_password_reset_email(
+                data.email,
+                session=session,
+                ip_address=ip_address,
+            )
+            await session.commit()
+        except Exception:
+            logger.exception("forgot_password_unexpected_error email=%s", data.email)
+
+        return Response(
+            content=MessageResponse(
+                message="If that email is registered, you'll receive a reset link shortly."
+            ),
+            status_code=HTTP_200_OK,
+        )
+
+    @post("/reset-password")
+    async def reset_password(
+        self,
+        data: Annotated[ResetPasswordRequest, Body()],
+        session: AsyncSession,
+        email_verification_service: EmailVerificationService,
+    ) -> Response[MessageResponse | AuthErrorResponse]:
+        """Consume a password reset token and update the password.
+
+        Revokes all active refresh tokens (forces re-login on all devices).
+        Returns 400 for invalid or expired tokens.
+        """
+        try:
+            await email_verification_service.reset_password(
+                data.token,
+                data.new_password,
+                session=session,
+            )
+            await session.commit()
+            return Response(
+                content=MessageResponse(
+                    message="Password updated successfully. Please log in with your new password."
+                ),
+                status_code=HTTP_200_OK,
+            )
+        except InvalidTokenError:
+            return Response(
+                content=AuthErrorResponse(
+                    error="invalid_token",
+                    error_description="This reset link is invalid or has expired.",
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )

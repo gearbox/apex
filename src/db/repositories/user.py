@@ -117,16 +117,20 @@ class UserRepository:
         return result.scalar_one_or_none()
 
     async def email_exists(self, email: str, exclude_user_id: UUID | None = None) -> bool:
-        """Check if email is already registered.
+        """Check if email is already registered by an active user.
 
         Args:
             email: Email to check.
             exclude_user_id: Optional user ID to exclude from check.
 
         Returns:
-            True if email exists, False otherwise.
+            True if an active user with this email exists, False otherwise.
         """
-        query = select(func.count()).select_from(User).where(User.email == email.lower())
+        query = (
+            select(func.count())
+            .select_from(User)
+            .where(User.email == email.lower(), User.is_active == True)  # noqa: E712
+        )
         if exclude_user_id:
             query = query.where(User.id != exclude_user_id)
         result = await self._session.execute(query)
@@ -184,6 +188,44 @@ class UserRepository:
             Updated User if found, None otherwise.
         """
         return await self.update_user(user_id, is_active=False)
+
+    async def mark_email_verified(self, user_id: UUID) -> User | None:
+        """Set email_verified_at to now() for a user.
+
+        Args:
+            user_id: User to verify.
+
+        Returns:
+            Updated User, or None if not found.
+        """
+        await self._session.execute(
+            update(User).where(User.id == user_id).values(email_verified_at=datetime.now(UTC))
+        )
+        await self._session.flush()
+        return await self.get_active_user(user_id)
+
+    async def revoke_all_refresh_tokens(self, user_id: UUID) -> int:
+        """Revoke all active refresh tokens for a user.
+
+        Used after a password reset to force re-authentication on all devices.
+
+        Args:
+            user_id: User whose tokens to revoke.
+
+        Returns:
+            Number of tokens revoked.
+        """
+        result = cast(
+            CursorResult[tuple[()]],
+            await self._session.execute(
+                update(RefreshToken)
+                .where(RefreshToken.user_id == user_id)
+                .where(RefreshToken.is_revoked == False)  # noqa: E712
+                .values(is_revoked=True)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount or 0
 
     # -------------------------------------------------------------------------
     # Refresh token operations

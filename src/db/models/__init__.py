@@ -1,5 +1,6 @@
 """Database models module."""
 
+from .base import Base
 from .billing import (
     Organization,
     OrganizationMember,
@@ -8,7 +9,7 @@ from .billing import (
     TokenAccount,
     TokenTransaction,
 )
-from .storage import Base, GenerationJob, GenerationOutput, UserImage
+from .storage import GenerationJob, GenerationOutput, UserImage
 from .user import RefreshToken, User
 
 __all__ = [

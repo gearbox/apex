@@ -10,6 +10,15 @@
 | POST | `/api/v1/auth/login` | Login and get tokens |
 | POST | `/api/v1/auth/refresh` | Refresh access token |
 | POST | `/api/v1/auth/logout` | Revoke refresh token |
+| POST | `/api/v1/auth/verify-email` | Verify email with token from link (24 h, single-use) |
+| POST | `/api/v1/auth/forgot-password` | Request password reset email (always 200) |
+| POST | `/api/v1/auth/reset-password` | Consume reset token and update password (30 min, single-use) |
+
+### Email Verification (Authenticated)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/auth/resend-verification` | Resend verification email to current user |
 
 ### User Profile (Authenticated)
 
@@ -116,8 +125,8 @@ CREATE TABLE refresh_tokens (
 ## Future Enhancements
 
 - [X] Add FK constraints from existing tables to users (see migration comments)
-- [ ] Implement background task for expired token cleanup
-- [ ] Add rate limiting for auth endpoints
+- [X] Add email verification (`POST /api/v1/auth/verify-email`, `POST /api/v1/auth/resend-verification`; single-use 24 h tokens, stored as SHA-256 hashes)
+- [X] Add account recovery flow (`POST /api/v1/auth/forgot-password`, `POST /api/v1/auth/reset-password`; single-use 30 min tokens, revokes all refresh tokens on success)
+- [ ] Implement background task for expired token cleanup (`email_verification_tokens`, `password_reset_tokens`, `refresh_tokens`)
+- [ ] Add rate limiting for auth endpoints (register, login, forgot-password, resend-verification)
 - [ ] Implement PKCE flow for OAuth2 clients
-- [ ] Add email verification
-- [ ] Add account recovery flow

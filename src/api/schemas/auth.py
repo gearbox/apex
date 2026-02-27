@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 import msgspec
 
@@ -50,6 +51,25 @@ class PKCETokenRequest(msgspec.Struct, kw_only=True):
     code_verifier: str
 
 
+class VerifyEmailRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Token from the verification link query string."""
+
+    token: Annotated[str, msgspec.Meta(min_length=20, max_length=100)]
+
+
+class ForgotPasswordRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Email address to send the reset link to."""
+
+    email: Annotated[str, msgspec.Meta(min_length=3, max_length=255)]
+
+
+class ResetPasswordRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Token + new password to apply."""
+
+    token: Annotated[str, msgspec.Meta(min_length=20, max_length=100)]
+    new_password: Annotated[str, msgspec.Meta(min_length=8, max_length=128)]
+
+
 # -----------------------------------------------------------------------------
 # Response schemas
 # -----------------------------------------------------------------------------
@@ -85,13 +105,13 @@ class AuthUserResponse(msgspec.Struct, kw_only=True):
 
 
 class MessageResponse(msgspec.Struct, kw_only=True):
-    """Simple message response."""
+    """Generic message response."""
 
     message: str
 
 
 class AuthErrorResponse(msgspec.Struct, kw_only=True):
-    """Authentication error response."""
+    """Generic authentication error response."""
 
     error: str
     error_description: str | None = None

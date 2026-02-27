@@ -35,6 +35,7 @@ class _FakeAsyncSession(AsyncSession):
     def __init__(self) -> None:  # noqa: D107
         pass  # intentionally skip AsyncSession.__init__
 
+
 # ---------------------------------------------------------------------------
 # Helpers / model factories
 # ---------------------------------------------------------------------------
@@ -143,12 +144,14 @@ def _create_org_app(
     """Build a minimal Litestar app wrapping OrganizationController for route testing."""
 
     def _org_permission_handler(
-        request: object, exc: OrganizationPermissionError  # noqa: ARG001
+        request: object,
+        exc: OrganizationPermissionError,  # noqa: ARG001
     ) -> Response:
         return Response(content={"detail": str(exc)}, status_code=HTTP_403_FORBIDDEN)
 
     def _org_balance_handler(
-        request: object, exc: OrganizationBalanceError  # noqa: ARG001
+        request: object,
+        exc: OrganizationBalanceError,  # noqa: ARG001
     ) -> Response:
         return Response(
             content={"detail": str(exc), "balance": exc.balance},

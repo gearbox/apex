@@ -25,6 +25,8 @@ services:
       - ./config:/app/config:ro
       - ./alembic:/app/alembic:ro
       - ./tests:/app/tests:ro
+      # Pass through coverage report to local filesystem
+      - ./htmlcov:/app/htmlcov
     # Override command to use uvicorn with reload
     command: >
       uvicorn src.api.app:app 

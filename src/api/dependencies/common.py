@@ -14,6 +14,8 @@ from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
 from src.api.services.comfyui_client import ComfyUIClient
+from src.api.services.email import EmailService, LogEmailService, ResendEmailService
+from src.api.services.email_verification import EmailVerificationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.job_manager import JobManager
@@ -21,6 +23,7 @@ from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
 from src.api.services.storage import R2StorageService, R2StorageSettings
+from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
 from src.api.services.workflow_service import WorkflowService
@@ -51,6 +54,9 @@ class ServiceContainer:
     jwt_service: JWTService | None = None
     password_service: PasswordService | None = None
     grok_job_service: GrokJobService | None = None
+    email_service: EmailService | None = None
+    email_verification_service: EmailVerificationService | None = None
+    unified_job_service: UnifiedJobService | None = None
 
 
 _services = ServiceContainer()
@@ -199,7 +205,7 @@ async def get_auth_service(session: AsyncSession) -> AuthService:
         session: Database session.
 
     Returns:
-        AuthService instance.
+        AuthService instance with email verification.
     """
     repository = UserRepository(session)
     return AuthService(
@@ -207,6 +213,7 @@ async def get_auth_service(session: AsyncSession) -> AuthService:
         jwt_service=get_jwt_service(),
         password_service=get_password_service(),
         session=session,
+        email_verification_service=get_email_verification_service(),
     )
 
 
@@ -226,6 +233,27 @@ async def get_user_service(session: AsyncSession) -> UserService:
     )
 
 
+def get_email_service() -> EmailService:
+    """Provide email service singleton.
+
+    Returns:
+        Configured EmailService (Log or Resend depending on settings).
+
+    Raises:
+        RuntimeError: If not initialized.
+    """
+    if _services.email_service is None:  # type: ignore[attr-defined]
+        raise RuntimeError("Email service not initialized")
+    return _services.email_service  # type: ignore[attr-defined]
+
+
+def get_email_verification_service() -> EmailVerificationService:
+    """Provide email verification service singleton."""
+    if _services.email_verification_service is None:  # type: ignore[attr-defined]
+        raise RuntimeError("Email verification service not initialized")
+    return _services.email_verification_service  # type: ignore[attr-defined]
+
+
 # -----------------------------------------------------------------------------
 # Grok dependency providers
 # -----------------------------------------------------------------------------
@@ -234,6 +262,18 @@ async def get_user_service(session: AsyncSession) -> UserService:
 async def get_grok_job_service() -> GrokJobService | None:
     """Provide Grok job service (None if not configured)."""
     return _services.grok_job_service
+
+
+# -----------------------------------------------------------------------------
+# Unified job dependency providers
+# -----------------------------------------------------------------------------
+
+
+def get_unified_job_service() -> UnifiedJobService:
+    """Provide unified job service singleton."""
+    if _services.unified_job_service is None:  # type: ignore[attr-defined]
+        raise RuntimeError("Unified job service not initialized")
+    return _services.unified_job_service  # type: ignore[attr-defined]
 
 
 # -----------------------------------------------------------------------------
@@ -356,6 +396,31 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     _services.password_service = PasswordService()
     logger.info("Authentication services initialized")
 
+    # Initialize email service
+    if settings.resend_api_key:
+        _services.email_service = ResendEmailService(
+            api_key=settings.resend_api_key,
+            from_address=settings.email_from_address,
+            from_name=settings.email_from_name,
+        )
+        logger.info("Email service initialized (Resend)")
+    else:
+        _services.email_service = LogEmailService()
+        logger.info("Email service initialized (Log — no RESEND_API_KEY set)")
+
+    # Initialize email verification service
+    _services.email_verification_service = EmailVerificationService(
+        email_service=_services.email_service,
+        app_url=settings.app_url,
+    )
+
+    # Initialize unified job service
+    _services.unified_job_service = UnifiedJobService(
+        storage=_services.r2_storage,
+        grok_job_service=_services.grok_job_service,
+    )
+    logger.info("Unified job service initialized")
+
     return _services.jwt_service  # Return for storing in app.state
 
 
@@ -407,4 +472,8 @@ dependencies = {
     "pricing_service": Provide(get_pricing_service, sync_to_thread=False),
     "organization_service": Provide(get_organization_service, sync_to_thread=False),
     "payment_service": Provide(get_payment_service, sync_to_thread=False),
+    # Email services
+    "email_verification_service": Provide(get_email_verification_service, sync_to_thread=False),
+    # Unified job service
+    "unified_job_service": Provide(get_unified_job_service, sync_to_thread=False),
 }
