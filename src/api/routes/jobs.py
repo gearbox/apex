@@ -11,10 +11,10 @@ Endpoints:
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from uuid import UUID
 
+import structlog
 from litestar import Controller, Response, delete, get
 from litestar.di import Provide
 from litestar.status_codes import (
@@ -30,7 +30,7 @@ from src.api.security import auth_guard
 from src.api.services.unified_jobs import UnifiedJobService
 from src.core.enums import GenerationType, JobStatus
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class UnifiedJobController(Controller):
@@ -152,4 +152,4 @@ class UnifiedJobController(Controller):
         job.error_message = "__hidden__"
         await session.commit()
 
-        logger.info("job_hidden job_id=%s user_id=%s", job_id, current_user_id)
+        logger.info("job.hidden", job_id=str(job_id), user_id=str(current_user_id))

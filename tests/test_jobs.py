@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import msgspec
-import pytest
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobListResponse, UnifiedJobResponse
 from src.api.services.unified_jobs import UnifiedJobService

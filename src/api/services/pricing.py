@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+import structlog
 
 from src.api.services.billing_errors import PriceNotFoundError
 from src.db.repositories.billing import BillingRepository
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
     from src.db.models.billing import PricingRule
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class PricingService:

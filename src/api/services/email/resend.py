@@ -13,13 +13,12 @@ Docs:    https://resend.com/docs/send-with-python
 
 from __future__ import annotations
 
-import logging
-
 import resend
+import structlog
 
 from .base import EmailDeliveryError, EmailMessage, EmailService
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class ResendEmailService(EmailService):
@@ -93,17 +92,17 @@ class ResendEmailService(EmailService):
         try:
             result = resend.Emails.send(params)
             logger.info(
-                "email_sent to=%s subject=%r resend_id=%s",
-                message.to,
-                message.subject,
-                result.get("id"),
+                "email.sent",
+                to=message.to,
+                subject=message.subject,
+                resend_id=result.get("id"),
             )
         except Exception as exc:
             logger.error(
-                "email_delivery_failed to=%s subject=%r error=%s",
-                message.to,
-                message.subject,
-                exc,
+                "email.send_failed",
+                to=message.to,
+                subject=message.subject,
+                error=str(exc),
             )
             raise EmailDeliveryError(
                 f"Resend delivery failed: {exc}",

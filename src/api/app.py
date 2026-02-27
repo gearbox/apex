@@ -1,14 +1,13 @@
 """Litestar application factory and configuration."""
 
-import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import structlog
 from litestar import Litestar, Request, Response
 from litestar.config.cors import CORSConfig
 from litestar.datastructures import UploadFile
-from litestar.logging import LoggingConfig
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
 from litestar.status_codes import (
@@ -21,6 +20,7 @@ from litestar.status_codes import (
 )
 
 from src.api.dependencies.common import dependencies, init_services, shutdown_services
+from src.api.middleware.logging import RequestLoggingMiddleware
 from src.api.routes.admin import AdminController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
@@ -51,8 +51,9 @@ from src.api.services.billing_errors import (
     RefundNotEligibleError,
 )
 from src.core.config import get_settings
+from src.core.logging import configure_logging
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,7 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
     Initializes services on startup and cleans up on shutdown.
     """
     settings = get_settings()
+    configure_logging(settings)
 
     # Determine base path for workflows
     # Check common locations
@@ -130,18 +132,17 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
     ]
 
     base_path = None
-    for path in possible_paths:
-        workflow_check = path / "config" / "bundles"
+    for base_path in possible_paths:
+        workflow_check = base_path / "config" / "bundles"
         if workflow_check.exists():
-            base_path = path
-            logger.info(f"Found workflow bundles at: {base_path}")
+            logger.info("app.bundles_found", path=str(base_path))
             break
+    else:
+        # Loop completed without break: use first path as fallback
+        logger.warning("app.bundles_not_found")
+        base_path = possible_paths[0]  # Use current directory as fallback
 
-    if base_path is None:
-        logger.warning("Workflow bundles directory not found, using current directory")
-        base_path = Path.cwd()
-
-    logger.info(f"Starting Apex API service, connecting to {settings.comfyui_base_url}")
+    logger.info("app.startup", comfyui_url=settings.comfyui_base_url)
 
     jwt_service = await init_services(settings, base_path=base_path)
 
@@ -151,7 +152,7 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
     try:
         yield
     finally:
-        logger.info("Shutting down Apex API service")
+        logger.info("app.shutdown")
         await shutdown_services()
 
 
@@ -163,45 +164,13 @@ def create_app() -> Litestar:
         Configured Litestar application instance.
     """
     settings = get_settings()
+    configure_logging(settings)
 
     # CORS configuration for development
     cors_config = CORSConfig(
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
-    )
-
-    # Logging configuration
-    logging_config = LoggingConfig(
-        root={
-            "level": "DEBUG" if settings.debug else "INFO",
-            "handlers": ["console"],
-        },
-        formatters={
-            "standard": {
-                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            },
-        },
-        handlers={
-            "console": {
-                "class": "logging.StreamHandler",
-                "formatter": "standard",
-            },
-        },
-        loggers={
-            "src": {
-                "level": "DEBUG" if settings.debug else "INFO",
-                "propagate": True,
-            },
-            "httpx": {
-                "level": "WARNING",
-                "propagate": False,
-            },
-            "xai_sdk": {
-                "level": "INFO",
-                "propagate": False,
-            },
-        },
     )
 
     # OpenAPI documentation configuration
@@ -265,8 +234,8 @@ def create_app() -> Litestar:
         },
         dependencies=dependencies,
         lifespan=[lifespan],
+        middleware=[RequestLoggingMiddleware],
         cors_config=cors_config,
-        logging_config=logging_config,
         openapi_config=openapi_config,
         debug=settings.debug,
         signature_types=[UploadFile],

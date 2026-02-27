@@ -9,7 +9,6 @@ Fixture scope hierarchy:
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import secrets
 import subprocess
@@ -18,11 +17,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-import pytest
 import pytest_asyncio
-from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[import-untyped]
-from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 from src.db.models.billing import Organization, TokenAccount
@@ -53,22 +50,6 @@ VerificationTokenFactory = Callable[
     ..., Coroutine[Any, Any, tuple[EmailVerificationToken, str]]
 ]
 ResetTokenFactory = Callable[..., Coroutine[Any, Any, tuple[PasswordResetToken, str]]]
-
-
-# ---------------------------------------------------------------------------
-# Logging (JSON structured, session-scoped, autouse)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session", autouse=True)
-def configure_logging() -> None:
-    """Configure JSON structured logging for the test session."""
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        JsonFormatter("%(asctime)s %(name)s %(levelname)s %(message)s")
-    )
-    logging.root.handlers = [handler]
-    logging.root.setLevel(logging.DEBUG)
 
 
 # ---------------------------------------------------------------------------

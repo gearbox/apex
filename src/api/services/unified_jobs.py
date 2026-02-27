@@ -10,9 +10,9 @@ this service is read-oriented (history, gallery, status polling).
 
 from __future__ import annotations
 
-import logging
 from uuid import UUID
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -24,7 +24,7 @@ from src.core.enums import GenerationType, JobStatus
 from src.db.models.storage import GenerationJob
 from src.db.repositories.storage import StorageRepository
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Presigned URL TTL in seconds (1 hour)
 _URL_TTL = 3600
@@ -90,7 +90,7 @@ class UnifiedJobService:
                 if updated is not None:
                     job = updated
             except Exception:
-                logger.exception("poll_on_read failed job_id=%s", job_id)
+                logger.exception("unified_jobs.poll_on_read_failed", job_id=str(job_id))
 
         return await self._build_response(job, session=session)
 
@@ -185,14 +185,14 @@ class UnifiedJobService:
         for out in db_outputs:
             try:
                 if self._storage is None:
-                    logger.warning("presigned_url_skipped output_id=%s — R2 not configured", out.id)
+                    logger.warning("unified_jobs.presigned_url_skipped", output_id=str(out.id))
                     continue
                 url_result = await self._storage.get_presigned_url(
                     out.storage_key, expires_in=_URL_TTL
                 )
                 presigned = url_result.presigned_url
             except Exception:
-                logger.warning("presigned_url_failed output_id=%s", out.id)
+                logger.warning("unified_jobs.presigned_url_failed", output_id=str(out.id))
                 continue
 
             item = JobOutputItem(

@@ -16,19 +16,17 @@ import signal
 import sys
 from typing import NoReturn
 
+import structlog
+
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.grok.video_worker import GrokVideoWorker
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.core.config import Settings, get_settings
+from src.core.logging import configure_logging
 from src.db import init_db
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class GrokVideoWorkerCLI:
@@ -46,15 +44,15 @@ class GrokVideoWorkerCLI:
 
     async def run(self) -> None:
         """Run the video worker until shutdown signal."""
-        logger.info("Starting Grok video worker...")
+        logger.info("grok_worker.starting")
 
         # Validate configuration
         if not self._settings.grok_configured:
-            logger.error("Grok API key not configured (XAI_API_KEY)")
+            logger.error("grok_worker.missing_api_key")
             sys.exit(1)
 
         if not self._settings.r2_configured:
-            logger.error("R2 storage not configured")
+            logger.error("grok_worker.r2_not_configured")
             sys.exit(1)
 
         # Initialize database
@@ -64,7 +62,7 @@ class GrokVideoWorkerCLI:
             max_overflow=self._settings.db_max_overflow,
             echo=self._settings.db_echo,
         )
-        logger.info("Database connection pool initialized")
+        logger.info("grok_worker.db_initialized")
 
         # Initialize R2 storage
         r2_settings = R2StorageSettings(
@@ -76,12 +74,12 @@ class GrokVideoWorkerCLI:
             retention_days=self._settings.retention_days,
         )
         r2_storage = R2StorageService(r2_settings)
-        logger.info(f"R2 storage initialized for bucket: {self._settings.r2_bucket_name}")
+        logger.info("grok_worker.r2_initialized", bucket=self._settings.r2_bucket_name)
 
         # Initialize Grok client
         grok_client = GrokClient(self._settings)
         await grok_client.connect()
-        logger.info("Grok client initialized")
+        logger.info("grok_worker.client_initialized")
 
         # Initialize job service
         job_service = GrokJobService(
@@ -90,7 +88,7 @@ class GrokVideoWorkerCLI:
             retention_days=self._settings.retention_days,
         )
         await job_service.connect()
-        logger.info("Grok job service initialized")
+        logger.info("grok_worker.job_service_initialized")
 
         # Create and start worker
         self._worker = GrokVideoWorker(
@@ -101,27 +99,27 @@ class GrokVideoWorkerCLI:
         await self._worker.start()
 
         logger.info(
-            f"Grok video worker running "
-            f"(poll interval: {self._settings.grok_video_poll_interval}s, "
-            f"max poll time: {self._settings.grok_video_max_poll_time}s)"
+            "grok_worker.running",
+            poll_interval=self._settings.grok_video_poll_interval,
+            max_poll_time=self._settings.grok_video_max_poll_time,
         )
-        logger.info("Press Ctrl+C to stop")
+        logger.info("grok_worker.ready", hint="Press Ctrl+C to stop")
 
         # Wait for shutdown signal
         await self._shutdown_event.wait()
 
         # Cleanup
-        logger.info("Shutting down...")
+        logger.info("grok_worker.shutting_down")
         await self._worker.stop()
         await job_service.close()
         await grok_client.close()
         await r2_storage.close()
         await db_manager.close()
-        logger.info("Grok video worker stopped")
+        logger.info("grok_worker.stopped")
 
     def handle_signal(self) -> None:
         """Handle shutdown signal."""
-        logger.info("Received shutdown signal")
+        logger.info("grok_worker.signal_received")
         self._shutdown_event.set()
 
 
@@ -149,13 +147,15 @@ Environment variables:
     )
     args = parser.parse_args()
 
-    # Configure logging level
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.getLogger("src").setLevel(logging.DEBUG)
-
     # Load settings
     settings = get_settings()
+
+    # Configure structlog (respects LOG_LEVEL / LOG_FORMAT env vars)
+    configure_logging(settings)
+
+    # Override log level when --debug flag is passed
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     # Create runner
     runner = GrokVideoWorkerCLI(settings)

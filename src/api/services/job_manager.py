@@ -1,15 +1,16 @@
 """In-memory job manager for tracking generation jobs."""
 
-import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
+
 from src.api.schemas.generation import GenerationRequest, JobStatus
 from src.api.services.comfyui_client import ComfyUIClient
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -70,7 +71,7 @@ class JobManager:
             created_at=datetime.now(UTC),
         )
         self._jobs[job_id] = job
-        logger.info(f"Created job {job_id}: {job.name}")
+        logger.info("job.created", job_id=job_id, name=job.name)
         return job
 
     def get_job(self, job_id: str) -> Job | None:
@@ -119,7 +120,7 @@ class JobManager:
             job.status = JobStatus.QUEUED
             job.started_at = datetime.now(UTC)
             self._prompt_to_job[prompt_id] = job_id
-            logger.debug(f"Job {job_id} queued with prompt_id {prompt_id}")
+            logger.debug("job.queued", job_id=job_id, prompt_id=prompt_id)
 
     def set_running(self, job_id: str, progress: float = 0.0) -> None:
         """Mark job as running with progress.
@@ -146,7 +147,7 @@ class JobManager:
             job.progress = 100.0
             job.completed_at = datetime.now(UTC)
             job.images = images
-            logger.info(f"Job {job_id} completed with {len(images)} images")
+            logger.info("job.completed", job_id=job_id, image_count=len(images))
 
     def set_failed(self, job_id: str, error: str) -> None:
         """Mark job as failed with error message.
@@ -159,7 +160,7 @@ class JobManager:
             job.status = JobStatus.FAILED
             job.completed_at = datetime.now(UTC)
             job.error = error
-            logger.error(f"Job {job_id} failed: {error}")
+            logger.error("job.failed", job_id=job_id, error=error)
 
     async def poll_job_status(self, job_id: str) -> Job | None:
         """Poll ComfyUI for job status updates.
@@ -216,7 +217,7 @@ class JobManager:
                         job.status = JobStatus.QUEUED
 
         except Exception as e:
-            logger.warning(f"Error polling job {job_id}: {e}")
+            logger.warning("job.poll_failed", job_id=job_id, error=str(e))
 
         return job
 
@@ -269,6 +270,6 @@ class JobManager:
                 self._prompt_to_job.pop(job.prompt_id, None)
 
         if old_jobs:
-            logger.info(f"Cleaned up {len(old_jobs)} old jobs")
+            logger.info("job.cleanup_done", count=len(old_jobs))
 
         return len(old_jobs)

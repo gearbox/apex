@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from uuid import UUID
 
+import structlog
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
 from litestar.status_codes import (
@@ -30,7 +30,7 @@ from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.organization import OrganizationService
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class OrganizationController(Controller):

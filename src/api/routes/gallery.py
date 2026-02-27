@@ -13,11 +13,11 @@ Add this method to the existing ``StorageController`` in
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from uuid import UUID
 
 import msgspec
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -26,7 +26,7 @@ from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus
 from src.db.models.storage import GenerationJob, GenerationOutput
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _URL_TTL = 3600  # 1 hour presigned URL lifetime
 
@@ -187,7 +187,7 @@ async def build_gallery_response(
                 r = await storage.get_presigned_url(thumb.storage_key, expires_in=_URL_TTL)
                 thumbnail_map[thumb.job_id] = r.presigned_url
             except Exception:
-                logger.warning("thumbnail_url_failed output_id=%s", thumb.id)
+                logger.warning("gallery.thumbnail_url_failed", output_id=str(thumb.id))
 
     # Build items
     items: list[GalleryOutputItem] = []
@@ -198,7 +198,7 @@ async def build_gallery_response(
             url_result = await storage.get_presigned_url(out.storage_key, expires_in=_URL_TTL)
             presigned = url_result.presigned_url
         except Exception:
-            logger.warning("gallery_presigned_url_failed output_id=%s", out.id)
+            logger.warning("gallery.presigned_url_failed", output_id=str(out.id))
             continue
 
         items.append(

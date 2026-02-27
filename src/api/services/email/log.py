@@ -6,11 +6,11 @@ Zero external dependencies — use this in local dev and test environments.
 
 from __future__ import annotations
 
-import logging
+import structlog
 
 from .base import EmailMessage, EmailService
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class LogEmailService(EmailService):

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from uuid import UUID
 
+import structlog
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
 from litestar.exceptions import NotFoundException
@@ -32,7 +32,7 @@ from src.api.services.pricing import PricingService
 from src.db.models import User
 from src.db.repositories.billing import BillingRepository
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class AdminController(Controller):
@@ -58,7 +58,7 @@ class AdminController(Controller):
         billing_service: BillingService,
     ) -> BalanceResponse:
         """Get balance for any account."""
-        logger.info("Admin %s viewing balance for account %s", admin_user.id, account_id)
+        logger.info("admin.viewing_balance", admin_id=str(admin_user.id), account_id=str(account_id))
         repo = BillingRepository(session)
         account = await repo.get_account_with_organization(account_id)
         if account is None:
@@ -88,7 +88,7 @@ class AdminController(Controller):
         type: str | None = None,
     ) -> TransactionListResponse:
         """Get transaction history for any account."""
-        logger.info("Admin %s viewing transactions for account %s", admin_user.id, account_id)
+        logger.info("admin.viewing_transactions", admin_id=str(admin_user.id), account_id=str(account_id))
         transactions, total = await billing_service.get_transaction_history(
             account_id,
             limit=limit,
@@ -112,10 +112,10 @@ class AdminController(Controller):
     ) -> AdminAdjustResponse:
         """Admin balance adjustment. Positive = credit, negative = debit."""
         logger.info(
-            "Admin %s adjusting account %s by %d tokens",
-            admin_user.id,
-            account_id,
-            data.amount,
+            "admin.adjusting_account",
+            admin_id=str(admin_user.id),
+            account_id=str(account_id),
+            amount=data.amount,
         )
         txn = await billing_service.admin_adjust(
             account_id,
@@ -144,7 +144,7 @@ class AdminController(Controller):
         active_only: bool = True,
     ) -> list[PricingRuleResponse]:
         """List pricing rules."""
-        logger.info("Admin %s listing pricing rules", admin_user.id)
+        logger.info("admin.listing_pricing_rules", admin_id=str(admin_user.id))
         rules = await pricing_service.list_catalog(active_only=active_only, session=session)
         return [
             PricingRuleResponse(
@@ -171,7 +171,12 @@ class AdminController(Controller):
     ) -> Response[PricingRuleResponse]:
         """Create a new pricing rule."""
         logger.info(
-            f"Admin {admin_user.id} creating pricing rule: {data.provider}/{data.generation_type}/{data.model} at {data.token_cost} tokens",
+            "admin.creating_pricing_rule",
+            admin_id=str(admin_user.id),
+            provider=data.provider,
+            generation_type=str(data.generation_type),
+            model=str(data.model),
+            token_cost=data.token_cost,
         )
         rule = await pricing_service.create_rule(
             provider=data.provider,
@@ -208,7 +213,7 @@ class AdminController(Controller):
         pricing_service: PricingService,
     ) -> PricingRuleResponse:
         """Update a pricing rule."""
-        logger.info(f"Admin {admin_user.id} updating pricing rule {rule_id}")
+        logger.info("admin.updating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id))
         rule = await pricing_service.update_rule(
             rule_id,
             token_cost=data.token_cost,
@@ -239,7 +244,7 @@ class AdminController(Controller):
         pricing_service: PricingService,
     ) -> dict:
         """Soft deactivate a pricing rule."""
-        logger.info("Admin %s deactivating pricing rule %s", admin_user.id, rule_id)
+        logger.info("admin.deactivating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id))
         await pricing_service.deactivate_rule(rule_id, session=session)
         await session.commit()
         return {"message": "Rule deactivated"}
@@ -259,7 +264,7 @@ class AdminController(Controller):
         offset: int = 0,
     ) -> PaymentListResponse:
         """List all payments."""
-        logger.info("Admin %s listing payments", admin_user.id)
+        logger.info("admin.listing_payments", admin_id=str(admin_user.id))
         repo = BillingRepository(session)
         payments, total = await repo.list_payments(
             status=status,
@@ -292,7 +297,7 @@ class AdminController(Controller):
         session: AsyncSession,
     ) -> PaymentResponse:
         """Get a single payment."""
-        logger.info("Admin %s viewing payment %s", admin_user.id, payment_id)
+        logger.info("admin.viewing_payment", admin_id=str(admin_user.id), payment_id=str(payment_id))
         repo = BillingRepository(session)
         payment = await repo.get_payment(payment_id)
         if payment is None:
@@ -321,7 +326,7 @@ class AdminController(Controller):
         billing_service: BillingService,
     ) -> BalanceResponse:
         """Get a user's resolved account (personal or org) + balance."""
-        logger.info(f"Admin {admin_user.id} viewing account for user {user_id}")
+        logger.info("admin.viewing_user_account", admin_id=str(admin_user.id), user_id=str(user_id))
         account = await billing_service.resolve_account_for_user(user_id, session=session)
         balance = await billing_service.get_balance(account.id, session=session)
 
@@ -345,7 +350,7 @@ class AdminController(Controller):
         billing_service: BillingService,
     ) -> BalanceResponse:
         """Get the enterprise token account and balance for an organization."""
-        logger.info("Admin %s viewing account for org %s", admin_user.id, org_id)
+        logger.info("admin.viewing_org_account", admin_id=str(admin_user.id), org_id=str(org_id))
         repo = BillingRepository(session)
         account = await repo.get_account_by_organization(org_id)
         if account is None:

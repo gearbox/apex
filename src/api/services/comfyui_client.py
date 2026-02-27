@@ -1,13 +1,13 @@
 """ComfyUI HTTP client service for API communication."""
 
-import logging
 from typing import Any
 
 import httpx
+import structlog
 
 from src.core.config import Settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class ComfyUIClientError(Exception):
@@ -61,14 +61,14 @@ class ComfyUIClient:
                 base_url=self._base_url,
                 timeout=httpx.Timeout(60.0, connect=10.0),
             )
-            logger.info(f"ComfyUI client connected to {self._base_url}")
+            logger.info("comfyui.connected", url=self._base_url)
 
     async def close(self) -> None:
         """Close HTTP client connection."""
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-            logger.info("ComfyUI client disconnected")
+            logger.info("comfyui.disconnected")
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -87,7 +87,7 @@ class ComfyUIClient:
             response = await self.client.get("/system_stats")
             return response.status_code == 200
         except httpx.RequestError as e:
-            logger.warning(f"ComfyUI health check failed: {e}")
+            logger.warning("comfyui.health_check_failed", error=str(e))
             return False
 
     async def queue_prompt(self, workflow: dict[str, Any]) -> dict[str, Any]:
@@ -111,18 +111,18 @@ class ComfyUIClient:
 
             if response.status_code != 200:
                 error_text = response.text
-                logger.error(f"ComfyUI queue_prompt failed: {response.status_code} - {error_text}")
+                logger.error("comfyui.queue_prompt_failed", status_code=response.status_code, error=error_text)
                 raise ComfyUIAPIError(
                     f"Failed to queue prompt: {error_text}",
                     status_code=response.status_code,
                 )
 
             result = response.json()
-            logger.debug(f"Prompt queued successfully: {result.get('prompt_id')}")
+            logger.debug("comfyui.prompt_queued", prompt_id=result.get("prompt_id"))
             return result
 
         except httpx.RequestError as e:
-            logger.error(f"ComfyUI connection error: {e}")
+            logger.error("comfyui.connection_error", error=str(e))
             raise ComfyUIConnectionError(f"Failed to connect to ComfyUI: {e}") from e
 
     async def get_history(self, prompt_id: str) -> dict[str, Any]:
@@ -139,7 +139,7 @@ class ComfyUIClient:
 
             return response.json() if response.status_code == 200 else {}
         except httpx.RequestError as e:
-            logger.warning(f"Failed to get history for {prompt_id}: {e}")
+            logger.warning("comfyui.get_history_failed", prompt_id=prompt_id, error=str(e))
             return {}
 
     async def get_queue(self) -> dict[str, Any]:
@@ -154,7 +154,7 @@ class ComfyUIClient:
                 return response.json()
             return {"queue_running": [], "queue_pending": []}
         except httpx.RequestError as e:
-            logger.warning(f"Failed to get queue: {e}")
+            logger.warning("comfyui.get_queue_failed", error=str(e))
             return {"queue_running": [], "queue_pending": []}
 
     async def upload_image(
@@ -193,11 +193,11 @@ class ComfyUIClient:
                 )
 
             result = response.json()
-            logger.debug(f"Image uploaded: {result.get('name')}")
+            logger.debug("comfyui.image_uploaded", name=result.get("name"))
             return result
 
         except httpx.RequestError as e:
-            logger.error(f"Failed to upload image: {e}")
+            logger.error("comfyui.image_upload_failed", error=str(e))
             raise ComfyUIConnectionError(f"Failed to upload image: {e}") from e
 
     def get_image_url(
@@ -256,5 +256,5 @@ class ComfyUIClient:
             return response.content
 
         except httpx.RequestError as e:
-            logger.error(f"Failed to get image: {e}")
+            logger.error("comfyui.get_image_failed", error=str(e))
             raise ComfyUIConnectionError(f"Failed to get image: {e}") from e

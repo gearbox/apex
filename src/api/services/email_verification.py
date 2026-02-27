@@ -13,8 +13,9 @@ Depends on:
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
+
+import structlog
 
 from src.api.services.email import EmailService
 from src.db.repositories.auth_tokens import AuthTokenRepository
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
     from src.db.models.user import User
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,7 @@ class EmailVerificationService:
             verification_url=verification_url,
         )
 
-        logger.info("verification_email_sent user_id=%s email=%s", user_id, user.email)
+        logger.info("email.verification_sent", user_id=str(user_id))
 
     async def verify_email(
         self,
@@ -140,7 +141,7 @@ class EmailVerificationService:
         if user is None:
             raise UserNotFoundError(f"User {user_id} not found after token verification")
 
-        logger.info("email_verified user_id=%s", user_id)
+        logger.info("email.verified", user_id=str(user_id))
         return user
 
     # -------------------------------------------------------------------------
@@ -170,7 +171,7 @@ class EmailVerificationService:
 
         if user is None:
             # Silent — do not reveal that the address is unknown
-            logger.info("password_reset_requested_unknown_email email=%s", email)
+            logger.info("email.password_reset_requested")
             return
 
         token_repo = AuthTokenRepository(session)
@@ -185,10 +186,10 @@ class EmailVerificationService:
         )
 
         logger.info(
-            "password_reset_email_sent user_id=%s email=%s ip=%s",
-            user.id,
-            user.email,
-            ip_address,
+            "email.password_reset_sent",
+            user_id=str(user.id),
+            email=user.email,
+            ip=ip_address,
         )
 
     async def reset_password(
@@ -234,9 +235,9 @@ class EmailVerificationService:
         # Revoke all refresh tokens — forces re-authentication on all devices
         revoked = await user_repo.revoke_all_refresh_tokens(user_id)
         logger.info(
-            "password_reset_complete user_id=%s revoked_tokens=%d",
-            user_id,
-            revoked,
+            "email.password_reset_done",
+            user_id=str(user_id),
+            revoked_tokens=revoked,
         )
 
         return user

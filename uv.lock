@@ -205,6 +205,7 @@ dependencies = [
     { name = "rich" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "stripe" },
+    { name = "structlog" },
     { name = "types-aiobotocore", extra = ["s3"] },
     { name = "uvicorn", extra = ["standard"] },
     { name = "xai-sdk" },
@@ -220,7 +221,6 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
-    { name = "python-json-logger" },
     { name = "ruff" },
 ]
 
@@ -245,13 +245,13 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6.0" },
-    { name = "python-json-logger", marker = "extra == 'dev'", specifier = ">=2.0.7" },
     { name = "python-multipart", specifier = ">=0.0.22" },
     { name = "resend", specifier = ">=2.23.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.13" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.45" },
     { name = "stripe", specifier = ">=14.3.0" },
+    { name = "structlog", specifier = ">=24.4.0" },
     { name = "types-aiobotocore", extras = ["s3"], specifier = ">=3.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
     { name = "xai-sdk", specifier = ">=0.1.0" },
@@ -1613,15 +1613,6 @@ wheels = [
 ]
 
 [[package]]
-name = "python-json-logger"
-version = "4.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/29/bf/eca6a3d43db1dae7070f70e160ab20b807627ba953663ba07928cdd3dc58/python_json_logger-4.0.0.tar.gz", hash = "sha256:f58e68eb46e1faed27e0f574a55a0455eecd7b8a5b88b85a784519ba3cff047f", size = 17683, upload-time = "2025-10-06T04:15:18.984Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/e5/fecf13f06e5e5f67e8837d777d1bc43fac0ed2b77a676804df5c34744727/python_json_logger-4.0.0-py3-none-any.whl", hash = "sha256:af09c9daf6a813aa4cc7180395f50f2a9e5fa056034c9953aec92e381c5ba1e2", size = 15548, upload-time = "2025-10-06T04:15:17.553Z" },
-]
-
-[[package]]
 name = "python-multipart"
 version = "0.0.22"
 source = { registry = "https://pypi.org/simple" }
@@ -1822,6 +1813,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/49/67/8a38222a57fc2ba359c4dcb66528d94c00d803c7fde8f8d8470ad6bdccbb/stripe-14.3.0.tar.gz", hash = "sha256:4c76137d741bd43e8bb433a596c198ca20f4cdf17a8fe04604faf37c74b01978", size = 1463618, upload-time = "2026-01-28T21:20:29.856Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/4b/0b7d5920f2be5e42d72bdfc44a9fae57b422668bfc8dacdf2f74886f6daa/stripe-14.3.0-py3-none-any.whl", hash = "sha256:3e36b68b256c8970e99b703e195d947e2a2919095758788c7074ac4485ac255e", size = 2106980, upload-time = "2026-01-28T21:20:27.566Z" },
+]
+
+[[package]]
+name = "structlog"
+version = "25.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/52/9ba0f43b686e7f3ddfeaa78ac3af750292662284b3661e91ad5494f21dbc/structlog-25.5.0.tar.gz", hash = "sha256:098522a3bebed9153d4570c6d0288abf80a031dfdb2048d59a49e9dc2190fc98", size = 1460830, upload-time = "2025-10-27T08:28:23.028Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/45/a132b9074aa18e799b891b91ad72133c98d8042c70f6240e4c5f9dabee2f/structlog-25.5.0-py3-none-any.whl", hash = "sha256:a8453e9b9e636ec59bd9e79bbd4a72f025981b3ba0f5837aebf48f02f37a7f9f", size = 72510, upload-time = "2025-10-27T08:28:21.535Z" },
 ]
 
 [[package]]

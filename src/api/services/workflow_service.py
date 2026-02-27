@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 from pathlib import Path
 from typing import Any, ClassVar
 
+import structlog
+
 from src.api.schemas.generation import GenerationRequest, GenerationType, ModelType
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class WorkflowError(Exception):
@@ -293,7 +294,7 @@ class WorkflowService:
         if request.generation_type == GenerationType.T2I:
             # For t2i: disconnect all image inputs from the prompt encoder
             self._disconnect_image_inputs(workflow)
-            logger.debug("T2I mode: disconnected all image input nodes")
+            logger.debug("workflow.disconnected_t2i_mode")
         else:
             # For i2i: connect only the images that were actually uploaded
             # First, disconnect all image inputs
@@ -326,7 +327,9 @@ class WorkflowService:
                     ]
 
             logger.debug(
-                f"I2I mode: connected images - image1={input_image_1}, image2={input_image_2}"
+                "workflow.configured",
+                image1=input_image_1,
+                image2=input_image_2,
             )
 
         return workflow

@@ -19,6 +19,8 @@ services:
     environment:
       DEBUG: "true"
       DB_ECHO: "true"
+      LOG_FORMAT: "console"
+      LOG_LEVEL: "DEBUG"
     volumes:
       # Mount source code for hot reload
       - ./src:/app/src:ro

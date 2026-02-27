@@ -11,12 +11,13 @@ rather than crashing the job — thumbnail is optional.
 from __future__ import annotations
 
 import asyncio
-import logging
 import subprocess
 import tempfile
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 async def extract_video_thumbnail(video_bytes: bytes) -> bytes | None:
@@ -35,7 +36,7 @@ async def extract_video_thumbnail(video_bytes: bytes) -> bytes | None:
     try:
         return await asyncio.to_thread(_extract_sync, video_bytes)
     except Exception:
-        logger.warning("thumbnail_extraction_failed — ffmpeg unavailable or crashed")
+        logger.warning("thumbnail.extraction_failed")
         return None
 
 
@@ -68,23 +69,23 @@ def _extract_sync(video_bytes: bytes) -> bytes | None:
 
         if result.returncode != 0:
             logger.warning(
-                "ffmpeg_nonzero_exit code=%d stderr=%s",
-                result.returncode,
-                result.stderr[:200].decode("utf-8", errors="replace"),
+                "thumbnail.ffmpeg_unavailable",
+                code=result.returncode,
+                stderr=result.stderr[:200].decode("utf-8", errors="replace"),
             )
             return None
 
         if not result.stdout:
-            logger.warning("ffmpeg_empty_output")
+            logger.warning("thumbnail.ffmpeg_empty_output")
             return None
 
         return result.stdout
 
     except FileNotFoundError:
-        logger.warning("ffmpeg_not_found — install ffmpeg to enable video thumbnails")
+        logger.warning("thumbnail.ffmpeg_not_found")
         return None
     except subprocess.TimeoutExpired:
-        logger.warning("ffmpeg_timeout — video thumbnail extraction timed out")
+        logger.warning("thumbnail.ffmpeg_timeout")
         return None
     finally:
         tmp_in_path.unlink(missing_ok=True)

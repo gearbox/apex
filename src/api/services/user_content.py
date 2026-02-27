@@ -11,10 +11,11 @@ a route guard is misconfigured, the service layer will reject cross-user access.
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
+
+import structlog
 
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
 from src.api.services.storage import (
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 
     from src.db.models import GenerationOutput, UserImage
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class UserContentError(Exception):
@@ -127,7 +128,11 @@ class UserContentService:
             )
 
             logger.info(
-                f"Uploaded image {result.id} for user {user_id}: {filename} ({len(data)} bytes)"
+                "user_content.uploaded",
+                image_id=str(result.id),
+                user_id=str(user_id),
+                filename=filename,
+                size_bytes=len(data),
             )
 
             return UploadedImage(
@@ -224,7 +229,11 @@ class UserContentService:
             return await self._storage.download(image.storage_key)
         except StorageNotFoundError as e:
             # DB record exists but R2 file missing - data inconsistency
-            logger.error(f"R2 file missing for image {image_id}: {image.storage_key}")
+            logger.error(
+                "r2.file_missing",
+                image_id=str(image_id),
+                storage_key=image.storage_key,
+            )
             raise UserContentNotFoundError(f"Image file not found: {image_id}") from e
 
     async def list_user_uploads(
@@ -273,7 +282,7 @@ class UserContentService:
         # Then delete DB record
         await self._repo.delete_user_image(image_id, user_id=user_id)
 
-        logger.info(f"Deleted upload {image_id}")
+        logger.info("user_content.deleted", image_id=str(image_id))
         return True
 
     # -------------------------------------------------------------------------
@@ -335,7 +344,11 @@ class UserContentService:
         )
 
         logger.info(
-            f"Stored output {result.id} for job {job_id}: index={output_index} ({len(data)} bytes)"
+            "user_content.output_stored",
+            output_id=str(result.id),
+            job_id=str(job_id),
+            output_index=output_index,
+            size_bytes=len(data),
         )
 
         return GeneratedImage(
@@ -417,7 +430,11 @@ class UserContentService:
         try:
             return await self._storage.download(output.storage_key)
         except StorageNotFoundError as e:
-            logger.error(f"R2 file missing for output {output_id}: {output.storage_key}")
+            logger.error(
+                "r2.file_missing",
+                output_id=str(output_id),
+                storage_key=output.storage_key,
+            )
             raise UserContentNotFoundError(f"Output file not found: {output_id}") from e
 
     async def list_job_outputs(

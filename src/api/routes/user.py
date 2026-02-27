@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from typing import Annotated
 from uuid import UUID
 
+import structlog
 from litestar import Controller, Request, Response, delete, get, patch, post
 from litestar.di import Provide
 from litestar.exceptions import NotAuthorizedException, NotFoundException
@@ -34,7 +34,7 @@ from src.api.services.user import (
     UserService,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def get_current_user_id(request: Request) -> UUID:

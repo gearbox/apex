@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import structlog
 from sqlalchemy import select
 
 from src.core.enums import GenerationType, JobStatus
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from src.core.config import Settings
     from src.db import DatabaseManager
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class GrokVideoWorker:
@@ -58,14 +58,15 @@ class GrokVideoWorker:
     async def start(self) -> None:
         """Start the background worker."""
         if self._running:
-            logger.warning("Video worker already running")
+            logger.warning("grok.video_worker_already_running")
             return
 
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         logger.info(
-            f"Grok video worker started (poll interval: {self._poll_interval}s, "
-            f"max poll time: {self._max_poll_time}s)"
+            "grok.video_worker_started",
+            poll_interval=self._poll_interval,
+            max_poll_time=self._max_poll_time,
         )
 
     async def stop(self) -> None:
@@ -76,15 +77,15 @@ class GrokVideoWorker:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
-        logger.info("Grok video worker stopped")
+        logger.info("grok.video_worker_stopped")
 
     async def _run_loop(self) -> None:
         """Main worker loop."""
         while self._running:
             try:
                 await self._poll_pending_jobs()
-            except Exception as e:
-                logger.exception(f"Error in video worker loop: {e}")
+            except Exception:
+                logger.exception("grok.video_worker_loop_error")
 
             # Wait for next poll interval
             await asyncio.sleep(self._poll_interval)
@@ -116,7 +117,7 @@ class GrokVideoWorker:
             if not jobs:
                 return
 
-            logger.debug(f"Found {len(jobs)} pending video jobs to poll")
+            logger.debug("grok.video_jobs_found", count=len(jobs))
 
             for job in jobs:
                 await self._poll_single_job(session, job)
@@ -133,7 +134,7 @@ class GrokVideoWorker:
         if job.started_at:
             elapsed = (datetime.now(UTC) - job.started_at).total_seconds()
             if elapsed > self._max_poll_time:
-                logger.warning(f"Video job {job_id} timed out after {elapsed:.0f}s")
+                logger.warning("grok.video_job_timeout", job_id=str(job_id), elapsed_s=int(elapsed))
                 job.status = JobStatus.FAILED
                 job.error_message = f"Video generation timed out after {elapsed:.0f} seconds"
                 job.completed_at = datetime.now(UTC)
@@ -146,16 +147,16 @@ class GrokVideoWorker:
             await session.commit()
 
             if updated_job is None:
-                logger.warning(f"Video job {job_id} not found during polling")
+                logger.warning("grok.video_job_not_found", job_id=str(job_id))
                 return
 
             if updated_job.status == JobStatus.COMPLETED.value:
-                logger.info(f"Video job {job_id} completed successfully")
+                logger.info("grok.video_job_completed", job_id=str(job_id))
             elif updated_job.status == JobStatus.FAILED.value:
-                logger.warning(f"Video job {job_id} failed: {updated_job.error_message}")
+                logger.warning("grok.video_job_failed", job_id=str(job_id), error=updated_job.error_message)
 
         except Exception as e:
-            logger.error(f"Failed to poll video job {job_id}: {e}")
+            logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))
             # Don't fail the job on transient errors, let it retry
             await session.rollback()
 
@@ -184,7 +185,7 @@ class GrokVideoWorkerManager:
             settings: Application settings.
         """
         if cls._worker is not None:
-            logger.warning("Video worker already initialized")
+            logger.warning("grok.video_worker_already_initialized")
             return
 
         cls._worker = GrokVideoWorker(db_manager, job_service, settings)

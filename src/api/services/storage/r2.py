@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -10,6 +9,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import aioboto3
+import structlog
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
@@ -32,7 +32,7 @@ from .schemas import (
 if TYPE_CHECKING:
     from types_aiobotocore_s3.client import S3Client
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _get_error_code(e: ClientError) -> str:
@@ -233,7 +233,7 @@ class R2StorageService:
                     Metadata=metadata,
                 )
 
-            logger.info(f"Uploaded file to R2: {storage_key} ({len(data)} bytes, user={user_id})")
+            logger.info("r2.upload_completed", key=storage_key, bytes=len(data), user_id=str(user_id))
 
             return UploadResult(
                 id=file_id,
@@ -242,13 +242,13 @@ class R2StorageService:
             )
 
         except ClientError as e:
-            logger.error(f"R2 upload failed for {storage_key}: {e}")
+            logger.error("r2.upload_failed", key=storage_key, error=str(e))
             raise StorageUploadError(
                 f"Failed to upload file: {_get_error_message(e)}",
                 cause=e,
             ) from e
         except Exception as e:
-            logger.error(f"Unexpected error uploading to R2: {e}")
+            logger.error("r2.upload_unexpected_error", error=str(e))
             raise StorageUploadError(f"Upload failed: {e}", cause=e) from e
 
     async def download(self, storage_key: str) -> bytes:
@@ -260,20 +260,20 @@ class R2StorageService:
                     Key=storage_key,
                 )
                 data = await response["Body"].read()
-                logger.debug(f"Downloaded {len(data)} bytes from R2: {storage_key}")
+                logger.debug("r2.download_completed", key=storage_key, bytes=len(data))
                 return data
 
         except ClientError as e:
             error_code = _get_error_code(e)
             if error_code in ("NoSuchKey", "404"):
                 raise StorageNotFoundError(f"File not found: {storage_key}") from e
-            logger.error(f"R2 download failed for {storage_key}: {e}")
+            logger.error("r2.download_failed", key=storage_key, error=str(e))
             raise StorageDownloadError(
                 f"Failed to download file: {_get_error_message(e)}",
                 cause=e,
             ) from e
         except Exception as e:
-            logger.error(f"Unexpected error downloading from R2: {e}")
+            logger.error("r2.download_unexpected_error", error=str(e))
             raise StorageDownloadError(f"Download failed: {e}", cause=e) from e
 
     async def get_presigned_url(
@@ -313,7 +313,7 @@ class R2StorageService:
             error_code = _get_error_code(e)
             if error_code in ("NoSuchKey", "404"):
                 raise StorageNotFoundError(f"File not found: {storage_key}") from e
-            logger.error(f"Failed to generate presigned URL for {storage_key}: {e}")
+            logger.error("r2.presigned_url_failed", key=storage_key, error=str(e))
             raise StorageDownloadError(
                 f"Failed to generate URL: {_get_error_message(e)}",
                 cause=e,
@@ -339,11 +339,11 @@ class R2StorageService:
                     Bucket=self._settings.bucket_name,
                     Key=storage_key,
                 )
-                logger.info(f"Deleted file from R2: {storage_key}")
+                logger.info("r2.delete_completed", key=storage_key)
                 return True
 
         except ClientError as e:
-            logger.error(f"R2 delete failed for {storage_key}: {e}")
+            logger.error("r2.delete_failed", key=storage_key, error=str(e))
             raise StorageDeleteError(
                 f"Failed to delete file: {_get_error_message(e)}",
                 cause=e,
@@ -369,11 +369,11 @@ class R2StorageService:
                     )
                     deleted_count += len(response.get("Deleted", []))
 
-                logger.info(f"Deleted {deleted_count} files from R2")
+                logger.info("r2.batch_delete_completed", count=deleted_count)
                 return deleted_count
 
         except ClientError as e:
-            logger.error(f"R2 batch delete failed: {e}")
+            logger.error("r2.batch_delete_failed", error=str(e))
             raise StorageDeleteError(
                 f"Failed to delete files: {_get_error_message(e)}",
                 cause=e,
@@ -391,7 +391,7 @@ class R2StorageService:
         except ClientError as e:
             if _get_error_code(e) in ("NoSuchKey", "404"):
                 return False
-            logger.error(f"R2 exists check failed for {storage_key}: {e}")
+            logger.error("r2.exists_check_failed", key=storage_key, error=str(e))
             raise StorageConnectionError(
                 f"Failed to check file existence: {e}",
                 cause=e,
@@ -440,7 +440,7 @@ class R2StorageService:
                 return files
 
         except ClientError as e:
-            logger.error(f"R2 list failed for user {user_id}: {e}")
+            logger.error("r2.list_failed", user_id=str(user_id), error=str(e))
             return []
 
     def _parse_storage_key(
@@ -491,7 +491,7 @@ class R2StorageService:
                 job_id=job_id,
             )
         except (ValueError, IndexError) as e:
-            logger.warning(f"Failed to parse storage key {storage_key}: {e}")
+            logger.warning("r2.key_parse_failed", key=storage_key, error=str(e))
             return None
 
     async def health_check(self) -> bool:
@@ -501,7 +501,7 @@ class R2StorageService:
                 await client.head_bucket(Bucket=self._settings.bucket_name)
                 return True
         except Exception as e:
-            logger.warning(f"R2 health check failed: {e}")
+            logger.warning("r2.health_check_failed", error=str(e))
             return False
 
     async def close(self) -> None:

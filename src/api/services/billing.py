@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+import structlog
 
 from src.api.services.billing_errors import (
     AccountInactiveError,
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
     from src.db.models.billing import TokenAccount, TokenTransaction
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class BillingService:
@@ -119,14 +120,9 @@ class BillingService:
             raise AccountNotFoundError(f"User {user_id} not found")
 
         logger.info(
-            "billing_account_preference_set user_id=%s account_type=%s",
-            user_id,
-            account_type.value,
-            extra={
-                "event": "billing_account_preference_set",
-                "user_id": str(user_id),
-                "account_type": account_type.value,
-            },
+            "billing.account_preference_set",
+            user_id=str(user_id),
+            account_type=account_type.value,
         )
 
     async def get_billing_account_preference(
@@ -207,21 +203,14 @@ class BillingService:
         )
 
         logger.info(
-            "token_debit account_id=%s job_id=%s amount=%d balance_after=%d",
-            account_id,
-            job_id,
-            token_cost,
-            new_balance,
-            extra={
-                "event": "token_debit",
-                "account_id": str(account_id),
-                "job_id": str(job_id),
-                "amount": token_cost,
-                "balance_after": new_balance,
-                "provider": metadata.get("provider"),
-                "generation_type": metadata.get("generation_type"),
-                "model": metadata.get("model"),
-            },
+            "billing.debit_processed",
+            account_id=str(account_id),
+            job_id=str(job_id),
+            amount=token_cost,
+            balance_after=new_balance,
+            provider=metadata.get("provider"),
+            generation_type=metadata.get("generation_type"),
+            model=metadata.get("model"),
         )
 
         return txn
@@ -269,18 +258,12 @@ class BillingService:
         )
 
         logger.info(
-            "token_refund account_id=%s job_id=%s amount=%d",
-            debit.account_id,
-            job_id,
-            refund_amount,
-            extra={
-                "event": "token_refund",
-                "account_id": str(debit.account_id),
-                "job_id": str(job_id),
-                "amount": refund_amount,
-                "balance_after": new_balance,
-                "reason": description,
-            },
+            "billing.credit_processed",
+            account_id=str(debit.account_id),
+            job_id=str(job_id),
+            amount=refund_amount,
+            balance_after=new_balance,
+            reason=description,
         )
 
         return txn
@@ -316,18 +299,12 @@ class BillingService:
         )
 
         logger.info(
-            "token_credit account_id=%s payment_id=%s amount=%d",
-            account_id,
-            payment_id,
-            amount,
-            extra={
-                "event": "token_credit",
-                "account_id": str(account_id),
-                "payment_id": str(payment_id),
-                "amount": amount,
-                "balance_after": new_balance,
-                "payment_provider": payment_provider,
-            },
+            "billing.credit_processed",
+            account_id=str(account_id),
+            payment_id=str(payment_id),
+            amount=amount,
+            balance_after=new_balance,
+            payment_provider=payment_provider,
         )
 
         return txn
@@ -368,18 +345,12 @@ class BillingService:
         )
 
         logger.info(
-            "admin_adjustment account_id=%s admin_id=%s amount=%d",
-            account_id,
-            admin_id,
-            amount,
-            extra={
-                "event": "admin_adjustment",
-                "account_id": str(account_id),
-                "admin_id": str(admin_id),
-                "amount": amount,
-                "balance_after": new_balance,
-                "description": description,
-            },
+            "billing.balance_updated",
+            account_id=str(account_id),
+            admin_id=str(admin_id),
+            amount=amount,
+            balance_after=new_balance,
+            description=description,
         )
 
         return txn

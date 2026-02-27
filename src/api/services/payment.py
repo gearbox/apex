@@ -6,12 +6,12 @@ import dataclasses
 import hashlib
 import hmac
 import json
-import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import stripe
+import structlog
 
 from src.api.services.billing_errors import (
     AccountNotFoundError,
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from src.api.services.billing import BillingService
     from src.core.config import Settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclasses.dataclass
@@ -161,7 +161,7 @@ class PaymentService:
         repo = BillingRepository(session)
         payment = await repo.get_payment_by_external_id(external_id)
         if payment is None:
-            logger.warning("Stripe webhook: payment not found for %s", external_id)
+            logger.warning("payment.webhook_payment_not_found", external_id=external_id)
             return
 
         # Idempotent check
@@ -296,7 +296,7 @@ class PaymentService:
         repo = BillingRepository(session)
         payment = await repo.get_payment_by_external_id(payment_id_str)
         if payment is None:
-            logger.warning("NowPayments webhook: payment not found for %s", payment_id_str)
+            logger.warning("payment.webhook_payment_not_found", external_id=payment_id_str)
             return
 
         # Idempotent check

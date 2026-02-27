@@ -6,11 +6,11 @@ and managing user storage.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from typing import Annotated
 from uuid import UUID
 
+import structlog
 from litestar import Controller, Response, delete, get, post
 from litestar.datastructures import UploadFile
 from litestar.di import Provide
@@ -44,7 +44,7 @@ from src.api.services.user_content import (
     UserContentValidationError,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -96,7 +96,7 @@ class StorageController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
-        logger.debug(f"Uploading image with content type: {content_type}")
+        logger.debug("storage.upload_started", content_type=content_type)
 
         # Read file data
         file_bytes = await data.read()
@@ -116,14 +116,14 @@ class StorageController(Controller):
                 content=ErrorResponse(error="Empty file"),
                 status_code=HTTP_400_BAD_REQUEST,
             )
-        logger.debug(f"Uploading image of size: {len(file_bytes)} bytes")
+        logger.debug("storage.upload_size", bytes=len(file_bytes))
 
         try:
             logger.debug(
-                "Uploading image for user %s: %s (%d bytes)",
-                current_user_id,
-                data.filename,
-                len(file_bytes),
+                "storage.uploading_image",
+                user_id=str(current_user_id),
+                filename=data.filename,
+                bytes=len(file_bytes),
             )
             result = await user_content.upload_image(
                 user_id=current_user_id,
@@ -146,13 +146,13 @@ class StorageController(Controller):
             )
 
         except UserContentValidationError as e:
-            logger.warning(f"Upload validation failed: {e}")
+            logger.warning("storage.upload_validation_failed", error=str(e))
             return Response(
                 content=ErrorResponse(error="Validation failed", detail=str(e)),
                 status_code=HTTP_400_BAD_REQUEST,
             )
         except UserContentError as e:
-            logger.error(f"Upload failed: {e}")
+            logger.error("storage.upload_failed", error=str(e))
             return Response(
                 content=ErrorResponse(error="Upload failed", detail=str(e)),
                 status_code=HTTP_400_BAD_REQUEST,

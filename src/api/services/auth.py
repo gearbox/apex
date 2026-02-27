@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+import structlog
 
 from src.api.security import (
     JWTService,
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from src.api.services.email_verification import EmailVerificationService
     from src.db.models import User
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class AuthError(Exception):
@@ -150,9 +151,9 @@ class AuthService:
         if self._session is not None:
             billing_repo = BillingRepository(self._session)
             await billing_repo.create_personal_account(id=uuid4(), user_id=user_id)
-            logger.info("Created personal token account for user %s", user_id)
+            logger.info("billing.account_created", user_id=str(user_id))
 
-        logger.info("User registered: %s (%s)", user_id, email)
+        logger.info("user.registered", user_id=str(user_id))
 
         # Generate tokens
         tokens = await self._create_token_pair(user_id)
@@ -166,9 +167,9 @@ class AuthService:
                 )
             except Exception:
                 logger.exception(
-                    "verification_email_failed_on_register user_id=%s email=%s",
-                    user_id,
-                    email,
+                    "auth.email_verification_failed",
+                    user_id=str(user_id),
+                    email=email,
                 )
 
         return user, tokens
@@ -210,9 +211,9 @@ class AuthService:
         if self._password.needs_rehash(user.password_hash):
             new_hash = self._password.hash(password)
             await self._repo.update_user(user.id, password_hash=new_hash)
-            logger.info(f"Rehashed password for user {user.id}")
+            logger.info("user.password_rehashed", user_id=str(user.id))
 
-        logger.info(f"User logged in: {user.id}")
+        logger.info("user.logged_in", user_id=str(user.id))
 
         tokens = await self._create_token_pair(
             user.id,
@@ -257,10 +258,10 @@ class AuthService:
             # Revoke entire token family as precaution
             revoked_count = await self._repo.revoke_token_family(stored_token.family_id)
             logger.warning(
-                "token_reuse_detected user_id=%s revoked=%d family=%s",
-                stored_token.user_id,
-                revoked_count,
-                stored_token.family_id,
+                "auth.token_reuse_detected",
+                user_id=str(stored_token.user_id),
+                revoked=revoked_count,
+                family=str(stored_token.family_id),
             )
             raise TokenReuseDetectedError(
                 "Security alert: This refresh token was already used. "
@@ -287,7 +288,7 @@ class AuthService:
             ip_address=ip_address,
         )
 
-        logger.debug(f"Tokens refreshed for user {stored_token.user_id}")
+        logger.debug("auth.token_refreshed", user_id=str(stored_token.user_id))
 
         return tokens
 
@@ -307,7 +308,7 @@ class AuthService:
             return False
 
         await self._repo.revoke_refresh_token(stored_token.id)
-        logger.debug(f"User {stored_token.user_id} logged out")
+        logger.debug("auth.logged_out", user_id=str(stored_token.user_id))
 
         return True
 
@@ -321,7 +322,7 @@ class AuthService:
             Number of tokens revoked.
         """
         count = await self._repo.revoke_all_user_tokens(user_id)
-        logger.info(f"Revoked {count} tokens for user {user_id}")
+        logger.info("auth.tokens_revoked", user_id=str(user_id), count=count)
         return count
 
     async def _create_token_pair(

@@ -9,12 +9,12 @@ Handles the full lifecycle of Grok generation jobs:
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import httpx
+import structlog
 
 from src.api.services.grok import (
     GrokAPIError,
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     from src.db.models import GenerationJob
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class GrokJobError(Exception):
@@ -231,11 +231,11 @@ class GrokJobService:
                 completed_at=datetime.now(UTC),
             )
 
-            logger.info(f"Grok image job {job_id} completed with {len(results)} outputs")
+            logger.info("grok.image_job_completed", job_id=str(job_id), output_count=len(results))
             return job
 
         except GrokAPIError as e:
-            logger.error(f"Grok API error for job {job_id}: {e}")
+            logger.error("grok.api_error", job_id=str(job_id), error=str(e))
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
@@ -247,7 +247,7 @@ class GrokJobService:
             raise GrokJobError(f"Image generation failed: {e}") from e
 
         except Exception as e:
-            logger.exception(f"Unexpected error for job {job_id}: {e}")
+            logger.exception("grok.unexpected_error", job_id=str(job_id))
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
@@ -271,7 +271,7 @@ class GrokJobService:
     ) -> None:
         """Download and store an image result in R2."""
         if not result.has_url:
-            logger.warning(f"Image result {output_index} has no URL, skipping")
+            logger.warning("grok.image_result_no_url", output_index=output_index)
             return
 
         # Download image from xAI CDN
@@ -323,7 +323,7 @@ class GrokJobService:
             input_image_id=input_image_id,
         )
 
-        logger.debug(f"Stored image output {output_id} for job {job_id}")
+        logger.debug("grok.image_output_stored", output_id=str(output_id), job_id=str(job_id))
 
     # -------------------------------------------------------------------------
     # Video Generation (Async Start)
@@ -405,11 +405,11 @@ class GrokJobService:
                 started_at=datetime.now(UTC),
             )
 
-            logger.info(f"Started Grok video job {job_id}, xAI request: {started.request_id}")
+            logger.info("grok.video_job_started", job_id=str(job_id), xai_request_id=started.request_id)
             return job
 
         except GrokAPIError as e:
-            logger.error(f"Failed to start video job {job_id}: {e}")
+            logger.error("grok.video_job_start_failed", job_id=str(job_id), error=str(e))
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
@@ -481,11 +481,11 @@ class GrokJobService:
                 completed_at=datetime.now(UTC),
             )
 
-            logger.info(f"Grok video job {job_id} completed")
+            logger.info("grok.video_job_completed", job_id=str(job_id))
             return job
 
         except GrokAPIError as e:
-            logger.error(f"Failed to poll video job {job_id}: {e}")
+            logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.FAILED.value,
@@ -546,7 +546,7 @@ class GrokJobService:
             is_thumbnail=False,
         )
 
-        logger.debug(f"Stored video output {output_id} for job {job_id}")
+        logger.debug("grok.video_output_stored", output_id=str(output_id), job_id=str(job_id))
 
         thumbnail_bytes = await extract_video_thumbnail(video_data)
         if thumbnail_bytes:
@@ -579,9 +579,9 @@ class GrokJobService:
                 input_image_id=None,
                 is_thumbnail=True,  # <-- marks this as poster frame
             )
-            logger.debug("stored video thumbnail %s for job %s", thumb_id, job_id)
+            logger.debug("grok.thumbnail_stored", thumb_id=str(thumb_id), job_id=str(job_id))
         else:
-            logger.warning("thumbnail_extraction_skipped job_id=%s", job_id)
+            logger.warning("grok.thumbnail_skipped", job_id=str(job_id))
 
     # -------------------------------------------------------------------------
     # Job Status

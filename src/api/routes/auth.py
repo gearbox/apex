@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from typing import Annotated
 from uuid import UUID
 
+import structlog
 from litestar import Controller, Request, Response, post
 from litestar.di import Provide
 from litestar.params import Body
@@ -46,7 +46,7 @@ from src.api.services.email_verification import (
 )
 from src.db.repositories.user import UserRepository
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class AuthController(Controller):
@@ -334,7 +334,7 @@ class AuthController(Controller):
             )
             await session.commit()
         except Exception:
-            logger.exception("forgot_password_unexpected_error email=%s", data.email)
+            logger.exception("auth.forgot_password_failed")
 
         return Response(
             content=MessageResponse(

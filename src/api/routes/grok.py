@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import contextlib
-import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
+import structlog
 from litestar import Controller, Response, get, post
 from litestar.di import Provide
 from litestar.status_codes import (
@@ -38,7 +38,7 @@ from src.api.services.pricing import PricingService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class GrokProviderController(Controller):
@@ -174,7 +174,7 @@ class GrokImageController(Controller):
             )
 
         except GrokJobError as e:
-            logger.error("Grok image generation failed: %s", e)
+            logger.error("grok.image_generation_failed", error=str(e))
             # Refund on provider error
             if job is not None:
                 try:
@@ -185,7 +185,7 @@ class GrokImageController(Controller):
                     )
                     await session.commit()
                 except Exception:
-                    logger.exception("Failed to refund for job %s", job.id)
+                    logger.exception("grok.refund_failed", job_id=str(job.id))
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -327,7 +327,7 @@ class GrokImageController(Controller):
             )
 
         except GrokJobError as e:
-            logger.error("Grok image editing failed: %s", e)
+            logger.error("grok.image_editing_failed", error=str(e))
             if job is not None:
                 try:
                     await billing_service.refund(
@@ -337,7 +337,7 @@ class GrokImageController(Controller):
                     )
                     await session.commit()
                 except Exception:
-                    logger.exception("Failed to refund for job %s", job.id)
+                    logger.exception("grok.refund_failed", job_id=str(job.id))
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -461,7 +461,7 @@ class GrokVideoController(Controller):
             )
 
         except GrokJobError as e:
-            logger.error("Grok video generation failed to start: %s", e)
+            logger.error("grok.video_generation_failed", error=str(e))
             if job is not None:
                 try:
                     await billing_service.refund(
@@ -471,7 +471,7 @@ class GrokVideoController(Controller):
                     )
                     await session.commit()
                 except Exception:
-                    logger.exception("Failed to refund for job %s", job.id)
+                    logger.exception("grok.refund_failed", job_id=str(job.id))
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -612,7 +612,7 @@ class GrokVideoController(Controller):
             )
 
         except GrokJobError as e:
-            logger.error("Grok I2V generation failed to start: %s", e)
+            logger.error("grok.i2v_generation_failed", error=str(e))
             if job is not None:
                 try:
                     await billing_service.refund(
@@ -622,7 +622,7 @@ class GrokVideoController(Controller):
                     )
                     await session.commit()
                 except Exception:
-                    logger.exception("Failed to refund for job %s", job.id)
+                    logger.exception("grok.refund_failed", job_id=str(job.id))
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -733,7 +733,7 @@ class GrokVideoController(Controller):
             )
 
         except GrokJobError as e:
-            logger.error("Grok V2V editing failed to start: %s", e)
+            logger.error("grok.v2v_editing_failed", error=str(e))
             if job is not None:
                 try:
                     await billing_service.refund(
@@ -743,7 +743,7 @@ class GrokVideoController(Controller):
                     )
                     await session.commit()
                 except Exception:
-                    logger.exception("Failed to refund for job %s", job.id)
+                    logger.exception("grok.refund_failed", job_id=str(job.id))
             return Response(
                 content=GrokJobResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),

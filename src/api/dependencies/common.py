@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 
+import structlog
 from litestar.di import Provide
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +31,7 @@ from src.core.config import Settings, get_settings
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # -----------------------------------------------------------------------------
 # Service container (single global, initialized at app startup)
@@ -341,12 +341,12 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         max_overflow=settings.db_max_overflow,
         echo=settings.db_echo,
     )
-    logger.info("Database connection pool initialized")
+    logger.info("db.pool_initialized")
 
     # Initialize ComfyUI client
     _services.comfyui_client = ComfyUIClient(settings)
     await _services.comfyui_client.connect()
-    logger.info(f"Connected to ComfyUI at {settings.comfyui_base_url}")
+    logger.info("comfyui.connected", url=settings.comfyui_base_url)
 
     # Initialize job manager with client
     _services.job_manager = JobManager(_services.comfyui_client)
@@ -365,9 +365,9 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             retention_days=settings.retention_days,
         )
         _services.r2_storage = R2StorageService(r2_settings)
-        logger.info(f"R2 storage initialized for bucket: {settings.r2_bucket_name}")
+        logger.info("r2.initialized", bucket=settings.r2_bucket_name)
     else:
-        logger.warning("R2 storage not configured - storage endpoints will be unavailable")
+        logger.warning("r2.not_configured")
 
     # Initialize Grok provider (if configured)
     if settings.grok_configured and _services.r2_storage is not None:
@@ -380,9 +380,9 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             retention_days=settings.retention_days,
         )
         await _services.grok_job_service.connect()
-        logger.info("Grok provider initialized")
+        logger.info("grok.initialized")
     else:
-        logger.warning("Grok provider not configured - XAI_API_KEY not set or R2 not available")
+        logger.warning("grok.not_configured")
 
     # Initialize authentication services
     jwt_config = JWTConfig(
@@ -394,7 +394,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     )
     _services.jwt_service = JWTService(jwt_config)
     _services.password_service = PasswordService()
-    logger.info("Authentication services initialized")
+    logger.info("auth.initialized")
 
     # Initialize email service
     if settings.resend_api_key:
@@ -403,10 +403,10 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             from_address=settings.email_from_address,
             from_name=settings.email_from_name,
         )
-        logger.info("Email service initialized (Resend)")
+        logger.info("email.initialized", provider="resend")
     else:
         _services.email_service = LogEmailService()
-        logger.info("Email service initialized (Log — no RESEND_API_KEY set)")
+        logger.info("email.initialized", provider="log")
 
     # Initialize email verification service
     _services.email_verification_service = EmailVerificationService(
@@ -419,7 +419,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         storage=_services.r2_storage,
         grok_job_service=_services.grok_job_service,
     )
-    logger.info("Unified job service initialized")
+    logger.info("unified_job_service.initialized")
 
     return _services.jwt_service  # Return for storing in app.state
 
@@ -433,19 +433,19 @@ async def shutdown_services() -> None:
 
     if _services.comfyui_client is not None:
         await _services.comfyui_client.close()
-        logger.info("ComfyUI client closed")
+        logger.info("comfyui.closed")
 
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
-        logger.info("R2 storage closed")
+        logger.info("r2.closed")
 
     if _services.db_manager is not None:
         await _services.db_manager.close()
-        logger.info("Database connections closed")
+        logger.info("db.closed")
 
     if _services.grok_job_service is not None:
         await _services.grok_job_service.close()
-        logger.info("Grok job service closed")
+        logger.info("grok.closed")
 
     # Reset container to clean state
     _services = ServiceContainer()

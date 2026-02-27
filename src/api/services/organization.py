@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 import re
 import unicodedata
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+import structlog
 
 from src.api.services.billing_errors import OrganizationBalanceError, OrganizationPermissionError
 from src.core.enums import OrgRole, TransactionType, UserRole
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
 
     from src.db.models.billing import Organization, OrganizationMember, TokenAccount
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def slugify(value: str) -> str:
@@ -84,10 +85,10 @@ class OrganizationService:
         )
 
         logger.info(
-            "organization_created org_id=%s owner_id=%s slug=%s",
-            org.id,
-            owner_id,
-            slug,
+            "org.created",
+            org_id=str(org.id),
+            owner_id=str(owner_id),
+            slug=slug,
         )
 
         return org, account
@@ -287,10 +288,10 @@ class OrganizationService:
             await session.flush()
 
         logger.info(
-            "organization_deleted org_id=%s actor_id=%s force_delete=%s",
-            org_id,
-            actor_id,
-            force_delete,
+            "org.updated",
+            org_id=str(org_id),
+            actor_id=str(actor_id),
+            force_delete=force_delete,
         )
 
     async def _require_admin_or_owner(

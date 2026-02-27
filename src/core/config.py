@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000, description="API server port")
     debug: bool = Field(default=False, description="Enable debug mode")
 
+    # Logging settings
+    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    log_format: Literal["json", "console"] = Field(
+        default="json",
+        description="Log output format: 'json' for production, 'console' for development",
+    )
+
     # App URL (used for building verification / reset links)
     app_url: str = Field(
         default="http://localhost:3000",

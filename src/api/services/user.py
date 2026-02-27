@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
+
+import structlog
 
 from src.api.schemas.user import (
     JobSummaryResponse,
@@ -19,7 +20,7 @@ from src.db.repositories import UserRepository
 if TYPE_CHECKING:
     from src.db.models import User
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class UserServiceError(Exception):
@@ -127,7 +128,7 @@ class UserService:
         if updated_user is None:
             raise UserNotFoundError(f"User {user_id} not found")
 
-        logger.info(f"Profile updated for user {user_id}")
+        logger.info("user.profile_updated", user_id=str(user_id))
 
         return self._to_profile_response(updated_user)
 
@@ -165,7 +166,7 @@ class UserService:
 
         # Revoke all refresh tokens (force re-login on all devices)
         revoked = await self._repo.revoke_all_user_tokens(user_id)
-        logger.info(f"Password changed for user {user_id}, revoked {revoked} tokens")
+        logger.info("user.password_changed", user_id=str(user_id), revoked_tokens=revoked)
 
     async def deactivate_account(self, user_id: UUID) -> datetime:
         """Soft delete user account.
@@ -189,7 +190,7 @@ class UserService:
         await self._repo.revoke_all_user_tokens(user_id)
 
         deactivated_at = datetime.now(UTC)
-        logger.info(f"Account deactivated for user {user_id}")
+        logger.info("user.deactivated", user_id=str(user_id))
 
         return deactivated_at
 

@@ -9,17 +9,17 @@ Endpoints:
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from decimal import Decimal
 
 import msgspec
+import structlog
 from litestar import Controller, get
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import TOKEN_PACKAGES
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------

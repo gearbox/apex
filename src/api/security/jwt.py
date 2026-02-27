@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -77,7 +77,7 @@ class JWTService:
         Returns:
             Tuple of (token string, expiration datetime).
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + self.access_token_lifetime
 
         payload: dict[str, Any] = {

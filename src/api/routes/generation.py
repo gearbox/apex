@@ -1,11 +1,11 @@
 """Generation API routes."""
 
-import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
+import structlog
 from litestar import Controller, Response, get, post
 from litestar.datastructures import UploadFile
 from litestar.di import Provide
@@ -32,7 +32,7 @@ from src.api.services.job_manager import JobManager
 from src.api.services.workflow_service import WorkflowError, WorkflowService
 from src.core.enums import GenerationType, JobStatus
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class HealthController(Controller):
@@ -107,11 +107,11 @@ class GenerationController(Controller):
                 job_manager.set_failed(job.job_id, "No prompt_id returned from ComfyUI")
 
         except WorkflowError as e:
-            logger.error(f"Workflow error: {e}")
+            logger.error("workflow.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
 
         except ComfyUIClientError as e:
-            logger.error(f"ComfyUI error: {e}")
+            logger.error("comfyui.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
 
         return Response(
@@ -175,7 +175,7 @@ class GenerationController(Controller):
 
                 result = await comfyui_client.upload_image(image_data, filename)
                 uploaded_image_1 = result.get("name")
-                logger.debug(f"Uploaded image1: {uploaded_image_1}")
+                logger.debug("image.uploaded", name="image1", result=str(uploaded_image_1))
 
             if image2 is not None:
                 image_data = await image2.read()
@@ -184,7 +184,7 @@ class GenerationController(Controller):
 
                 result = await comfyui_client.upload_image(image_data, filename)
                 uploaded_image_2 = result.get("name")
-                logger.debug(f"Uploaded image2: {uploaded_image_2}")
+                logger.debug("image.uploaded", name="image2", result=str(uploaded_image_2))
 
             # Load and configure workflow
             workflow = workflow_service.load_workflow(data.model_type)
@@ -208,11 +208,11 @@ class GenerationController(Controller):
                 job_manager.set_failed(job.job_id, "No prompt_id returned from ComfyUI")
 
         except WorkflowError as e:
-            logger.error(f"Workflow error: {e}")
+            logger.error("workflow.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
 
         except ComfyUIClientError as e:
-            logger.error(f"ComfyUI error: {e}")
+            logger.error("comfyui.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
 
         return Response(
@@ -331,7 +331,7 @@ class ImageController(Controller):
 
             # Generate unique filename preserving extension
             ext = data.filename.rsplit(".", 1)[-1] if data.filename else "png"
-            logger.debug(f"Uploading image with extension: {ext}")
+            logger.debug("image.uploading", ext=ext)
             unique_filename = f"upload_{uuid4().hex[:12]}.{ext}"
 
             result = await comfyui_client.upload_image(image_data, unique_filename)
@@ -346,7 +346,7 @@ class ImageController(Controller):
             )
 
         except ComfyUIClientError as e:
-            logger.error(f"Image upload failed: {e}")
+            logger.error("image.upload_failed", error=str(e))
             return Response(
                 content=ImageUploadResponse(
                     filename="",

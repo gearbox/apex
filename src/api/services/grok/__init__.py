@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from src.core.config import Settings
 from src.core.enums import AspectRatio, ModelType, VideoResolution
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from xai_sdk.proto.v6.deferred_pb2 import StartDeferredResponse
     from xai_sdk.proto.v6.video_pb2 import GetDeferredVideoResponse
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class GrokClientError(Exception):
@@ -178,10 +179,7 @@ class GrokClient:
                 api_key=self._settings.xai_api_key,
                 timeout=self._settings.xai_timeout,
             )
-            logger.info(
-                "Grok AsyncClient initialized (timeout=%ds)",
-                self._settings.xai_timeout,
-            )
+            logger.info("grok.client_initialized", timeout=self._settings.xai_timeout)
 
     async def close(self) -> None:
         """Close the client connection.
@@ -206,10 +204,10 @@ class GrokClient:
                     if asyncio.iscoroutine(result):
                         await result
         except Exception as e:
-            logger.warning("Error closing Grok client: %s", e)
+            logger.warning("grok.close_failed", error=str(e))
         finally:
             self._client = None
-            logger.info("Grok client closed")
+            logger.info("grok.client_closed")
 
     @property
     def client(self) -> XAIAsyncClient:
