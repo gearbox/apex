@@ -1,0 +1,69 @@
+# Apex API - Integration Test Docker Compose
+# Usage:
+#   make test-integration
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+
+services:
+  # ===========================================================================
+  # PostgreSQL Test Database (ephemeral)
+  # ===========================================================================
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: apex-postgres-test
+    environment:
+      POSTGRES_USER: apex_test
+      POSTGRES_PASSWORD: apex_test
+      POSTGRES_DB: apex_test
+    # Use tmpfs for speed — data is discarded when container exits
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apex_test -d apex_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - apex-test-network
+
+  # ===========================================================================
+  # Test Runner
+  # ===========================================================================
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: apex-test-runner
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    environment:
+      TEST_DATABASE_URL: "postgresql+asyncpg://apex_test:apex_test@postgres-test:5432/apex_test"
+      DATABASE_URL: "postgresql+asyncpg://apex_test:apex_test@postgres-test:5432/apex_test"
+      # Minimal settings to satisfy Settings validation
+      JWT_SECRET_KEY: "test-secret-key-for-integration-tests-only-32b"
+      COMFYUI_HOST: "127.0.0.1"
+      COMFYUI_PORT: "18188"
+      R2_ACCOUNT_ID: "test"
+      R2_ACCESS_KEY_ID: "test"
+      R2_SECRET_ACCESS_KEY: "test"
+      R2_BUCKET_NAME: "test-bucket"
+    command:
+      [
+        "pytest",
+        "tests/integration/",
+        "-v",
+        "--tb=short",
+        "--no-header",
+      ]
+    volumes:
+      - .:/app
+    working_dir: /app
+    networks:
+      - apex-test-network
+
+networks:
+  apex-test-network:
+    driver: bridge

@@ -1,7 +1,7 @@
 # Apex API - Makefile
 # Common commands for development and deployment
 
-.PHONY: help dev prod down logs migrate shell db-shell test lint clean
+.PHONY: help dev prod down logs migrate shell db-shell test test-cov test-integration test-integration-local test-all lint clean
 
 # Default target
 help:
@@ -19,8 +19,11 @@ help:
 	@echo "  make migrate-new NAME=xxx - Create new migration"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test       - Run tests"
-	@echo "  make lint       - Run linter"
+	@echo "  make test                    - Run unit tests"
+	@echo "  make test-integration        - Run integration tests (Docker)"
+	@echo "  make test-integration-local  - Run integration tests locally (needs postgres-test on 5433)"
+	@echo "  make test-all                - Run all tests"
+	@echo "  make lint                    - Run linter"
 	@echo ""
 	@echo "Production:"
 	@echo "  make prod       - Start production environment"
@@ -83,10 +86,22 @@ migrate-history:
 # =============================================================================
 
 test:
-	docker compose exec api pytest -v
+	docker compose exec api pytest -v --ignore=tests/integration/
 
 test-cov:
-	docker compose exec api pytest --cov=src --cov-report=html
+	docker compose exec api pytest --cov=src --cov-report=html --ignore=tests/integration/
+
+test-integration:
+	docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test-runner
+	docker compose -f docker-compose.test.yml down -v
+
+test-integration-local:
+	TEST_DATABASE_URL=postgresql+asyncpg://apex_test:apex_test@localhost:5433/apex_test \
+	pytest tests/integration/ -v --tb=short
+
+test-all:
+	make test
+	make test-integration
 
 lint:
 	docker compose exec api ruff check src/
