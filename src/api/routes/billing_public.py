@@ -3,8 +3,8 @@
 These endpoints power the purchase/pricing page on the frontend.
 
 Endpoints:
-  GET /api/v1/billing/packages   — available token packages with USD prices
-  GET /api/v1/billing/pricing    — active per-operation prices from pricing_catalog
+  GET /v1/billing/packages   — available token packages with USD prices
+  GET /v1/billing/pricing    — active per-operation prices from pricing_catalog
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def _build_packages() -> list[TokenPackageResponse]:
 class PublicBillingController(Controller):
     """Public billing information — no auth required."""
 
-    path = "/api/v1/billing"
+    path = "/v1/billing"
     tags: Sequence[str] | None = ["Billing"]
 
     @get("/packages")

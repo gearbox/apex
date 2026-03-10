@@ -66,7 +66,7 @@ class StorageController(Controller):
     All content is stored in Cloudflare R2 with metadata in PostgreSQL.
     """
 
-    path = "/api/v1/storage"
+    path = "/v1/storage"
     tags: Sequence[str] | None = ["Storage"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}

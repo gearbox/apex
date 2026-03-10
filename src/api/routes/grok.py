@@ -44,7 +44,7 @@ logger = structlog.get_logger(__name__)
 class GrokProviderController(Controller):
     """Grok provider information endpoints."""
 
-    path = "/api/v1/grok"
+    path = "/v1/grok"
     tags: Sequence[str] | None = ["Grok Provider"]
 
     @get("/")
@@ -65,7 +65,7 @@ class GrokProviderController(Controller):
 class GrokImageController(Controller):
     """Grok image generation endpoints."""
 
-    path = "/api/v1/grok/image"
+    path = "/v1/grok/image"
     tags: Sequence[str] | None = ["Grok Image"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
@@ -314,7 +314,7 @@ class GrokImageController(Controller):
 class GrokVideoController(Controller):
     """Grok video generation endpoints."""
 
-    path = "/api/v1/grok/video"
+    path = "/v1/grok/video"
     tags: Sequence[str] | None = ["Grok Video"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
@@ -660,7 +660,7 @@ class GrokVideoController(Controller):
 class GrokJobController(Controller):
     """Grok job status endpoints."""
 
-    path = "/api/v1/grok/jobs"
+    path = "/v1/grok/jobs"
     tags: Sequence[str] | None = ["Grok Jobs"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}

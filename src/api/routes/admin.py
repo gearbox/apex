@@ -38,7 +38,7 @@ logger = structlog.get_logger(__name__)
 class AdminController(Controller):
     """Admin endpoints for billing management."""
 
-    path = "/api/v1/admin"
+    path = "/v1/admin"
     tags: Sequence[str] | None = ["Admin"]
     guards = [auth_guard]
     dependencies = {

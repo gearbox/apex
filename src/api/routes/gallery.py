@@ -5,7 +5,7 @@ their parent ``GenerationJob`` so the frontend can render a gallery grid
 without extra API calls.
 
 Endpoint:
-  GET /api/v1/storage/gallery  — paginated gallery with job context + presigned URLs
+  GET /v1/storage/gallery  — paginated gallery with job context + presigned URLs
 
 Add this method to the existing ``StorageController`` in
 ``src/api/routes/storage.py``.

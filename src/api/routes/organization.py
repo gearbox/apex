@@ -36,7 +36,7 @@ logger = structlog.get_logger(__name__)
 class OrganizationController(Controller):
     """Organization management endpoints."""
 
-    path = "/api/v1/organizations"
+    path = "/v1/organizations"
     tags: Sequence[str] | None = ["Organizations"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}

@@ -58,7 +58,7 @@ async def get_current_user_id(request: Request) -> UUID:
 class UserController(Controller):
     """User profile management endpoints."""
 
-    path = "/api/v1/users"
+    path = "/v1/users"
     tags: Sequence[str] | None = ["Users"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}

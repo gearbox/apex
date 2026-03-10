@@ -52,7 +52,7 @@ logger = structlog.get_logger(__name__)
 class AuthController(Controller):
     """Authentication endpoints."""
 
-    path = "/api/v1/auth"
+    path = "/v1/auth"
     tags: Sequence[str] | None = ["Authentication"]
 
     @post("/register", status_code=HTTP_201_CREATED)

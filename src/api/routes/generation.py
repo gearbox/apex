@@ -68,7 +68,7 @@ class HealthController(Controller):
 class GenerationController(Controller):
     """Image generation endpoints."""
 
-    path = "/api/v1/generate"
+    path = "/v1/generate"
     tags: Sequence[str] | None = ["Generation"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
@@ -334,7 +334,7 @@ class GenerationController(Controller):
 class JobController(Controller):
     """Job status and management endpoints."""
 
-    path = "/api/v1/jobs"
+    path = "/v1/jobs"
     tags: Sequence[str] | None = ["Jobs"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
@@ -414,7 +414,7 @@ class JobController(Controller):
 class ImageController(Controller):
     """Image upload and retrieval endpoints."""
 
-    path = "/api/v1/images"
+    path = "/v1/images"
     tags: Sequence[str] | None = ["Images"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}

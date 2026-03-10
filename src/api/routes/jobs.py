@@ -4,9 +4,9 @@ Replaces the legacy in-memory ``JobController`` in ``generation.py``.
 All providers (Grok, ComfyUI) surface through this single controller.
 
 Endpoints:
-  GET  /api/v1/jobs           — paginated job list (filterable)
-  GET  /api/v1/jobs/{job_id}  — single job detail with outputs + thumbnails
-  DELETE /api/v1/jobs/{job_id} — soft-hide job from history
+  GET  /v1/jobs           — paginated job list (filterable)
+  GET  /v1/jobs/{job_id}  — single job detail with outputs + thumbnails
+  DELETE /v1/jobs/{job_id} — soft-hide job from history
 """
 
 from __future__ import annotations
@@ -40,13 +40,13 @@ class UnifiedJobController(Controller):
     so the frontend can render the gallery without extra API calls.
     """
 
-    path = "/api/v1/jobs"
+    path = "/v1/jobs"
     tags: Sequence[str] | None = ["Jobs"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
 
     # -------------------------------------------------------------------------
-    # GET /api/v1/jobs
+    # GET /v1/jobs
     # -------------------------------------------------------------------------
 
     @get("/")
@@ -84,7 +84,7 @@ class UnifiedJobController(Controller):
         )
 
     # -------------------------------------------------------------------------
-    # GET /api/v1/jobs/{job_id}
+    # GET /v1/jobs/{job_id}
     # -------------------------------------------------------------------------
 
     @get("/{job_id:uuid}")
@@ -114,7 +114,7 @@ class UnifiedJobController(Controller):
         return Response(content=job, status_code=HTTP_200_OK)
 
     # -------------------------------------------------------------------------
-    # DELETE /api/v1/jobs/{job_id}
+    # DELETE /v1/jobs/{job_id}
     # -------------------------------------------------------------------------
 
     @delete("/{job_id:uuid}", status_code=HTTP_204_NO_CONTENT)

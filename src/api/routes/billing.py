@@ -58,7 +58,7 @@ def _txn_to_response(txn: object) -> TransactionResponse:
 class BillingController(Controller):
     """Billing endpoints — balance, transactions, pricing, top-up."""
 
-    path = "/api/v1/billing"
+    path = "/v1/billing"
     tags: Sequence[str] | None = ["Billing"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
@@ -248,7 +248,7 @@ class BillingController(Controller):
 class BillingWebhookController(Controller):
     """Webhook endpoints — no auth guard, signature verified in handler."""
 
-    path = "/api/v1/billing/webhooks"
+    path = "/v1/billing/webhooks"
     tags: Sequence[str] | None = ["Billing Webhooks"]
 
     @post("/stripe")

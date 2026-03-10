@@ -89,10 +89,10 @@ def build_rate_limit_config(settings: Settings) -> dict[str, str]:
         Dictionary mapping '{METHOD} {path}' to limit strings.
     """
     return {
-        "POST /api/v1/auth/register": settings.rate_limit_register,
-        "POST /api/v1/auth/login": settings.rate_limit_login,
-        "POST /api/v1/auth/forgot-password": settings.rate_limit_forgot_password,
-        "POST /api/v1/auth/resend-verification": settings.rate_limit_resend_verification,
+        "POST /v1/auth/register": settings.rate_limit_register,
+        "POST /v1/auth/login": settings.rate_limit_login,
+        "POST /v1/auth/forgot-password": settings.rate_limit_forgot_password,
+        "POST /v1/auth/resend-verification": settings.rate_limit_resend_verification,
     }
 
 
