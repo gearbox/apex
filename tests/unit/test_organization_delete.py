@@ -463,7 +463,7 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            resp = client.delete(f"/api/v1/organizations/{uuid4()}")
+            resp = client.delete(f"/v1/organizations/{uuid4()}")
 
         assert resp.status_code == HTTP_401_UNAUTHORIZED
 
@@ -478,7 +478,7 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            resp = client.delete(f"/api/v1/organizations/{uuid4()}", headers=auth_header)
+            resp = client.delete(f"/v1/organizations/{uuid4()}", headers=auth_header)
 
         assert resp.status_code == HTTP_404_NOT_FOUND
 
@@ -497,7 +497,7 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            resp = client.delete(f"/api/v1/organizations/{org.id}", headers=auth_header)
+            resp = client.delete(f"/v1/organizations/{org.id}", headers=auth_header)
 
         assert resp.status_code == HTTP_403_FORBIDDEN
 
@@ -516,7 +516,7 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            resp = client.delete(f"/api/v1/organizations/{org.id}", headers=auth_header)
+            resp = client.delete(f"/v1/organizations/{org.id}", headers=auth_header)
 
         assert resp.status_code == HTTP_409_CONFLICT
         assert resp.json()["balance"] == 750
@@ -533,7 +533,7 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            resp = client.delete(f"/api/v1/organizations/{org.id}", headers=auth_header)
+            resp = client.delete(f"/v1/organizations/{org.id}", headers=auth_header)
 
         assert resp.status_code == HTTP_200_OK
         assert resp.json() == {"message": "Organization deleted"}
@@ -551,7 +551,7 @@ class TestDeleteOrganizationRoute:
 
         with TestClient(app=app) as client:
             resp = client.delete(
-                f"/api/v1/organizations/{org.id}?force_delete=true",
+                f"/v1/organizations/{org.id}?force_delete=true",
                 headers=auth_header,
             )
 
@@ -571,7 +571,7 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            resp = client.delete(f"/api/v1/organizations/{org.id}", headers=auth_header)
+            resp = client.delete(f"/v1/organizations/{org.id}", headers=auth_header)
 
         assert resp.status_code == HTTP_200_OK
         assert svc.delete_organization.call_args.kwargs["force_delete"] is False  # type: ignore[attr-defined]
@@ -588,7 +588,7 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            client.delete(f"/api/v1/organizations/{org.id}", headers=auth_header)
+            client.delete(f"/v1/organizations/{org.id}", headers=auth_header)
 
         mock_session.commit.assert_awaited_once()  # type: ignore[attr-defined]
 
@@ -603,6 +603,6 @@ class TestDeleteOrganizationRoute:
         app = _create_org_app(jwt_service, svc, mock_session)
 
         with TestClient(app=app) as client:
-            client.delete(f"/api/v1/organizations/{uuid4()}", headers=auth_header)
+            client.delete(f"/v1/organizations/{uuid4()}", headers=auth_header)
 
         mock_session.commit.assert_not_awaited()  # type: ignore[attr-defined]

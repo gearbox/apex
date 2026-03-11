@@ -19,10 +19,11 @@ help:
 	@echo "  make migrate-new NAME=xxx - Create new migration"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test                    - Run unit tests"
-	@echo "  make test-integration        - Run integration tests (Docker)"
+	@echo "  make test                    - Run unit tests (in API container)"
+	@echo "  make test-integration        - Run integration tests (Docker with DB)"
 	@echo "  make test-integration-local  - Run integration tests locally (needs postgres-test on 5433)"
-	@echo "  make test-all                - Run all tests"
+	@echo "  make test-all                - Run all tests (unit + integration) in Docker with DB"
+	@echo "  make test-cov                - Run all tests with coverage in Docker with DB"
 	@echo "  make lint                    - Run linter"
 	@echo ""
 	@echo "Production:"
@@ -86,10 +87,12 @@ migrate-history:
 # =============================================================================
 
 test:
-	docker compose exec api pytest -v --ignore=tests/integration/
+	docker compose exec api pytest tests/unit/ -v
 
 test-cov:
-	docker compose exec api pytest --cov=src --cov-report=html --ignore=tests/integration/
+	docker compose -f docker-compose.test.yml run --build test-runner \
+		pytest tests/ --cov=src --cov-report=html --tb=short --no-header
+	docker compose -f docker-compose.test.yml down -v
 
 test-integration:
 	docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test-runner
@@ -100,8 +103,9 @@ test-integration-local:
 	pytest tests/integration/ -v --tb=short
 
 test-all:
-	make test
-	make test-integration
+	docker compose -f docker-compose.test.yml run --build test-runner \
+		pytest tests/ -v --tb=short --no-header
+	docker compose -f docker-compose.test.yml down -v
 
 lint:
 	docker compose exec api ruff check src/

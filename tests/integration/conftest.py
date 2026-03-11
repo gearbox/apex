@@ -27,6 +27,7 @@ from src.db.models.storage import GenerationJob, UserImage
 from src.db.models.user import User
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.billing import BillingRepository
+from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.storage import StorageRepository
 from src.db.repositories.user import UserRepository
 
@@ -159,6 +160,12 @@ async def storage_repo(db_session: AsyncSession) -> StorageRepository:
 async def auth_token_repo(db_session: AsyncSession) -> AuthTokenRepository:
     """AuthTokenRepository bound to the test session."""
     return AuthTokenRepository(db_session)
+
+
+@pytest_asyncio.fixture
+async def generation_model_repo(db_session: AsyncSession) -> GenerationModelRepository:
+    """GenerationModelRepository bound to the test session."""
+    return GenerationModelRepository(db_session)
 
 
 # ---------------------------------------------------------------------------

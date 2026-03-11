@@ -9,12 +9,14 @@ from .billing import (
     TokenAccount,
     TokenTransaction,
 )
+from .generation_model import GenerationModel
 from .storage import GenerationJob, GenerationOutput, UserImage
 from .user import RefreshToken, User
 
 __all__ = [
     "Base",
     "GenerationJob",
+    "GenerationModel",
     "GenerationOutput",
     "Organization",
     "OrganizationMember",

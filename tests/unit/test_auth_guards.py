@@ -293,6 +293,8 @@ class TestGrokControllersAuth:
     def _create_grok_app(self, jwt_service: JWTService) -> Litestar:
         from unittest.mock import AsyncMock, MagicMock
 
+        from sqlalchemy.ext.asyncio import AsyncSession
+
         from src.api.routes.grok import (
             GrokImageController,
             GrokJobController,
@@ -300,8 +302,11 @@ class TestGrokControllersAuth:
             GrokVideoController,
         )
 
-        mock_session = MagicMock()
+        mock_session = MagicMock(spec=AsyncSession)
         mock_session.commit = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
 
         app = Litestar(
             route_handlers=[
@@ -323,14 +328,14 @@ class TestGrokControllersAuth:
         """GrokProviderController should NOT require auth."""
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/api/v1/grok/")
+            resp = client.get("/v1/grok/")
             assert resp.status_code == HTTP_200_OK
             assert resp.json()["available"] is False  # grok_job_service is None
 
     def test_image_generate_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.post("/api/v1/grok/image/", json={"prompt": "test"})
+            resp = client.post("/v1/grok/image/", json={"prompt": "test"})
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_image_generate_with_auth_passes_guard(
@@ -340,7 +345,7 @@ class TestGrokControllersAuth:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.post(
-                "/api/v1/grok/image/",
+                "/v1/grok/image/",
                 json={"prompt": "test image"},
                 headers=auth_header,
             )
@@ -351,7 +356,7 @@ class TestGrokControllersAuth:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.post(
-                "/api/v1/grok/image/edit",
+                "/v1/grok/image/edit",
                 json={"prompt": "edit", "input_image_id": str(uuid4())},
             )
             assert resp.status_code == HTTP_401_UNAUTHORIZED
@@ -359,7 +364,7 @@ class TestGrokControllersAuth:
     def test_video_generate_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.post("/api/v1/grok/video/", json={"prompt": "test video"})
+            resp = client.post("/v1/grok/video/", json={"prompt": "test video"})
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_video_generate_with_auth_passes_guard(
@@ -368,7 +373,7 @@ class TestGrokControllersAuth:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.post(
-                "/api/v1/grok/video/",
+                "/v1/grok/video/",
                 json={"prompt": "test video"},
                 headers=auth_header,
             )
@@ -378,7 +383,7 @@ class TestGrokControllersAuth:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.post(
-                "/api/v1/grok/video/from-image",
+                "/v1/grok/video/from-image",
                 json={"prompt": "animate", "input_image_id": str(uuid4())},
             )
             assert resp.status_code == HTTP_401_UNAUTHORIZED
@@ -387,7 +392,7 @@ class TestGrokControllersAuth:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.post(
-                "/api/v1/grok/video/edit",
+                "/v1/grok/video/edit",
                 json={"prompt": "edit", "input_video_url": "https://example.com/video.mp4"},
             )
             assert resp.status_code == HTTP_401_UNAUTHORIZED
@@ -395,7 +400,7 @@ class TestGrokControllersAuth:
     def test_job_status_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get(f"/api/v1/grok/jobs/{uuid4()}")
+            resp = client.get(f"/v1/grok/jobs/{uuid4()}")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_job_status_with_auth_passes_guard(
@@ -403,7 +408,7 @@ class TestGrokControllersAuth:
     ) -> None:
         app = self._create_grok_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get(f"/api/v1/grok/jobs/{uuid4()}", headers=auth_header)
+            resp = client.get(f"/v1/grok/jobs/{uuid4()}", headers=auth_header)
             # Any non-401 status means guard passed
             assert resp.status_code != HTTP_401_UNAUTHORIZED
 
@@ -439,31 +444,31 @@ class TestStorageControllerAuth:
     def test_upload_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.post("/api/v1/storage/upload")
+            resp = client.post("/v1/storage/upload")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_list_uploads_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/api/v1/storage/uploads")
+            resp = client.get("/v1/storage/uploads")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_list_outputs_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/api/v1/storage/outputs")
+            resp = client.get("/v1/storage/outputs")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_stats_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/api/v1/storage/stats")
+            resp = client.get("/v1/storage/stats")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_get_upload_access_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get(f"/api/v1/storage/uploads/{uuid4()}")
+            resp = client.get(f"/v1/storage/uploads/{uuid4()}")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_list_uploads_with_auth_returns_data(
@@ -474,7 +479,7 @@ class TestStorageControllerAuth:
     ) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/api/v1/storage/uploads", headers=auth_header)
+            resp = client.get("/v1/storage/uploads", headers=auth_header)
             assert resp.status_code == HTTP_200_OK
             body = resp.json()
             assert body["count"] == 0
@@ -492,7 +497,7 @@ class TestStorageControllerAuth:
     ) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/api/v1/storage/stats", headers=auth_header)
+            resp = client.get("/v1/storage/stats", headers=auth_header)
             assert resp.status_code == HTTP_200_OK
 
         mock = app.state["mock_content_service"]
@@ -508,7 +513,7 @@ class TestStorageControllerAuth:
         other_user = uuid4()
         with TestClient(app=app) as client:
             resp = client.get(
-                f"/api/v1/storage/stats?user_id={other_user}",
+                f"/v1/storage/stats?user_id={other_user}",
                 headers=auth_header,
             )
             # Should succeed (extra query param ignored) but use auth user_id, not query
@@ -565,25 +570,25 @@ class TestGenerationControllersAuth:
     def test_generate_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.post("/api/v1/generate/", json={"prompt": "test"})
+            resp = client.post("/v1/generate/", json={"prompt": "test"})
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_list_jobs_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/api/v1/jobs/")
+            resp = client.get("/v1/jobs/")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_get_job_status_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get(f"/api/v1/jobs/{uuid4()}")
+            resp = client.get(f"/v1/jobs/{uuid4()}")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_image_upload_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.post("/api/v1/images/upload")
+            resp = client.post("/v1/images/upload")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
 

@@ -37,6 +37,7 @@ from src.api.services.grok.job_service import GrokJobError, GrokJobService
 from src.api.services.pricing import PricingService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus
+from src.db.repositories.generation_model import GenerationModelRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -51,14 +52,20 @@ class GrokProviderController(Controller):
     async def get_provider_info(
         self,
         grok_job_service: GrokJobService | None,
+        session: AsyncSession,
     ) -> GrokProviderInfo:
         """Get Grok provider information and available models.
 
         Returns provider configuration status and supported models.
+        Only enabled models are included in the response.
         """
+        repo = GenerationModelRepository(session)
+        enabled_records = await repo.list_enabled()
+        enabled_keys = {r.model_key for r in enabled_records}
+        filtered_models = [m for m in GROK_MODELS if m.model.value in enabled_keys]
         return GrokProviderInfo(
             available=grok_job_service is not None,
-            models=GROK_MODELS,
+            models=filtered_models,
         )
 
 

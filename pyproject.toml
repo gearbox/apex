@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.6.2"
+version = "0.6.3"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -109,6 +109,9 @@ asyncio_mode = "auto"
 addopts = "-v"
 filterwarnings = [
     "ignore::DeprecationWarning",
+]
+markers = [
+    "unit: fast unit tests (no database required)",
 ]
 
 [tool.coverage.run]

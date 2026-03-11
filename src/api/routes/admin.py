@@ -25,12 +25,18 @@ from src.api.schemas.billing import (
     PricingRuleResponse,
     TransactionListResponse,
 )
+from src.api.schemas.models import (
+    GenerationModelResponse,
+    ModelListResponse,
+    SetModelEnabledRequest,
+)
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import AccountNotFoundError
 from src.api.services.pricing import PricingService
 from src.db.models import User
 from src.db.repositories.billing import BillingRepository
+from src.db.repositories.generation_model import GenerationModelRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -364,4 +370,66 @@ class AdminController(Controller):
             account_type=account.account_type,
             balance=balance,
             organization_name=org_name,
+        )
+
+    # -------------------------------------------------------------------------
+    # Model enable/disable management
+    # -------------------------------------------------------------------------
+
+    @get("/models")
+    async def list_models(
+        self,
+        admin_user: User,
+        session: AsyncSession,
+        enabled_only: bool = False,
+    ) -> ModelListResponse:
+        """List all generation models. Pass enabled_only=true to filter."""
+        logger.info("admin.listing_models", admin_id=str(admin_user.id), enabled_only=enabled_only)
+        repo = GenerationModelRepository(session)
+        if enabled_only:
+            models = await repo.list_enabled()
+        else:
+            models = await repo.list_all()
+        items = [
+            GenerationModelResponse(
+                model_key=m.model_key,
+                provider=m.provider,
+                name=m.name,
+                description=m.description,
+                is_enabled=m.is_enabled,
+                created_at=m.created_at,
+                updated_at=m.updated_at,
+            )
+            for m in models
+        ]
+        return ModelListResponse(items=items, total=len(items))
+
+    @patch("/models/{model_key:str}")
+    async def toggle_model(
+        self,
+        admin_user: User,
+        model_key: str,
+        data: SetModelEnabledRequest,
+        session: AsyncSession,
+    ) -> GenerationModelResponse:
+        """Toggle the is_enabled flag for a model."""
+        logger.info(
+            "admin.toggling_model",
+            admin_id=str(admin_user.id),
+            model_key=model_key,
+            is_enabled=data.is_enabled,
+        )
+        repo = GenerationModelRepository(session)
+        model = await repo.set_enabled(model_key, data.is_enabled)
+        if model is None:
+            raise NotFoundException(detail=f"Model '{model_key}' not found")
+        await session.commit()
+        return GenerationModelResponse(
+            model_key=model.model_key,
+            provider=model.provider,
+            name=model.name,
+            description=model.description,
+            is_enabled=model.is_enabled,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
         )
