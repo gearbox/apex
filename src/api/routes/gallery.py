@@ -30,6 +30,7 @@ logger = structlog.get_logger(__name__)
 
 _URL_TTL = 3600  # 1 hour presigned URL lifetime
 
+# TODO: There is no /v1/storage/gallery endpoint yet — this is just the response builder function and schemas.
 
 # ---------------------------------------------------------------------------
 # Schemas
