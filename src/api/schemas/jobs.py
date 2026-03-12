@@ -14,6 +14,41 @@ import msgspec
 from src.core.enums import GenerationType, JobStatus
 
 
+class JobCreatedResponse(msgspec.Struct, kw_only=True):
+    """Creation receipt returned immediately after a job is submitted.
+
+    The frontend should use ``job_id`` to poll ``GET /v1/jobs/{job_id}``
+    for the full ``UnifiedJobResponse`` including outputs.
+    """
+
+    job_id: UUID
+    """Unique job identifier."""
+
+    status: JobStatus
+    """Initial status (typically ``queued`` or ``completed`` for sync jobs)."""
+
+    name: str
+    """Human-readable job name."""
+
+    model: str
+    """Model identifier used for this job."""
+
+    generation_type: GenerationType
+    """Workflow type: t2i, i2i, t2v, i2v, v2v."""
+
+    created_at: datetime
+    """Job creation timestamp."""
+
+    message: str | None = None
+    """Optional human-readable status message (e.g. 'Poll job status for results.')."""
+
+    tokens_charged: int | None = None
+    """Tokens charged at submission time."""
+
+    balance_remaining: int | None = None
+    """Token balance after the charge."""
+
+
 class JobOutputItem(msgspec.Struct, kw_only=True):
     """A single generated output (image or video) within a job."""
 

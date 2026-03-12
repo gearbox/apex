@@ -16,7 +16,12 @@ from uuid import UUID, uuid4
 
 import msgspec
 
-from src.api.schemas.jobs import JobOutputItem, UnifiedJobListResponse, UnifiedJobResponse
+from src.api.schemas.jobs import (
+    JobCreatedResponse,
+    JobOutputItem,
+    UnifiedJobListResponse,
+    UnifiedJobResponse,
+)
 from src.api.services.unified_jobs import UnifiedJobService
 from src.core.enums import GenerationType, JobStatus
 
@@ -741,3 +746,21 @@ class TestSchemas:
             is_thumbnail=True,
         )
         assert item.output_index == -1
+
+    def test_job_created_response_round_trip(self) -> None:
+        now = datetime.now(UTC)
+        response = JobCreatedResponse(
+            job_id=uuid4(),
+            status=JobStatus.QUEUED,
+            name="Test job",
+            model="grok-imagine-image",
+            generation_type=GenerationType.T2I,
+            created_at=now,
+            tokens_charged=100,
+            balance_remaining=900,
+        )
+        encoded = msgspec.json.encode(response)
+        decoded = msgspec.json.decode(encoded, type=JobCreatedResponse)
+        assert decoded.status == JobStatus.QUEUED
+        assert decoded.model == "grok-imagine-image"
+        assert decoded.tokens_charged == 100

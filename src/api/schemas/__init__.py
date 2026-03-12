@@ -9,9 +9,9 @@ from .generation import (
     ImageUploadResponse,
     JobResponse,
     JobStatus,
-    JobStatusResponse,
     ModelType,
 )
+from .jobs import JobCreatedResponse, UnifiedJobListResponse, UnifiedJobResponse
 
 __all__ = [
     "DEFAULT_NEGATIVE_PROMPT",
@@ -20,8 +20,10 @@ __all__ = [
     "GenerationType",
     "HealthResponse",
     "ImageUploadResponse",
+    "JobCreatedResponse",
     "JobResponse",
     "JobStatus",
-    "JobStatusResponse",
     "ModelType",
+    "UnifiedJobListResponse",
+    "UnifiedJobResponse",
 ]

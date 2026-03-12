@@ -297,7 +297,6 @@ class TestGrokControllersAuth:
 
         from src.api.routes.grok import (
             GrokImageController,
-            GrokJobController,
             GrokProviderController,
             GrokVideoController,
         )
@@ -313,7 +312,6 @@ class TestGrokControllersAuth:
                 GrokProviderController,
                 GrokImageController,
                 GrokVideoController,
-                GrokJobController,
             ],
             dependencies={
                 "grok_job_service": Provide(lambda: None, sync_to_thread=False),
@@ -396,22 +394,6 @@ class TestGrokControllersAuth:
                 json={"prompt": "edit", "input_video_url": "https://example.com/video.mp4"},
             )
             assert resp.status_code == HTTP_401_UNAUTHORIZED
-
-    def test_job_status_requires_auth(self, jwt_service: JWTService) -> None:
-        app = self._create_grok_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get(f"/v1/grok/jobs/{uuid4()}")
-            assert resp.status_code == HTTP_401_UNAUTHORIZED
-
-    def test_job_status_with_auth_passes_guard(
-        self, jwt_service: JWTService, auth_header: dict[str, str]
-    ) -> None:
-        app = self._create_grok_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get(f"/v1/grok/jobs/{uuid4()}", headers=auth_header)
-            # Any non-401 status means guard passed
-            assert resp.status_code != HTTP_401_UNAUTHORIZED
-
 
 class TestStorageControllerAuth:
     """Verify auth guards are properly applied to StorageController."""
@@ -535,7 +517,6 @@ class TestGenerationControllersAuth:
             GenerationController,
             HealthController,
             ImageController,
-            JobController,
         )
         from src.api.services.comfyui_client import ComfyUIClient
 
@@ -548,7 +529,6 @@ class TestGenerationControllersAuth:
             route_handlers=[
                 HealthController,
                 GenerationController,
-                JobController,
                 ImageController,
             ],
             dependencies={
@@ -571,18 +551,6 @@ class TestGenerationControllersAuth:
         app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.post("/v1/generate/", json={"prompt": "test"})
-            assert resp.status_code == HTTP_401_UNAUTHORIZED
-
-    def test_list_jobs_requires_auth(self, jwt_service: JWTService) -> None:
-        app = self._create_gen_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get("/v1/jobs/")
-            assert resp.status_code == HTTP_401_UNAUTHORIZED
-
-    def test_get_job_status_requires_auth(self, jwt_service: JWTService) -> None:
-        app = self._create_gen_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get(f"/v1/jobs/{uuid4()}")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_image_upload_requires_auth(self, jwt_service: JWTService) -> None:
@@ -645,13 +613,6 @@ class TestControllerGuardDeclarations:
         assert guards is not None
         assert auth_guard in guards
 
-    def test_grok_job_controller_has_guard(self) -> None:
-        from src.api.routes.grok import GrokJobController
-
-        guards = GrokJobController.guards
-        assert guards is not None
-        assert auth_guard in guards
-
     def test_grok_provider_controller_has_no_guard(self) -> None:
         from src.api.routes.grok import GrokProviderController
 
@@ -673,13 +634,6 @@ class TestControllerGuardDeclarations:
         assert guards is not None
         assert auth_guard in guards
 
-    def test_job_controller_has_guard(self) -> None:
-        from src.api.routes.generation import JobController
-
-        guards = JobController.guards
-        assert guards is not None
-        assert auth_guard in guards
-
     def test_image_controller_has_guard(self) -> None:
         from src.api.routes.generation import ImageController
 
@@ -692,3 +646,100 @@ class TestControllerGuardDeclarations:
 
         guards = HealthController.__dict__.get("guards")
         assert guards is None or (isinstance(guards, list) and auth_guard not in guards)
+
+
+# ---------------------------------------------------------------------------
+# Test: UnifiedJobController auth
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedJobControllerAuth:
+    """Verify auth guards are applied to UnifiedJobController."""
+
+    def _create_unified_jobs_app(self, jwt_service: JWTService) -> Litestar:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from src.api.routes.jobs import UnifiedJobController
+        from src.api.services.unified_jobs import UnifiedJobService
+
+        mock_session = MagicMock(spec=AsyncSession)
+        mock_session.commit = AsyncMock()
+        mock_unified_job_service = MagicMock(spec=UnifiedJobService)
+
+        app = Litestar(
+            route_handlers=[UnifiedJobController],
+            dependencies={
+                "session": Provide(lambda: mock_session, sync_to_thread=False),
+                "unified_job_service": Provide(
+                    lambda: mock_unified_job_service, sync_to_thread=False
+                ),
+            },
+        )
+        app.state["jwt_service"] = jwt_service
+        return app
+
+    def test_list_jobs_requires_auth(self, jwt_service: JWTService) -> None:
+        app = self._create_unified_jobs_app(jwt_service)
+        with TestClient(app=app) as client:
+            resp = client.get("/v1/jobs/")
+            assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+    def test_get_job_requires_auth(self, jwt_service: JWTService) -> None:
+        app = self._create_unified_jobs_app(jwt_service)
+        with TestClient(app=app) as client:
+            resp = client.get(f"/v1/jobs/{uuid4()}")
+            assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+
+# ---------------------------------------------------------------------------
+# Test: Removed Grok job route returns 404
+# ---------------------------------------------------------------------------
+
+
+class TestGrokJobRouteChanges:
+    """Verify GET /v1/grok/jobs/{uuid} returns 404 — route has been removed."""
+
+    def _create_grok_app_without_job_controller(self, jwt_service: JWTService) -> Litestar:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from src.api.routes.grok import (
+            GrokImageController,
+            GrokProviderController,
+            GrokVideoController,
+        )
+
+        mock_session = MagicMock(spec=AsyncSession)
+        mock_session.commit = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        app = Litestar(
+            route_handlers=[
+                GrokProviderController,
+                GrokImageController,
+                GrokVideoController,
+            ],
+            dependencies={
+                "grok_job_service": Provide(lambda: None, sync_to_thread=False),
+                "session": Provide(lambda: mock_session, sync_to_thread=False),
+                "r2_storage": Provide(lambda: MagicMock(), sync_to_thread=False),
+            },
+        )
+        app.state["jwt_service"] = jwt_service
+        return app
+
+    def test_grok_job_status_route_no_longer_exists(
+        self, jwt_service: JWTService, auth_header: dict[str, str]
+    ) -> None:
+        """GET /v1/grok/jobs/{uuid} returns 404 — GrokJobController was removed."""
+        from litestar.status_codes import HTTP_404_NOT_FOUND
+
+        app = self._create_grok_app_without_job_controller(jwt_service)
+        with TestClient(app=app) as client:
+            resp = client.get(f"/v1/grok/jobs/{uuid4()}", headers=auth_header)
+            assert resp.status_code == HTTP_404_NOT_FOUND

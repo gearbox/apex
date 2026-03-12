@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
@@ -11,7 +10,6 @@ import structlog
 from litestar import Controller, Response, get, post
 from litestar.di import Provide
 from litestar.status_codes import (
-    HTTP_200_OK,
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
@@ -24,13 +22,12 @@ from src.api.schemas.grok import (
     GROK_MODELS,
     GrokImageEditRequest,
     GrokImageRequest,
-    GrokJobResponse,
-    GrokJobStatusResponse,
     GrokProviderInfo,
     GrokVideoEditRequest,
     GrokVideoFromImageRequest,
     GrokVideoRequest,
 )
+from src.api.schemas.jobs import JobCreatedResponse
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.grok.job_service import GrokJobError, GrokJobService
@@ -86,7 +83,7 @@ class GrokImageController(Controller):
         grok_job_service: GrokJobService | None,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[GrokJobResponse]:
+    ) -> Response[JobCreatedResponse]:
         """Generate images from text prompt.
 
         Creates and executes an image generation job using Grok.
@@ -98,11 +95,11 @@ class GrokImageController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name="Service Unavailable",
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.T2I,
                     created_at=datetime.now(UTC),
                     message="Grok provider is not configured",
@@ -135,11 +132,11 @@ class GrokImageController(Controller):
 
             if job is None:
                 return Response(
-                    content=GrokJobResponse(
+                    content=JobCreatedResponse(
                         job_id=UUID("00000000-0000-0000-0000-000000000000"),
                         status=JobStatus.FAILED,
                         name=data.name or data.prompt[:50],
-                        model=data.model,
+                        model=data.model.value,
                         generation_type=GenerationType.T2I,
                         created_at=datetime.now(UTC),
                         message="Job creation failed",
@@ -153,11 +150,11 @@ class GrokImageController(Controller):
             balance = await billing_service.get_balance(account.id, session=session)
 
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=job.id,
                     status=JobStatus(job.status),
                     name=job.name,
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.T2I,
                     created_at=job.created_at,
                     tokens_charged=token_cost,
@@ -173,11 +170,11 @@ class GrokImageController(Controller):
             logger.error("grok.image_generation_failed", error=str(e))
             # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name=data.name or data.prompt[:50],
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.T2I,
                     created_at=datetime.now(UTC),
                     message=str(e),
@@ -195,7 +192,7 @@ class GrokImageController(Controller):
         r2_storage: R2StorageService,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[GrokJobResponse]:
+    ) -> Response[JobCreatedResponse]:
         """Edit an existing image with a text prompt.
 
         Performs image-to-image editing using grok-imagine-image.
@@ -203,11 +200,11 @@ class GrokImageController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name="Service Unavailable",
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.I2I,
                     created_at=datetime.now(UTC),
                     message="Grok provider is not configured",
@@ -232,11 +229,11 @@ class GrokImageController(Controller):
 
             if input_image is None:
                 return Response(
-                    content=GrokJobResponse(
+                    content=JobCreatedResponse(
                         job_id=UUID("00000000-0000-0000-0000-000000000000"),
                         status=JobStatus.FAILED,
                         name="Invalid Input",
-                        model=data.model,
+                        model=data.model.value,
                         generation_type=GenerationType.I2I,
                         created_at=datetime.now(UTC),
                         message=f"Input image {data.input_image_id} not found",
@@ -268,11 +265,11 @@ class GrokImageController(Controller):
 
             if job is None:
                 return Response(
-                    content=GrokJobResponse(
+                    content=JobCreatedResponse(
                         job_id=UUID("00000000-0000-0000-0000-000000000000"),
                         status=JobStatus.FAILED,
                         name=data.name or data.prompt[:50],
-                        model=data.model,
+                        model=data.model.value,
                         generation_type=GenerationType.I2I,
                         created_at=datetime.now(UTC),
                         message="Job creation failed",
@@ -285,11 +282,11 @@ class GrokImageController(Controller):
             balance = await billing_service.get_balance(account.id, session=session)
 
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=job.id,
                     status=JobStatus(job.status),
                     name=job.name,
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.I2I,
                     created_at=job.created_at,
                     tokens_charged=token_cost,
@@ -305,11 +302,11 @@ class GrokImageController(Controller):
             logger.error("grok.image_editing_failed", error=str(e))
             # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name=data.name or data.prompt[:50],
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.I2I,
                     created_at=datetime.now(UTC),
                     message=str(e),
@@ -335,7 +332,7 @@ class GrokVideoController(Controller):
         grok_job_service: GrokJobService | None,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[GrokJobResponse]:
+    ) -> Response[JobCreatedResponse]:
         """Generate video from text prompt.
 
         Starts an asynchronous video generation job. The job will be processed
@@ -346,11 +343,11 @@ class GrokVideoController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name="Service Unavailable",
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.T2V,
                     created_at=datetime.now(UTC),
                     message="Grok provider is not configured",
@@ -384,11 +381,11 @@ class GrokVideoController(Controller):
 
             if job is None:
                 return Response(
-                    content=GrokJobResponse(
+                    content=JobCreatedResponse(
                         job_id=UUID("00000000-0000-0000-0000-000000000000"),
                         status=JobStatus.FAILED,
                         name=data.name or data.prompt[:50],
-                        model=data.model,
+                        model=data.model.value,
                         generation_type=GenerationType.T2V,
                         created_at=datetime.now(UTC),
                         message="Job creation failed",
@@ -401,11 +398,11 @@ class GrokVideoController(Controller):
             balance = await billing_service.get_balance(account.id, session=session)
 
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=job.id,
                     status=JobStatus(job.status),
                     name=job.name,
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.T2V,
                     created_at=job.created_at,
                     tokens_charged=token_cost,
@@ -419,11 +416,11 @@ class GrokVideoController(Controller):
             logger.error("grok.video_generation_failed", error=str(e))
             # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name=data.name or data.prompt[:50],
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.T2V,
                     created_at=datetime.now(UTC),
                     message=str(e),
@@ -441,7 +438,7 @@ class GrokVideoController(Controller):
         r2_storage: R2StorageService,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[GrokJobResponse]:
+    ) -> Response[JobCreatedResponse]:
         """Generate video from an image (image-to-video).
 
         Animates an existing image into a video. The input image must be
@@ -449,11 +446,11 @@ class GrokVideoController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name="Service Unavailable",
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.I2V,
                     created_at=datetime.now(UTC),
                     message="Grok provider is not configured",
@@ -478,11 +475,11 @@ class GrokVideoController(Controller):
 
             if input_image is None:
                 return Response(
-                    content=GrokJobResponse(
+                    content=JobCreatedResponse(
                         job_id=UUID("00000000-0000-0000-0000-000000000000"),
                         status=JobStatus.FAILED,
                         name="Invalid Input",
-                        model=data.model,
+                        model=data.model.value,
                         generation_type=GenerationType.I2V,
                         created_at=datetime.now(UTC),
                         message=f"Input image {data.input_image_id} not found",
@@ -515,11 +512,11 @@ class GrokVideoController(Controller):
 
             if job is None:
                 return Response(
-                    content=GrokJobResponse(
+                    content=JobCreatedResponse(
                         job_id=UUID("00000000-0000-0000-0000-000000000000"),
                         status=JobStatus.FAILED,
                         name=data.name or data.prompt[:50],
-                        model=data.model,
+                        model=data.model.value,
                         generation_type=GenerationType.I2V,
                         created_at=datetime.now(UTC),
                         message="Job creation failed",
@@ -532,11 +529,11 @@ class GrokVideoController(Controller):
             balance = await billing_service.get_balance(account.id, session=session)
 
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=job.id,
                     status=JobStatus(job.status),
                     name=job.name,
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.I2V,
                     created_at=job.created_at,
                     tokens_charged=token_cost,
@@ -550,11 +547,11 @@ class GrokVideoController(Controller):
             logger.error("grok.i2v_generation_failed", error=str(e))
             # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name=data.name or data.prompt[:50],
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.I2V,
                     created_at=datetime.now(UTC),
                     message=str(e),
@@ -571,7 +568,7 @@ class GrokVideoController(Controller):
         grok_job_service: GrokJobService | None,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[GrokJobResponse]:
+    ) -> Response[JobCreatedResponse]:
         """Edit an existing video with a text prompt (V2V).
 
         Performs video-to-video editing using grok-imagine-video.
@@ -580,11 +577,11 @@ class GrokVideoController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name="Service Unavailable",
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.V2V,
                     created_at=datetime.now(UTC),
                     message="Grok provider is not configured",
@@ -616,11 +613,11 @@ class GrokVideoController(Controller):
 
             if job is None:
                 return Response(
-                    content=GrokJobResponse(
+                    content=JobCreatedResponse(
                         job_id=UUID("00000000-0000-0000-0000-000000000000"),
                         status=JobStatus.FAILED,
                         name=data.name or data.prompt[:50],
-                        model=data.model,
+                        model=data.model.value,
                         generation_type=GenerationType.V2V,
                         created_at=datetime.now(UTC),
                         message="Job creation failed",
@@ -633,11 +630,11 @@ class GrokVideoController(Controller):
             balance = await billing_service.get_balance(account.id, session=session)
 
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=job.id,
                     status=JobStatus(job.status),
                     name=job.name,
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.V2V,
                     created_at=job.created_at,
                     tokens_charged=token_cost,
@@ -651,100 +648,14 @@ class GrokVideoController(Controller):
             logger.error("grok.v2v_editing_failed", error=str(e))
             # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=GrokJobResponse(
+                content=JobCreatedResponse(
                     job_id=UUID("00000000-0000-0000-0000-000000000000"),
                     status=JobStatus.FAILED,
                     name=data.name or data.prompt[:50],
-                    model=data.model,
+                    model=data.model.value,
                     generation_type=GenerationType.V2V,
                     created_at=datetime.now(UTC),
                     message=str(e),
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
-
-
-class GrokJobController(Controller):
-    """Grok job status endpoints."""
-
-    path = "/v1/grok/jobs"
-    tags: Sequence[str] | None = ["Grok Jobs"]
-    guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
-
-    @get("/{job_id:uuid}")
-    async def get_job_status(
-        self,
-        current_user_id: UUID,
-        job_id: UUID,
-        session: AsyncSession,
-        grok_job_service: GrokJobService | None,
-        billing_service: BillingService,
-    ) -> Response[GrokJobStatusResponse]:
-        """Get current status of a Grok generation job.
-
-        Returns job details including progress and output URLs.
-        For video jobs, this may trigger a poll to check completion status.
-        Only returns jobs owned by the authenticated user.
-        """
-        if grok_job_service is None:
-            return Response(
-                content=GrokJobStatusResponse(
-                    job_id=job_id,
-                    status=JobStatus.FAILED,
-                    name="Service Unavailable",
-                    generation_type=GenerationType.T2I,
-                    prompt="",
-                    created_at=datetime.now(UTC),
-                    error="Grok provider is not configured",
-                ),
-                status_code=HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        job = await grok_job_service.get_job(session, job_id)
-
-        if job is None or job.user_id != current_user_id:
-            return Response(
-                content=GrokJobStatusResponse(
-                    job_id=job_id,
-                    status=JobStatus.FAILED,
-                    name="Not Found",
-                    generation_type=GenerationType.T2I,
-                    prompt="",
-                    created_at=datetime.now(UTC),
-                    error=f"Job {job_id} not found",
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-        # Get output URLs if job is complete
-        outputs: list[str] = []
-        if job.status == JobStatus.COMPLETED.value:
-            outputs = await grok_job_service.get_job_outputs(session, job_id)
-
-        # Get billing info
-        balance: int | None = None
-        if job.token_cost is not None:
-            with contextlib.suppress(Exception):
-                account = await billing_service.resolve_account_for_user(
-                    current_user_id, session=session
-                )
-                balance = await billing_service.get_balance(account.id, session=session)
-        return Response(
-            content=GrokJobStatusResponse(
-                job_id=job.id,
-                status=JobStatus(job.status),
-                name=job.name,
-                generation_type=GenerationType(job.generation_type),
-                prompt=job.prompt,
-                enhanced_prompt=job.enhanced_prompt,
-                created_at=job.created_at,
-                started_at=job.started_at,
-                completed_at=job.completed_at,
-                outputs=outputs,
-                error=job.error_message,
-                tokens_charged=job.token_cost,
-                balance_remaining=balance,
-            ),
-            status_code=HTTP_200_OK,
-        )

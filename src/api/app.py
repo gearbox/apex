@@ -30,14 +30,13 @@ from src.api.routes.generation import (
     GenerationController,
     HealthController,
     ImageController,
-    JobController,
 )
 from src.api.routes.grok import (
     GrokImageController,
-    GrokJobController,
     GrokProviderController,
     GrokVideoController,
 )
+from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.storage import StorageController
 from src.api.routes.user import UserController
@@ -213,7 +212,6 @@ def create_app() -> Litestar:
             AdminController,
             # Generation
             GenerationController,
-            JobController,
             ImageController,
             # Storage
             StorageController,
@@ -221,7 +219,8 @@ def create_app() -> Litestar:
             GrokProviderController,
             GrokImageController,
             GrokVideoController,
-            GrokJobController,
+            # Jobs (unified, cross-provider)
+            UnifiedJobController,
         ],
         exception_handlers={
             InsufficientBalanceError: insufficient_balance_handler,

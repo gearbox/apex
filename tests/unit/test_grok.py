@@ -12,11 +12,11 @@ from src.api.schemas.grok import (
     GROK_MODELS,
     GrokImageEditRequest,
     GrokImageRequest,
-    GrokJobResponse,
     GrokProviderInfo,
     GrokVideoFromImageRequest,
     GrokVideoRequest,
 )
+from src.api.schemas.jobs import JobCreatedResponse
 from src.core.enums import (
     AspectRatio,
     GenerationType,
@@ -278,17 +278,17 @@ class TestGrokVideoEditRequest:
             )
 
 
-class TestGrokJobResponse:
-    """Tests for GrokJobResponse schema."""
+class TestJobCreatedResponse:
+    """Tests for JobCreatedResponse schema (renamed from GrokJobResponse)."""
 
     def test_valid_response(self) -> None:
         """Test valid response creation."""
         job_id = UUID("12345678-1234-1234-1234-123456789012")
-        response = GrokJobResponse(
+        response = JobCreatedResponse(
             job_id=job_id,
             status=JobStatus.COMPLETED,
             name="Test Job",
-            model=ModelType.GROK_IMAGINE_IMAGE,
+            model=ModelType.GROK_IMAGINE_IMAGE.value,
             generation_type=GenerationType.T2I,
             created_at=datetime.now(UTC),
             message="Generation completed",

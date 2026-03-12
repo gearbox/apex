@@ -12,10 +12,8 @@ from litestar.di import Provide
 from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.status_codes import (
-    HTTP_200_OK,
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
-    HTTP_404_NOT_FOUND,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +23,6 @@ from src.api.schemas.generation import (
     HealthResponse,
     ImageUploadResponse,
     JobResponse,
-    JobStatusResponse,
 )
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
@@ -329,86 +326,6 @@ class GenerationController(Controller):
             ),
             status_code=HTTP_201_CREATED,
         )
-
-
-class JobController(Controller):
-    """Job status and management endpoints."""
-
-    path = "/v1/jobs"
-    tags: Sequence[str] | None = ["Jobs"]
-    guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
-
-    @get("/{job_id:str}")
-    async def get_job_status(
-        self,
-        current_user_id: UUID,  # will filter by user when jobs are persisted
-        job_id: str,
-        job_manager: JobManager,
-    ) -> Response[JobStatusResponse]:
-        """Get current status of a generation job.
-
-        Polls ComfyUI for latest status if job is still processing.
-        Returns job details including progress and result images.
-        """
-        # Poll for updates
-        job = await job_manager.poll_job_status(job_id)
-
-        if job is None:
-            return Response(
-                content=JobStatusResponse(
-                    job_id=job_id,
-                    status=JobStatus.FAILED,
-                    name="Unknown",
-                    created_at=None,  # type: ignore
-                    error="Job not found",
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-        return Response(
-            content=JobStatusResponse(
-                job_id=job.job_id,
-                status=job.status,
-                name=job.name,
-                created_at=job.created_at,
-                started_at=job.started_at,
-                completed_at=job.completed_at,
-                progress=job.progress,
-                images=job.images,
-                error=job.error,
-            ),
-            status_code=HTTP_200_OK,
-        )
-
-    @get("/")
-    async def list_jobs(
-        self,
-        current_user_id: UUID,  # will filter by user when jobs are persisted
-        job_manager: JobManager,
-        status: JobStatus | None = None,
-        limit: int = 50,
-    ) -> list[JobStatusResponse]:
-        """List generation jobs.
-
-        Optionally filter by status. Returns most recent jobs first.
-        """
-        jobs = job_manager.list_jobs(status=status, limit=limit)
-
-        return [
-            JobStatusResponse(
-                job_id=job.job_id,
-                status=job.status,
-                name=job.name,
-                created_at=job.created_at,
-                started_at=job.started_at,
-                completed_at=job.completed_at,
-                progress=job.progress,
-                images=job.images,
-                error=job.error,
-            )
-            for job in jobs
-        ]
 
 
 class ImageController(Controller):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -10,8 +9,6 @@ import msgspec
 
 from src.core.enums import (
     AspectRatio,
-    GenerationType,
-    JobStatus,
     ModelType,
     VideoResolution,
 )
@@ -163,88 +160,6 @@ class GrokVideoEditRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=T
                 f"Model {self.model.value} does not support video editing. "
                 f"Use {ModelType.GROK_IMAGINE_VIDEO.value}."
             )
-
-
-# -----------------------------------------------------------------------------
-# Response Schemas
-# -----------------------------------------------------------------------------
-
-
-class GrokJobResponse(msgspec.Struct, kw_only=True):
-    """Response schema for job creation."""
-
-    job_id: UUID
-    """Unique job identifier."""
-
-    status: JobStatus
-    """Current job status."""
-
-    name: str
-    """Job name."""
-
-    model: ModelType
-    """Model used for generation."""
-
-    generation_type: GenerationType
-    """Type of generation (T2I, I2I, T2V, I2V)."""
-
-    created_at: datetime
-    """Job creation timestamp."""
-
-    message: str | None = None
-    """Optional status message."""
-
-    tokens_charged: int | None = None
-    """Tokens charged for this generation."""
-
-    balance_remaining: int | None = None
-    """Token balance remaining after charge."""
-
-
-class GrokJobStatusResponse(msgspec.Struct, kw_only=True):
-    """Response schema for job status query."""
-
-    job_id: UUID
-    """Unique job identifier."""
-
-    status: JobStatus
-    """Current job status."""
-
-    name: str
-    """Job name."""
-
-    model: ModelType | None = None
-    """Model used for generation."""
-
-    generation_type: GenerationType
-    """Type of generation."""
-
-    prompt: str
-    """Original prompt."""
-
-    enhanced_prompt: str | None = None
-    """Revised prompt from the model."""
-
-    created_at: datetime
-    """Job creation timestamp."""
-
-    started_at: datetime | None = None
-    """When processing started."""
-
-    completed_at: datetime | None = None
-    """When processing completed."""
-
-    outputs: list[str] = msgspec.field(default_factory=list)
-    """Presigned URLs for accessing outputs."""
-
-    error: str | None = None
-    """Error message if job failed."""
-
-    tokens_charged: int | None = None
-    """Tokens charged for this generation."""
-
-    balance_remaining: int | None = None
-    """Token balance remaining after charge."""
 
 
 # -----------------------------------------------------------------------------

@@ -68,20 +68,6 @@ class JobResponse(msgspec.Struct, kw_only=True):
     message: str | None = None
 
 
-class JobStatusResponse(msgspec.Struct, kw_only=True):
-    """Response schema for job status query."""
-
-    job_id: str
-    status: JobStatus
-    name: str
-    created_at: datetime
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    progress: Progress = 0.0
-    images: list[str] = msgspec.field(default_factory=list)
-    error: str | None = None
-
-
 class ImageUploadResponse(msgspec.Struct, kw_only=True):
     """Response schema for image upload."""
 
