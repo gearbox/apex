@@ -66,6 +66,7 @@ class JobSummaryResponse(msgspec.Struct, kw_only=True):
     generation_type: str
     prompt: str
     output_count: int
+    thumbnail_url: str | None
     created_at: datetime
     completed_at: datetime | None
 

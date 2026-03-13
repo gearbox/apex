@@ -163,6 +163,7 @@ JobSummaryResponse: {
   generation_type: GenerationType,
   prompt: string,
   output_count: int,
+  thumbnail_url: string | null,   // presigned URL for first output; null if no outputs yet
   created_at: datetime,
   completed_at: datetime | null
 }

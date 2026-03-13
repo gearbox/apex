@@ -233,6 +233,7 @@ async def get_user_service(session: AsyncSession) -> UserService:
     return UserService(
         repository=repository,
         password_service=get_password_service(),
+        r2_storage=_services.r2_storage,
     )
 
 

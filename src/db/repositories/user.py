@@ -695,6 +695,28 @@ class UserRepository:
         )
         return int(result.scalar() or 0)
 
+    async def get_first_outputs_for_jobs(
+        self, job_ids: list[UUID]
+    ) -> dict[UUID, GenerationOutput]:
+        """Get the first output (lowest output_index) for each job in a single query.
+
+        Args:
+            job_ids: List of job IDs to fetch thumbnails for.
+
+        Returns:
+            Dict mapping job_id to its first GenerationOutput.
+        """
+        if not job_ids:
+            return {}
+
+        result = await self._session.execute(
+            select(GenerationOutput)
+            .distinct(GenerationOutput.job_id)
+            .where(GenerationOutput.job_id.in_(job_ids))
+            .order_by(GenerationOutput.job_id, GenerationOutput.output_index)
+        )
+        return {out.job_id: out for out in result.scalars().all()}
+
     async def count_outputs_for_jobs(self, job_ids: list[UUID]) -> dict[UUID, int]:
         """Count outputs for multiple jobs in a single query.
 

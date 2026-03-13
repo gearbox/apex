@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -18,6 +19,7 @@ from src.api.security import PasswordService
 from src.db.repositories import UserRepository
 
 if TYPE_CHECKING:
+    from src.api.services.storage import R2StorageService
     from src.db.models import User
 
 logger = structlog.get_logger(__name__)
@@ -57,15 +59,18 @@ class UserService:
         self,
         repository: UserRepository,
         password_service: PasswordService,
+        r2_storage: R2StorageService | None = None,
     ) -> None:
         """Initialize user service.
 
         Args:
             repository: User repository.
             password_service: Password hashing service.
+            r2_storage: R2 storage service for presigned URL generation (optional).
         """
         self._repo = repository
         self._password = password_service
+        self._r2 = r2_storage
 
     async def get_profile(self, user_id: UUID) -> UserProfileResponse:
         """Get user profile.
@@ -251,9 +256,24 @@ class UserService:
         jobs = await self._repo.list_user_jobs(user_id, limit=limit, offset=offset)
         total = await self._repo.count_user_jobs(user_id)
 
-        # Fetch all output counts in a single query to avoid N+1
         job_ids = [job.id for job in jobs]
-        output_counts = await self._repo.count_outputs_for_jobs(job_ids)
+
+        # Both batch queries in a single round-trip each — no N+1
+        output_counts, first_outputs = await asyncio.gather(
+            self._repo.count_outputs_for_jobs(job_ids),
+            self._repo.get_first_outputs_for_jobs(job_ids),
+        )
+
+        # Sign thumbnail URLs in parallel (pure HMAC, no R2 round-trips)
+        thumbnail_urls: dict[UUID, str] = {}
+        if self._r2 and first_outputs:
+            sign_results = await asyncio.gather(
+                *(self._r2.sign_key(out.storage_key) for out in first_outputs.values()),
+                return_exceptions=True,
+            )
+            for job_id, result in zip(first_outputs.keys(), sign_results, strict=True):
+                if isinstance(result, str):
+                    thumbnail_urls[job_id] = result
 
         items = [
             JobSummaryResponse(
@@ -263,6 +283,7 @@ class UserService:
                 generation_type=str(job.generation_type),
                 prompt=(f"{job.prompt[:200]}..." if len(job.prompt) > 200 else job.prompt),
                 output_count=output_counts.get(job.id, 0),
+                thumbnail_url=thumbnail_urls.get(job.id),
                 created_at=job.created_at,
                 completed_at=job.completed_at,
             )
