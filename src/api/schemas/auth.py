@@ -110,8 +110,3 @@ class MessageResponse(msgspec.Struct, kw_only=True):
     message: str
 
 
-class AuthErrorResponse(msgspec.Struct, kw_only=True):
-    """Generic authentication error response."""
-
-    error: str
-    error_description: str | None = None

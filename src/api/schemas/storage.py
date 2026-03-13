@@ -72,8 +72,3 @@ class StorageStatsResponse(msgspec.Struct, kw_only=True):
     total_mb: float
 
 
-class ErrorResponse(msgspec.Struct, kw_only=True):
-    """Error response."""
-
-    error: str
-    detail: str | None = None

@@ -26,8 +26,8 @@ from litestar.status_codes import (
 )
 
 from src.api.dependencies.auth import get_current_user_id
+from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.storage import (
-    ErrorResponse,
     ImageAccessResponse,
     ImageListItem,
     ImageListResponse,
@@ -77,7 +77,7 @@ class StorageController(Controller):
         current_user_id: UUID,
         user_content: UserContentService,
         data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART, title="file")],
-    ) -> Response[UploadResponse | ErrorResponse]:
+    ) -> Response[UploadResponse | ErrorEnvelope]:
         """Upload an image for use in generation.
 
         Accepts PNG, JPEG, or WebP images up to 20MB.
@@ -90,9 +90,10 @@ class StorageController(Controller):
         content_type = data.content_type or "application/octet-stream"
         if content_type not in ALLOWED_CONTENT_TYPES:
             return Response(
-                content=ErrorResponse(
-                    error="Invalid file type",
-                    detail=f"Allowed types: {', '.join(ALLOWED_CONTENT_TYPES)}",
+                content=ErrorEnvelope(
+                    error="invalid_file_type",
+                    message=f"Allowed types: {', '.join(ALLOWED_CONTENT_TYPES)}",
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -104,16 +105,21 @@ class StorageController(Controller):
         # Validate size
         if len(file_bytes) > MAX_UPLOAD_SIZE:
             return Response(
-                content=ErrorResponse(
-                    error="File too large",
-                    detail=f"Maximum size: {MAX_UPLOAD_SIZE // (1024 * 1024)}MB",
+                content=ErrorEnvelope(
+                    error="file_too_large",
+                    message=f"Maximum size: {MAX_UPLOAD_SIZE // (1024 * 1024)}MB",
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
         if len(file_bytes) == 0:
             return Response(
-                content=ErrorResponse(error="Empty file"),
+                content=ErrorEnvelope(
+                    error="empty_file",
+                    message="Uploaded file is empty",
+                    status_code=HTTP_400_BAD_REQUEST,
+                ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
         logger.debug("storage.upload_size", bytes=len(file_bytes))
@@ -148,13 +154,21 @@ class StorageController(Controller):
         except UserContentValidationError as e:
             logger.warning("storage.upload_validation_failed", error=str(e))
             return Response(
-                content=ErrorResponse(error="Validation failed", detail=str(e)),
+                content=ErrorEnvelope(
+                    error="validation_error",
+                    message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
+                ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
         except UserContentError as e:
             logger.error("storage.upload_failed", error=str(e))
             return Response(
-                content=ErrorResponse(error="Upload failed", detail=str(e)),
+                content=ErrorEnvelope(
+                    error="upload_failed",
+                    message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
+                ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
@@ -172,7 +186,7 @@ class StorageController(Controller):
                 description="URL validity in seconds (1 min to 24 hours)",
             ),
         ] = 3600,
-    ) -> Response[ImageAccessResponse | ErrorResponse]:
+    ) -> Response[ImageAccessResponse | ErrorEnvelope]:
         """Get a presigned URL to access an uploaded image.
 
         Returns a temporary URL valid for the specified duration.
@@ -199,7 +213,7 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorResponse(error="Image not found"),
+                content=ErrorEnvelope(error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -209,7 +223,7 @@ class StorageController(Controller):
         current_user_id: UUID,
         user_content: UserContentService,
         image_id: UUID,
-    ) -> Response[bytes | ErrorResponse]:
+    ) -> Response[bytes | ErrorEnvelope]:
         """Download an uploaded image directly.
 
         Returns the raw image bytes with appropriate content type.
@@ -220,7 +234,7 @@ class StorageController(Controller):
             image = await user_content.get_upload(image_id, user_id=current_user_id)
             if image is None:
                 return Response(
-                    content=ErrorResponse(error="Image not found"),
+                    content=ErrorEnvelope(error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND),
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
@@ -234,7 +248,7 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorResponse(error="Image not found"),
+                content=ErrorEnvelope(error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -305,7 +319,7 @@ class StorageController(Controller):
                 description="URL validity in seconds",
             ),
         ] = 3600,
-    ) -> Response[ImageAccessResponse | ErrorResponse]:
+    ) -> Response[ImageAccessResponse | ErrorEnvelope]:
         """Get a presigned URL to access a generated output.
 
         Returns a temporary URL valid for the specified duration.
@@ -331,7 +345,7 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorResponse(error="Output not found"),
+                content=ErrorEnvelope(error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -341,7 +355,7 @@ class StorageController(Controller):
         current_user_id: UUID,
         user_content: UserContentService,
         output_id: UUID,
-    ) -> Response[bytes | ErrorResponse]:
+    ) -> Response[bytes | ErrorEnvelope]:
         """Download a generated output directly.
 
         Returns the raw image bytes with appropriate content type.
@@ -350,7 +364,7 @@ class StorageController(Controller):
             output = await user_content.get_output(output_id, user_id=current_user_id)
             if output is None:
                 return Response(
-                    content=ErrorResponse(error="Output not found"),
+                    content=ErrorEnvelope(error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND),
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
@@ -364,7 +378,7 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorResponse(error="Output not found"),
+                content=ErrorEnvelope(error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -407,7 +421,7 @@ class StorageController(Controller):
         current_user_id: UUID,
         user_content: UserContentService,
         job_id: UUID,
-    ) -> Response[OutputListResponse | ErrorResponse]:
+    ) -> Response[OutputListResponse | ErrorEnvelope]:
         """List outputs for a specific job.
 
         Returns outputs ordered by output index (batch order).
@@ -417,7 +431,7 @@ class StorageController(Controller):
             outputs = await user_content.list_job_outputs(job_id, user_id=current_user_id)
         except UserContentNotFoundError:
             return Response(
-                content=ErrorResponse(error="Job outputs not found"),
+                content=ErrorEnvelope(error="not_found", message="Job outputs not found", status_code=HTTP_404_NOT_FOUND),
                 status_code=HTTP_404_NOT_FOUND,
             )
 

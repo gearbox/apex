@@ -3,7 +3,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-03-13
+> **Last synced:** 2026-03-14
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -999,17 +999,58 @@ Values: `"pending"`, `"completed"`, `"failed"`, `"refunded"`
 
 ## 12. Error Response Format
 
-Standard error responses across all endpoints:
+All non-2xx responses use a single unified envelope:
 
+```typescript
+interface ApiError {
+  error: string;        // machine-readable code (snake_case)
+  message: string;      // human-readable, safe to show in UI
+  status_code: number;  // mirrors the HTTP status
+  detail?: Record<string, unknown> | null;  // optional structured context
+}
 ```
-HTTP 400: { error: string, detail?: string }
-HTTP 401: { error: string, error_description?: string }
-HTTP 402: { error: "insufficient_balance", balance: int, required: int }
-HTTP 403: { error: string, detail?: string }
-HTTP 404: { detail: string }
-HTTP 409: { error: string, detail?: string }
-HTTP 422: { error: "moderation", provider: string, policy: string }
-HTTP 503: { error: string, detail?: string }
+
+The `error` code is always a stable snake_case string — treat it like an enum. Common values:
+
+| HTTP | `error` | `detail` keys |
+|------|---------|---------------|
+| 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed` | — |
+| 401 | `unauthorized`, `invalid_credentials`, `account_inactive`, `token_reuse_detected` | — |
+| 402 | `insufficient_balance` | `balance`, `required` |
+| 403 | `forbidden`, `account_inactive`, `permission_denied` | — |
+| 404 | `not_found`, `account_not_found`, `price_not_found` | — |
+| 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero` | `balance` |
+| 422 | `validation_error`, `moderation` | `provider`, `policy` |
+| 429 | `too_many_requests` | — |
+| 503 | `service_unavailable` | — |
+
+**Example responses:**
+
+```json
+// 401
+{ "error": "invalid_credentials", "message": "Invalid email or password", "status_code": 401, "detail": null }
+
+// 402
+{ "error": "insufficient_balance", "message": "Insufficient balance: have 50, need 100", "status_code": 402, "detail": { "balance": 50, "required": 100 } }
+
+// 404
+{ "error": "not_found", "message": "Job not found", "status_code": 404, "detail": null }
+
+// 422
+{ "error": "moderation", "message": "Content moderated by grok (policy: nsfw)", "status_code": 422, "detail": { "provider": "grok", "policy": "nsfw" } }
+```
+
+**Frontend usage:**
+
+```typescript
+async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
+  if (!res.ok) {
+    const err: ApiError = await res.json();
+    throw err;  // catch by err.error code, display err.message
+  }
+  return res.json();
+}
 ```
 
 ---

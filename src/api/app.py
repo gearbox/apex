@@ -8,6 +8,7 @@ import structlog
 from litestar import Litestar, Request, Response
 from litestar.config.cors import CORSConfig
 from litestar.datastructures import UploadFile
+from litestar.exceptions import HTTPException
 from litestar.middleware import DefineMiddleware
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
@@ -40,6 +41,7 @@ from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.storage import StorageController
 from src.api.routes.user import UserController
+from src.api.schemas.errors import ErrorEnvelope
 from src.api.services.billing_errors import (
     AccountInactiveError,
     AccountNotFoundError,
@@ -58,60 +60,85 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Exception handlers for billing errors
+# Exception handlers — all produce a unified ErrorEnvelope
 # ---------------------------------------------------------------------------
 
+_STATUS_TO_ERROR_CODE: dict[int, str] = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    409: "conflict",
+    422: "validation_error",
+    429: "too_many_requests",
+    500: "internal_error",
+    503: "service_unavailable",
+}
 
-def _billing_error_response(
-    request: Request,  # noqa: ARG001
-    exc: Exception,
-    status_code: int,
-) -> Response:
-    return Response(content={"detail": str(exc)}, status_code=status_code)
+
+def _error(error: str, message: str, status_code: int, detail: dict | None = None) -> Response:
+    return Response(
+        content=ErrorEnvelope(
+            error=error, message=message, status_code=status_code, detail=detail
+        ),
+        status_code=status_code,
+    )
+
+
+def http_exception_handler(request: Request, exc: HTTPException) -> Response:  # noqa: ARG001
+    error_code = _STATUS_TO_ERROR_CODE.get(exc.status_code, "error")
+    message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return _error(error_code, message, exc.status_code)
 
 
 def insufficient_balance_handler(request: Request, exc: InsufficientBalanceError) -> Response:  # noqa: ARG001
-    return Response(
-        content={"detail": str(exc), "balance": exc.balance, "required": exc.required},
-        status_code=HTTP_402_PAYMENT_REQUIRED,
+    return _error(
+        "insufficient_balance",
+        str(exc),
+        HTTP_402_PAYMENT_REQUIRED,
+        {"balance": exc.balance, "required": exc.required},
     )
 
 
-def account_not_found_handler(request: Request, exc: AccountNotFoundError) -> Response:
-    return _billing_error_response(request, exc, HTTP_404_NOT_FOUND)
+def account_not_found_handler(request: Request, exc: AccountNotFoundError) -> Response:  # noqa: ARG001
+    return _error("account_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
-def account_inactive_handler(request: Request, exc: AccountInactiveError) -> Response:
-    return _billing_error_response(request, exc, HTTP_403_FORBIDDEN)
+def account_inactive_handler(request: Request, exc: AccountInactiveError) -> Response:  # noqa: ARG001
+    return _error("account_inactive", str(exc), HTTP_403_FORBIDDEN)
 
 
-def refund_not_eligible_handler(request: Request, exc: RefundNotEligibleError) -> Response:
-    return _billing_error_response(request, exc, HTTP_409_CONFLICT)
+def refund_not_eligible_handler(request: Request, exc: RefundNotEligibleError) -> Response:  # noqa: ARG001
+    return _error("refund_not_eligible", str(exc), HTTP_409_CONFLICT)
 
 
-def price_not_found_handler(request: Request, exc: PriceNotFoundError) -> Response:
-    return _billing_error_response(request, exc, HTTP_404_NOT_FOUND)
+def price_not_found_handler(request: Request, exc: PriceNotFoundError) -> Response:  # noqa: ARG001
+    return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
 def moderation_error_handler(request: Request, exc: ModerationError) -> Response:  # noqa: ARG001
-    return Response(
-        content={"detail": str(exc), "provider": exc.provider, "policy": exc.policy},
-        status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+    return _error(
+        "moderation",
+        str(exc),
+        HTTP_422_UNPROCESSABLE_ENTITY,
+        {"provider": exc.provider, "policy": exc.policy},
     )
 
 
-def payment_verification_handler(request: Request, exc: PaymentVerificationError) -> Response:
-    return _billing_error_response(request, exc, HTTP_400_BAD_REQUEST)
+def payment_verification_handler(request: Request, exc: PaymentVerificationError) -> Response:  # noqa: ARG001
+    return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
 
 
-def organization_permission_handler(request: Request, exc: OrganizationPermissionError) -> Response:
-    return _billing_error_response(request, exc, HTTP_403_FORBIDDEN)
+def organization_permission_handler(request: Request, exc: OrganizationPermissionError) -> Response:  # noqa: ARG001
+    return _error("permission_denied", str(exc), HTTP_403_FORBIDDEN)
 
 
 def organization_balance_handler(request: Request, exc: OrganizationBalanceError) -> Response:  # noqa: ARG001
-    return Response(
-        content={"detail": str(exc), "balance": exc.balance},
-        status_code=HTTP_409_CONFLICT,
+    return _error(
+        "organization_balance_nonzero",
+        str(exc),
+        HTTP_409_CONFLICT,
+        {"balance": exc.balance},
     )
 
 
@@ -223,6 +250,7 @@ def create_app() -> Litestar:
             UnifiedJobController,
         ],
         exception_handlers={
+            HTTPException: http_exception_handler,
             InsufficientBalanceError: insufficient_balance_handler,
             AccountNotFoundError: account_not_found_handler,
             AccountInactiveError: account_inactive_handler,

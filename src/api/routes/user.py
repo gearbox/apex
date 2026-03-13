@@ -16,7 +16,8 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
 )
 
-from src.api.schemas.auth import AuthErrorResponse, MessageResponse
+from src.api.schemas.auth import MessageResponse
+from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.user import (
     ChangePasswordRequest,
     DeleteAccountResponse,
@@ -68,7 +69,7 @@ class UserController(Controller):
         self,
         current_user_id: UUID,
         user_service: UserService,
-    ) -> Response[UserProfileResponse | AuthErrorResponse]:
+    ) -> Response[UserProfileResponse | ErrorEnvelope]:
         """Get current user's profile."""
         try:
             profile = await user_service.get_profile(current_user_id)
@@ -83,7 +84,7 @@ class UserController(Controller):
         current_user_id: UUID,
         data: Annotated[UpdateProfileRequest, Body()],
         user_service: UserService,
-    ) -> Response[UserProfileResponse | AuthErrorResponse]:
+    ) -> Response[UserProfileResponse | ErrorEnvelope]:
         """Update current user's profile."""
         try:
             profile = await user_service.update_profile(
@@ -98,9 +99,10 @@ class UserController(Controller):
 
         except EmailAlreadyExistsError as e:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="email_exists",
-                    error_description=str(e),
+                    message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -111,7 +113,7 @@ class UserController(Controller):
         current_user_id: UUID,
         data: Annotated[ChangePasswordRequest, Body()],
         user_service: UserService,
-    ) -> Response[MessageResponse | AuthErrorResponse]:
+    ) -> Response[MessageResponse | ErrorEnvelope]:
         """Change current user's password.
 
         All existing sessions will be invalidated.
@@ -134,9 +136,10 @@ class UserController(Controller):
 
         except InvalidPasswordError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="invalid_password",
-                    error_description="Current password is incorrect",
+                    message="Current password is incorrect",
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )

@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.auth import (
-    AuthErrorResponse,
     ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
@@ -30,6 +29,7 @@ from src.api.schemas.auth import (
     TokenResponse,
     VerifyEmailRequest,
 )
+from src.api.schemas.errors import ErrorEnvelope
 from src.api.security import auth_guard
 from src.api.services.auth import (
     AuthService,
@@ -60,7 +60,7 @@ class AuthController(Controller):
         self,
         data: Annotated[RegisterRequest, Body()],
         auth_service: AuthService,
-    ) -> Response[TokenResponse | AuthErrorResponse]:
+    ) -> Response[TokenResponse | ErrorEnvelope]:
         """Register a new user account.
 
         Creates a new user and returns authentication tokens.
@@ -84,9 +84,10 @@ class AuthController(Controller):
 
         except EmailAlreadyExistsError as e:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="email_exists",
-                    error_description=str(e),
+                    message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -97,7 +98,7 @@ class AuthController(Controller):
         data: Annotated[VerifyEmailRequest, Body()],
         session: AsyncSession,
         email_verification_service: EmailVerificationService,
-    ) -> Response[MessageResponse | AuthErrorResponse]:
+    ) -> Response[MessageResponse | ErrorEnvelope]:
         """Verify a user's email address using a token from the verification link.
 
         The token is single-use and expires after 24 hours.
@@ -112,9 +113,10 @@ class AuthController(Controller):
             )
         except InvalidTokenError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="invalid_token",
-                    error_description="This verification link is invalid or has expired.",
+                    message="This verification link is invalid or has expired.",
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -129,7 +131,7 @@ class AuthController(Controller):
         current_user_id: UUID,
         session: AsyncSession,
         email_verification_service: EmailVerificationService,
-    ) -> Response[MessageResponse | AuthErrorResponse]:
+    ) -> Response[MessageResponse | ErrorEnvelope]:
         """Resend the email verification link to the authenticated user.
 
         Rate limiting should be applied externally (e.g. nginx / middleware).
@@ -142,9 +144,10 @@ class AuthController(Controller):
 
         if user is None:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="user_not_found",
-                    error_description="User not found.",
+                    message="User not found.",
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -165,9 +168,10 @@ class AuthController(Controller):
             )
         except UserNotFoundError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="user_not_found",
-                    error_description="User not found.",
+                    message="User not found.",
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -178,7 +182,7 @@ class AuthController(Controller):
         request: Request,
         data: Annotated[LoginRequest, Body()],
         auth_service: AuthService,
-    ) -> Response[TokenResponse | AuthErrorResponse]:
+    ) -> Response[TokenResponse | ErrorEnvelope]:
         """Authenticate user and return tokens.
 
         Returns access and refresh tokens for valid credentials.
@@ -212,18 +216,20 @@ class AuthController(Controller):
 
         except InvalidCredentialsError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="invalid_credentials",
-                    error_description="Invalid email or password",
+                    message="Invalid email or password",
+                    status_code=HTTP_401_UNAUTHORIZED,
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
 
         except UserInactiveError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="account_inactive",
-                    error_description="Account has been deactivated",
+                    message="Account has been deactivated",
+                    status_code=HTTP_401_UNAUTHORIZED,
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
@@ -234,7 +240,7 @@ class AuthController(Controller):
         request: Request,
         data: Annotated[RefreshTokenRequest, Body()],
         auth_service: AuthService,
-    ) -> Response[TokenResponse | AuthErrorResponse]:
+    ) -> Response[TokenResponse | ErrorEnvelope]:
         """Refresh access token using refresh token.
 
         Implements token rotation - old refresh token is invalidated.
@@ -266,27 +272,30 @@ class AuthController(Controller):
 
         except InvalidRefreshTokenError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="invalid_token",
-                    error_description="Refresh token is invalid or expired",
+                    message="Refresh token is invalid or expired",
+                    status_code=HTTP_401_UNAUTHORIZED,
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
 
         except TokenReuseDetectedError as e:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="token_reuse_detected",
-                    error_description=str(e),
+                    message=str(e),
+                    status_code=HTTP_401_UNAUTHORIZED,
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
 
         except UserInactiveError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="account_inactive",
-                    error_description="Account has been deactivated",
+                    message="Account has been deactivated",
+                    status_code=HTTP_401_UNAUTHORIZED,
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
@@ -349,7 +358,7 @@ class AuthController(Controller):
         data: Annotated[ResetPasswordRequest, Body()],
         session: AsyncSession,
         email_verification_service: EmailVerificationService,
-    ) -> Response[MessageResponse | AuthErrorResponse]:
+    ) -> Response[MessageResponse | ErrorEnvelope]:
         """Consume a password reset token and update the password.
 
         Revokes all active refresh tokens (forces re-login on all devices).
@@ -370,9 +379,10 @@ class AuthController(Controller):
             )
         except InvalidTokenError:
             return Response(
-                content=AuthErrorResponse(
+                content=ErrorEnvelope(
                     error="invalid_token",
-                    error_description="This reset link is invalid or has expired.",
+                    message="This reset link is invalid or has expired.",
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )

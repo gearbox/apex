@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from uuid import UUID
 
 import structlog
@@ -18,6 +17,7 @@ from litestar.status_codes import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
+from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.grok import (
     GROK_MODELS,
     GrokImageEditRequest,
@@ -83,7 +83,7 @@ class GrokImageController(Controller):
         grok_job_service: GrokJobService | None,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[JobCreatedResponse]:
+    ) -> Response[JobCreatedResponse | ErrorEnvelope]:
         """Generate images from text prompt.
 
         Creates and executes an image generation job using Grok.
@@ -95,14 +95,10 @@ class GrokImageController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name="Service Unavailable",
-                    model=data.model.value,
-                    generation_type=GenerationType.T2I,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="service_unavailable",
                     message="Grok provider is not configured",
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
@@ -132,14 +128,10 @@ class GrokImageController(Controller):
 
             if job is None:
                 return Response(
-                    content=JobCreatedResponse(
-                        job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        status=JobStatus.FAILED,
-                        name=data.name or data.prompt[:50],
-                        model=data.model.value,
-                        generation_type=GenerationType.T2I,
-                        created_at=datetime.now(UTC),
+                    content=ErrorEnvelope(
+                        error="job_creation_failed",
                         message="Job creation failed",
+                        status_code=HTTP_400_BAD_REQUEST,
                     ),
                     status_code=HTTP_400_BAD_REQUEST,
                 )
@@ -168,16 +160,11 @@ class GrokImageController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.image_generation_failed", error=str(e))
-            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name=data.name or data.prompt[:50],
-                    model=data.model.value,
-                    generation_type=GenerationType.T2I,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="generation_failed",
                     message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -192,7 +179,7 @@ class GrokImageController(Controller):
         r2_storage: R2StorageService,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[JobCreatedResponse]:
+    ) -> Response[JobCreatedResponse | ErrorEnvelope]:
         """Edit an existing image with a text prompt.
 
         Performs image-to-image editing using grok-imagine-image.
@@ -200,14 +187,10 @@ class GrokImageController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name="Service Unavailable",
-                    model=data.model.value,
-                    generation_type=GenerationType.I2I,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="service_unavailable",
                     message="Grok provider is not configured",
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
@@ -229,14 +212,10 @@ class GrokImageController(Controller):
 
             if input_image is None:
                 return Response(
-                    content=JobCreatedResponse(
-                        job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        status=JobStatus.FAILED,
-                        name="Invalid Input",
-                        model=data.model.value,
-                        generation_type=GenerationType.I2I,
-                        created_at=datetime.now(UTC),
+                    content=ErrorEnvelope(
+                        error="not_found",
                         message=f"Input image {data.input_image_id} not found",
+                        status_code=HTTP_404_NOT_FOUND,
                     ),
                     status_code=HTTP_404_NOT_FOUND,
                 )
@@ -265,14 +244,10 @@ class GrokImageController(Controller):
 
             if job is None:
                 return Response(
-                    content=JobCreatedResponse(
-                        job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        status=JobStatus.FAILED,
-                        name=data.name or data.prompt[:50],
-                        model=data.model.value,
-                        generation_type=GenerationType.I2I,
-                        created_at=datetime.now(UTC),
+                    content=ErrorEnvelope(
+                        error="job_creation_failed",
                         message="Job creation failed",
+                        status_code=HTTP_400_BAD_REQUEST,
                     ),
                     status_code=HTTP_400_BAD_REQUEST,
                 )
@@ -300,16 +275,11 @@ class GrokImageController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.image_editing_failed", error=str(e))
-            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name=data.name or data.prompt[:50],
-                    model=data.model.value,
-                    generation_type=GenerationType.I2I,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="generation_failed",
                     message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -332,7 +302,7 @@ class GrokVideoController(Controller):
         grok_job_service: GrokJobService | None,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[JobCreatedResponse]:
+    ) -> Response[JobCreatedResponse | ErrorEnvelope]:
         """Generate video from text prompt.
 
         Starts an asynchronous video generation job. The job will be processed
@@ -343,14 +313,10 @@ class GrokVideoController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name="Service Unavailable",
-                    model=data.model.value,
-                    generation_type=GenerationType.T2V,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="service_unavailable",
                     message="Grok provider is not configured",
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
@@ -381,14 +347,10 @@ class GrokVideoController(Controller):
 
             if job is None:
                 return Response(
-                    content=JobCreatedResponse(
-                        job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        status=JobStatus.FAILED,
-                        name=data.name or data.prompt[:50],
-                        model=data.model.value,
-                        generation_type=GenerationType.T2V,
-                        created_at=datetime.now(UTC),
+                    content=ErrorEnvelope(
+                        error="job_creation_failed",
                         message="Job creation failed",
+                        status_code=HTTP_400_BAD_REQUEST,
                     ),
                     status_code=HTTP_400_BAD_REQUEST,
                 )
@@ -414,16 +376,11 @@ class GrokVideoController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.video_generation_failed", error=str(e))
-            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name=data.name or data.prompt[:50],
-                    model=data.model.value,
-                    generation_type=GenerationType.T2V,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="generation_failed",
                     message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -438,7 +395,7 @@ class GrokVideoController(Controller):
         r2_storage: R2StorageService,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[JobCreatedResponse]:
+    ) -> Response[JobCreatedResponse | ErrorEnvelope]:
         """Generate video from an image (image-to-video).
 
         Animates an existing image into a video. The input image must be
@@ -446,14 +403,10 @@ class GrokVideoController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name="Service Unavailable",
-                    model=data.model.value,
-                    generation_type=GenerationType.I2V,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="service_unavailable",
                     message="Grok provider is not configured",
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
@@ -475,14 +428,10 @@ class GrokVideoController(Controller):
 
             if input_image is None:
                 return Response(
-                    content=JobCreatedResponse(
-                        job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        status=JobStatus.FAILED,
-                        name="Invalid Input",
-                        model=data.model.value,
-                        generation_type=GenerationType.I2V,
-                        created_at=datetime.now(UTC),
+                    content=ErrorEnvelope(
+                        error="not_found",
                         message=f"Input image {data.input_image_id} not found",
+                        status_code=HTTP_404_NOT_FOUND,
                     ),
                     status_code=HTTP_404_NOT_FOUND,
                 )
@@ -512,14 +461,10 @@ class GrokVideoController(Controller):
 
             if job is None:
                 return Response(
-                    content=JobCreatedResponse(
-                        job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        status=JobStatus.FAILED,
-                        name=data.name or data.prompt[:50],
-                        model=data.model.value,
-                        generation_type=GenerationType.I2V,
-                        created_at=datetime.now(UTC),
+                    content=ErrorEnvelope(
+                        error="job_creation_failed",
                         message="Job creation failed",
+                        status_code=HTTP_400_BAD_REQUEST,
                     ),
                     status_code=HTTP_400_BAD_REQUEST,
                 )
@@ -545,16 +490,11 @@ class GrokVideoController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.i2v_generation_failed", error=str(e))
-            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name=data.name or data.prompt[:50],
-                    model=data.model.value,
-                    generation_type=GenerationType.I2V,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="generation_failed",
                     message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
@@ -568,7 +508,7 @@ class GrokVideoController(Controller):
         grok_job_service: GrokJobService | None,
         billing_service: BillingService,
         pricing_service: PricingService,
-    ) -> Response[JobCreatedResponse]:
+    ) -> Response[JobCreatedResponse | ErrorEnvelope]:
         """Edit an existing video with a text prompt (V2V).
 
         Performs video-to-video editing using grok-imagine-video.
@@ -577,14 +517,10 @@ class GrokVideoController(Controller):
         """
         if grok_job_service is None:
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name="Service Unavailable",
-                    model=data.model.value,
-                    generation_type=GenerationType.V2V,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="service_unavailable",
                     message="Grok provider is not configured",
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
@@ -613,14 +549,10 @@ class GrokVideoController(Controller):
 
             if job is None:
                 return Response(
-                    content=JobCreatedResponse(
-                        job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                        status=JobStatus.FAILED,
-                        name=data.name or data.prompt[:50],
-                        model=data.model.value,
-                        generation_type=GenerationType.V2V,
-                        created_at=datetime.now(UTC),
+                    content=ErrorEnvelope(
+                        error="job_creation_failed",
                         message="Job creation failed",
+                        status_code=HTTP_400_BAD_REQUEST,
                     ),
                     status_code=HTTP_400_BAD_REQUEST,
                 )
@@ -646,16 +578,11 @@ class GrokVideoController(Controller):
 
         except GrokJobError as e:
             logger.error("grok.v2v_editing_failed", error=str(e))
-            # Refunds are now handled internally by GrokJobService on provider error
             return Response(
-                content=JobCreatedResponse(
-                    job_id=UUID("00000000-0000-0000-0000-000000000000"),
-                    status=JobStatus.FAILED,
-                    name=data.name or data.prompt[:50],
-                    model=data.model.value,
-                    generation_type=GenerationType.V2V,
-                    created_at=datetime.now(UTC),
+                content=ErrorEnvelope(
+                    error="generation_failed",
                     message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
