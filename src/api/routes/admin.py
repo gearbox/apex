@@ -8,12 +8,19 @@ from uuid import UUID
 import structlog
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
-from litestar.exceptions import NotFoundException
+from litestar.exceptions import NotFoundException, PermissionDeniedException, ValidationException
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_admin_user
 from src.api.routes.billing import _txn_to_response
+from src.api.schemas.admin import (
+    AdminOrgListResponse,
+    AdminOrgResponse,
+    AdminPatchUserRequest,
+    AdminUserListResponse,
+    AdminUserResponse,
+)
 from src.api.schemas.billing import (
     AdminAdjustRequest,
     AdminAdjustResponse,
@@ -34,9 +41,11 @@ from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import AccountNotFoundError
 from src.api.services.pricing import PricingService
+from src.core.enums import UserRole
 from src.db.models import User
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.generation_model import GenerationModelRepository
+from src.db.repositories.user import UserRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -50,6 +59,145 @@ class AdminController(Controller):
     dependencies = {
         "admin_user": Provide(get_current_admin_user),
     }
+
+    # -------------------------------------------------------------------------
+    # User management
+    # -------------------------------------------------------------------------
+
+    @get("/users")
+    async def list_users(
+        self,
+        admin_user: User,
+        session: AsyncSession,
+        is_active: bool | None = None,
+        role: str | None = None,
+        email: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> AdminUserListResponse:
+        """List all users with optional filtering. Excludes SYSTEM role users."""
+        logger.info(
+            "admin.listing_users",
+            admin_id=str(admin_user.id),
+            is_active=is_active,
+            role=role,
+            email=email,
+        )
+        repo = UserRepository(session)
+        users, total = await repo.list_users(
+            is_active=is_active,
+            role=role,
+            email_contains=email,
+            limit=limit,
+            offset=offset,
+        )
+        return AdminUserListResponse(
+            items=[
+                AdminUserResponse(
+                    id=u.id,
+                    email=u.email,
+                    display_name=u.display_name,
+                    role=u.role.value if hasattr(u.role, "value") else u.role,
+                    subscription_tier=(
+                        u.subscription_tier.value
+                        if hasattr(u.subscription_tier, "value")
+                        else u.subscription_tier
+                    ),
+                    is_active=u.is_active,
+                    email_verified_at=u.email_verified_at,
+                    created_at=u.created_at,
+                    updated_at=u.updated_at,
+                )
+                for u in users
+            ],
+            total=total,
+        )
+
+    @patch("/users/{user_id:uuid}", status_code=HTTP_200_OK)
+    async def patch_user(
+        self,
+        admin_user: User,
+        user_id: UUID,
+        data: AdminPatchUserRequest,
+        session: AsyncSession,
+    ) -> AdminUserResponse:
+        """Update a user's role, subscription tier, or active status."""
+        if user_id == admin_user.id:
+            raise PermissionDeniedException(
+                detail="Admins cannot modify their own account via this endpoint"
+            )
+        if data.role == UserRole.SYSTEM:
+            raise ValidationException(detail="Cannot set user role to system")
+
+        logger.info(
+            "admin.patching_user",
+            admin_id=str(admin_user.id),
+            target_user_id=str(user_id),
+            role=data.role,
+            subscription_tier=data.subscription_tier,
+            is_active=data.is_active,
+        )
+        repo = UserRepository(session)
+        user = await repo.update_user_admin(
+            user_id,
+            role=data.role.value if data.role is not None else None,
+            subscription_tier=(
+                data.subscription_tier.value if data.subscription_tier is not None else None
+            ),
+            is_active=data.is_active,
+        )
+        if user is None:
+            raise NotFoundException(detail=f"User {user_id} not found")
+        await session.commit()
+        return AdminUserResponse(
+            id=user.id,
+            email=user.email,
+            display_name=user.display_name,
+            role=user.role.value if hasattr(user.role, "value") else user.role,
+            subscription_tier=(
+                user.subscription_tier.value
+                if hasattr(user.subscription_tier, "value")
+                else user.subscription_tier
+            ),
+            is_active=user.is_active,
+            email_verified_at=user.email_verified_at,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+        )
+
+    @get("/organizations")
+    async def list_organizations(
+        self,
+        admin_user: User,
+        session: AsyncSession,
+        is_active: bool | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> AdminOrgListResponse:
+        """List all organisations with member count and token balance."""
+        logger.info("admin.listing_organizations", admin_id=str(admin_user.id))
+        repo = BillingRepository(session)
+        rows, total = await repo.list_organizations(
+            is_active=is_active,
+            limit=limit,
+            offset=offset,
+        )
+        return AdminOrgListResponse(
+            items=[
+                AdminOrgResponse(
+                    id=org.id,
+                    name=org.name,
+                    slug=org.slug,
+                    owner_id=org.owner_id,
+                    is_active=org.is_active,
+                    member_count=member_count,
+                    token_balance=token_balance,
+                    created_at=org.created_at,
+                )
+                for org, member_count, token_balance in rows
+            ],
+            total=total,
+        )
 
     # -------------------------------------------------------------------------
     # Account management
@@ -386,10 +534,7 @@ class AdminController(Controller):
         """List all generation models. Pass enabled_only=true to filter."""
         logger.info("admin.listing_models", admin_id=str(admin_user.id), enabled_only=enabled_only)
         repo = GenerationModelRepository(session)
-        if enabled_only:
-            models = await repo.list_enabled()
-        else:
-            models = await repo.list_all()
+        models = await repo.list_enabled() if enabled_only else await repo.list_all()
         items = [
             GenerationModelResponse(
                 model_key=m.model_key,

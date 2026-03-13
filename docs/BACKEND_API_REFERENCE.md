@@ -3,7 +3,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-03-12
+> **Last synced:** 2026-03-13
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -746,6 +746,64 @@ MemberResponse: {
 
 ## 10. Admin *(authenticated — admin only)*
 
+### User Management
+
+#### `GET /v1/admin/users`
+
+```
+Query:    is_active? (bool), role? (string), email? (partial match, case-insensitive),
+          limit? (default 50), offset? (default 0)
+Response: {
+  items: AdminUserResponse[],
+  total: int
+}
+Note:     SYSTEM role users are never returned regardless of filters.
+
+AdminUserResponse: {
+  id: UUID,
+  email: string,
+  display_name: string | null,
+  role: string,               // UserRole value
+  subscription_tier: string,  // SubscriptionTier value
+  is_active: bool,
+  email_verified_at: datetime | null,
+  created_at: datetime,
+  updated_at: datetime
+}
+```
+
+#### `PATCH /v1/admin/users/{user_id}`
+
+```
+Request:  { role?: UserRole, subscription_tier?: SubscriptionTier, is_active?: bool }
+          // All fields optional — only provided fields are updated
+Response: AdminUserResponse
+Errors:   400 (role=system), 403 (patching own account), 404 (user not found)
+Note:     Admins cannot modify their own account via this endpoint.
+          Only fields present in the request body are mutated.
+```
+
+#### `GET /v1/admin/organizations`
+
+```
+Query:    is_active? (bool), limit? (default 50), offset? (default 0)
+Response: {
+  items: AdminOrgResponse[],
+  total: int
+}
+
+AdminOrgResponse: {
+  id: UUID,
+  name: string,
+  slug: string,
+  owner_id: UUID,
+  is_active: bool,
+  member_count: int,    // count of OrganizationMember rows
+  token_balance: int,   // sum of token_transactions for the enterprise account (0 if no account)
+  created_at: datetime
+}
+```
+
 ### Account Management
 
 #### `GET /v1/admin/accounts/{account_id}/balance`
@@ -922,6 +980,12 @@ Values: `"debit"`, `"credit"`, `"refund"`, `"admin_adjustment"`
 ### SubscriptionTier
 
 Values: `"free"`, `"basic"`, `"pro"`, `"enterprise"`
+
+### UserRole
+
+Values: `"admin"`, `"user"`
+
+> `"system"` is an internal sentinel role — never returned by any API endpoint.
 
 ### OrgRole
 

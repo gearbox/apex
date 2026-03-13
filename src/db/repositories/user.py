@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.enums import JobStatus, SubscriptionTier
+from src.core.enums import JobStatus, SubscriptionTier, UserRole
 from src.db.models import GenerationJob, GenerationOutput, RefreshToken, User, UserImage
 
 if TYPE_CHECKING:
@@ -383,6 +383,103 @@ class UserRepository:
             await self._session.execute(delete(RefreshToken).where(RefreshToken.expires_at < now)),
         )
         return result.rowcount or 0
+
+    # -------------------------------------------------------------------------
+    # Admin operations
+    # -------------------------------------------------------------------------
+
+    async def list_users(
+        self,
+        *,
+        is_active: bool | None = None,
+        role: str | None = None,
+        email_contains: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[Sequence[User], int]:
+        """List users with optional filtering, excluding SYSTEM role users.
+
+        Args:
+            is_active: Filter by active status when not None.
+            role: Filter by exact role value when not None.
+            email_contains: Case-insensitive partial email match when not None.
+            limit: Maximum number of results to return.
+            offset: Number of results to skip.
+
+        Returns:
+            Tuple of (users, total_count) matching the filters.
+        """
+        base = select(User).where(User.role != UserRole.SYSTEM.value)
+        count_base = (
+            select(func.count(User.id))
+            .select_from(User)
+            .where(User.role != UserRole.SYSTEM.value)
+        )
+
+        if is_active is not None:
+            base = base.where(User.is_active == is_active)
+            count_base = count_base.where(User.is_active == is_active)
+        if role is not None:
+            base = base.where(User.role == role)
+            count_base = count_base.where(User.role == role)
+        if email_contains is not None:
+            pattern = f"%{email_contains}%"
+            base = base.where(User.email.ilike(pattern))
+            count_base = count_base.where(User.email.ilike(pattern))
+
+        count_result = await self._session.execute(count_base)
+        total = int(count_result.scalar_one())
+
+        result = await self._session.execute(
+            base.order_by(User.created_at.desc()).limit(limit).offset(offset)
+        )
+        return result.scalars().all(), total
+
+    async def update_user_admin(
+        self,
+        user_id: UUID,
+        *,
+        role: str | None = None,
+        subscription_tier: str | None = None,
+        is_active: bool | None = None,
+    ) -> User | None:
+        """Update user fields as an admin operation.
+
+        Uses a single UPDATE … RETURNING round-trip when there are changes.
+        Returns the existing user unchanged when no fields are provided.
+
+        Args:
+            user_id: ID of the user to update.
+            role: New role value (must not be UserRole.SYSTEM).
+            subscription_tier: New subscription tier value.
+            is_active: New active status.
+
+        Returns:
+            Updated (or unchanged) User, or None if user does not exist.
+
+        Raises:
+            ValueError: If role is set to UserRole.SYSTEM.
+        """
+        if role is not None and role == UserRole.SYSTEM.value:
+            raise ValueError("Cannot set user role to SYSTEM")
+
+        values: dict[str, object] = {}
+        if role is not None:
+            values["role"] = role
+        if subscription_tier is not None:
+            values["subscription_tier"] = subscription_tier
+        if is_active is not None:
+            values["is_active"] = is_active
+
+        if not values:
+            return await self.get_user(user_id)
+
+        values["updated_at"] = datetime.now(UTC)
+
+        result = await self._session.execute(
+            update(User).where(User.id == user_id).values(**values).returning(User)
+        )
+        return result.scalar_one_or_none()
 
     # -------------------------------------------------------------------------
     # User statistics

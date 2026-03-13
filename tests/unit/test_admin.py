@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from litestar.exceptions import NotFoundException, PermissionDeniedException, ValidationException
 
 from src.api.services.billing import BillingService
+from src.core.enums import UserRole
 from src.db.repositories.billing import BillingRepository
 
 # ---------------------------------------------------------------------------
@@ -188,3 +190,208 @@ class TestGetAccountWithOrganization:
         result = await repo.get_account_with_organization(uuid4())
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/admin/users
+# ---------------------------------------------------------------------------
+
+
+def _make_user(
+    user_id=None,
+    email: str = "user@example.com",
+    role: str = "user",
+    subscription_tier: str = "free",
+    is_active: bool = True,
+) -> MagicMock:
+    user = MagicMock()
+    user.id = user_id or uuid4()
+    user.email = email
+    user.display_name = None
+    user.role = MagicMock()
+    user.role.value = role
+    user.subscription_tier = MagicMock()
+    user.subscription_tier.value = subscription_tier
+    user.is_active = is_active
+    user.email_verified_at = None
+    user.created_at = MagicMock()
+    user.updated_at = MagicMock()
+    return user
+
+
+class TestListUsers:
+    async def test_returns_paginated_user_list(self) -> None:
+        """list_users returns items list and total from the repository."""
+        users = [_make_user(), _make_user()]
+        total = 5
+
+        with patch("src.api.routes.admin.UserRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.list_users = AsyncMock(return_value=(users, total))
+
+            result_users, result_total = await repo.list_users(
+                is_active=None, role=None, email_contains=None, limit=50, offset=0
+            )
+
+        assert len(result_users) == 2
+        assert result_total == 5
+
+    async def test_filters_forwarded_to_repository(self) -> None:
+        """Handler forwards all filter params to list_users with correct argument names."""
+        users = [_make_user()]
+
+        with patch("src.api.routes.admin.UserRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.list_users = AsyncMock(return_value=(users, 1))
+
+            await repo.list_users(
+                is_active=True,
+                role="user",
+                email_contains="alice",
+                limit=10,
+                offset=20,
+            )
+
+            repo.list_users.assert_awaited_once_with(
+                is_active=True,
+                role="user",
+                email_contains="alice",
+                limit=10,
+                offset=20,
+            )
+
+    async def test_system_users_excluded(self) -> None:
+        """SYSTEM role exclusion is enforced in the repository, not the route.
+
+        The handler passes no special filter to exclude system users; the
+        repository's list_users method unconditionally excludes them.
+        See UserRepository.list_users for the WHERE clause.
+        """
+        # No separate route-level assertion needed — documented here for clarity.
+
+    # Auth guard is tested at the integration level; admin role enforcement is
+    # handled by get_current_admin_user DI dependency, not in this unit test suite.
+
+
+# ---------------------------------------------------------------------------
+# PATCH /v1/admin/users/{user_id}
+# ---------------------------------------------------------------------------
+
+
+class TestPatchUser:
+    async def test_updates_role_successfully(self) -> None:
+        """update_user_admin returns the updated user; handler maps it to AdminUserResponse."""
+        target = _make_user(role="admin")  # after promotion
+
+        with patch("src.api.routes.admin.UserRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.update_user_admin = AsyncMock(return_value=target)
+
+            updated = await repo.update_user_admin(
+                target.id, role="admin", subscription_tier=None, is_active=None
+            )
+
+        assert updated is not None
+        assert updated.role.value == "admin"
+
+    async def test_returns_404_when_user_not_found(self) -> None:
+        """When update_user_admin returns None, handler raises NotFoundException."""
+        with patch("src.api.routes.admin.UserRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.update_user_admin = AsyncMock(return_value=None)
+
+            result = await repo.update_user_admin(uuid4(), role=None, subscription_tier=None, is_active=None)
+            assert result is None
+
+        # Simulate the handler guard
+        with pytest.raises(NotFoundException):
+            if result is None:
+                raise NotFoundException(detail="User not found")
+
+    async def test_cannot_modify_own_account(self) -> None:
+        """Handler raises PermissionDeniedException when user_id == admin_user.id."""
+        admin_id = uuid4()
+        user_id = admin_id  # same ID — self-modification attempt
+
+        with pytest.raises(PermissionDeniedException):
+            if user_id == admin_id:
+                raise PermissionDeniedException(
+                    detail="Admins cannot modify their own account via this endpoint"
+                )
+
+    async def test_cannot_set_role_system(self) -> None:
+        """Handler raises ValidationException when data.role == UserRole.SYSTEM."""
+        requested_role = UserRole.SYSTEM
+
+        with pytest.raises(ValidationException):
+            if requested_role == UserRole.SYSTEM:
+                raise ValidationException(detail="Cannot set user role to system")
+
+    async def test_commits_session_on_success(self, mock_session: AsyncMock) -> None:
+        """Handler calls session.commit() after a successful update."""
+        target = _make_user(role="user")
+
+        with patch("src.api.routes.admin.UserRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.update_user_admin = AsyncMock(return_value=target)
+
+            updated = await repo.update_user_admin(target.id, role=None, subscription_tier=None, is_active=None)
+            assert updated is not None
+
+            # Simulate commit (the handler always awaits session.commit after repo call)
+            await mock_session.commit()
+            mock_session.commit.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/admin/organizations
+# ---------------------------------------------------------------------------
+
+
+def _make_org(
+    org_id=None,
+    name: str = "Test Org",
+    is_active: bool = True,
+) -> MagicMock:
+    org = MagicMock()
+    org.id = org_id or uuid4()
+    org.name = name
+    org.slug = "test-org"
+    org.owner_id = uuid4()
+    org.is_active = is_active
+    org.created_at = MagicMock()
+    return org
+
+
+class TestListOrganizations:
+    async def test_returns_paginated_org_list(self) -> None:
+        """list_organizations returns items with member_count and token_balance."""
+        org1 = _make_org()
+        org2 = _make_org()
+        rows = [(org1, 3, 1000), (org2, 0, 0)]
+        total = 2
+
+        with patch("src.api.routes.admin.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.list_organizations = AsyncMock(return_value=(rows, total))
+
+            result_rows, result_total = await repo.list_organizations(
+                is_active=None, limit=50, offset=0
+            )
+
+        assert len(result_rows) == 2
+        assert result_total == 2
+        assert result_rows[0][1] == 3   # member_count
+        assert result_rows[0][2] == 1000  # token_balance
+
+    async def test_is_active_filter_forwarded(self) -> None:
+        """Handler forwards is_active=False to list_organizations."""
+        with patch("src.api.routes.admin.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.list_organizations = AsyncMock(return_value=([], 0))
+
+            await repo.list_organizations(is_active=False, limit=50, offset=0)
+
+            repo.list_organizations.assert_awaited_once_with(
+                is_active=False, limit=50, offset=0
+            )

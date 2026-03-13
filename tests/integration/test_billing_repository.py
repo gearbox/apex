@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import AccountType, TransactionType
 from src.db.repositories.billing import BillingRepository
@@ -675,3 +676,135 @@ async def test_list_payments_filter_by_status(
     completed, total = await billing_repo.list_payments(status="completed")
     assert total >= 1
     assert all(p.status == "completed" for p in completed)
+
+
+# ---------------------------------------------------------------------------
+# list_organizations
+# ---------------------------------------------------------------------------
+
+
+class TestListOrganizations:
+    async def test_list_organizations_returns_all_by_default(
+        self, billing_repo: BillingRepository, make_org
+    ) -> None:
+        """list_organizations returns all organisations when no filter applied."""
+        org = await make_org()
+        rows, total = await billing_repo.list_organizations()
+        assert total >= 1
+        assert any(row[0].id == org.id for row in rows)
+
+    async def test_list_organizations_filters_by_is_active_false(
+        self, billing_repo: BillingRepository, make_user, db_session: AsyncSession
+    ) -> None:
+        """list_organizations returns only inactive orgs when is_active=False."""
+        owner = await make_user(email=f"org-inactive-owner-{uuid4().hex[:6]}@example.com")
+        from src.db.models.billing import Organization
+
+        inactive_org = Organization(
+            id=uuid4(),
+            name="Inactive Org",
+            slug=f"inactive-{uuid4().hex[:8]}",
+            owner_id=owner.id,
+            is_active=False,
+        )
+        db_session.add(inactive_org)
+        await db_session.flush()
+
+        rows, total = await billing_repo.list_organizations(is_active=False)
+        assert total >= 1
+        assert all(not row[0].is_active for row in rows)
+        assert any(row[0].id == inactive_org.id for row in rows)
+
+    async def test_list_organizations_includes_member_count(
+        self, billing_repo: BillingRepository, make_org, make_user
+    ) -> None:
+        """Each row includes the correct member count for the organisation."""
+        org = await make_org()
+        for i in range(2):
+            member = await make_user(email=f"memcount-{uuid4().hex[:6]}-{i}@example.com")
+            await billing_repo.create_membership(
+                id=uuid4(), organization_id=org.id, user_id=member.id, role="member"
+            )
+
+        rows, _ = await billing_repo.list_organizations()
+        org_row = next((r for r in rows if r[0].id == org.id), None)
+        assert org_row is not None
+        assert org_row[1] >= 2  # member_count
+
+    async def test_list_organizations_includes_token_balance(
+        self, billing_repo: BillingRepository, make_org, make_user, make_token_account
+    ) -> None:
+        """Each row includes the correct token balance for the organisation's account."""
+        org = await make_org()
+        user = await make_user(email=f"orgbal-{uuid4().hex[:6]}@example.com")
+        account = await make_token_account(account_type="enterprise", org=org)
+        await billing_repo.create_transaction(
+            id=uuid4(),
+            account_id=account.id,
+            transaction_type=TransactionType.CREDIT.value,
+            amount=750,
+            balance_after=750,
+            created_by=user.id,
+        )
+
+        rows, _ = await billing_repo.list_organizations()
+        org_row = next((r for r in rows if r[0].id == org.id), None)
+        assert org_row is not None
+        assert org_row[2] == 750  # token_balance
+
+    async def test_list_organizations_pagination_limit_offset(
+        self, billing_repo: BillingRepository, make_org
+    ) -> None:
+        """list_organizations respects limit and offset."""
+        for _ in range(4):
+            await make_org()
+
+        page1, total = await billing_repo.list_organizations(limit=2, offset=0)
+        page2, _ = await billing_repo.list_organizations(limit=2, offset=2)
+        assert total >= 4
+        assert len(page1) <= 2
+        assert len(page2) <= 2
+        page1_ids = {row[0].id for row in page1}
+        page2_ids = {row[0].id for row in page2}
+        assert page1_ids.isdisjoint(page2_ids)
+
+    async def test_list_organizations_total_reflects_filtered_count(
+        self, billing_repo: BillingRepository, make_user, db_session: AsyncSession
+    ) -> None:
+        """total returned matches only orgs matching the filter."""
+        from src.db.models.billing import Organization
+
+        owner = await make_user(email=f"total-filter-owner-{uuid4().hex[:6]}@example.com")
+        for _ in range(2):
+            inactive_org = Organization(
+                id=uuid4(),
+                name="Inactive",
+                slug=f"inactive-total-{uuid4().hex[:8]}",
+                owner_id=owner.id,
+                is_active=False,
+            )
+            db_session.add(inactive_org)
+        await db_session.flush()
+
+        _rows, total = await billing_repo.list_organizations(is_active=False)
+        assert total >= 2
+
+    async def test_list_organizations_member_count_zero_when_no_members(
+        self, billing_repo: BillingRepository, make_org
+    ) -> None:
+        """An org with no members has member_count=0."""
+        org = await make_org()
+        rows, _ = await billing_repo.list_organizations()
+        org_row = next((r for r in rows if r[0].id == org.id), None)
+        assert org_row is not None
+        assert org_row[1] == 0  # member_count
+
+    async def test_list_organizations_balance_zero_when_no_account(
+        self, billing_repo: BillingRepository, make_org
+    ) -> None:
+        """An org with no token account has token_balance=0."""
+        org = await make_org()
+        rows, _ = await billing_repo.list_organizations()
+        org_row = next((r for r in rows if r[0].id == org.id), None)
+        assert org_row is not None
+        assert org_row[2] == 0  # token_balance

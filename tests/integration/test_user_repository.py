@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models.user import RefreshToken
+from src.core.enums import SubscriptionTier, UserRole
+from src.db.models.user import RefreshToken, User
 from src.db.repositories.user import UserRepository
 
 # ---------------------------------------------------------------------------
@@ -565,3 +566,247 @@ async def test_cascade_delete_user_removes_refresh_tokens(
         select(RefreshToken).where(RefreshToken.user_id == user.id)
     )
     assert result.scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# list_users
+# ---------------------------------------------------------------------------
+
+
+class TestListUsers:
+    async def test_list_users_returns_all_active_by_default(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """list_users returns active non-SYSTEM users when no filters applied."""
+        user = User(
+            id=uuid4(), email=f"listall-{uuid4().hex[:6]}@example.com", password_hash="x"
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        users, total = await user_repo.list_users()
+        assert total >= 1
+        assert any(u.id == user.id for u in users)
+
+    async def test_list_users_filters_by_is_active_false(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """list_users returns only inactive users when is_active=False."""
+        user = User(
+            id=uuid4(),
+            email=f"inactive-filter-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+            is_active=False,
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        users, total = await user_repo.list_users(is_active=False)
+        assert total >= 1
+        assert all(not u.is_active for u in users)
+        assert any(u.id == user.id for u in users)
+
+    async def test_list_users_filters_by_role(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """list_users returns only users with the specified role."""
+        admin = User(
+            id=uuid4(),
+            email=f"admin-role-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+            role=UserRole.ADMIN,
+        )
+        db_session.add(admin)
+        await db_session.flush()
+
+        users, total = await user_repo.list_users(role=UserRole.ADMIN.value)
+        assert total >= 1
+        assert all(u.role == UserRole.ADMIN for u in users)
+        assert any(u.id == admin.id for u in users)
+
+    async def test_list_users_filters_by_email_contains_case_insensitive(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """list_users email_contains filter is case-insensitive."""
+        unique = uuid4().hex[:8]
+        user = User(
+            id=uuid4(),
+            email=f"searchable-{unique}@example.com",
+            password_hash="x",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        users, total = await user_repo.list_users(email_contains=unique.upper())
+        assert total >= 1
+        assert any(u.id == user.id for u in users)
+
+    async def test_list_users_excludes_system_role_users(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """list_users never returns users with role=SYSTEM."""
+        system = User(
+            id=uuid4(),
+            email=f"system-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+            role=UserRole.SYSTEM,
+        )
+        db_session.add(system)
+        await db_session.flush()
+
+        users, _ = await user_repo.list_users()
+        assert all(u.role != UserRole.SYSTEM for u in users)
+        assert all(u.id != system.id for u in users)
+
+    async def test_list_users_pagination_limit_offset(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """list_users respects limit and offset parameters."""
+        for i in range(5):
+            db_session.add(
+                User(
+                    id=uuid4(),
+                    email=f"page-{uuid4().hex[:6]}-{i}@example.com",
+                    password_hash="x",
+                )
+            )
+        await db_session.flush()
+
+        page1, total = await user_repo.list_users(limit=3, offset=0)
+        page2, _ = await user_repo.list_users(limit=3, offset=3)
+        assert len(page1) <= 3
+        assert len(page2) <= 3
+        # Pages should not overlap
+        page1_ids = {u.id for u in page1}
+        page2_ids = {u.id for u in page2}
+        assert page1_ids.isdisjoint(page2_ids)
+
+    async def test_list_users_total_reflects_filtered_count(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """total returned by list_users matches the count of filtered users."""
+        unique = uuid4().hex[:8]
+        for i in range(3):
+            db_session.add(
+                User(
+                    id=uuid4(),
+                    email=f"totaltest-{unique}-{i}@example.com",
+                    password_hash="x",
+                )
+            )
+        await db_session.flush()
+
+        _users, total = await user_repo.list_users(email_contains=unique)
+        assert total == 3
+
+
+# ---------------------------------------------------------------------------
+# update_user_admin
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateUserAdmin:
+    async def test_update_user_admin_changes_role(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """update_user_admin promotes a user to admin role."""
+        user = User(
+            id=uuid4(),
+            email=f"promote-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        updated = await user_repo.update_user_admin(user.id, role=UserRole.ADMIN.value)
+        assert updated is not None
+        assert updated.role == UserRole.ADMIN
+
+    async def test_update_user_admin_changes_subscription_tier(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """update_user_admin changes subscription_tier."""
+        user = User(
+            id=uuid4(),
+            email=f"tier-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        updated = await user_repo.update_user_admin(
+            user.id, subscription_tier=SubscriptionTier.PRO.value
+        )
+        assert updated is not None
+        assert updated.subscription_tier == SubscriptionTier.PRO
+
+    async def test_update_user_admin_deactivates_user(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """update_user_admin sets is_active=False."""
+        user = User(
+            id=uuid4(),
+            email=f"deactivate-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        updated = await user_repo.update_user_admin(user.id, is_active=False)
+        assert updated is not None
+        assert updated.is_active is False
+
+    async def test_update_user_admin_noop_when_no_fields_given(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """update_user_admin returns the existing user without UPDATE when all args None."""
+        user = User(
+            id=uuid4(),
+            email=f"noop-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        result = await user_repo.update_user_admin(user.id)
+        assert result is not None
+        assert result.id == user.id
+
+    async def test_update_user_admin_returns_none_for_unknown_id(
+        self, user_repo: UserRepository
+    ) -> None:
+        """update_user_admin returns None when user does not exist."""
+        result = await user_repo.update_user_admin(uuid4(), role=UserRole.ADMIN.value)
+        assert result is None
+
+    async def test_update_user_admin_raises_on_system_role(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """update_user_admin raises ValueError if role=SYSTEM is requested."""
+        user = User(
+            id=uuid4(),
+            email=f"system-guard-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        with pytest.raises(ValueError, match="SYSTEM"):
+            await user_repo.update_user_admin(user.id, role=UserRole.SYSTEM.value)
+
+    async def test_update_user_admin_updates_updated_at_timestamp(
+        self, user_repo: UserRepository, db_session: AsyncSession
+    ) -> None:
+        """update_user_admin sets updated_at to a time >= the original."""
+        user = User(
+            id=uuid4(),
+            email=f"timestamp-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+        )
+        db_session.add(user)
+        await db_session.flush()
+        original_updated_at = user.updated_at
+
+        updated = await user_repo.update_user_admin(user.id, is_active=False)
+        assert updated is not None
+        assert updated.updated_at >= original_updated_at

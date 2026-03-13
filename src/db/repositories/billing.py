@@ -416,6 +416,64 @@ class BillingRepository:
         await self._session.flush()
         return True
 
+    async def list_organizations(
+        self,
+        *,
+        is_active: bool | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[Sequence[tuple[Organization, int, int]], int]:
+        """List organisations with aggregated member count and token balance.
+
+        Uses a single SQL statement with LEFT JOINs and GROUP BY to avoid N+1.
+        Balance is the sum of all token_transactions for the org's enterprise account.
+
+        Args:
+            is_active: Filter by active status when not None.
+            limit: Maximum number of results to return.
+            offset: Number of results to skip.
+
+        Returns:
+            Tuple of (rows, total_count) where each row is
+            (Organization, member_count, token_balance).
+        """
+        member_count_col = func.count(
+            func.distinct(OrganizationMember.id)
+        ).label("member_count")
+        token_balance_col = func.coalesce(
+            func.sum(TokenTransaction.amount), 0
+        ).label("token_balance")
+
+        base_q = (
+            select(Organization, member_count_col, token_balance_col)
+            .outerjoin(
+                OrganizationMember,
+                OrganizationMember.organization_id == Organization.id,
+            )
+            .outerjoin(
+                TokenAccount,
+                (TokenAccount.organization_id == Organization.id)
+                & (TokenAccount.account_type == AccountType.ENTERPRISE.value),
+            )
+            .outerjoin(TokenTransaction, TokenTransaction.account_id == TokenAccount.id)
+            .group_by(Organization.id)
+        )
+
+        count_q = select(func.count(Organization.id)).select_from(Organization)
+
+        if is_active is not None:
+            base_q = base_q.where(Organization.is_active == is_active)
+            count_q = count_q.where(Organization.is_active == is_active)
+
+        count_result = await self._session.execute(count_q)
+        total = int(count_result.scalar_one())
+
+        result = await self._session.execute(
+            base_q.order_by(Organization.created_at.desc()).limit(limit).offset(offset)
+        )
+        rows = result.all()
+        return [(row[0], int(row[1]), int(row[2])) for row in rows], total
+
     async def list_members(self, org_id: UUID) -> Sequence[OrganizationMember]:
         result = await self._session.execute(
             select(OrganizationMember).where(OrganizationMember.organization_id == org_id)
