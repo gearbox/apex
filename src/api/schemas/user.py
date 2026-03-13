@@ -40,6 +40,7 @@ class UserProfileResponse(msgspec.Struct, kw_only=True):
     email: str
     display_name: str | None
     subscription_tier: str
+    role: str
     is_active: bool
     created_at: datetime
     updated_at: datetime

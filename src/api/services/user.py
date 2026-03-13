@@ -285,6 +285,7 @@ class UserService:
             email=user.email,
             display_name=user.display_name,
             subscription_tier=str(user.subscription_tier),
+            role=str(user.role),
             is_active=user.is_active,
             created_at=user.created_at,
             updated_at=user.updated_at,
