@@ -225,7 +225,7 @@ class GrokImageController(Controller):
             from src.db import StorageRepository
 
             repo = StorageRepository(session)
-            input_image = await repo.get_upload(data.input_image_id)
+            input_image = await repo.get_user_image(data.input_image_id)
 
             if input_image is None:
                 return Response(
@@ -471,7 +471,7 @@ class GrokVideoController(Controller):
             from src.db import StorageRepository
 
             repo = StorageRepository(session)
-            input_image = await repo.get_upload(data.input_image_id)
+            input_image = await repo.get_user_image(data.input_image_id)
 
             if input_image is None:
                 return Response(

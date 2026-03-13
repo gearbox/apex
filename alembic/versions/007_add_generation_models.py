@@ -5,6 +5,7 @@ Revises: 006
 Create Date: 2026-03-11 12:00:00.000000
 """
 
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -42,16 +43,16 @@ _SEED_DATA: list[dict[str, object]] = [
         "is_enabled": True,
     },
 ]
-for _grok_model in GROK_MODELS:
-    _SEED_DATA.append(
-        {
-            "model_key": _grok_model.model.value,
-            "provider": _grok_model.model.provider.value,
-            "name": _grok_model.name,
-            "description": _grok_model.description,
-            "is_enabled": True,
-        }
-    )
+_SEED_DATA.extend(
+    {
+        "model_key": _grok_model.model.value,
+        "provider": _grok_model.model.provider.value,
+        "name": _grok_model.name,
+        "description": _grok_model.description,
+        "is_enabled": True,
+    }
+    for _grok_model in GROK_MODELS
+)
 
 
 def upgrade() -> None:

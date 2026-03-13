@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.enums import JobStatus, Provider
+from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.models import GenerationJob, GenerationOutput, UserImage
 
 if TYPE_CHECKING:
@@ -229,107 +229,10 @@ class StorageRepository:
         )
         return result.scalars().all()
 
-    async def get_upload(
-        self,
-        upload_id: UUID,
-        *,
-        user_id: UUID | None = None,
-    ) -> UserImage | None:
-        """Get an upload by ID.
-
-        Args:
-            upload_id: Upload ID to look up.
-            user_id: When provided, only returns if owned by this user.
-
-        Returns:
-            UserImage if found, None otherwise.
-        """
-        return await self._get_by_id_with_optional_owner(  # type: ignore[return-value]
-            UserImage,
-            upload_id,
-            user_id=user_id,
-        )
-
-    async def list_user_uploads(
-        self,
-        user_id: UUID,
-        *,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> Sequence[UserImage]:
-        """List uploads for a user.
-
-        Args:
-            user_id: User to list uploads for.
-            limit: Maximum results to return.
-            offset: Number of results to skip.
-
-        Returns:
-            List of UserImage instances.
-        """
-        result = await self._session.execute(
-            select(UserImage)
-            .where(UserImage.user_id == user_id)
-            .order_by(UserImage.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-        return result.scalars().all()
-
-    async def delete_upload(
-        self,
-        upload_id: UUID,
-        *,
-        user_id: UUID | None = None,
-    ) -> bool:
-        """Delete an upload record.
-
-        Args:
-            upload_id: Upload ID to delete.
-            user_id: When provided, only deletes if owned by this user.
-
-        Returns:
-            True if deleted, False if not found.
-        """
-        upload = await self.get_upload(upload_id, user_id=user_id)
-        if upload is None:
-            return False
-        await self._session.delete(upload)
-        await self._session.flush()
-        return True
-
-    async def get_expired_uploads(
-        self,
-        *,
-        before: datetime | None = None,
-        limit: int = 100,
-    ) -> Sequence[UserImage]:
-        """Get uploads that have expired.
-
-        Args:
-            before: Get uploads expired before this time (default: now).
-            limit: Maximum results.
-
-        Returns:
-            List of expired UserImage instances.
-        """
-        if before is None:
-            before = datetime.now(UTC)
-
-        result = await self._session.execute(
-            select(UserImage)
-            .where(UserImage.expires_at < before)
-            .order_by(UserImage.expires_at)
-            .limit(limit)
-        )
-        return result.scalars().all()
-
-    # TODO: Remove duplication with above methods for uploads vs images?
-
     # -------------------------------------------------------------------------
     # GenerationJob operations
     # -------------------------------------------------------------------------
-    # FIXME: Use generation_type and JobStatus enums instead of str where applicable.
+
     async def create_job(
         self,
         *,
@@ -337,10 +240,11 @@ class StorageRepository:
         user_id: UUID,
         name: str,
         prompt: str,
-        generation_type: str = "i2i",
-        status: str = "pending",
-        provider: str = Provider.COMFYUI.value,
+        generation_type: GenerationType = GenerationType.I2I,
+        status: JobStatus = JobStatus.PENDING,
+        provider: Provider = Provider.COMFYUI,
         model: str | None = None,
+        aspect_ratio: str | None = None,
     ) -> GenerationJob:
         """Create a new generation job.
 
@@ -353,6 +257,7 @@ class StorageRepository:
             status: Initial status.
             provider: Generation provider (comfyui, grok).
             model: Model identifier.
+            aspect_ratio: Aspect ratio string, e.g. ``16:9``.
 
         Returns:
             Created GenerationJob instance.
@@ -366,6 +271,7 @@ class StorageRepository:
             generation_type=generation_type,
             provider=provider,
             model=model,
+            aspect_ratio=aspect_ratio,
         )
         self._session.add(job)
         await self._session.flush()
@@ -397,7 +303,7 @@ class StorageRepository:
     async def update_job_status(
         self,
         job_id: UUID,
-        status: str,
+        status: JobStatus,
         *,
         comfyui_prompt_id: str | None = None,
         external_request_id: str | None = None,
@@ -421,7 +327,7 @@ class StorageRepository:
         if job is None:
             return None
 
-        job.status = JobStatus(status)
+        job.status = status
 
         # TODO: deprecate comfyui_prompt_id
         # Handle both legacy and new parameter names
@@ -440,8 +346,8 @@ class StorageRepository:
         self,
         user_id: UUID,
         *,
-        status: str | None = None,
-        provider: str | None = None,
+        status: JobStatus | None = None,
+        provider: Provider | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> Sequence[GenerationJob]:
@@ -644,7 +550,6 @@ class StorageRepository:
         Returns:
             Number of records deleted.
         """
-        # TODO: Do we need this?
         if not output_ids:
             return 0
 

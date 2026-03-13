@@ -32,6 +32,7 @@ from src.core.enums import (
     JobStatus,
     MediaFormat,
     ModelType,
+    Provider,
     VideoResolution,
 )
 from src.db import StorageRepository
@@ -178,8 +179,11 @@ class GrokJobService:
             user_id=user_id,
             name=name,
             prompt=prompt,
-            generation_type=generation_type.value,
-            status=JobStatus.PENDING.value,
+            generation_type=generation_type,
+            status=JobStatus.PENDING,
+            provider=Provider.GROK,
+            model=model.value,
+            aspect_ratio=aspect_ratio.value,
         )
 
         # Update with negative prompt if provided
@@ -191,7 +195,7 @@ class GrokJobService:
             # Update status to running
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.RUNNING.value,
+                JobStatus.RUNNING,
                 started_at=datetime.now(UTC),
             )
 
@@ -252,7 +256,7 @@ class GrokJobService:
             # Mark job complete
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.COMPLETED.value,
+                JobStatus.COMPLETED,
                 completed_at=datetime.now(UTC),
             )
 
@@ -263,7 +267,7 @@ class GrokJobService:
             logger.error("grok.api_error", job_id=str(job_id), error=str(e))
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.FAILED.value,
+                JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
             )
             if job is not None:
@@ -287,7 +291,7 @@ class GrokJobService:
             logger.exception("grok.unexpected_error", job_id=str(job_id))
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.FAILED.value,
+                JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
             )
             if job is not None:
@@ -437,8 +441,11 @@ class GrokJobService:
             user_id=user_id,
             name=name,
             prompt=prompt,
-            generation_type=generation_type.value,
-            status=JobStatus.PENDING.value,
+            generation_type=generation_type,
+            status=JobStatus.PENDING,
+            provider=Provider.GROK,
+            model=model.value,
+            aspect_ratio=aspect_ratio.value,
         )
 
         try:
@@ -473,7 +480,7 @@ class GrokJobService:
             # Store xAI request ID for polling (reusing comfyui_prompt_id field)
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.QUEUED.value,
+                JobStatus.QUEUED,
                 comfyui_prompt_id=started.request_id,
                 started_at=datetime.now(UTC),
             )
@@ -485,7 +492,7 @@ class GrokJobService:
             logger.error("grok.video_job_start_failed", job_id=str(job_id), error=str(e))
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.FAILED.value,
+                JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
             )
             if job is not None:
@@ -509,7 +516,7 @@ class GrokJobService:
             logger.exception("grok.unexpected_error", job_id=str(job_id))
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.FAILED.value,
+                JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
             )
             if job is not None:
@@ -571,7 +578,7 @@ class GrokJobService:
             if result is None:
                 # Still processing, update to running if needed
                 if job.status == JobStatus.QUEUED.value:
-                    job = await repo.update_job_status(job_id, JobStatus.RUNNING.value)
+                    job = await repo.update_job_status(job_id, JobStatus.RUNNING)
                 return job
 
             # Video is ready, download and store
@@ -586,7 +593,7 @@ class GrokJobService:
             # Mark complete
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.COMPLETED.value,
+                JobStatus.COMPLETED,
                 completed_at=datetime.now(UTC),
             )
 
@@ -597,7 +604,7 @@ class GrokJobService:
             logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))
             job = await repo.update_job_status(
                 job_id,
-                JobStatus.FAILED.value,
+                JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
             )
             if job is not None:

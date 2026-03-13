@@ -142,6 +142,9 @@ class GenerationJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     generation_type: Mapped[GenerationType] = mapped_column(String(20), index=True, nullable=False)
 
+    # Generation parameters
+    aspect_ratio: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
     # Prompts
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     enhanced_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)

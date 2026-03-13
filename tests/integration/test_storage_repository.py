@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.enums import GenerationType, JobStatus
 from src.db.repositories.storage import StorageRepository
 
 # ---------------------------------------------------------------------------
@@ -184,7 +185,7 @@ async def test_create_job(storage_repo: StorageRepository, make_user) -> None:
         user_id=user.id,
         name="My Job",
         prompt="A beautiful landscape",
-        generation_type="t2i",
+        generation_type=GenerationType.T2I,
     )
     assert job.status == "pending"
     assert job.prompt == "A beautiful landscape"
@@ -220,16 +221,16 @@ async def test_update_job_status(
 ) -> None:
     """update_job_status changes the job status."""
     job = await make_job(status="pending")
-    updated = await storage_repo.update_job_status(job.id, "running")
+    updated = await storage_repo.update_job_status(job.id, JobStatus.RUNNING)
     assert updated is not None
-    assert updated.status.value == "running"
+    assert updated.status == JobStatus.RUNNING
 
 
 async def test_update_job_status_unknown_returns_none(
     storage_repo: StorageRepository,
 ) -> None:
     """update_job_status returns None for an unknown job ID."""
-    assert await storage_repo.update_job_status(uuid4(), "running") is None
+    assert await storage_repo.update_job_status(uuid4(), JobStatus.RUNNING) is None
 
 
 async def test_update_job_status_with_started_at(
@@ -239,7 +240,7 @@ async def test_update_job_status_with_started_at(
     job = await make_job()
     started = datetime.now(UTC)
     updated = await storage_repo.update_job_status(
-        job.id, "running", started_at=started
+        job.id, JobStatus.RUNNING, started_at=started
     )
     assert updated is not None
     assert updated.started_at is not None
@@ -252,7 +253,7 @@ async def test_update_job_status_with_completed_at(
     job = await make_job()
     completed = datetime.now(UTC)
     updated = await storage_repo.update_job_status(
-        job.id, "completed", completed_at=completed
+        job.id, JobStatus.COMPLETED, completed_at=completed
     )
     assert updated is not None
     assert updated.completed_at is not None
@@ -277,7 +278,7 @@ async def test_list_user_jobs_filter_by_status(
     user = await make_user(email=f"statusjobs-{uuid4().hex[:6]}@example.com")
     await make_job(user=user, status="pending")
     await make_job(user=user, status="completed")
-    pending_jobs = await storage_repo.list_user_jobs(user.id, status="pending")
+    pending_jobs = await storage_repo.list_user_jobs(user.id, status=JobStatus.PENDING)
     assert all(j.status == "pending" for j in pending_jobs)
 
 

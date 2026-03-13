@@ -35,6 +35,7 @@ def upgrade() -> None:
         sa.Column("prompt", sa.Text(), nullable=False),
         sa.Column("enhanced_prompt", sa.Text(), nullable=True),
         sa.Column("negative_prompt", sa.Text(), nullable=True),
+        sa.Column("aspect_ratio", sa.String(10), nullable=True),
         sa.Column("theme_detected", sa.String(length=100), nullable=True),
         sa.Column("theme_confidence", sa.Float(), nullable=False),
         sa.Column("is_nsfw", sa.Boolean(), nullable=False),

@@ -224,7 +224,7 @@ class UnifiedJobService:
             generation_type=GenerationType(job.generation_type),
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
-            aspect_ratio=None,  # TODO: store aspect_ratio on GenerationJob in migration 007
+            aspect_ratio=job.aspect_ratio,
             token_cost=job.token_cost,
             created_at=job.created_at,
             started_at=job.started_at,
