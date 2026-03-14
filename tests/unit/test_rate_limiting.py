@@ -35,7 +35,9 @@ async def test_register_rate_limit_allows_under_threshold(override_limiter_defau
         # Make requests under the limit (5 per hour)
         for i in range(5):
             # Using incorrect input on purpose, we only care about if the rate limit middleware allows it through
-            response = await client.post("/v1/auth/register", json={"email": f"test{i}@example.com"})
+            response = await client.post(
+                "/v1/auth/register", json={"email": f"test{i}@example.com"}
+            )
             # The body validation might fail, returning 422 Unprocessable Entity
             # The core point is that it DOES NOT return 429
             assert response.status_code != HTTP_429_TOO_MANY_REQUESTS

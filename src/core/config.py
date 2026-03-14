@@ -108,7 +108,9 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False, description="Enable debug mode")
 
     # Logging settings
-    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    log_level: str = Field(
+        default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)"
+    )
     log_format: Literal["json", "console"] = Field(
         default="json",
         description="Log output format: 'json' for production, 'console' for development",
@@ -237,6 +239,19 @@ class Settings(BaseSettings):
     jwt_issuer: str | None = Field(
         default="apex-api",
         description="JWT issuer claim",
+    )
+
+    # Branding
+    app_name: str = Field(
+        default="Apex",
+        description=(
+            "Public-facing product name used in emails and UI copy. "
+            "Override via APP_NAME env var when the brand/domain changes."
+        ),
+    )
+    support_email: str = Field(
+        default="support@apex.ai",
+        description="Support email address shown in transactional emails.",
     )
 
     # Email

@@ -113,8 +113,7 @@ class AuthTokenRepository:
         """Delete expired/used email verification tokens. Returns count deleted."""
         now = datetime.now(UTC)
         result = await self._session.execute(
-            select(EmailVerificationToken)
-            .where(
+            select(EmailVerificationToken).where(
                 (EmailVerificationToken.expires_at < now)
                 | (EmailVerificationToken.used_at.is_not(None))
             )
@@ -198,10 +197,8 @@ class AuthTokenRepository:
         """Delete expired/used password reset tokens. Returns count deleted."""
         now = datetime.now(UTC)
         result = await self._session.execute(
-            select(PasswordResetToken)
-            .where(
-                (PasswordResetToken.expires_at < now)
-                | (PasswordResetToken.used_at.is_not(None))
+            select(PasswordResetToken).where(
+                (PasswordResetToken.expires_at < now) | (PasswordResetToken.used_at.is_not(None))
             )
         )
         tokens_to_delete = result.scalars().all()
@@ -212,4 +209,3 @@ class AuthTokenRepository:
 
         await self._session.flush()
         return count
-

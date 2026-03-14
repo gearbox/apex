@@ -60,6 +60,7 @@ class EmailVerificationService:
         *,
         email_service: EmailService,
         app_url: str,
+        app_name: str = "Apex",
     ) -> None:
         """Initialise the service.
 
@@ -67,9 +68,11 @@ class EmailVerificationService:
             email_service: Provider that actually sends emails.
             app_url: Base URL of the frontend app, e.g. ``https://app.apex.ai``.
                      Used to build verification/reset links.
+            app_name: Public-facing product name for email branding.
         """
         self._email = email_service
         self._app_url = app_url.rstrip("/")
+        self._app_name = app_name
 
     # -------------------------------------------------------------------------
     # Email verification
@@ -107,6 +110,8 @@ class EmailVerificationService:
             to=user.email,
             display_name=user.display_name,
             verification_url=verification_url,
+            locale=user.locale,
+            app_name=self._app_name,
         )
 
         logger.info("email.verification_sent", user_id=str(user_id))
@@ -183,6 +188,8 @@ class EmailVerificationService:
             to=user.email,
             display_name=user.display_name,
             reset_url=reset_url,
+            locale=user.locale,
+            app_name=self._app_name,
         )
 
         logger.info(

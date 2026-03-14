@@ -136,6 +136,7 @@ class AdminController(Controller):
             role=data.role,
             subscription_tier=data.subscription_tier,
             is_active=data.is_active,
+            locale=data.locale,
         )
         repo = UserRepository(session)
         user = await repo.update_user_admin(
@@ -145,6 +146,7 @@ class AdminController(Controller):
                 data.subscription_tier.value if data.subscription_tier is not None else None
             ),
             is_active=data.is_active,
+            locale=data.locale.value if data.locale is not None else None,
         )
         if user is None:
             raise NotFoundException(detail=f"User {user_id} not found")
@@ -212,7 +214,9 @@ class AdminController(Controller):
         billing_service: BillingService,
     ) -> BalanceResponse:
         """Get balance for any account."""
-        logger.info("admin.viewing_balance", admin_id=str(admin_user.id), account_id=str(account_id))
+        logger.info(
+            "admin.viewing_balance", admin_id=str(admin_user.id), account_id=str(account_id)
+        )
         repo = BillingRepository(session)
         account = await repo.get_account_with_organization(account_id)
         if account is None:
@@ -242,7 +246,9 @@ class AdminController(Controller):
         type: str | None = None,
     ) -> TransactionListResponse:
         """Get transaction history for any account."""
-        logger.info("admin.viewing_transactions", admin_id=str(admin_user.id), account_id=str(account_id))
+        logger.info(
+            "admin.viewing_transactions", admin_id=str(admin_user.id), account_id=str(account_id)
+        )
         transactions, total = await billing_service.get_transaction_history(
             account_id,
             limit=limit,
@@ -367,7 +373,9 @@ class AdminController(Controller):
         pricing_service: PricingService,
     ) -> PricingRuleResponse:
         """Update a pricing rule."""
-        logger.info("admin.updating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id))
+        logger.info(
+            "admin.updating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id)
+        )
         rule = await pricing_service.update_rule(
             rule_id,
             token_cost=data.token_cost,
@@ -398,7 +406,9 @@ class AdminController(Controller):
         pricing_service: PricingService,
     ) -> dict:
         """Soft deactivate a pricing rule."""
-        logger.info("admin.deactivating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id))
+        logger.info(
+            "admin.deactivating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id)
+        )
         await pricing_service.deactivate_rule(rule_id, session=session)
         await session.commit()
         return {"message": "Rule deactivated"}
@@ -451,7 +461,9 @@ class AdminController(Controller):
         session: AsyncSession,
     ) -> PaymentResponse:
         """Get a single payment."""
-        logger.info("admin.viewing_payment", admin_id=str(admin_user.id), payment_id=str(payment_id))
+        logger.info(
+            "admin.viewing_payment", admin_id=str(admin_user.id), payment_id=str(payment_id)
+        )
         repo = BillingRepository(session)
         payment = await repo.get_payment(payment_id)
         if payment is None:

@@ -300,7 +300,9 @@ class TestPatchUser:
             repo = MockRepo.return_value
             repo.update_user_admin = AsyncMock(return_value=None)
 
-            result = await repo.update_user_admin(uuid4(), role=None, subscription_tier=None, is_active=None)
+            result = await repo.update_user_admin(
+                uuid4(), role=None, subscription_tier=None, is_active=None
+            )
             assert result is None
 
         # Simulate the handler guard
@@ -335,7 +337,9 @@ class TestPatchUser:
             repo = MockRepo.return_value
             repo.update_user_admin = AsyncMock(return_value=target)
 
-            updated = await repo.update_user_admin(target.id, role=None, subscription_tier=None, is_active=None)
+            updated = await repo.update_user_admin(
+                target.id, role=None, subscription_tier=None, is_active=None
+            )
             assert updated is not None
 
             # Simulate commit (the handler always awaits session.commit after repo call)
@@ -381,7 +385,7 @@ class TestListOrganizations:
 
         assert len(result_rows) == 2
         assert result_total == 2
-        assert result_rows[0][1] == 3   # member_count
+        assert result_rows[0][1] == 3  # member_count
         assert result_rows[0][2] == 1000  # token_balance
 
     async def test_is_active_filter_forwarded(self) -> None:
@@ -392,6 +396,4 @@ class TestListOrganizations:
 
             await repo.list_organizations(is_active=False, limit=50, offset=0)
 
-            repo.list_organizations.assert_awaited_once_with(
-                is_active=False, limit=50, offset=0
-            )
+            repo.list_organizations.assert_awaited_once_with(is_active=False, limit=50, offset=0)

@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.6.3"
+version = "0.7.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -31,6 +31,7 @@ dependencies = [
     "PyJWT>=2.10.1",
     "stripe>=14.3.0",
     "resend>=2.23.0",
+    "Jinja2>=3.1.0",
     "ffmpeg-python>=0.2.0",
     "limits>=5.8.0",
     "pytest-asyncio>=0.23",

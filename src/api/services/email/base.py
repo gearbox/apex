@@ -5,6 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from src.api.services.email.i18n import get_subject, render_template
+
 
 @dataclass(frozen=True, slots=True)
 class EmailMessage:
@@ -63,6 +65,8 @@ class EmailService(ABC):
         display_name: str | None,
         verification_url: str,
         expires_hours: int = 24,
+        locale: str = "en",
+        app_name: str = "Apex",
     ) -> None:
         """Send an email verification message.
 
@@ -71,14 +75,23 @@ class EmailService(ABC):
             display_name: User's display name (falls back to email prefix).
             verification_url: The full URL the user must visit to verify.
             expires_hours: How many hours until the link expires.
+            locale: ISO 639-1 locale code for template selection.
+            app_name: Public-facing product name for branding.
         """
         name = display_name or to.split("@")[0]
+        context: dict[str, str | int] = {
+            "display_name": name,
+            "verification_url": verification_url,
+            "expires_hours": expires_hours,
+            "app_name": app_name,
+        }
+        html, text = render_template("verify_email", locale, context)
         await self.send(
             EmailMessage(
                 to=to,
-                subject="Verify your Apex account",
-                text_body=_verification_text(name, verification_url, expires_hours),
-                html_body=_verification_html(name, verification_url, expires_hours),
+                subject=get_subject("verify_email", locale, app_name=app_name),
+                html_body=html,
+                text_body=text,
                 tags={"type": "verification"},
             )
         )
@@ -90,6 +103,8 @@ class EmailService(ABC):
         display_name: str | None,
         reset_url: str,
         expires_minutes: int = 30,
+        locale: str = "en",
+        app_name: str = "Apex",
     ) -> None:
         """Send a password reset email.
 
@@ -98,99 +113,26 @@ class EmailService(ABC):
             display_name: User's display name.
             reset_url: The full URL the user must visit to reset their password.
             expires_minutes: How many minutes until the link expires.
+            locale: ISO 639-1 locale code for template selection.
+            app_name: Public-facing product name for branding.
         """
         name = display_name or to.split("@")[0]
+        context: dict[str, str | int] = {
+            "display_name": name,
+            "reset_url": reset_url,
+            "expires_minutes": expires_minutes,
+            "app_name": app_name,
+        }
+        html, text = render_template("reset_password", locale, context)
         await self.send(
             EmailMessage(
                 to=to,
-                subject="Reset your Apex password",
-                text_body=_reset_text(name, reset_url, expires_minutes),
-                html_body=_reset_html(name, reset_url, expires_minutes),
+                subject=get_subject("reset_password", locale, app_name=app_name),
+                html_body=html,
+                text_body=text,
                 tags={"type": "password_reset"},
             )
         )
-
-
-# ---------------------------------------------------------------------------
-# Simple inline templates — good enough for MVP.
-# Move to Jinja2 / React Email when branding matters.
-# ---------------------------------------------------------------------------
-
-
-def _verification_text(name: str, url: str, expires_hours: int) -> str:
-    return (
-        f"Hi {name},\n\n"
-        f"Please verify your Apex account by visiting the link below:\n\n"
-        f"{url}\n\n"
-        f"This link expires in {expires_hours} hours.\n\n"
-        f"If you did not create an account, you can safely ignore this email.\n\n"
-        f"— The Apex Team"
-    )
-
-
-def _verification_html(name: str, url: str, expires_hours: int) -> str:
-    return f"""<!DOCTYPE html>
-<html>
-<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-  <h2>Verify your Apex account</h2>
-  <p>Hi {name},</p>
-  <p>Click the button below to verify your email address.</p>
-  <p style="margin:32px 0;">
-    <a href="{url}"
-       style="background:#6366f1;color:#fff;padding:12px 24px;
-              border-radius:6px;text-decoration:none;font-weight:600;">
-      Verify Email
-    </a>
-  </p>
-  <p style="color:#6b7280;font-size:14px;">
-    Or copy and paste this URL into your browser:<br/>
-    <a href="{url}" style="color:#6366f1;">{url}</a>
-  </p>
-  <p style="color:#6b7280;font-size:14px;">
-    This link expires in {expires_hours} hours.
-    If you did not create an account, you can safely ignore this email.
-  </p>
-</body>
-</html>"""
-
-
-def _reset_text(name: str, url: str, expires_minutes: int) -> str:
-    return (
-        f"Hi {name},\n\n"
-        f"We received a request to reset your Apex password.\n\n"
-        f"Click the link below to choose a new password:\n\n"
-        f"{url}\n\n"
-        f"This link expires in {expires_minutes} minutes.\n\n"
-        f"If you did not request a password reset, you can safely ignore this email.\n\n"
-        f"— The Apex Team"
-    )
-
-
-def _reset_html(name: str, url: str, expires_minutes: int) -> str:
-    return f"""<!DOCTYPE html>
-<html>
-<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-  <h2>Reset your password</h2>
-  <p>Hi {name},</p>
-  <p>We received a request to reset your Apex password.
-     Click the button below to choose a new password.</p>
-  <p style="margin:32px 0;">
-    <a href="{url}"
-       style="background:#6366f1;color:#fff;padding:12px 24px;
-              border-radius:6px;text-decoration:none;font-weight:600;">
-      Reset Password
-    </a>
-  </p>
-  <p style="color:#6b7280;font-size:14px;">
-    Or copy and paste this URL into your browser:<br/>
-    <a href="{url}" style="color:#6366f1;">{url}</a>
-  </p>
-  <p style="color:#6b7280;font-size:14px;">
-    This link expires in {expires_minutes} minutes.
-    If you did not request a password reset, you can safely ignore this email.
-  </p>
-</body>
-</html>"""
 
 
 class EmailDeliveryError(Exception):

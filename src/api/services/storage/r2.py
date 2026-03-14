@@ -233,7 +233,9 @@ class R2StorageService:
                     Metadata=metadata,
                 )
 
-            logger.info("r2.upload_completed", key=storage_key, bytes=len(data), user_id=str(user_id))
+            logger.info(
+                "r2.upload_completed", key=storage_key, bytes=len(data), user_id=str(user_id)
+            )
 
             return UploadResult(
                 id=file_id,

@@ -213,7 +213,9 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorEnvelope(error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND),
+                content=ErrorEnvelope(
+                    error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND
+                ),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -234,7 +236,9 @@ class StorageController(Controller):
             image = await user_content.get_upload(image_id, user_id=current_user_id)
             if image is None:
                 return Response(
-                    content=ErrorEnvelope(error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND),
+                    content=ErrorEnvelope(
+                        error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND
+                    ),
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
@@ -248,7 +252,9 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorEnvelope(error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND),
+                content=ErrorEnvelope(
+                    error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND
+                ),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -345,7 +351,9 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorEnvelope(error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND),
+                content=ErrorEnvelope(
+                    error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND
+                ),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -364,7 +372,11 @@ class StorageController(Controller):
             output = await user_content.get_output(output_id, user_id=current_user_id)
             if output is None:
                 return Response(
-                    content=ErrorEnvelope(error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND),
+                    content=ErrorEnvelope(
+                        error="not_found",
+                        message="Output not found",
+                        status_code=HTTP_404_NOT_FOUND,
+                    ),
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
@@ -378,7 +390,9 @@ class StorageController(Controller):
 
         except UserContentNotFoundError:
             return Response(
-                content=ErrorEnvelope(error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND),
+                content=ErrorEnvelope(
+                    error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND
+                ),
                 status_code=HTTP_404_NOT_FOUND,
             )
 
@@ -431,7 +445,11 @@ class StorageController(Controller):
             outputs = await user_content.list_job_outputs(job_id, user_id=current_user_id)
         except UserContentNotFoundError:
             return Response(
-                content=ErrorEnvelope(error="not_found", message="Job outputs not found", status_code=HTTP_404_NOT_FOUND),
+                content=ErrorEnvelope(
+                    error="not_found",
+                    message="Job outputs not found",
+                    status_code=HTTP_404_NOT_FOUND,
+                ),
                 status_code=HTTP_404_NOT_FOUND,
             )
 

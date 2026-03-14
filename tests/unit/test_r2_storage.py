@@ -200,9 +200,7 @@ class TestStorageKeyParsing:
 class TestSignKey:
     """Tests for R2StorageService.sign_key (no head_object round-trip)."""
 
-    async def test_sign_key_returns_presigned_url(
-        self, r2_service: R2StorageService
-    ) -> None:
+    async def test_sign_key_returns_presigned_url(self, r2_service: R2StorageService) -> None:
         """sign_key calls generate_presigned_url and returns the URL string."""
         expected_url = "https://test-account.r2.cloudflarestorage.com/test-key?sig=abc"
         storage_key = "users/uid/outputs/job/img.jpg"
@@ -239,9 +237,7 @@ class TestSignKey:
         _, kwargs = mock_client.generate_presigned_url.call_args
         assert kwargs["ExpiresIn"] == 1800
 
-    async def test_sign_key_does_not_call_head_object(
-        self, r2_service: R2StorageService
-    ) -> None:
+    async def test_sign_key_does_not_call_head_object(self, r2_service: R2StorageService) -> None:
         """sign_key must not issue a head_object request."""
         mock_client = AsyncMock()
         mock_client.generate_presigned_url = AsyncMock(return_value="https://url")

@@ -10,7 +10,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.core.enums import SubscriptionTier, UserRole
+from src.core.enums import SubscriptionTier, SupportedLocale, UserRole
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 from src.db.models.base import Base
 
@@ -60,6 +60,13 @@ class User(Base):
         String(20),
         nullable=True,
         default=None,
+    )
+
+    locale: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        default=SupportedLocale.EN.value,
+        server_default="en",
     )
 
     # Account status

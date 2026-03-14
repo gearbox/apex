@@ -283,7 +283,9 @@ class GrokJobService:
                 )
                 await session.flush()
             except Exception as refund_error:
-                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+                logger.exception(
+                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
+                )
 
             raise GrokJobError(f"Image generation failed: {e}") from e
 
@@ -307,7 +309,9 @@ class GrokJobService:
                 )
                 await session.flush()
             except Exception as refund_error:
-                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+                logger.exception(
+                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
+                )
 
             raise GrokJobError(f"Unexpected error: {e}") from e
 
@@ -485,7 +489,9 @@ class GrokJobService:
                 started_at=datetime.now(UTC),
             )
 
-            logger.info("grok.video_job_started", job_id=str(job_id), xai_request_id=started.request_id)
+            logger.info(
+                "grok.video_job_started", job_id=str(job_id), xai_request_id=started.request_id
+            )
             return job
 
         except GrokAPIError as e:
@@ -508,7 +514,9 @@ class GrokJobService:
                 )
                 await session.flush()
             except Exception as refund_error:
-                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+                logger.exception(
+                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
+                )
 
             raise GrokJobError(f"Failed to start video generation: {e}") from e
 
@@ -532,7 +540,9 @@ class GrokJobService:
                 )
                 await session.flush()
             except Exception as refund_error:
-                logger.exception("grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error))
+                logger.exception(
+                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
+                )
 
             raise GrokJobError(f"Unexpected error: {e}") from e
 

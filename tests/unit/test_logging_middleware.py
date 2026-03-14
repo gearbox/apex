@@ -26,13 +26,16 @@ def _make_scope(
     headers: list[tuple[bytes, bytes]] | None = None,
     client: tuple[str, int] | None = ("127.0.0.1", 12345),
 ) -> Scope:
-    return cast(Scope, {
-        "type": "http",
-        "method": method,
-        "path": path,
-        "headers": headers or [],
-        "client": client,
-    })
+    return cast(
+        Scope,
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "headers": headers or [],
+            "client": client,
+        },
+    )
 
 
 async def _noop_receive() -> Any:

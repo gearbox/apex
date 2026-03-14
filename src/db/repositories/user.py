@@ -145,6 +145,7 @@ class UserRepository:
         display_name: str | None = None,
         subscription_tier: str | None = None,
         is_active: bool | None = None,
+        locale: str | None = None,
     ) -> User | None:
         """Update user fields.
 
@@ -173,6 +174,8 @@ class UserRepository:
             user.subscription_tier = SubscriptionTier(subscription_tier)
         if is_active is not None:
             user.is_active = is_active
+        if locale is not None:
+            user.locale = locale
 
         user.updated_at = datetime.now(UTC)
         await self._session.flush()
@@ -411,9 +414,7 @@ class UserRepository:
         """
         base = select(User).where(User.role != UserRole.SYSTEM.value)
         count_base = (
-            select(func.count(User.id))
-            .select_from(User)
-            .where(User.role != UserRole.SYSTEM.value)
+            select(func.count(User.id)).select_from(User).where(User.role != UserRole.SYSTEM.value)
         )
 
         if is_active is not None:
@@ -442,6 +443,7 @@ class UserRepository:
         role: str | None = None,
         subscription_tier: str | None = None,
         is_active: bool | None = None,
+        locale: str | None = None,
     ) -> User | None:
         """Update user fields as an admin operation.
 
@@ -470,6 +472,8 @@ class UserRepository:
             values["subscription_tier"] = subscription_tier
         if is_active is not None:
             values["is_active"] = is_active
+        if locale is not None:
+            values["locale"] = locale
 
         if not values:
             return await self.get_user(user_id)
@@ -695,9 +699,7 @@ class UserRepository:
         )
         return int(result.scalar() or 0)
 
-    async def get_first_outputs_for_jobs(
-        self, job_ids: list[UUID]
-    ) -> dict[UUID, GenerationOutput]:
+    async def get_first_outputs_for_jobs(self, job_ids: list[UUID]) -> dict[UUID, GenerationOutput]:
         """Get the first output (lowest output_index) for each job in a single query.
 
         Args:

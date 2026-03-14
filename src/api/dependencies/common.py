@@ -419,6 +419,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     _services.email_verification_service = EmailVerificationService(
         email_service=_services.email_service,
         app_url=settings.app_url,
+        app_name=settings.app_name,
     )
 
     # Initialize unified job service

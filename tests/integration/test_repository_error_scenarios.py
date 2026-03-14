@@ -30,9 +30,7 @@ from src.db.repositories.user import UserRepository
 # ---------------------------------------------------------------------------
 
 
-async def test_output_fk_violation_raises(
-    db_session: AsyncSession, make_user
-) -> None:
+async def test_output_fk_violation_raises(db_session: AsyncSession, make_user) -> None:
     """Inserting a GenerationOutput with a non-existent job_id raises IntegrityError."""
     user = await make_user(email=f"fk-{uuid4().hex[:6]}@example.com")
     out_id = uuid4()
@@ -105,9 +103,7 @@ async def test_personal_account_with_org_id_check_constraint(
 # ---------------------------------------------------------------------------
 
 
-async def test_session_usable_after_savepoint_rollback(
-    db_session: AsyncSession, make_user
-) -> None:
+async def test_session_usable_after_savepoint_rollback(db_session: AsyncSession, make_user) -> None:
     """After an IntegrityError rolls back the current SAVEPOINT, the session can still execute queries."""
     user1 = await make_user(email=f"rb1-{uuid4().hex[:6]}@example.com")
 
@@ -137,9 +133,7 @@ async def test_session_usable_after_savepoint_rollback(
 # ---------------------------------------------------------------------------
 
 
-async def test_duplicate_org_slug_raises(
-    billing_repo: BillingRepository, make_user
-) -> None:
+async def test_duplicate_org_slug_raises(billing_repo: BillingRepository, make_user) -> None:
     """Creating two organizations with the same slug raises IntegrityError."""
     user = await make_user(email=f"slugdup-{uuid4().hex[:6]}@example.com")
     await billing_repo.create_organization(
@@ -179,9 +173,7 @@ async def test_large_prompt_stored_without_truncation(
 # ---------------------------------------------------------------------------
 
 
-async def test_user_timestamps_are_timezone_aware(
-    user_repo: UserRepository, make_user
-) -> None:
+async def test_user_timestamps_are_timezone_aware(user_repo: UserRepository, make_user) -> None:
     """User.created_at and .updated_at are timezone-aware datetimes."""
     user = await make_user(email=f"tzuser-{uuid4().hex[:6]}@example.com")
     found = await user_repo.get_user(user.id)
@@ -259,9 +251,7 @@ async def test_generation_output_timestamps_are_timezone_aware(
 # ---------------------------------------------------------------------------
 
 
-async def test_user_image_missing_storage_key_raises(
-    db_session: AsyncSession, make_user
-) -> None:
+async def test_user_image_missing_storage_key_raises(db_session: AsyncSession, make_user) -> None:
     """Inserting a UserImage without storage_key raises IntegrityError (NOT NULL)."""
     user = await make_user(email=f"notnull-{uuid4().hex[:6]}@example.com")
     db_session.add(
@@ -285,9 +275,7 @@ async def test_user_image_missing_storage_key_raises(
 # ---------------------------------------------------------------------------
 
 
-async def test_duplicate_refresh_token_hash_raises(
-    user_repo: UserRepository, make_user
-) -> None:
+async def test_duplicate_refresh_token_hash_raises(user_repo: UserRepository, make_user) -> None:
     """Two refresh tokens with the same hash raise IntegrityError (unique constraint)."""
     user = await make_user(email=f"duprt-{uuid4().hex[:6]}@example.com")
     expires = datetime.now(UTC) + timedelta(days=7)
@@ -362,12 +350,8 @@ async def test_cascade_delete_user_removes_all_owned_rows(
     await db_session.delete(user)
     await db_session.flush()
 
-    job_result = await db_session.execute(
-        select(GenerationJob).where(GenerationJob.id == job.id)
-    )
+    job_result = await db_session.execute(select(GenerationJob).where(GenerationJob.id == job.id))
     assert job_result.scalar_one_or_none() is None
 
-    img_result = await db_session.execute(
-        select(UserImage).where(UserImage.id == image.id)
-    )
+    img_result = await db_session.execute(select(UserImage).where(UserImage.id == image.id))
     assert img_result.scalar_one_or_none() is None

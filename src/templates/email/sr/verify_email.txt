@@ -1,0 +1,11 @@
+Zdravo {{ display_name }},
+
+Potvrdite vaš {{ app_name }} nalog klikom na link ispod:
+
+{{ verification_url }}
+
+Link ističe za {{ expires_hours }} sati.
+
+Ako niste kreirali nalog, ignorišite ovaj email.
+
+— {{ app_name }} Tim

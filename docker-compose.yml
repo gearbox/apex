@@ -97,6 +97,10 @@ services:
 
       # App frontend URL (used for building verification/reset links)
       APP_URL: ${APP_URL:-http://localhost:3000}
+
+      # Branding
+      APP_NAME: ${APP_NAME:-Apex}
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL:-support@apex.ai}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:

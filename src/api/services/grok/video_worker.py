@@ -153,7 +153,9 @@ class GrokVideoWorker:
             if updated_job.status == JobStatus.COMPLETED.value:
                 logger.info("grok.video_job_completed", job_id=str(job_id))
             elif updated_job.status == JobStatus.FAILED.value:
-                logger.warning("grok.video_job_failed", job_id=str(job_id), error=updated_job.error_message)
+                logger.warning(
+                    "grok.video_job_failed", job_id=str(job_id), error=updated_job.error_message
+                )
 
         except Exception as e:
             logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))

@@ -78,9 +78,7 @@ _STATUS_TO_ERROR_CODE: dict[int, str] = {
 
 def _error(error: str, message: str, status_code: int, detail: dict | None = None) -> Response:
     return Response(
-        content=ErrorEnvelope(
-            error=error, message=message, status_code=status_code, detail=detail
-        ),
+        content=ErrorEnvelope(error=error, message=message, status_code=status_code, detail=detail),
         status_code=status_code,
     )
 

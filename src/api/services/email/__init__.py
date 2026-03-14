@@ -12,6 +12,7 @@ Wire up via ``init_services()`` in ``dependencies/common.py`` depending on
 """
 
 from .base import EmailMessage, EmailService
+from .i18n import get_subject, render_template
 from .log import LogEmailService
 from .resend import ResendEmailService
 
@@ -20,4 +21,6 @@ __all__ = [
     "EmailService",
     "LogEmailService",
     "ResendEmailService",
+    "get_subject",
+    "render_template",
 ]

@@ -6,6 +6,8 @@ from datetime import datetime
 
 import msgspec
 
+from src.core.enums import SupportedLocale
+
 # -----------------------------------------------------------------------------
 # Request schemas
 # -----------------------------------------------------------------------------
@@ -19,6 +21,7 @@ class UpdateProfileRequest(msgspec.Struct, kw_only=True):
 
     display_name: str | None = None
     email: str | None = None
+    locale: SupportedLocale | None = None
 
 
 class ChangePasswordRequest(msgspec.Struct, kw_only=True):
@@ -40,6 +43,7 @@ class UserProfileResponse(msgspec.Struct, kw_only=True):
     email: str
     display_name: str | None
     subscription_tier: str
+    locale: str
     role: str
     is_active: bool
     created_at: datetime

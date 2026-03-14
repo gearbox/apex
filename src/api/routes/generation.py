@@ -145,14 +145,18 @@ class GenerationController(Controller):
             logger.error("workflow.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
             if txn:
-                await billing_service.refund(db_job_id, description=f"Workflow error: {e}", session=session)
+                await billing_service.refund(
+                    db_job_id, description=f"Workflow error: {e}", session=session
+                )
                 await session.commit()
 
         except ComfyUIClientError as e:
             logger.error("comfyui.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
             if txn:
-                await billing_service.refund(db_job_id, description=f"ComfyUI error: {e}", session=session)
+                await billing_service.refund(
+                    db_job_id, description=f"ComfyUI error: {e}", session=session
+                )
                 await session.commit()
 
         except Exception as e:
@@ -160,10 +164,14 @@ class GenerationController(Controller):
             job_manager.set_failed(job.job_id, str(e))
             if txn:
                 try:
-                    await billing_service.refund(db_job_id, description=f"Unexpected generation error: {e}", session=session)
+                    await billing_service.refund(
+                        db_job_id, description=f"Unexpected generation error: {e}", session=session
+                    )
                     await session.commit()
                 except Exception as refund_error:
-                    logger.exception("generation.refund_failed", job_id=job.job_id, error=str(refund_error))
+                    logger.exception(
+                        "generation.refund_failed", job_id=job.job_id, error=str(refund_error)
+                    )
             raise
 
         return Response(
@@ -295,14 +303,18 @@ class GenerationController(Controller):
             logger.error("workflow.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
             if txn:
-                await billing_service.refund(db_job_id, description=f"Workflow error: {e}", session=session)
+                await billing_service.refund(
+                    db_job_id, description=f"Workflow error: {e}", session=session
+                )
                 await session.commit()
 
         except ComfyUIClientError as e:
             logger.error("comfyui.error", error=str(e))
             job_manager.set_failed(job.job_id, str(e))
             if txn:
-                await billing_service.refund(db_job_id, description=f"ComfyUI error: {e}", session=session)
+                await billing_service.refund(
+                    db_job_id, description=f"ComfyUI error: {e}", session=session
+                )
                 await session.commit()
 
         except Exception as e:
@@ -310,10 +322,14 @@ class GenerationController(Controller):
             job_manager.set_failed(job.job_id, str(e))
             if txn:
                 try:
-                    await billing_service.refund(db_job_id, description=f"Unexpected generation error: {e}", session=session)
+                    await billing_service.refund(
+                        db_job_id, description=f"Unexpected generation error: {e}", session=session
+                    )
                     await session.commit()
                 except Exception as refund_error:
-                    logger.exception("generation.refund_failed", job_id=job.job_id, error=str(refund_error))
+                    logger.exception(
+                        "generation.refund_failed", job_id=job.job_id, error=str(refund_error)
+                    )
             raise
 
         return Response(

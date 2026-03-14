@@ -7,7 +7,7 @@ from uuid import UUID
 
 import msgspec
 
-from src.core.enums import SubscriptionTier, UserRole
+from src.core.enums import SubscriptionTier, SupportedLocale, UserRole
 
 # --- Request structs ---
 
@@ -18,6 +18,7 @@ class AdminPatchUserRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=
     role: UserRole | None = None
     subscription_tier: SubscriptionTier | None = None
     is_active: bool | None = None
+    locale: SupportedLocale | None = None
 
 
 # --- Response structs ---

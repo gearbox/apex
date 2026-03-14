@@ -91,6 +91,7 @@ class UserController(Controller):
                 current_user_id,
                 display_name=data.display_name,
                 email=data.email,
+                locale=data.locale.value if data.locale is not None else None,
             )
             return Response(content=profile, status_code=HTTP_200_OK)
 

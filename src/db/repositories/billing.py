@@ -437,12 +437,10 @@ class BillingRepository:
             Tuple of (rows, total_count) where each row is
             (Organization, member_count, token_balance).
         """
-        member_count_col = func.count(
-            func.distinct(OrganizationMember.id)
-        ).label("member_count")
-        token_balance_col = func.coalesce(
-            func.sum(TokenTransaction.amount), 0
-        ).label("token_balance")
+        member_count_col = func.count(func.distinct(OrganizationMember.id)).label("member_count")
+        token_balance_col = func.coalesce(func.sum(TokenTransaction.amount), 0).label(
+            "token_balance"
+        )
 
         base_q = (
             select(Organization, member_count_col, token_balance_col)

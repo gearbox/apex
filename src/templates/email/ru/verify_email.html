@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+  <h2>Подтвердите ваш аккаунт {{ app_name }}</h2>
+  <p>Здравствуйте, {{ display_name }}!</p>
+  <p>Нажмите кнопку ниже, чтобы подтвердить ваш email адрес.</p>
+  <p style="margin:32px 0;">
+    <a href="{{ verification_url }}"
+       style="background:#6366f1;color:#fff;padding:12px 24px;
+              border-radius:6px;text-decoration:none;font-weight:600;">
+      Подтвердить
+    </a>
+  </p>
+  <p style="color:#6b7280;font-size:14px;">
+    Или скопируйте ссылку в браузер:<br/>
+    <a href="{{ verification_url }}" style="color:#6366f1;">{{ verification_url }}</a>
+  </p>
+  <p style="color:#6b7280;font-size:14px;">
+    Ссылка действительна {{ expires_hours }} часов.
+    Если вы не создавали аккаунт, проигнорируйте это письмо.
+  </p>
+</body>
+</html>

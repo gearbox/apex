@@ -395,6 +395,7 @@ class TestGrokControllersAuth:
             )
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
+
 class TestStorageControllerAuth:
     """Verify auth guards are properly applied to StorageController."""
 

@@ -40,9 +40,7 @@ async def test_create_verification_token_hash_stored_correctly(
 
     expected_hash = hashlib.sha256(raw.encode()).hexdigest()
     result = await db_session.execute(
-        select(EmailVerificationToken).where(
-            EmailVerificationToken.token_hash == expected_hash
-        )
+        select(EmailVerificationToken).where(EmailVerificationToken.token_hash == expected_hash)
     )
     token = result.scalar_one_or_none()
     assert token is not None
@@ -190,7 +188,9 @@ async def test_create_reset_token_stores_ip_address(
 
 
 async def test_create_reset_token_accepts_none_ip(
-    auth_token_repo: AuthTokenRepository, make_user, db_session: AsyncSession  # noqa: ARG001
+    auth_token_repo: AuthTokenRepository,
+    make_user,
+    db_session: AsyncSession,  # noqa: ARG001
 ) -> None:
     """create_reset_token accepts ip_address=None."""
     user = await make_user(email=f"rnoip-{uuid4().hex[:6]}@example.com")

@@ -70,5 +70,3 @@ class StorageStatsResponse(msgspec.Struct, kw_only=True):
     output_count: int
     total_bytes: int
     total_mb: float
-
-

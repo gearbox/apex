@@ -96,6 +96,7 @@ class UserService:
         *,
         display_name: str | None = None,
         email: str | None = None,
+        locale: str | None = None,
     ) -> UserProfileResponse:
         """Update user profile.
 
@@ -128,6 +129,7 @@ class UserService:
             user_id,
             email=email,
             display_name=display_name,
+            locale=locale,
         )
 
         if updated_user is None:
@@ -306,6 +308,7 @@ class UserService:
             email=user.email,
             display_name=user.display_name,
             subscription_tier=str(user.subscription_tier),
+            locale=user.locale,
             role=str(user.role),
             is_active=user.is_active,
             created_at=user.created_at,

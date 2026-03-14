@@ -136,9 +136,7 @@ async def test_get_account_by_organization_no_account_returns_none(
 # ---------------------------------------------------------------------------
 
 
-async def test_create_personal_account(
-    billing_repo: BillingRepository, make_user
-) -> None:
+async def test_create_personal_account(billing_repo: BillingRepository, make_user) -> None:
     """create_personal_account creates an account with type=personal."""
     user = await make_user(email=f"newpersonal-{uuid4().hex[:6]}@example.com")
     account = await billing_repo.create_personal_account(id=uuid4(), user_id=user.id)
@@ -161,14 +159,10 @@ async def test_create_personal_account_duplicate_user_raises(
 # ---------------------------------------------------------------------------
 
 
-async def test_create_enterprise_account(
-    billing_repo: BillingRepository, make_org
-) -> None:
+async def test_create_enterprise_account(billing_repo: BillingRepository, make_org) -> None:
     """create_enterprise_account creates an account with type=enterprise."""
     org = await make_org()
-    account = await billing_repo.create_enterprise_account(
-        id=uuid4(), organization_id=org.id
-    )
+    account = await billing_repo.create_enterprise_account(id=uuid4(), organization_id=org.id)
     assert account.account_type == AccountType.ENTERPRISE.value
     assert account.organization_id == org.id
 
@@ -403,9 +397,7 @@ async def test_has_refund_for_job_true_with_refund(
 # ---------------------------------------------------------------------------
 
 
-async def test_get_organization_returns_existing(
-    billing_repo: BillingRepository, make_org
-) -> None:
+async def test_get_organization_returns_existing(billing_repo: BillingRepository, make_org) -> None:
     """get_organization returns the org by primary key."""
     org = await make_org()
     found = await billing_repo.get_organization(org.id)
@@ -420,9 +412,7 @@ async def test_get_organization_returns_none_for_unknown(
     assert await billing_repo.get_organization(uuid4()) is None
 
 
-async def test_get_organization_by_slug(
-    billing_repo: BillingRepository, make_org
-) -> None:
+async def test_get_organization_by_slug(billing_repo: BillingRepository, make_org) -> None:
     """get_organization_by_slug finds org by slug."""
     org = await make_org(slug="unique-slug-xyz")
     found = await billing_repo.get_organization_by_slug("unique-slug-xyz")
@@ -437,9 +427,7 @@ async def test_get_organization_by_slug_not_found(
     assert await billing_repo.get_organization_by_slug("no-such-slug") is None
 
 
-async def test_create_organization(
-    billing_repo: BillingRepository, make_user
-) -> None:
+async def test_create_organization(billing_repo: BillingRepository, make_user) -> None:
     """create_organization persists a new Organization."""
     user = await make_user(email=f"orgowner-{uuid4().hex[:6]}@example.com")
     org = await billing_repo.create_organization(
@@ -485,9 +473,7 @@ async def test_get_membership_not_found_returns_none(
     assert await billing_repo.get_membership(org.id, user.id) is None
 
 
-async def test_delete_membership(
-    billing_repo: BillingRepository, make_user, make_org
-) -> None:
+async def test_delete_membership(billing_repo: BillingRepository, make_user, make_org) -> None:
     """delete_membership removes the membership row."""
     user = await make_user(email=f"delmember-{uuid4().hex[:6]}@example.com")
     org = await make_org()
@@ -508,9 +494,7 @@ async def test_delete_membership_not_found_returns_false(
     assert await billing_repo.delete_membership(org.id, user.id) is False
 
 
-async def test_list_members(
-    billing_repo: BillingRepository, make_user, make_org
-) -> None:
+async def test_list_members(billing_repo: BillingRepository, make_user, make_org) -> None:
     """list_members returns all members of an organization."""
     org = await make_org()
     for i in range(3):
@@ -553,9 +537,7 @@ async def test_get_active_membership_no_membership_returns_none(
 # ---------------------------------------------------------------------------
 
 
-async def test_create_and_get_pricing_rule(
-    billing_repo: BillingRepository, make_user
-) -> None:
+async def test_create_and_get_pricing_rule(billing_repo: BillingRepository, make_user) -> None:
     """create_pricing_rule and get_pricing_rule round-trip."""
     admin = await make_user(email=f"adminrule-{uuid4().hex[:6]}@example.com")
     rule = await billing_repo.create_pricing_rule(
@@ -572,9 +554,7 @@ async def test_create_and_get_pricing_rule(
     assert found.token_cost == 50
 
 
-async def test_get_active_price_exact_match(
-    billing_repo: BillingRepository, make_user
-) -> None:
+async def test_get_active_price_exact_match(billing_repo: BillingRepository, make_user) -> None:
     """get_active_price returns the most specific active rule (exact model match)."""
     admin = await make_user(email=f"adminprice-{uuid4().hex[:6]}@example.com")
     await billing_repo.create_pricing_rule(

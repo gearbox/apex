@@ -1,0 +1,161 @@
+# =============================================================================
+# Apex API - Staging Environment Overrides
+# =============================================================================
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+#
+# Prerequisites:
+#   - Copy .env.staging.example to .env.staging and fill in values
+#   - Run with: docker compose --env-file .env.staging \
+#               -f docker-compose.yml -f docker-compose.staging.yml up -d
+#
+# Differences from production:
+#   - More verbose logging (DEBUG level, JSON format)
+#   - Separate named DB volume (isolated from prod data)
+#   - Separate R2 bucket (apex-staging)
+#   - `unless-stopped` restart (easier crash inspection vs `always`)
+#   - Relaxed resource limits
+#   - cloudflared sidecar for Cloudflare Tunnel exposure
+# =============================================================================
+
+services:
+
+  # ===========================================================================
+  # PostgreSQL - Staging (isolated volume)
+  # ===========================================================================
+  postgres:
+    container_name: apex-postgres-staging
+    ports: []  # Never expose DB externally in staging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apex_staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-apex_staging}
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Apex API - Staging
+  # ===========================================================================
+  api:
+    container_name: apex-api-staging
+    # Use pre-built image tagged as :staging (pushed by CI)
+    # Override `build` from base compose to prevent accidental local builds
+    image: ${API_IMAGE:?API_IMAGE is required (e.g. ghcr.io/yourorg/apex-api:staging)}
+    build: !reset null
+    environment:
+      # --- Core ---
+      DEBUG: "false"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+
+      # --- Logging ---
+      # More verbose than prod: DEBUG level but still JSON for structured output
+      LOG_LEVEL: "DEBUG"
+      LOG_FORMAT: "json"
+
+      # --- Database ---
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex_staging}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apex_staging}"
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-3}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-5}
+      DB_ECHO: "false"
+
+      # --- JWT ---
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ISSUER: ${JWT_ISSUER:-apex-api-staging}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}
+
+      # --- Storage (use a SEPARATE staging bucket!) ---
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:?R2_ACCOUNT_ID is required}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID is required}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is required}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-apex-staging}
+
+      # --- AI Providers ---
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
+      COMFYUI_PORT: ${COMFYUI_PORT:-18188}
+
+    # Staging: restart unless-stopped so crashes are inspectable before Docker restarts
+    restart: unless-stopped
+
+    # Relaxed resource limits vs production
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    networks:
+      - apex-network
+
+  # ===========================================================================
+  # Migrations - Staging (runs once, then exits)
+  # ===========================================================================
+  migrations:
+    container_name: apex-migrations-staging
+    image: ${API_IMAGE:?API_IMAGE is required}
+    build: !reset null
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex_staging}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apex_staging}"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - apex-network
+
+  # ===========================================================================
+  # Cloudflare Tunnel - exposes staging to the internet via CF Zero Trust
+  # ===========================================================================
+  # Prerequisites:
+  #   1. Create a tunnel in Cloudflare Zero Trust dashboard
+  #   2. Add public hostname: staging.yourdomain.com → http://api:8000
+  #   3. Copy the tunnel token to CLOUDFLARE_TUNNEL_TOKEN in .env.staging
+  #   4. (Optional) Add an Access policy to gate behind email auth
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: apex-cloudflared-staging
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+    depends_on:
+      - api
+    networks:
+      - apex-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# =============================================================================
+# Volumes - Staging-specific (isolated from dev/prod volumes)
+# =============================================================================
+volumes:
+  postgres_staging_data:
+    name: apex_postgres_staging_data
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  apex-network:
+    name: apex-staging-network

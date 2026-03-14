@@ -111,7 +111,11 @@ class ComfyUIClient:
 
             if response.status_code != 200:
                 error_text = response.text
-                logger.error("comfyui.queue_prompt_failed", status_code=response.status_code, error=error_text)
+                logger.error(
+                    "comfyui.queue_prompt_failed",
+                    status_code=response.status_code,
+                    error=error_text,
+                )
                 raise ComfyUIAPIError(
                     f"Failed to queue prompt: {error_text}",
                     status_code=response.status_code,

@@ -12,7 +12,7 @@ class ErrorEnvelope(msgspec.Struct, kw_only=True):
     can use a single typed error parser.
     """
 
-    error: str        # machine-readable code, e.g. "not_found", "insufficient_balance"
-    message: str      # human-readable, safe to display in UI
+    error: str  # machine-readable code, e.g. "not_found", "insufficient_balance"
+    message: str  # human-readable, safe to display in UI
     status_code: int  # mirrors the HTTP status (useful in batch/aggregate responses)
     detail: dict | None = None  # optional structured context

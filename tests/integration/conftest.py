@@ -47,9 +47,7 @@ OrgFactory = Callable[..., Coroutine[Any, Any, Organization]]
 TokenAccountFactory = Callable[..., Coroutine[Any, Any, TokenAccount]]
 JobFactory = Callable[..., Coroutine[Any, Any, GenerationJob]]
 UserImageFactory = Callable[..., Coroutine[Any, Any, UserImage]]
-VerificationTokenFactory = Callable[
-    ..., Coroutine[Any, Any, tuple[EmailVerificationToken, str]]
-]
+VerificationTokenFactory = Callable[..., Coroutine[Any, Any, tuple[EmailVerificationToken, str]]]
 ResetTokenFactory = Callable[..., Coroutine[Any, Any, tuple[PasswordResetToken, str]]]
 
 
@@ -298,9 +296,7 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
 
 
 @pytest_asyncio.fixture
-async def make_user_image(
-    db_session: AsyncSession, make_user: UserFactory
-) -> UserImageFactory:
+async def make_user_image(db_session: AsyncSession, make_user: UserFactory) -> UserImageFactory:
     """Factory fixture: create a UserImage row and flush it."""
 
     async def _factory(
@@ -367,9 +363,7 @@ async def make_verification_token(
 
 
 @pytest_asyncio.fixture
-async def make_reset_token(
-    db_session: AsyncSession, make_user: UserFactory
-) -> ResetTokenFactory:
+async def make_reset_token(db_session: AsyncSession, make_user: UserFactory) -> ResetTokenFactory:
     """Factory fixture: insert a PasswordResetToken row directly and flush it."""
 
     async def _factory(

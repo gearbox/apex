@@ -1,0 +1,330 @@
+name: CI / Deploy Staging
+
+# =============================================================================
+# Trigger Rules
+# =============================================================================
+# - Every push to `develop` runs full CI + deploys to staging
+# - Every PR targeting `main` or `develop` runs CI only (no deploy)
+# - Manual trigger available via GitHub UI (Actions → Run workflow)
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+    inputs:
+      deploy:
+        description: "Deploy to staging after tests?"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+# =============================================================================
+# Global settings
+# =============================================================================
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/apex-api   # e.g. yourorg/apex-api
+  PYTHON_VERSION: "3.13"
+
+# Cancel in-progress runs for the same branch (saves CI minutes)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# =============================================================================
+# Jobs
+# =============================================================================
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Job 1: Lint & Type Check
+  # Fast gate — catches obvious errors before spinning up test DB
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true           # Cache uv's package cache between runs
+
+      - name: Install dependencies
+        run: uv sync --frozen          # Respects uv.lock — no surprise upgrades
+
+      - name: Run ruff linter
+        run: uv run ruff check src/
+
+      - name: Run ruff formatter check
+        run: uv run ruff format --check src/
+
+      - name: Run mypy type checker
+        run: uv run mypy src/ --ignore-missing-imports
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Unit Tests
+  # Fast, no DB — runs in parallel with lint
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests
+        run: |
+          uv run pytest tests/unit/ \
+            -v \
+            --tb=short \
+            --no-header \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+        env:
+          # Minimal env needed to satisfy Settings validation
+          JWT_SECRET_KEY: "ci-unit-test-secret-key-32-bytes-long"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()                   # Upload even if tests fail
+        with:
+          name: unit-coverage
+          path: coverage.xml
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Integration Tests
+  # Spins up real PostgreSQL via service container
+  # ---------------------------------------------------------------------------
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [lint]                      # Don't bother if lint fails
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: apex_test
+          POSTGRES_PASSWORD: apex_test
+          POSTGRES_DB: apex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apex_test -d apex_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run database migrations
+        run: uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://apex_test:apex_test@localhost:5432/apex_test
+          JWT_SECRET_KEY: "ci-integration-test-secret-32-bytes"
+
+      - name: Run integration tests
+        run: |
+          uv run pytest tests/integration/ \
+            -v \
+            --tb=short \
+            --no-header \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://apex_test:apex_test@localhost:5432/apex_test
+          DATABASE_URL: postgresql+asyncpg://apex_test:apex_test@localhost:5432/apex_test
+          JWT_SECRET_KEY: "ci-integration-test-secret-32-bytes"
+          R2_ACCOUNT_ID: test
+          R2_ACCESS_KEY_ID: test
+          R2_SECRET_ACCESS_KEY: test
+          R2_BUCKET_NAME: apex-test
+
+      - name: Upload integration coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-coverage
+          path: coverage.xml
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Build & Push Docker Image
+  # Only runs on `develop` branch (not PRs), after tests pass
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+
+    # Only push image on actual commits to develop (not PRs)
+    if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/develop' ||
+      github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
+
+    permissions:
+      contents: read
+      packages: write              # Required to push to GHCR
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Speeds up multi-platform builds significantly
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # Auto-provided by GitHub, no setup needed
+
+      # Generates image tags and labels from git metadata
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Always tag as :staging for develop branch
+            type=raw,value=staging,enable={{is_default_branch}}
+            type=raw,value=staging,enable=${{ github.ref == 'refs/heads/develop' }}
+            # Also tag with short SHA for traceability (e.g. :sha-abc1234)
+            type=sha,prefix=sha-,format=short
+            # Tag with branch name (e.g. :develop)
+            type=ref,event=branch
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          dockerfile: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache layers in GHCR — dramatically speeds up subsequent builds
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          # Build args for reproducibility
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Deploy to Staging (Portainer webhook)
+  # Triggers Portainer to pull the new :staging image and redeploy
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    environment:
+      name: staging
+      url: https://staging.yourdomain.com   # Update to your actual domain
+
+    steps:
+      - name: Trigger Portainer stack redeploy
+        run: |
+          echo "Triggering Portainer redeploy for staging stack..."
+          HTTP_STATUS=$(curl \
+            --silent \
+            --output /dev/null \
+            --write-out "%{http_code}" \
+            --max-time 30 \
+            --request POST \
+            "${{ secrets.PORTAINER_WEBHOOK_URL }}")
+
+          echo "Portainer response: HTTP $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "204" ]; then
+            echo "ERROR: Portainer webhook returned HTTP $HTTP_STATUS"
+            exit 1
+          fi
+
+          echo "Portainer redeploy triggered successfully."
+
+      - name: Wait for staging to be healthy
+        run: |
+          echo "Waiting for staging API to become healthy..."
+          STAGING_URL="https://staging.yourdomain.com/health/"  # Update this
+          MAX_ATTEMPTS=24    # 24 × 10s = 4 minutes max wait
+          ATTEMPT=0
+
+          until curl --silent --fail --max-time 5 "$STAGING_URL" > /dev/null 2>&1; do
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+              echo "ERROR: Staging health check failed after $((MAX_ATTEMPTS * 10))s"
+              exit 1
+            fi
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — waiting 10s..."
+            sleep 10
+          done
+
+          echo "Staging is healthy at $STAGING_URL"
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "Staging deployment complete!"
+          echo "SHA: ${{ github.sha }}"
+          echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
+          echo "URL: https://staging.yourdomain.com"
+
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          echo "Staging deployment FAILED for SHA ${{ github.sha }}"
+          # Optional: add Slack/Discord/email notification here
+          exit 1

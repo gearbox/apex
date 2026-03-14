@@ -108,5 +108,3 @@ class MessageResponse(msgspec.Struct, kw_only=True):
     """Generic message response."""
 
     message: str
-
-

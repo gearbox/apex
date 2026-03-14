@@ -85,6 +85,7 @@ async def test_worker_runs_cleanup_on_interval() -> None:
     class AsyncContextManagerMock:
         async def __aenter__(self) -> AsyncMock:
             return AsyncMock(spec=AsyncSession)
+
         async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
             pass
 
@@ -93,10 +94,11 @@ async def test_worker_runs_cleanup_on_interval() -> None:
     worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
     worker._running = True  # Avoid starting actual asyncio task that spins immediately
 
-    with patch("src.workers.token_cleanup.UserRepository") as user_repo_cls, \
-         patch("src.workers.token_cleanup.AuthTokenRepository") as auth_token_repo_cls, \
-         patch("src.workers.token_cleanup.logger") as logger_mock:
-
+    with (
+        patch("src.workers.token_cleanup.UserRepository") as user_repo_cls,
+        patch("src.workers.token_cleanup.AuthTokenRepository") as auth_token_repo_cls,
+        patch("src.workers.token_cleanup.logger") as logger_mock,
+    ):
         user_repo_mock = AsyncMock()
         user_repo_mock.cleanup_expired_tokens.return_value = 5
         user_repo_cls.return_value = user_repo_mock
@@ -120,7 +122,7 @@ async def test_worker_runs_cleanup_on_interval() -> None:
             refresh=5,
             email_verification=3,
             password_reset=2,
-            duration_ms=pytest.approx(0, abs=100) # approximate time check
+            duration_ms=pytest.approx(0, abs=100),  # approximate time check
         )
 
 
@@ -131,6 +133,7 @@ async def test_worker_continues_on_exception() -> None:
     class AsyncContextManagerMock:
         async def __aenter__(self) -> AsyncMock:
             return AsyncMock(spec=AsyncSession)
+
         async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
             pass
 
@@ -138,9 +141,10 @@ async def test_worker_continues_on_exception() -> None:
 
     worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
 
-    with patch("src.workers.token_cleanup.UserRepository") as user_repo_cls, \
-         patch("src.workers.token_cleanup.logger") as logger_mock:
-
+    with (
+        patch("src.workers.token_cleanup.UserRepository") as user_repo_cls,
+        patch("src.workers.token_cleanup.logger") as logger_mock,
+    ):
         user_repo_mock = AsyncMock()
         user_repo_mock.cleanup_expired_tokens.side_effect = Exception("Database failure")
         user_repo_cls.return_value = user_repo_mock

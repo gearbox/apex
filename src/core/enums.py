@@ -239,3 +239,14 @@ class UserRole(str, Enum):
     SYSTEM = "system"
     ADMIN = "admin"
     USER = "user"
+
+
+class SupportedLocale(str, Enum):
+    """Supported UI/email locales.
+
+    Add new locales here AND create corresponding email template directories simultaneously.
+    """
+
+    EN = "en"  # English
+    RU = "ru"  # Russian
+    SR = "sr"  # Serbian (Latin)

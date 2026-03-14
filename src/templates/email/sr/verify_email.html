@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+  <h2>Potvrdite vaš {{ app_name }} nalog</h2>
+  <p>Zdravo {{ display_name }},</p>
+  <p>Kliknite na dugme ispod da potvrdite vašu email adresu.</p>
+  <p style="margin:32px 0;">
+    <a href="{{ verification_url }}"
+       style="background:#6366f1;color:#fff;padding:12px 24px;
+              border-radius:6px;text-decoration:none;font-weight:600;">
+      Potvrdi Email
+    </a>
+  </p>
+  <p style="color:#6b7280;font-size:14px;">
+    Ili kopirajte link u pretraživač:<br/>
+    <a href="{{ verification_url }}" style="color:#6366f1;">{{ verification_url }}</a>
+  </p>
+  <p style="color:#6b7280;font-size:14px;">
+    Link ističe za {{ expires_hours }} sati.
+    Ako niste kreirali nalog, ignorišite ovaj email.
+  </p>
+</body>
+</html>

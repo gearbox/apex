@@ -25,9 +25,7 @@ class GenerationModelRepository:
     async def list_all(self) -> Sequence[GenerationModel]:
         """Return all models ordered by provider, model_key."""
         result = await self._session.execute(
-            select(GenerationModel).order_by(
-                GenerationModel.provider, GenerationModel.model_key
-            )
+            select(GenerationModel).order_by(GenerationModel.provider, GenerationModel.model_key)
         )
         return result.scalars().all()
 
