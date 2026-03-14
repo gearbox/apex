@@ -45,6 +45,10 @@ class GenerationModelRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_model_key(self, model_key: str) -> GenerationModel | None:
+        """Fetch a single model by its model_key (alias for get_by_key)."""
+        return await self.get_by_key(model_key)
+
     async def set_enabled(self, model_key: str, is_enabled: bool) -> GenerationModel | None:
         """Toggle is_enabled flag. Updates updated_at. Returns updated record or None."""
         result = await self._session.execute(

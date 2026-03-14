@@ -515,9 +515,9 @@ class TestGenerationControllersAuth:
         from unittest.mock import AsyncMock, MagicMock
 
         from src.api.routes.generation import (
-            GenerationController,
             HealthController,
             ImageController,
+            LegacyGenerationController,
         )
         from src.api.services.comfyui_client import ComfyUIClient
 
@@ -529,7 +529,7 @@ class TestGenerationControllersAuth:
         app = Litestar(
             route_handlers=[
                 HealthController,
-                GenerationController,
+                LegacyGenerationController,
                 ImageController,
             ],
             dependencies={
@@ -551,7 +551,7 @@ class TestGenerationControllersAuth:
     def test_generate_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.post("/v1/generate/", json={"prompt": "test"})
+            resp = client.post("/v1/legacy/generate/", json={"prompt": "test"})
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_image_upload_requires_auth(self, jwt_service: JWTService) -> None:
@@ -629,9 +629,9 @@ class TestControllerGuardDeclarations:
         assert auth_guard in guards
 
     def test_generation_controller_has_guard(self) -> None:
-        from src.api.routes.generation import GenerationController
+        from src.api.routes.generation import LegacyGenerationController
 
-        guards = GenerationController.guards
+        guards = LegacyGenerationController.guards
         assert guards is not None
         assert auth_guard in guards
 

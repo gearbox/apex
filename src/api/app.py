@@ -28,9 +28,9 @@ from src.api.routes.admin import AdminController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.generation import (
-    GenerationController,
     HealthController,
     ImageController,
+    LegacyGenerationController,
 )
 from src.api.routes.grok import (
     GrokImageController,
@@ -39,7 +39,9 @@ from src.api.routes.grok import (
 )
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
+from src.api.routes.providers import ProvidersController
 from src.api.routes.storage import StorageController
+from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.routes.user import UserController
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.services.billing_errors import (
@@ -235,12 +237,14 @@ def create_app() -> Litestar:
             OrganizationController,
             # Admin
             AdminController,
-            # Generation
-            GenerationController,
+            # Generation (unified)
+            UnifiedGenerationController,  # POST /v1/generate
+            ProvidersController,  # GET /v1/providers
             ImageController,
             # Storage
             StorageController,
-            # Grok generation
+            # Legacy generation (deprecated)
+            LegacyGenerationController,  # POST /v1/legacy/generate
             GrokProviderController,
             GrokImageController,
             GrokVideoController,

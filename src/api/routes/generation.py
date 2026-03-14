@@ -62,11 +62,11 @@ class HealthController(Controller):
 # WorkflowService may also need adjustments to support user-specific workflows or parameters in the future.
 # For now, we will pass current_user_id to the controllers and services that need it,
 # but it is not yet integrated into the JobManager or WorkflowService logic.
-class GenerationController(Controller):
-    """Image generation endpoints."""
+class LegacyGenerationController(Controller):
+    """DEPRECATED: Image generation endpoints. Use POST /v1/generate with unified schema."""
 
-    path = "/v1/generate"
-    tags: Sequence[str] | None = ["Generation"]
+    path = "/v1/legacy/generate"
+    tags: Sequence[str] | None = ["Generation (Deprecated)"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
 

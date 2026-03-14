@@ -67,10 +67,10 @@ class GrokProviderController(Controller):
 
 
 class GrokImageController(Controller):
-    """Grok image generation endpoints."""
+    """DEPRECATED: Use POST /v1/generate with unified schema."""
 
     path = "/v1/grok/image"
-    tags: Sequence[str] | None = ["Grok Image"]
+    tags: Sequence[str] | None = ["Grok Image (Deprecated)"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
 
@@ -286,10 +286,10 @@ class GrokImageController(Controller):
 
 
 class GrokVideoController(Controller):
-    """Grok video generation endpoints."""
+    """DEPRECATED: Use POST /v1/generate with unified schema."""
 
     path = "/v1/grok/video"
-    tags: Sequence[str] | None = ["Grok Video"]
+    tags: Sequence[str] | None = ["Grok Video (Deprecated)"]
     guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
 

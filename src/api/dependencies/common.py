@@ -17,6 +17,7 @@ from src.api.services.billing import BillingService
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.email import EmailService, LogEmailService, ResendEmailService
 from src.api.services.email_verification import EmailVerificationService
+from src.api.services.generation.service import GenerationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.job_manager import JobManager
@@ -60,6 +61,7 @@ class ServiceContainer:
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
     token_cleanup_worker: TokenCleanupWorker | None = None
+    generation_service: GenerationService | None = None
 
 
 _services = ServiceContainer()
@@ -280,6 +282,13 @@ def get_unified_job_service() -> UnifiedJobService:
     return _services.unified_job_service  # type: ignore[attr-defined]
 
 
+def get_generation_service() -> GenerationService:
+    """Provide GenerationService singleton."""
+    if _services.generation_service is None:
+        raise RuntimeError("GenerationService not initialized")
+    return _services.generation_service
+
+
 # -----------------------------------------------------------------------------
 # Billing dependencies
 # -----------------------------------------------------------------------------
@@ -429,6 +438,35 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     )
     logger.info("unified_job_service.initialized")
 
+    # Initialize unified generation service
+    from src.api.services.generation.aisha_provider import AishaGenerationProvider
+    from src.api.services.generation.grok_provider import GrokGenerationProvider
+    from src.core.enums import Provider
+
+    generation_providers: dict[Provider, object] = {
+        Provider.COMFYUI: AishaGenerationProvider(
+            comfyui_client=_services.comfyui_client,
+            job_manager=_services.job_manager,
+            workflow_service=_services.workflow_service,
+        )
+    }
+
+    if _services.grok_job_service is not None and _services.r2_storage is not None:
+        generation_providers[Provider.GROK] = GrokGenerationProvider(
+            grok_job_service=_services.grok_job_service,
+            r2_storage=_services.r2_storage,
+        )
+
+    _services.generation_service = GenerationService(
+        providers=generation_providers,  # type: ignore[arg-type]
+        billing_service=get_billing_service(),
+        pricing_service=get_pricing_service(),
+    )
+    logger.info(
+        "generation_service.initialized",
+        providers=[p.value for p in generation_providers],
+    )
+
     # Initialize and start token cleanup worker
     _services.token_cleanup_worker = TokenCleanupWorker(
         db_manager=_services.db_manager,
@@ -494,4 +532,6 @@ dependencies = {
     "email_verification_service": Provide(get_email_verification_service, sync_to_thread=False),
     # Unified job service
     "unified_job_service": Provide(get_unified_job_service, sync_to_thread=False),
+    # Unified generation service
+    "generation_service": Provide(get_generation_service, sync_to_thread=False),
 }

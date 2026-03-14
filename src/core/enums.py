@@ -42,6 +42,35 @@ class ModelType(str, Enum):
         """Check if this model generates video."""
         return self == ModelType.GROK_IMAGINE_VIDEO
 
+    def supports_generation_type(self, gen_type: GenerationType) -> bool:
+        """Check if this model supports the given generation type.
+
+        Derives compatibility from existing properties rather than
+        maintaining a separate matrix. Adding a new model only requires
+        setting ``supports_image_input`` and ``is_video_model`` correctly —
+        this method, all provider validate() calls, and the /v1/providers
+        discovery endpoint follow automatically.
+        """
+        if gen_type == GenerationType.T2I:
+            return True
+        if gen_type == GenerationType.I2I:
+            return self.supports_image_input and not self.is_video_model
+        if gen_type in (GenerationType.T2V, GenerationType.V2V, GenerationType.FLF2V):
+            return self.is_video_model
+        if gen_type == GenerationType.I2V:
+            return self.is_video_model and self.supports_image_input
+        return False
+
+    @property
+    def max_concurrent_outputs(self) -> int:
+        """Maximum number of outputs this model can produce per request.
+
+        Video models always produce 1. Image models vary by provider.
+        """
+        if self.is_video_model:
+            return 1
+        return 4 if self.provider == Provider.COMFYUI else 10
+
 
 class GenerationType(str, Enum):
     """Generation type - text-to-image or image-to-image."""
