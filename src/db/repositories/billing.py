@@ -163,8 +163,28 @@ class BillingRepository:
         limit: int = 50,
         offset: int = 0,
         transaction_type: str | None = None,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
     ) -> tuple[Sequence[TokenTransaction], int]:
-        """List transactions with count. Returns (transactions, total_count)."""
+        """List transactions with count. Returns (transactions, total_count).
+
+        Supports both offset-based and cursor-based (keyset) pagination.
+        When ``cursor_ts`` and ``cursor_id`` are supplied, offset is ignored
+        and keyset filtering is applied instead.
+
+        Args:
+            account_id: Account to list transactions for.
+            limit: Max results.
+            offset: Results to skip (ignored when cursor supplied).
+            transaction_type: Optional transaction type filter.
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
+
+        Returns:
+            ``(transactions, total_count)`` tuple.
+        """
+        from sqlalchemy import and_, or_
+
         base = select(TokenTransaction).where(TokenTransaction.account_id == account_id)
         count_base = select(func.count(TokenTransaction.id)).where(
             TokenTransaction.account_id == account_id
@@ -177,9 +197,25 @@ class BillingRepository:
         count_result = await self._session.execute(count_base)
         total = int(count_result.scalar_one())
 
-        result = await self._session.execute(
-            base.order_by(TokenTransaction.created_at.desc()).limit(limit).offset(offset)
-        )
+        if cursor_ts is not None and cursor_id is not None:
+            base = base.where(
+                or_(
+                    TokenTransaction.created_at < cursor_ts,
+                    and_(
+                        TokenTransaction.created_at == cursor_ts,
+                        TokenTransaction.id < cursor_id,
+                    ),
+                )
+            )
+            result = await self._session.execute(
+                base.order_by(TokenTransaction.created_at.desc(), TokenTransaction.id.desc()).limit(
+                    limit
+                )
+            )
+        else:
+            result = await self._session.execute(
+                base.order_by(TokenTransaction.created_at.desc()).limit(limit).offset(offset)
+            )
         return result.scalars().all(), total
 
     # -------------------------------------------------------------------------

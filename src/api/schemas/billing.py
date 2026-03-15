@@ -37,13 +37,6 @@ class TransactionResponse(msgspec.Struct, kw_only=True):
     created_by: UUID | None
 
 
-class TransactionListResponse(msgspec.Struct, kw_only=True):
-    """Paginated list of transactions."""
-
-    items: list[TransactionResponse]
-    total: int
-
-
 class PricingRuleResponse(msgspec.Struct, kw_only=True):
     """Pricing catalog entry."""
 
@@ -80,13 +73,6 @@ class PaymentResponse(msgspec.Struct, kw_only=True):
     currency: str
     created_at: datetime
     completed_at: datetime | None
-
-
-class PaymentListResponse(msgspec.Struct, kw_only=True):
-    """Paginated list of payments."""
-
-    items: list[PaymentResponse]
-    total: int
 
 
 class AdminAdjustResponse(msgspec.Struct, kw_only=True):

@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
-from src.api.schemas.user import JobSummaryResponse, UserJobsResponse
+from src.api.schemas.pagination import PaginatedResponse
+from src.api.schemas.user import JobSummaryResponse
 from src.api.services.user import UserService
 from src.core.enums import GenerationType, JobStatus
 from src.db.repositories import UserRepository
@@ -90,7 +91,7 @@ class TestGetJobsThumbnailUrl:
 
         result = await _service(repo=repo, r2=r2).get_jobs(user_id)
 
-        assert isinstance(result, UserJobsResponse)
+        assert isinstance(result, PaginatedResponse)
         assert len(result.items) == 1
         item = result.items[0]
         assert isinstance(item, JobSummaryResponse)

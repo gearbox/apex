@@ -75,13 +75,6 @@ class JobSummaryResponse(msgspec.Struct, kw_only=True):
     completed_at: datetime | None
 
 
-class UserJobsResponse(msgspec.Struct, kw_only=True):
-    """User's generation jobs list response."""
-
-    items: list[JobSummaryResponse]
-    total: int
-
-
 class DeleteAccountResponse(msgspec.Struct, kw_only=True):
     """Account deletion response."""
 

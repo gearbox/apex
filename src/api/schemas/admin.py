@@ -38,13 +38,6 @@ class AdminUserResponse(msgspec.Struct, kw_only=True):
     updated_at: datetime
 
 
-class AdminUserListResponse(msgspec.Struct, kw_only=True):
-    """Paginated list of users."""
-
-    items: list[AdminUserResponse]
-    total: int
-
-
 class AdminOrgResponse(msgspec.Struct, kw_only=True):
     """Admin view of a single organisation."""
 
@@ -56,10 +49,3 @@ class AdminOrgResponse(msgspec.Struct, kw_only=True):
     member_count: int
     token_balance: int
     created_at: datetime
-
-
-class AdminOrgListResponse(msgspec.Struct, kw_only=True):
-    """Paginated list of organisations."""
-
-    items: list[AdminOrgResponse]
-    total: int

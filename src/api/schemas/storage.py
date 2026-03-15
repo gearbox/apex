@@ -37,13 +37,6 @@ class ImageListItem(msgspec.Struct, kw_only=True):
     expires_at: datetime
 
 
-class ImageListResponse(msgspec.Struct, kw_only=True):
-    """Response for listing images."""
-
-    items: list[ImageListItem]
-    count: int
-
-
 class OutputListItem(msgspec.Struct, kw_only=True):
     """Item in output list response."""
 
@@ -54,13 +47,6 @@ class OutputListItem(msgspec.Struct, kw_only=True):
     output_index: int
     created_at: datetime
     expires_at: datetime
-
-
-class OutputListResponse(msgspec.Struct, kw_only=True):
-    """Response for listing outputs."""
-
-    items: list[OutputListItem]
-    count: int
 
 
 class StorageStatsResponse(msgspec.Struct, kw_only=True):

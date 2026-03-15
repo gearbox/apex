@@ -9,9 +9,9 @@ from uuid import UUID
 
 import structlog
 
+from src.api.schemas.pagination import PaginatedResponse, decode_cursor, encode_cursor
 from src.api.schemas.user import (
     JobSummaryResponse,
-    UserJobsResponse,
     UserProfileResponse,
     UserStatsResponse,
 )
@@ -237,16 +237,23 @@ class UserService:
         *,
         limit: int = 50,
         offset: int = 0,
-    ) -> UserJobsResponse:
+        cursor: str | None = None,
+    ) -> PaginatedResponse[JobSummaryResponse]:
         """Get user's generation jobs.
+
+        Supports both offset-based and cursor-based pagination.  When
+        ``cursor`` is supplied the offset is ignored and keyset filtering is
+        applied instead.
 
         Args:
             user_id: User ID.
             limit: Max results.
-            offset: Results to skip.
+            offset: Results to skip (ignored when cursor supplied).
+            cursor: Opaque cursor token from a previous response's
+                ``next_cursor`` field.
 
         Returns:
-            UserJobsResponse.
+            PaginatedResponse[JobSummaryResponse].
 
         Raises:
             UserNotFoundError: If user not found.
@@ -255,7 +262,21 @@ class UserService:
         if user is None:
             raise UserNotFoundError(f"User {user_id} not found")
 
-        jobs = await self._repo.list_user_jobs(user_id, limit=limit, offset=offset)
+        # Decode cursor if provided
+        cursor_ts = None
+        cursor_id = None
+        effective_offset = offset
+        if cursor is not None:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+            effective_offset = 0
+
+        jobs = await self._repo.list_user_jobs(
+            user_id,
+            limit=limit,
+            offset=effective_offset,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
+        )
         total = await self._repo.count_user_jobs(user_id)
 
         job_ids = [job.id for job in jobs]
@@ -292,7 +313,20 @@ class UserService:
             for job in jobs
         ]
 
-        return UserJobsResponse(items=items, total=total)
+        has_more = effective_offset + len(items) < total
+        next_cursor: str | None = None
+        if has_more and jobs:
+            last = jobs[-1]
+            next_cursor = encode_cursor(last.created_at, last.id)
+
+        return PaginatedResponse(
+            items=items,
+            total=total,
+            limit=limit,
+            offset=effective_offset,
+            has_more=has_more,
+            next_cursor=next_cursor,
+        )
 
     def _to_profile_response(self, user: User) -> UserProfileResponse:
         """Convert User model to profile response.

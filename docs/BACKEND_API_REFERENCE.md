@@ -9,6 +9,50 @@ This document captures the API surface that the frontend depends on. It is a **s
 
 ---
 
+## Pagination
+
+All list endpoints return a **unified `PaginatedResponse<T>`** shape:
+
+```typescript
+interface PaginatedResponse<T> {
+  items: T[];
+  total: number;      // total matching records (regardless of cursor/offset)
+  limit: number;      // echoed page size
+  offset: number;     // echoed offset (0 when cursor-based paging is active)
+  has_more: boolean;  // true when there are additional pages
+  next_cursor: string | null;  // opaque cursor token for the next page; null if none
+}
+```
+
+### Cursor-based pagination (keyset)
+
+Priority list endpoints (`/v1/jobs`, `/v1/users/me/jobs`, `/v1/storage/outputs`,
+`/v1/billing/transactions`, `/v1/storage/uploads`) support an optional `cursor`
+query parameter alongside the existing `limit`/`offset` parameters.
+
+- Pass `cursor=<next_cursor>` from the previous response to fetch the next page.
+- When `cursor` is supplied, `offset` is **ignored**.
+- The cursor is an opaque, URL-safe base64 token; do not parse or construct it manually.
+- `next_cursor` is `null` when `has_more` is `false`.
+
+```
+// Page 1
+GET /v1/jobs?limit=20
+Response: { items: [...], total: 142, limit: 20, offset: 0, has_more: true, next_cursor: "eyJ..." }
+
+// Page 2 (cursor-based — stable even if new jobs were added)
+GET /v1/jobs?limit=20&cursor=eyJ...
+Response: { items: [...], total: 142, limit: 20, offset: 0, has_more: true, next_cursor: "eyJ..." }
+```
+
+Traditional offset paging still works unchanged for all endpoints:
+
+```
+GET /v1/jobs?limit=20&offset=40
+```
+
+---
+
 ## 1. Base URL & CORS
 
 - **Local dev:** `http://localhost:8000`
@@ -155,11 +199,9 @@ Response: {
 #### `GET /v1/users/me/jobs`
 
 ```
-Query:    limit? (1-100, default 50), offset? (default 0)
-Response: {
-  items: JobSummaryResponse[],
-  total: int
-}
+Query:    limit? (1-100, default 50), offset? (default 0), cursor? (opaque token)
+Response: PaginatedResponse<JobSummaryResponse>
+  // has_more, next_cursor for cursor-based paging
 
 JobSummaryResponse: {
   id: UUID,
@@ -248,13 +290,10 @@ Response: {
 #### `GET /v1/jobs`
 
 ```
-Query:    status?, provider?, generation_type?, limit? (default 20), offset? (default 0)
-Response: {
-  items: UnifiedJobResponse[],
-  total: int,
-  limit: int,
-  offset: int
-}
+Query:    status?, provider?, generation_type?, limit? (default 20), offset? (default 0),
+          cursor? (opaque token for keyset pagination)
+Response: PaginatedResponse<UnifiedJobResponse>
+  // has_more, next_cursor for cursor-based paging
 ```
 
 #### `GET /v1/jobs/{job_id}`
@@ -331,8 +370,9 @@ Note:     Returns image id used for I2I/I2V generation requests
 #### `GET /v1/storage/uploads`
 
 ```
-Query:    limit? (1–100, default 50), offset? (default 0)
-Response: { items: ImageListItem[], count: int }
+Query:    limit? (1–100, default 50), offset? (default 0), cursor? (opaque token)
+Response: PaginatedResponse<ImageListItem>
+  // has_more, next_cursor for cursor-based paging
 
 ImageListItem: {
   id: UUID,
@@ -377,8 +417,9 @@ Response: 204 No Content
 #### `GET /v1/storage/outputs`
 
 ```
-Query:    limit? (1–100, default 50), offset? (default 0)
-Response: { items: OutputListItem[], count: int }
+Query:    limit? (1–100, default 50), offset? (default 0), cursor? (opaque token)
+Response: PaginatedResponse<OutputListItem>
+  // has_more, next_cursor for cursor-based paging
 
 OutputListItem: {
   id: UUID,
@@ -409,7 +450,7 @@ Errors:   404 not_found
 #### `GET /v1/storage/jobs/{job_id}/outputs`
 
 ```
-Response: { items: OutputListItem[], count: int }
+Response: PaginatedResponse<OutputListItem>  // has_more=false, no cursor (returns all outputs)
 Errors:   404
 ```
 
@@ -444,11 +485,10 @@ Response: {
 #### `GET /v1/billing/transactions`
 
 ```
-Query:    limit? (default 50), offset?, type? ("debit" | "credit" | "refund" | "admin_adjustment")
-Response: {
-  items: TransactionResponse[],
-  total: int
-}
+Query:    limit? (default 50), offset?, type? ("debit" | "credit" | "refund" | "admin_adjustment"),
+          cursor? (opaque token for keyset pagination)
+Response: PaginatedResponse<TransactionResponse>
+  // has_more, next_cursor for cursor-based paging
 
 TransactionResponse: {
   id: UUID,
@@ -668,10 +708,7 @@ MemberResponse: {
 ```
 Query:    is_active? (bool), role? (string), email? (partial match, case-insensitive),
           limit? (default 50), offset? (default 0)
-Response: {
-  items: AdminUserResponse[],
-  total: int
-}
+Response: PaginatedResponse<AdminUserResponse>
 Note:     SYSTEM role users are never returned regardless of filters.
 
 AdminUserResponse: {
@@ -708,10 +745,7 @@ Note:     Admins cannot modify their own account via this endpoint.
 
 ```
 Query:    is_active? (bool), limit? (default 50), offset? (default 0)
-Response: {
-  items: AdminOrgResponse[],
-  total: int
-}
+Response: PaginatedResponse<AdminOrgResponse>
 
 AdminOrgResponse: {
   id: UUID,
@@ -737,7 +771,7 @@ Response: BalanceResponse (same as GET /billing/balance)
 
 ```
 Query:    limit?, offset?, type?
-Response: TransactionListResponse
+Response: PaginatedResponse<TransactionResponse>
 ```
 
 #### `POST /v1/admin/accounts/{account_id}/adjust`
@@ -797,7 +831,7 @@ Note:     Deactivates the rule (sets is_active=false), does not hard-delete
 
 ```
 Query:    status?, payment_provider?, limit? (default 50), offset?
-Response: { items: PaymentResponse[], total: int }
+Response: PaginatedResponse<PaymentResponse>
 
 PaymentResponse: {
   id: UUID,

@@ -18,11 +18,12 @@ from litestar.status_codes import (
 
 from src.api.schemas.auth import MessageResponse
 from src.api.schemas.errors import ErrorEnvelope
+from src.api.schemas.pagination import PaginatedResponse
 from src.api.schemas.user import (
     ChangePasswordRequest,
     DeleteAccountResponse,
+    JobSummaryResponse,
     UpdateProfileRequest,
-    UserJobsResponse,
     UserProfileResponse,
     UserStatsResponse,
 )
@@ -190,13 +191,22 @@ class UserController(Controller):
         user_service: UserService,
         limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
         offset: Annotated[int, Parameter(ge=0)] = 0,
-    ) -> Response[UserJobsResponse]:
-        """Get current user's generation jobs."""
+        cursor: str | None = None,
+    ) -> Response[PaginatedResponse[JobSummaryResponse]]:
+        """Get current user's generation jobs.
+
+        Query parameters:
+          - ``limit``: Page size 1–100 (default 50)
+          - ``offset``: Page offset (default 0, ignored when ``cursor`` is supplied)
+          - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
+            field.  When supplied, enables efficient keyset pagination.
+        """
         try:
             jobs = await user_service.get_jobs(
                 current_user_id,
                 limit=limit,
                 offset=offset,
+                cursor=cursor,
             )
             return Response(content=jobs, status_code=HTTP_200_OK)
 

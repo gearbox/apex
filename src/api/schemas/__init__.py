@@ -11,7 +11,8 @@ from .generation import (
     JobStatus,
     ModelType,
 )
-from .jobs import JobCreatedResponse, UnifiedJobListResponse, UnifiedJobResponse
+from .jobs import JobCreatedResponse, UnifiedJobResponse
+from .pagination import PaginatedResponse
 
 __all__ = [
     "DEFAULT_NEGATIVE_PROMPT",
@@ -24,6 +25,6 @@ __all__ = [
     "JobResponse",
     "JobStatus",
     "ModelType",
-    "UnifiedJobListResponse",
+    "PaginatedResponse",
     "UnifiedJobResponse",
 ]

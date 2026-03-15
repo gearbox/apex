@@ -125,12 +125,3 @@ class UnifiedJobResponse(msgspec.Struct, kw_only=True):
 
     error: str | None = None
     """Error message for failed jobs."""
-
-
-class UnifiedJobListResponse(msgspec.Struct, kw_only=True):
-    """Paginated list of jobs."""
-
-    items: list[UnifiedJobResponse]
-    total: int
-    limit: int
-    offset: int

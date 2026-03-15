@@ -4,7 +4,7 @@ Covers:
   - UnifiedJobService.get_job (including Grok poll-on-read)
   - UnifiedJobService.list_jobs (pagination, limit capping)
   - _build_response output/thumbnail logic (presigned URL failures, thumbnail flag)
-  - Schema round-trip serialization (UnifiedJobResponse, UnifiedJobListResponse,
+  - Schema round-trip serialization (UnifiedJobResponse, PaginatedResponse,
     JobOutputItem)
 """
 
@@ -19,9 +19,9 @@ import msgspec
 from src.api.schemas.jobs import (
     JobCreatedResponse,
     JobOutputItem,
-    UnifiedJobListResponse,
     UnifiedJobResponse,
 )
+from src.api.schemas.pagination import PaginatedResponse
 from src.api.services.unified_jobs import UnifiedJobService
 from src.core.enums import GenerationType, JobStatus
 
@@ -380,7 +380,7 @@ class TestListJobs:
 
         result = await _service().list_jobs(uuid4(), session=session)
 
-        assert isinstance(result, UnifiedJobListResponse)
+        assert isinstance(result, PaginatedResponse)
         assert result.total == 0
         assert result.items == []
 
@@ -692,15 +692,19 @@ class TestSchemas:
         assert decoded.thumbnail_url == "https://r2.example.com/thumb.jpg"
         assert decoded.error == "Connection reset by peer"
 
-    def test_unified_job_list_response_round_trip(self) -> None:
-        resp = UnifiedJobListResponse(items=[], total=42, limit=10, offset=20)
+    def test_paginated_response_round_trip(self) -> None:
+        resp: PaginatedResponse[UnifiedJobResponse] = PaginatedResponse(
+            items=[], total=42, limit=10, offset=20, has_more=True, next_cursor="tok"
+        )
 
         encoded = msgspec.json.encode(resp)
-        decoded = msgspec.json.decode(encoded, type=UnifiedJobListResponse)
+        decoded = msgspec.json.decode(encoded, type=PaginatedResponse[UnifiedJobResponse])
 
         assert decoded.total == 42
         assert decoded.limit == 10
         assert decoded.offset == 20
+        assert decoded.has_more is True
+        assert decoded.next_cursor == "tok"
         assert decoded.items == []
 
     def test_job_output_item_defaults(self) -> None:

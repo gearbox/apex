@@ -11,6 +11,7 @@ a route guard is misconfigured, the service layer will reject cross-user access.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -242,23 +243,35 @@ class UserContentService:
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[UserImage]:
-        """List uploads for a user.
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> tuple[list[UserImage], int]:
+        """List uploads for a user with total count.
+
+        Supports both offset-based and cursor-based pagination.  When
+        ``cursor_ts`` and ``cursor_id`` are supplied, offset is ignored.
 
         Args:
             user_id: User to list uploads for.
             limit: Maximum results.
-            offset: Results to skip.
+            offset: Results to skip (ignored when cursor supplied).
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            List of UserImage metadata.
+            ``(images, total_count)`` tuple.
         """
-        images = await self._repo.list_user_images(
-            user_id,
-            limit=limit,
-            offset=offset,
+        images, total = await asyncio.gather(
+            self._repo.list_user_images(
+                user_id,
+                limit=limit,
+                offset=offset,
+                cursor_ts=cursor_ts,
+                cursor_id=cursor_id,
+            ),
+            self._repo.count_user_images(user_id),
         )
-        return list(images)
+        return list(images), total
 
     async def delete_upload(self, image_id: UUID, *, user_id: UUID) -> bool:
         """Delete an uploaded image.
@@ -466,23 +479,35 @@ class UserContentService:
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[GenerationOutput]:
-        """List outputs for a user.
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> tuple[list[GenerationOutput], int]:
+        """List outputs for a user with total count.
+
+        Supports both offset-based and cursor-based pagination.  When
+        ``cursor_ts`` and ``cursor_id`` are supplied, offset is ignored.
 
         Args:
             user_id: User to list outputs for.
             limit: Maximum results.
-            offset: Results to skip.
+            offset: Results to skip (ignored when cursor supplied).
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            List of GenerationOutput metadata.
+            ``(outputs, total_count)`` tuple.
         """
-        outputs = await self._repo.list_user_outputs(
-            user_id,
-            limit=limit,
-            offset=offset,
+        outputs, total = await asyncio.gather(
+            self._repo.list_user_outputs(
+                user_id,
+                limit=limit,
+                offset=offset,
+                cursor_ts=cursor_ts,
+                cursor_id=cursor_id,
+            ),
+            self._repo.count_user_outputs(user_id),
         )
-        return list(outputs)
+        return list(outputs), total
 
     # -------------------------------------------------------------------------
     # Storage key utilities (for ComfyUI integration)

@@ -16,10 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.dependencies.auth import get_current_admin_user
 from src.api.routes.billing import _txn_to_response
 from src.api.schemas.admin import (
-    AdminOrgListResponse,
     AdminOrgResponse,
     AdminPatchUserRequest,
-    AdminUserListResponse,
     AdminUserResponse,
 )
 from src.api.schemas.billing import (
@@ -28,16 +26,16 @@ from src.api.schemas.billing import (
     BalanceResponse,
     CreatePricingRuleRequest,
     PatchPricingRuleRequest,
-    PaymentListResponse,
     PaymentResponse,
     PricingRuleResponse,
-    TransactionListResponse,
+    TransactionResponse,
 )
 from src.api.schemas.models import (
     GenerationModelResponse,
     ModelListResponse,
     SetModelEnabledRequest,
 )
+from src.api.schemas.pagination import PaginatedResponse
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import AccountNotFoundError
@@ -75,7 +73,7 @@ class AdminController(Controller):
         email: str | None = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> AdminUserListResponse:
+    ) -> PaginatedResponse[AdminUserResponse]:
         """List all users with optional filtering. Excludes SYSTEM role users."""
         logger.info(
             "admin.listing_users",
@@ -92,26 +90,30 @@ class AdminController(Controller):
             limit=limit,
             offset=offset,
         )
-        return AdminUserListResponse(
-            items=[
-                AdminUserResponse(
-                    id=u.id,
-                    email=u.email,
-                    display_name=u.display_name,
-                    role=u.role.value if hasattr(u.role, "value") else u.role,
-                    subscription_tier=(
-                        u.subscription_tier.value
-                        if hasattr(u.subscription_tier, "value")
-                        else u.subscription_tier
-                    ),
-                    is_active=u.is_active,
-                    email_verified_at=u.email_verified_at,
-                    created_at=u.created_at,
-                    updated_at=u.updated_at,
-                )
-                for u in users
-            ],
+        items = [
+            AdminUserResponse(
+                id=u.id,
+                email=u.email,
+                display_name=u.display_name,
+                role=u.role.value if hasattr(u.role, "value") else u.role,
+                subscription_tier=(
+                    u.subscription_tier.value
+                    if hasattr(u.subscription_tier, "value")
+                    else u.subscription_tier
+                ),
+                is_active=u.is_active,
+                email_verified_at=u.email_verified_at,
+                created_at=u.created_at,
+                updated_at=u.updated_at,
+            )
+            for u in users
+        ]
+        return PaginatedResponse(
+            items=items,
             total=total,
+            limit=limit,
+            offset=offset,
+            has_more=offset + len(items) < total,
         )
 
     @patch("/users/{user_id:uuid}", status_code=HTTP_200_OK)
@@ -176,7 +178,7 @@ class AdminController(Controller):
         is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> AdminOrgListResponse:
+    ) -> PaginatedResponse[AdminOrgResponse]:
         """List all organisations with member count and token balance."""
         logger.info("admin.listing_organizations", admin_id=str(admin_user.id))
         repo = BillingRepository(session)
@@ -185,21 +187,25 @@ class AdminController(Controller):
             limit=limit,
             offset=offset,
         )
-        return AdminOrgListResponse(
-            items=[
-                AdminOrgResponse(
-                    id=org.id,
-                    name=org.name,
-                    slug=org.slug,
-                    owner_id=org.owner_id,
-                    is_active=org.is_active,
-                    member_count=member_count,
-                    token_balance=token_balance,
-                    created_at=org.created_at,
-                )
-                for org, member_count, token_balance in rows
-            ],
+        items = [
+            AdminOrgResponse(
+                id=org.id,
+                name=org.name,
+                slug=org.slug,
+                owner_id=org.owner_id,
+                is_active=org.is_active,
+                member_count=member_count,
+                token_balance=token_balance,
+                created_at=org.created_at,
+            )
+            for org, member_count, token_balance in rows
+        ]
+        return PaginatedResponse(
+            items=items,
             total=total,
+            limit=limit,
+            offset=offset,
+            has_more=offset + len(items) < total,
         )
 
     # -------------------------------------------------------------------------
@@ -245,7 +251,7 @@ class AdminController(Controller):
         limit: int = 50,
         offset: int = 0,
         type: str | None = None,
-    ) -> TransactionListResponse:
+    ) -> PaginatedResponse[TransactionResponse]:
         """Get transaction history for any account."""
         logger.info(
             "admin.viewing_transactions", admin_id=str(admin_user.id), account_id=str(account_id)
@@ -257,9 +263,13 @@ class AdminController(Controller):
             transaction_type=type,
             session=session,
         )
-        return TransactionListResponse(
-            items=[_txn_to_response(t) for t in transactions],
+        items = [_txn_to_response(t) for t in transactions]
+        return PaginatedResponse(
+            items=items,
             total=total,
+            limit=limit,
+            offset=offset,
+            has_more=offset + len(items) < total,
         )
 
     @post("/accounts/{account_id:uuid}/adjust")
@@ -427,7 +437,7 @@ class AdminController(Controller):
         payment_provider: str | None = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> PaymentListResponse:
+    ) -> PaginatedResponse[PaymentResponse]:
         """List all payments."""
         logger.info("admin.listing_payments", admin_id=str(admin_user.id))
         repo = BillingRepository(session)
@@ -437,21 +447,25 @@ class AdminController(Controller):
             limit=limit,
             offset=offset,
         )
-        return PaymentListResponse(
-            items=[
-                PaymentResponse(
-                    id=p.id,
-                    payment_provider=p.payment_provider,
-                    status=p.status,
-                    amount_usd=str(p.amount_usd),
-                    tokens_granted=p.tokens_granted,
-                    currency=p.currency,
-                    created_at=p.created_at,
-                    completed_at=p.completed_at,
-                )
-                for p in payments
-            ],
+        items = [
+            PaymentResponse(
+                id=p.id,
+                payment_provider=p.payment_provider,
+                status=p.status,
+                amount_usd=str(p.amount_usd),
+                tokens_granted=p.tokens_granted,
+                currency=p.currency,
+                created_at=p.created_at,
+                completed_at=p.completed_at,
+            )
+            for p in payments
+        ]
+        return PaginatedResponse(
+            items=items,
             total=total,
+            limit=limit,
+            offset=offset,
+            has_more=offset + len(items) < total,
         )
 
     @get("/payments/{payment_id:uuid}")

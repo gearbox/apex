@@ -649,24 +649,45 @@ class UserRepository:
         *,
         limit: int = 50,
         offset: int = 0,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
     ) -> Sequence[GenerationJob]:
         """List generation jobs for a user.
+
+        Supports both offset-based and cursor-based (keyset) pagination.
+        When ``cursor_ts`` and ``cursor_id`` are supplied, offset is ignored
+        and keyset filtering is applied instead.
 
         Args:
             user_id: User ID.
             limit: Max results.
-            offset: Results to skip.
+            offset: Results to skip (ignored when cursor supplied).
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            List of GenerationJob.
+            List of GenerationJob ordered by ``created_at DESC``.
         """
-        result = await self._session.execute(
-            select(GenerationJob)
-            .where(GenerationJob.user_id == user_id)
-            .order_by(GenerationJob.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
+        from sqlalchemy import and_, or_
+
+        query = select(GenerationJob).where(GenerationJob.user_id == user_id)
+
+        if cursor_ts is not None and cursor_id is not None:
+            query = query.where(
+                or_(
+                    GenerationJob.created_at < cursor_ts,
+                    and_(GenerationJob.created_at == cursor_ts, GenerationJob.id < cursor_id),
+                )
+            )
+            result = await self._session.execute(
+                query.order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc()).limit(
+                    limit
+                )
+            )
+        else:
+            result = await self._session.execute(
+                query.order_by(GenerationJob.created_at.desc()).limit(limit).offset(offset)
+            )
         return result.scalars().all()
 
     async def count_user_jobs(self, user_id: UUID) -> int:

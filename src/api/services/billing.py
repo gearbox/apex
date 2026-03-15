@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -363,6 +364,8 @@ class BillingService:
         limit: int = 50,
         offset: int = 0,
         transaction_type: str | None = None,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
         session: AsyncSession,
     ) -> tuple[Sequence[TokenTransaction], int]:
         """Returns (transactions, total_count). Ordered by created_at DESC."""
@@ -372,4 +375,6 @@ class BillingService:
             limit=limit,
             offset=offset,
             transaction_type=transaction_type,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
         )
