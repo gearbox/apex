@@ -46,7 +46,7 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     negative_prompt: NegativePromptStr = DEFAULT_NEGATIVE_PROMPT
     height: Height = 1024
     aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1
-    model_type: ModelType = ModelType.AISHA
+    model_type: ModelType = ModelType.AISHA_IMAGE
     generation_type: GenerationType = GenerationType.T2I
     max_images: MaxImages = 1
     seed: int | None = None

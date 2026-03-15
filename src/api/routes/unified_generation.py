@@ -11,6 +11,7 @@ from litestar.di import Provide
 from litestar.status_codes import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
+    HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,7 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.security import auth_guard
+from src.api.services.generation.rate_limiter import RateLimitExceededError
 from src.api.services.generation.service import (
     GenerationError,
     GenerationService,
@@ -60,6 +62,23 @@ class UnifiedGenerationController(Controller):
                 session=session,
             )
             return Response(content=result, status_code=HTTP_201_CREATED)
+
+        except RateLimitExceededError as exc:
+            logger.warning(
+                "generation.rate_limited",
+                model=data.model.value,
+                retry_after=exc.retry_after,
+            )
+            return Response(
+                content=ErrorEnvelope(
+                    error="rate_limited",
+                    message=str(exc),
+                    status_code=HTTP_429_TOO_MANY_REQUESTS,
+                    detail={"retry_after": exc.retry_after},
+                ),
+                status_code=HTTP_429_TOO_MANY_REQUESTS,
+                headers={"Retry-After": str(exc.retry_after)},
+            )
 
         except ProviderUnavailableError as exc:
             logger.warning("generation.provider_unavailable", error=str(exc))

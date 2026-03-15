@@ -32,7 +32,7 @@ class TestModelType:
 
     def test_provider_property_aisha(self) -> None:
         """Test Aisha models return Aisha provider."""
-        assert ModelType.AISHA.provider == Provider.AISHA
+        assert ModelType.AISHA_IMAGE.provider == Provider.AISHA
 
     def test_provider_property_grok(self) -> None:
         """Test Grok models return Grok provider."""
@@ -45,14 +45,14 @@ class TestModelType:
         assert ModelType.GROK_IMAGINE_IMAGE.supports_image_input is True
         assert ModelType.GROK_2_IMAGE.supports_image_input is False
         assert ModelType.GROK_IMAGINE_VIDEO.supports_image_input is True
-        assert ModelType.AISHA.supports_image_input is True
+        assert ModelType.AISHA_IMAGE.supports_image_input is True
 
     def test_is_video_model(self) -> None:
         """Test is_video_model property."""
         assert ModelType.GROK_IMAGINE_VIDEO.is_video_model is True
         assert ModelType.GROK_IMAGINE_IMAGE.is_video_model is False
         assert ModelType.GROK_2_IMAGE.is_video_model is False
-        assert ModelType.AISHA.is_video_model is False
+        assert ModelType.AISHA_IMAGE.is_video_model is False
 
 
 class TestGenerationType:

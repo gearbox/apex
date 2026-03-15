@@ -55,7 +55,7 @@ class TestGenerationRequest:
         assert request.prompt == "A cat"
         assert request.height == 1024
         assert request.aspect_ratio == AspectRatio.RATIO_1_1
-        assert request.model_type == ModelType.AISHA
+        assert request.model_type == ModelType.AISHA_IMAGE
         assert request.max_images == 1
         assert request.steps == 12
         assert request.seed is not None  # Auto-generated

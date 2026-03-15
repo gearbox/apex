@@ -457,10 +457,15 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             r2_storage=_services.r2_storage,
         )
 
+    from src.api.services.generation.rate_limiter import ModelRateLimiter
+
+    model_rate_limiter = ModelRateLimiter()
+
     _services.generation_service = GenerationService(
         providers=generation_providers,  # type: ignore[arg-type]
         billing_service=get_billing_service(),
         pricing_service=get_pricing_service(),
+        rate_limiter=model_rate_limiter,
     )
     logger.info(
         "generation_service.initialized",

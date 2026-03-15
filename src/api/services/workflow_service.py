@@ -50,7 +50,7 @@ class WorkflowService:
 
     # Mapping of model types to workflow paths
     MODEL_WORKFLOW_MAP: ClassVar[dict[ModelType, str]] = {
-        ModelType.AISHA: "config/bundles/qwen_rapid_aio/260103-18/workflow.json",
+        ModelType.AISHA_IMAGE: "config/bundles/qwen_rapid_aio/260103-18/workflow.json",
     }
 
     def __init__(self, base_path: Path | None = None) -> None:

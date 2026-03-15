@@ -11,6 +11,7 @@ from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.services.billing import BillingService
 from src.api.services.generation.base import GenerationProvider
+from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.pricing import PricingService
 from src.core.enums import JobStatus, Provider
 from src.db.repositories.generation_model import GenerationModelRepository
@@ -38,6 +39,7 @@ class GenerationService:
     2. Validate required inputs (image_id, video_url)
     3. Validate n <= model.max_concurrent_outputs
     4. Check model is enabled in generation_models table
+    4.5. Global per-model rate limit check
     5. Resolve provider from ModelType
     6. Delegate provider-specific validation
     7. Billing saga (reserve -> submit -> refund on error)
@@ -49,10 +51,12 @@ class GenerationService:
         providers: dict[Provider, GenerationProvider],
         billing_service: BillingService,
         pricing_service: PricingService,
+        rate_limiter: ModelRateLimiter,
     ) -> None:
         self._providers = providers
         self._billing = billing_service
         self._pricing = pricing_service
+        self._rate_limiter = rate_limiter
 
     async def generate(
         self,
@@ -83,6 +87,9 @@ class GenerationService:
         model_record = await model_repo.get_by_model_key(request.model.value)
         if model_record is None or not model_record.is_enabled:
             raise ModelDisabledError(f"Model '{request.model.value}' is currently disabled")
+
+        # 4.5 Global per-model rate limit check
+        self._rate_limiter.check(request.model)
 
         # 5. Resolve provider
         provider_key = request.model.provider

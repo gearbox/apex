@@ -251,7 +251,7 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 429 rate_limited, 503 service_unavailable
 ```
 
 ### JobCreatedResponse Schema
@@ -272,14 +272,73 @@ Errors:   400 (model_disabled | validation_error | generation_failed), 402 insuf
 
 ---
 
-## 5. Providers *(public)*
+## 5. Providers *(auth-optional)*
 
 #### `GET /v1/providers`
+
+Auth-optional: unauthenticated callers get the full capabilities catalog; authenticated callers additionally receive `user_context` with their subscription tier.
 
 ```
 Response: {
   providers: ProviderInfo[],
-  models: ProviderModelInfo[]
+  user_context: UserContext | null   // null when unauthenticated
+}
+
+ProviderInfo: {
+  provider: string,       // e.g. "aisha", "grok"
+  name: string,           // e.g. "Aisha", "xAI Grok"
+  available: bool,        // whether provider backend is reachable
+  models: ModelInfo[]
+}
+
+ModelInfo: {
+  model_key: string,                 // matches ModelType value
+  name: string,
+  description: string,
+  capabilities: string[],            // e.g. ["t2i", "i2i"]
+  is_enabled: bool,
+  max_images: int,                   // max outputs per request
+  max_prompt_length: int,
+  supports_negative_prompt: bool,
+  aspect_ratios: string[],           // e.g. ["1:1", "16:9"]
+  image: ImageConstraints | null,    // null for video-only models
+  video: VideoConstraints | null     // null for image-only models
+}
+
+ImageConstraints: {
+  min_height: int | null,            // null = not user-controllable
+  max_height: int | null,
+  default_height: int | null,
+  output_resolutions: string[] | null  // informational; null = backend-determined
+}
+
+VideoConstraints: {
+  max_duration: int,                 // maximum video duration in seconds
+  resolutions: string[]              // e.g. ["480p", "720p"]
+}
+
+UserContext: {
+  subscription_tier: string          // e.g. "free", "pro"
+}
+```
+
+> **Deprecated flat format** (`providers` + `models` as a flat list) was removed in v2.
+> The old `GET /v1/grok` endpoint is still available for backward compatibility (see section 11).
+
+---
+
+### Rate Limit Errors
+
+The unified generation endpoint may return `429 Too Many Requests` when a model's global rate limit is exceeded:
+
+```
+Status:  429 Too Many Requests
+Headers: Retry-After: <seconds>
+Body: {
+  error: "rate_limited",
+  message: "Rate limit exceeded for model '...' ...",
+  status_code: 429,
+  detail: { retry_after: int }
 }
 ```
 
@@ -897,7 +956,7 @@ Request:  {
   negative_prompt?: string (max 2048 chars),
   height?: int (256–2048, default 1024),
   aspect_ratio?: AspectRatio (default "1:1"),
-  model_type?: ModelType (default "aisha"),
+  model_type?: ModelType (default "aisha-image"),
   generation_type?: GenerationType (default "t2i"),
   max_images?: int (1–4, default 1),
   seed?: int,
@@ -981,12 +1040,15 @@ Response: JobCreatedResponse
 
 ### ModelType
 
-| Value | Provider | T2I | I2I | T2V | I2V | V2V | Max Images |
-|-------|----------|-----|-----|-----|-----|-----|-----------|
-| `grok-imagine-image` | grok | ✓ | ✓ | | | | 10 |
-| `grok-2-image-1212` | grok | ✓ | | | | | 10 |
-| `grok-imagine-video` | grok | | | ✓ | ✓ | ✓ | 1 |
-| `aisha` | aisha | ✓ | ✓ | | | | 4 |
+| Value | Provider | T2I | I2I | T2V | I2V | V2V | FLF2V | Max Images |
+|-------|----------|-----|-----|-----|-----|-----|-------|-----------|
+| `grok-imagine-image` | grok | ✓ | ✓ | | | | | 10 |
+| `grok-2-image-1212` | grok | ✓ | | | | | | 10 |
+| `grok-imagine-video` | grok | | | ✓ | ✓ | ✓ | ✓ | 1 |
+| `aisha-image` | aisha | ✓ | ✓ | | | | | 4 |
+| `aisha-video` | aisha | | | ✓ | ✓ | ✓ | ✓ | 1 |
+
+> `aisha-video` is seeded as disabled until the video workflow is production-ready.
 
 ### GenerationType
 
@@ -1077,7 +1139,7 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 404 | `not_found`, `account_not_found`, `price_not_found` | — |
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero` | `balance` |
 | 422 | `validation_error`, `moderation` | `provider`, `policy` |
-| 429 | `too_many_requests` | — |
+| 429 | `too_many_requests`, `rate_limited` | `retry_after` |
 | 503 | `service_unavailable` | — |
 
 **Example responses:**

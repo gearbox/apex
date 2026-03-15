@@ -20,7 +20,8 @@ async def test_list_all_returns_seeded_rows(
     """list_all returns all seeded rows from migration 007."""
     rows = await generation_model_repo.list_all()
     keys = {r.model_key for r in rows}
-    assert "aisha" in keys
+    assert "aisha-image" in keys
+    assert "aisha-video" in keys
     assert "grok-imagine-image" in keys
     assert "grok-2-image-1212" in keys
     assert "grok-imagine-video" in keys
@@ -60,7 +61,7 @@ async def test_list_enabled_returns_only_enabled_seeded_rows(
     rows = await generation_model_repo.list_enabled()
     assert all(r.is_enabled for r in rows)
     keys = {r.model_key for r in rows}
-    assert "aisha" in keys
+    assert "aisha-image" in keys
     assert "grok-imagine-image" in keys
 
 
@@ -74,7 +75,7 @@ async def test_list_enabled_excludes_disabled_row(
     await db_session.flush()
 
     rows = await generation_model_repo.list_enabled()
-    assert not any(r.model_key == key for r in rows)
+    assert all(r.model_key != key for r in rows)
 
 
 async def test_list_enabled_includes_newly_enabled_row(

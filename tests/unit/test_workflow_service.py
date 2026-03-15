@@ -26,7 +26,7 @@ class TestWorkflowService:
 
     def test_load_workflow(self, workflow_service: WorkflowService) -> None:
         """Test loading a workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
 
         assert isinstance(workflow, dict)
         assert NodeIDs.EMPTY_LATENT in workflow
@@ -34,8 +34,8 @@ class TestWorkflowService:
 
     def test_workflow_caching(self, workflow_service: WorkflowService) -> None:
         """Test that workflows are cached."""
-        workflow1 = workflow_service.load_workflow(ModelType.AISHA)
-        workflow2 = workflow_service.load_workflow(ModelType.AISHA)
+        workflow1 = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
+        workflow2 = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
 
         # Should be different objects (deep copy)
         assert workflow1 is not workflow2
@@ -47,11 +47,11 @@ class TestWorkflowService:
         service = WorkflowService(base_path=tmp_path)
 
         with pytest.raises(WorkflowNotFoundError):
-            service.load_workflow(ModelType.AISHA)
+            service.load_workflow(ModelType.AISHA_IMAGE)
 
     def test_apply_parameters(self, workflow_service: WorkflowService) -> None:
         """Test applying generation parameters to workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
 
         request = GenerationRequest(
             prompt="A beautiful cat",
@@ -84,7 +84,7 @@ class TestWorkflowService:
 
     def test_apply_parameters_with_images(self, workflow_service: WorkflowService) -> None:
         """Test applying input images to workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
 
         request = GenerationRequest(prompt="test", generation_type=GenerationType.I2I)
 
@@ -100,7 +100,7 @@ class TestWorkflowService:
 
     def test_apply_parameters_immutable(self, workflow_service: WorkflowService) -> None:
         """Test that apply_parameters doesn't modify original workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
         original_prompt = workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"]
 
         request = GenerationRequest(prompt="New prompt")
@@ -114,7 +114,7 @@ class TestWorkflowService:
         workflow_service: WorkflowService,
     ) -> None:
         """Test that t2i mode disconnects image inputs."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
 
         request = GenerationRequest(
             prompt="A beautiful cat",
@@ -137,7 +137,7 @@ class TestWorkflowService:
         workflow_service: WorkflowService,
     ) -> None:
         """Test that i2i mode preserves image connections for uploaded images."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
 
         request = GenerationRequest(
             prompt="Use this reference",
@@ -161,7 +161,7 @@ class TestWorkflowService:
         workflow_service: WorkflowService,
     ) -> None:
         """Test that i2i mode only connects provided images."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
 
         request = GenerationRequest(
             prompt="Use this reference",
@@ -183,7 +183,7 @@ class TestWorkflowService:
 
     def test_validate_workflow_valid(self, workflow_service: WorkflowService) -> None:
         """Test validation passes for valid workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA)
+        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
         assert workflow_service.validate_workflow(workflow) is True
 
     def test_validate_workflow_missing_nodes(
@@ -233,7 +233,7 @@ class TestGuiToApiConversion:
         (bundle_dir / "workflow.json").write_text(json.dumps(gui_workflow))
 
         service = WorkflowService(base_path=tmp_path)
-        api_workflow = service.load_workflow(ModelType.AISHA)
+        api_workflow = service.load_workflow(ModelType.AISHA_IMAGE)
 
         # Check structure
         assert "1" in api_workflow

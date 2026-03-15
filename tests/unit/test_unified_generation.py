@@ -10,6 +10,7 @@ import msgspec
 import pytest
 
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
+from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
     GenerationError,
     GenerationService,
@@ -67,7 +68,7 @@ class TestUnifiedGenerationRequestSchema:
         req = UnifiedGenerationRequest(
             prompt="A landscape",
             generation_type=GenerationType.T2I,
-            model=ModelType.AISHA,
+            model=ModelType.AISHA_IMAGE,
             height=768,
             seed=42,
             steps=8,
@@ -79,21 +80,21 @@ class TestUnifiedGenerationRequestSchema:
     def test_forbid_unknown_fields(self) -> None:
         with pytest.raises(msgspec.ValidationError):
             msgspec.json.decode(
-                b'{"prompt":"x","generation_type":"t2i","model":"aisha","bogus":true}',
+                b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","bogus":true}',
                 type=UnifiedGenerationRequest,
             )
 
     def test_prompt_validation(self) -> None:
         with pytest.raises(msgspec.ValidationError):
             msgspec.json.decode(
-                b'{"prompt":"","generation_type":"t2i","model":"aisha"}',
+                b'{"prompt":"","generation_type":"t2i","model":"aisha-image"}',
                 type=UnifiedGenerationRequest,
             )
 
     def test_n_validation_bounds(self) -> None:
         with pytest.raises(msgspec.ValidationError):
             msgspec.json.decode(
-                b'{"prompt":"x","generation_type":"t2i","model":"aisha","n":0}',
+                b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","n":0}',
                 type=UnifiedGenerationRequest,
             )
 
@@ -101,7 +102,7 @@ class TestUnifiedGenerationRequestSchema:
         req = UnifiedGenerationRequest(
             prompt="test",
             generation_type=GenerationType.T2I,
-            model=ModelType.AISHA,
+            model=ModelType.AISHA_IMAGE,
         )
         encoded = msgspec.json.encode(req)
         decoded = msgspec.json.decode(encoded, type=UnifiedGenerationRequest)
@@ -140,9 +141,10 @@ def _make_service(
         providers = {Provider.GROK: _make_mock_provider()}
 
     return GenerationService(
-        providers=providers,
+        providers=providers,  # type: ignore[arg-type]
         billing_service=billing,
         pricing_service=pricing,
+        rate_limiter=MagicMock(spec=ModelRateLimiter),
     )
 
 
@@ -222,11 +224,11 @@ class TestGenerationServiceGenerate:
 
     async def test_rejects_n_exceeding_model_cap(self) -> None:
         """Aisha supports max 4 outputs."""
-        service = _make_service(providers={Provider.AISHA: _make_mock_provider()})
+        service = _make_service(providers={Provider.AISHA: _make_mock_provider()})  # type: ignore[arg-type]
         request = UnifiedGenerationRequest(
             prompt="Cats",
             generation_type=GenerationType.T2I,
-            model=ModelType.AISHA,
+            model=ModelType.AISHA_IMAGE,
             n=8,
         )
         with pytest.raises(ValueError, match="max 4 outputs"):
@@ -249,9 +251,10 @@ class TestGenerationServiceGenerate:
         pricing.get_price = AsyncMock(return_value=50)
 
         service = GenerationService(
-            providers={Provider.GROK: mock_provider},
+            providers={Provider.GROK: mock_provider},  # type: ignore[arg-type]
             billing_service=billing,
             pricing_service=pricing,
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
         )
 
         request = UnifiedGenerationRequest(
@@ -271,3 +274,51 @@ class TestGenerationServiceGenerate:
                 user_id=uuid4(),
                 session=AsyncMock(),
             )
+
+
+class TestGenerationServiceRateLimit:
+    """Test rate limit integration in GenerationService."""
+
+    async def test_rate_limit_exceeded_raises(self) -> None:
+        """GenerationService should propagate RateLimitExceededError."""
+        from src.api.services.generation.rate_limiter import RateLimitExceededError
+
+        mock_limiter = MagicMock(spec=ModelRateLimiter)
+        mock_limiter.check.side_effect = RateLimitExceededError(
+            model=ModelType.GROK_IMAGINE_VIDEO,
+            retry_after=30,
+        )
+
+        mock_model_record = MagicMock()
+        mock_model_record.is_enabled = True
+
+        mock_session = AsyncMock()
+        mock_providers: dict = {Provider.GROK: _make_mock_provider()}
+        mock_billing = AsyncMock()
+        mock_billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        mock_billing.assert_sufficient_balance = AsyncMock()
+        mock_billing.get_balance = AsyncMock(return_value=1000)
+        mock_pricing = AsyncMock()
+        mock_pricing.get_price = AsyncMock(return_value=50)
+
+        service = GenerationService(
+            providers=mock_providers,
+            billing_service=mock_billing,
+            pricing_service=mock_pricing,
+            rate_limiter=mock_limiter,
+        )
+
+        request = UnifiedGenerationRequest(
+            prompt="Test",
+            generation_type=GenerationType.T2V,
+            model=ModelType.GROK_IMAGINE_VIDEO,
+        )
+
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=mock_model_record),
+            ),
+            pytest.raises(RateLimitExceededError),
+        ):
+            await service.generate(request, user_id=uuid4(), session=mock_session)

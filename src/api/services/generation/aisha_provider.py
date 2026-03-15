@@ -47,12 +47,11 @@ class AishaGenerationProvider:
         self._workflow = workflow_service
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
-        """Aisha-specific validation beyond what the enum provides.
+        """Aisha-specific validation beyond what the enum provides."""
+        from src.core.enums import ModelType
 
-        Currently a no-op — model-generation_type compatibility (aisha supports
-        t2i and i2i only) and n <= 4 are enforced by the orchestrator via
-        ModelType.supports_generation_type() and ModelType.max_concurrent_outputs.
-        """
+        if request.model == ModelType.AISHA_VIDEO:
+            raise ValueError("Aisha video generation is not yet available via the unified endpoint")
 
     async def submit(
         self,

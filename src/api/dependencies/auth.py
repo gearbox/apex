@@ -67,3 +67,16 @@ async def get_current_admin_user(request: Request[Any, Any, Any], session: Async
         raise NotAuthorizedException(detail="Admin access required")
 
     return user
+
+
+async def get_optional_user_id(request: Request[Any, Any, Any]) -> UUID | None:
+    """Extract current user ID from request state, or None if unauthenticated.
+
+    Must be used in routes protected by optional_auth_guard, which populates
+    request.state["user_id"] after optionally validating the JWT token.
+
+    Returns:
+        Authenticated user's UUID, or None if no token was provided.
+    """
+    user_id = request.state.get("user_id")
+    return None if user_id is None else UUID(str(user_id))

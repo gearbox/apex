@@ -13,26 +13,30 @@ class TestModelTypeSupportsGenerationType:
     @pytest.mark.parametrize(
         ("model", "gen_type", "expected"),
         [
-            # Every model supports T2I
-            (ModelType.AISHA, GenerationType.T2I, True),
+            # T2I: only image models (meta.image is not None)
+            (ModelType.AISHA_IMAGE, GenerationType.T2I, True),
             (ModelType.GROK_IMAGINE_IMAGE, GenerationType.T2I, True),
             (ModelType.GROK_2_IMAGE, GenerationType.T2I, True),
-            (ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2I, True),
-            # I2I: needs image input AND not video model
+            (ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2I, False),  # video-only model
+            (ModelType.AISHA_VIDEO, GenerationType.T2I, False),  # video-only model
+            # I2I: image models only (meta.image is not None and meta.video is None)
             (ModelType.GROK_IMAGINE_IMAGE, GenerationType.I2I, True),
-            (ModelType.AISHA, GenerationType.I2I, True),
+            (ModelType.AISHA_IMAGE, GenerationType.I2I, True),
             (ModelType.GROK_2_IMAGE, GenerationType.I2I, False),
             (ModelType.GROK_IMAGINE_VIDEO, GenerationType.I2I, False),
             # T2V: only video models
             (ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2V, True),
+            (ModelType.AISHA_VIDEO, GenerationType.T2V, True),
             (ModelType.GROK_IMAGINE_IMAGE, GenerationType.T2V, False),
-            (ModelType.AISHA, GenerationType.T2V, False),
-            # I2V: video model + image input
+            (ModelType.AISHA_IMAGE, GenerationType.T2V, False),
+            # I2V: video models
             (ModelType.GROK_IMAGINE_VIDEO, GenerationType.I2V, True),
+            (ModelType.AISHA_VIDEO, GenerationType.I2V, True),
             (ModelType.GROK_IMAGINE_IMAGE, GenerationType.I2V, False),
             # V2V / FLF2V: video models only
             (ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, True),
-            (ModelType.AISHA, GenerationType.V2V, False),
+            (ModelType.AISHA_IMAGE, GenerationType.V2V, False),
+            (ModelType.AISHA_VIDEO, GenerationType.V2V, True),
             (ModelType.GROK_IMAGINE_VIDEO, GenerationType.FLF2V, True),
             (ModelType.GROK_IMAGINE_IMAGE, GenerationType.FLF2V, False),
         ],
@@ -52,8 +56,8 @@ class TestModelTypeMaxConcurrentOutputs:
     def test_video_model_always_one(self) -> None:
         assert ModelType.GROK_IMAGINE_VIDEO.max_concurrent_outputs == 1
 
-    def test_aisha_four(self) -> None:
-        assert ModelType.AISHA.max_concurrent_outputs == 4
+    def test_aisha_image_four(self) -> None:
+        assert ModelType.AISHA_IMAGE.max_concurrent_outputs == 4
 
     def test_grok_image_ten(self) -> None:
         assert ModelType.GROK_IMAGINE_IMAGE.max_concurrent_outputs == 10

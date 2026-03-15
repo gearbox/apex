@@ -40,7 +40,12 @@ logger = structlog.get_logger(__name__)
 
 
 class GrokProviderController(Controller):
-    """Grok provider information endpoints."""
+    """Grok provider information endpoints.
+
+    DEPRECATED: Use GET /v1/providers for the unified, provider-grouped model
+    catalog with full capability metadata. This endpoint returns a Grok-specific
+    view and will be removed in a future release.
+    """
 
     path = "/v1/grok"
     tags: Sequence[str] | None = ["Grok Provider"]

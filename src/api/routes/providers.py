@@ -1,115 +1,152 @@
-"""Provider discovery endpoint."""
+"""Provider discovery endpoint (v2).
+
+Returns provider-grouped, capability-rich model catalog.
+Auth-optional: unauthenticated callers get the full catalog;
+authenticated callers additionally receive user_context.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from uuid import UUID
 
-import msgspec
 import structlog
 from litestar import Controller, get
+from litestar.di import Provide
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.dependencies.auth import get_optional_user_id
+from src.api.schemas.providers import (
+    ImageConstraints,
+    ModelInfo,
+    ProviderInfo,
+    ProvidersResponse,
+    UserContext,
+    VideoConstraints,
+)
+from src.api.security import optional_auth_guard
 from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import GenerationType, ModelType, Provider
+from src.core.model_registry import get_model_meta
 from src.db.repositories.generation_model import GenerationModelRepository
+from src.db.repositories.user import UserRepository
 
 logger = structlog.get_logger(__name__)
 
-
-class ProviderModelInfo(msgspec.Struct, kw_only=True):
-    """A single model's capabilities — derived from ModelType enum properties."""
-
-    model: str
-    name: str
-    description: str
-    provider: str
-    is_enabled: bool
-    supports_t2i: bool
-    supports_i2i: bool
-    supports_t2v: bool
-    supports_i2v: bool
-    supports_v2v: bool
-    supports_flf2v: bool
-    max_images: int
+# Provider display names — single source of truth
+PROVIDER_DISPLAY_NAMES: dict[Provider, str] = {
+    Provider.AISHA: "Aisha",
+    Provider.GROK: "xAI Grok",
+}
 
 
-class ProviderInfo(msgspec.Struct, kw_only=True):
-    """Single provider status."""
-
-    provider: str
-    name: str
-    available: bool
+def _is_provider_available(provider: Provider, *, grok_configured: bool) -> bool:
+    """Determine if a provider's backend is currently available."""
+    return grok_configured if provider == Provider.GROK else True
 
 
-class ProvidersResponse(msgspec.Struct, kw_only=True):
-    """Full providers discovery response."""
+def _build_model_info(mt: ModelType, record: object) -> ModelInfo:
+    """Build ModelInfo from ModelType enum properties + model registry metadata.
 
-    providers: list[ProviderInfo]
-    models: list[ProviderModelInfo]
-
-
-def _build_model_info(mt: ModelType, record: object) -> ProviderModelInfo:
-    """Build ProviderModelInfo entirely from ModelType enum properties.
-
-    No hardcoded if/elif per model — adding a new ModelType member with the
-    correct ``supports_image_input`` and ``is_video_model`` properties is enough.
+    Args:
+        mt: The ModelType enum member.
+        record: The GenerationModel DB record (has .name, .description, .is_enabled).
     """
-    return ProviderModelInfo(
-        model=mt.value,
+    meta = get_model_meta(mt)
+    return ModelInfo(
+        model_key=mt.value,
         name=record.name,  # type: ignore[attr-defined]
         description=record.description,  # type: ignore[attr-defined]
-        provider=mt.provider.value,
+        capabilities=[gt.value for gt in GenerationType if mt.supports_generation_type(gt)],
         is_enabled=record.is_enabled,  # type: ignore[attr-defined]
-        supports_t2i=mt.supports_generation_type(GenerationType.T2I),
-        supports_i2i=mt.supports_generation_type(GenerationType.I2I),
-        supports_t2v=mt.supports_generation_type(GenerationType.T2V),
-        supports_i2v=mt.supports_generation_type(GenerationType.I2V),
-        supports_v2v=mt.supports_generation_type(GenerationType.V2V),
-        supports_flf2v=mt.supports_generation_type(GenerationType.FLF2V),
-        max_images=mt.max_concurrent_outputs,
+        max_images=meta.max_concurrent_outputs,
+        max_prompt_length=meta.max_prompt_length,
+        supports_negative_prompt=meta.supports_negative_prompt,
+        aspect_ratios=[ar.value for ar in meta.aspect_ratios],
+        image=(
+            ImageConstraints(
+                min_height=meta.image.min_height,
+                max_height=meta.image.max_height,
+                default_height=meta.image.default_height,
+                output_resolutions=(
+                    list(meta.image.output_resolutions)
+                    if meta.image.output_resolutions is not None
+                    else None
+                ),
+            )
+            if meta.image is not None
+            else None
+        ),
+        video=(
+            VideoConstraints(
+                max_duration=meta.video.max_duration,
+                resolutions=[r.value for r in meta.video.resolutions],
+            )
+            if meta.video is not None
+            else None
+        ),
     )
 
 
 class ProvidersController(Controller):
-    """Provider and model discovery."""
+    """Provider and model discovery (v2)."""
 
     path = "/v1/providers"
     tags: Sequence[str] | None = ["Providers"]
+    guards = [optional_auth_guard]
+    dependencies = {"current_user_id": Provide(get_optional_user_id)}
 
     @get("/")
     async def list_providers(
         self,
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
+        current_user_id: UUID | None,
     ) -> ProvidersResponse:
         """List available providers and their models.
 
-        Returns provider availability status and per-model capability flags.
-        The frontend uses this to build the model selector and validate
-        generation_type options before submission.
+        Returns provider-grouped model catalog with capability metadata.
+        When authenticated, includes user_context with subscription tier.
         """
         repo = GenerationModelRepository(session)
-        all_models = await repo.list_enabled()
+        db_models = await repo.list_enabled()
 
-        providers = [
-            ProviderInfo(
-                provider=Provider.AISHA.value,
-                name="Aisha",
-                available=True,
-            ),
-            ProviderInfo(
-                provider=Provider.GROK.value,
-                name="xAI Grok",
-                available=grok_job_service is not None,
-            ),
-        ]
-
-        models = []
-        for record in all_models:
+        # Group models by provider
+        provider_models: dict[Provider, list[ModelInfo]] = {}
+        for record in db_models:
             try:
                 mt = ModelType(record.model_key)
             except ValueError:
+                logger.warning(
+                    "providers.unknown_model_key",
+                    model_key=record.model_key,
+                )
                 continue
-            models.append(_build_model_info(mt, record))
 
-        return ProvidersResponse(providers=providers, models=models)
+            info = _build_model_info(mt, record)
+            provider_models.setdefault(mt.provider, []).append(info)
+
+        # Build provider list — include all known providers even with 0 models
+        grok_configured = grok_job_service is not None
+        providers = [
+            ProviderInfo(
+                provider=p.value,
+                name=PROVIDER_DISPLAY_NAMES[p],
+                available=_is_provider_available(p, grok_configured=grok_configured),
+                models=provider_models.get(p, []),
+            )
+            for p in Provider
+        ]
+
+        # Optional user context
+        user_context: UserContext | None = None
+        if current_user_id is not None:
+            user_repo = UserRepository(session)
+            user = await user_repo.get_active_user(current_user_id)
+            if user is not None:
+                tier = user.subscription_tier
+                user_context = UserContext(
+                    subscription_tier=tier.value if hasattr(tier, "value") else str(tier),
+                )
+
+        return ProvidersResponse(providers=providers, user_context=user_context)

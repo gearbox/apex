@@ -13,63 +13,61 @@ class Provider(str, Enum):
 class ModelType(str, Enum):
     """Available model types."""
 
-    AISHA = "aisha"
-    # Future models:
-    # SEEDREAM = "seedream"
-    # Z_IMAGE = "z-image"
+    AISHA_IMAGE = "aisha-image"
+    AISHA_VIDEO = "aisha-video"
 
     # Grok models
     GROK_IMAGINE_IMAGE = "grok-imagine-image"  # T2I, I2I (editing)
     GROK_2_IMAGE = "grok-2-image-1212"  # T2I only (older, different pricing)
-    GROK_IMAGINE_VIDEO = "grok-imagine-video"  # T2V, I2V
+    GROK_IMAGINE_VIDEO = "grok-imagine-video"  # T2V, I2V, V2V, FLF2V
 
     @property
     def provider(self) -> Provider:
         """Get the provider for this model type."""
-        return Provider.GROK if self.value.startswith("grok") else Provider.AISHA
+        from src.core.model_registry import get_model_meta
+
+        return get_model_meta(self).provider
 
     @property
     def supports_image_input(self) -> bool:
         """Check if this model supports image input (I2I/I2V)."""
-        return self in (
-            ModelType.GROK_IMAGINE_IMAGE,
-            ModelType.GROK_IMAGINE_VIDEO,
-            ModelType.AISHA,
+        return self.supports_generation_type(GenerationType.I2I) or self.supports_generation_type(
+            GenerationType.I2V
         )
 
     @property
     def is_video_model(self) -> bool:
         """Check if this model generates video."""
-        return self == ModelType.GROK_IMAGINE_VIDEO
+        from src.core.model_registry import get_model_meta
+
+        return get_model_meta(self).video is not None
 
     def supports_generation_type(self, gen_type: GenerationType) -> bool:
         """Check if this model supports the given generation type.
 
-        Derives compatibility from existing properties rather than
-        maintaining a separate matrix. Adding a new model only requires
-        setting ``supports_image_input`` and ``is_video_model`` correctly —
-        this method, all provider validate() calls, and the /v1/providers
-        discovery endpoint follow automatically.
+        Derives compatibility from registry metadata rather than
+        hardcoded member lists.
         """
+        from src.core.model_registry import get_model_meta
+
+        meta = get_model_meta(self)
+
         if gen_type == GenerationType.T2I:
-            return True
+            return meta.image is not None
         if gen_type == GenerationType.I2I:
-            return self.supports_image_input and not self.is_video_model
+            return meta.image is not None and meta.video is None and meta.image.supports_editing
         if gen_type in (GenerationType.T2V, GenerationType.V2V, GenerationType.FLF2V):
-            return self.is_video_model
+            return meta.video is not None
         if gen_type == GenerationType.I2V:
-            return self.is_video_model and self.supports_image_input
+            return meta.video is not None
         return False
 
     @property
     def max_concurrent_outputs(self) -> int:
-        """Maximum number of outputs this model can produce per request.
+        """Maximum number of outputs this model can produce per request."""
+        from src.core.model_registry import get_model_meta
 
-        Video models always produce 1. Image models vary by provider.
-        """
-        if self.is_video_model:
-            return 1
-        return 4 if self.provider == Provider.AISHA else 10
+        return get_model_meta(self).max_concurrent_outputs
 
 
 class GenerationType(str, Enum):
