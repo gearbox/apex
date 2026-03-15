@@ -6,6 +6,7 @@ Uses the `limits` library for sliding-window counters backed by Redis
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
@@ -18,6 +19,7 @@ from litestar.middleware import MiddlewareProtocol
 from litestar.status_codes import HTTP_429_TOO_MANY_REQUESTS
 from litestar.types import ASGIApp, Receive, Scope, Send
 
+from src.api.schemas.errors import ErrorEnvelope
 from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
@@ -143,22 +145,50 @@ class RateLimitMiddleware(MiddlewareProtocol):
         # We form a unique key using the route and the IP
         key = f"rate_limit:{route_key}:{ip}"
 
-        if not limiter.test(limit_item, key):
-            # Limit exceeded
-            # Find time until reset window
-            retry_after = str(int(limit_item.get_expiry()))
+        # hit() atomically increments and returns False when limit is exceeded
+        allowed = limiter.hit(limit_item, key)
+        stats = limiter.get_window_stats(limit_item, key)
+
+        limit = limit_item.amount
+        remaining = max(0, stats.remaining)
+        reset_time = int(stats.reset_time)
+
+        if not allowed:
+            retry_after = max(0, reset_time - int(time.time()))
 
             logger.warning("rate_limit.exceeded", ip=ip, route=route_key)
 
             response = Response(
-                content={"detail": "Too Many Requests"},
+                content=ErrorEnvelope(
+                    error="rate_limited",
+                    message=f"Too many requests. Try again in {retry_after} seconds.",
+                    status_code=HTTP_429_TOO_MANY_REQUESTS,
+                    detail={"retry_after": retry_after},
+                ),
                 status_code=HTTP_429_TOO_MANY_REQUESTS,
-                headers={"Retry-After": retry_after},
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-RateLimit-Limit": str(limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(reset_time),
+                },
             )
-            # Middleware must return ASGI application response
             asgi_response = response.to_asgi_response(app=None, request=request)
             return await asgi_response(scope, receive, send)
 
-        # Hit the storage to record the request
-        limiter.hit(limit_item, key)
-        return await self.app(scope, receive, send)
+        # Inject rate limit headers into every non-429 response
+        rate_limit_headers = [
+            (b"x-ratelimit-limit", str(limit).encode()),
+            (b"x-ratelimit-remaining", str(remaining).encode()),
+            (b"x-ratelimit-reset", str(reset_time).encode()),
+        ]
+
+        async def send_with_headers(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                message = {
+                    **message,
+                    "headers": list(message.get("headers", [])) + rate_limit_headers,
+                }
+            await send(message)
+
+        return await self.app(scope, receive, send_with_headers)

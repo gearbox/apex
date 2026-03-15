@@ -103,6 +103,41 @@ async def test_resend_verification_rate_limit(override_limiter_defaults: None) -
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_headers_on_allowed_requests(override_limiter_defaults: None) -> None:  # noqa: ARG001
+    async with AsyncTestClient(app=application) as client:
+        response = await client.post("/v1/auth/register", json={})
+        assert response.status_code != HTTP_429_TOO_MANY_REQUESTS
+        assert "x-ratelimit-limit" in response.headers
+        assert "x-ratelimit-remaining" in response.headers
+        assert "x-ratelimit-reset" in response.headers
+        assert int(response.headers["x-ratelimit-limit"]) == 5
+        assert int(response.headers["x-ratelimit-remaining"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_headers_on_429(override_limiter_defaults: None) -> None:  # noqa: ARG001
+    async with AsyncTestClient(app=application) as client:
+        for _ in range(5):
+            await client.post("/v1/auth/register", json={})
+
+        response = await client.post("/v1/auth/register", json={})
+        assert response.status_code == HTTP_429_TOO_MANY_REQUESTS
+
+        # All four headers must be present
+        assert "retry-after" in response.headers
+        assert "x-ratelimit-limit" in response.headers
+        assert "x-ratelimit-remaining" in response.headers
+        assert "x-ratelimit-reset" in response.headers
+        assert response.headers["x-ratelimit-remaining"] == "0"
+
+        # Body must follow the unified error envelope
+        body = response.json()
+        assert body["error"] == "rate_limited"
+        assert body["status_code"] == HTTP_429_TOO_MANY_REQUESTS
+        assert "retry_after" in body["detail"]
+
+
+@pytest.mark.asyncio
 async def test_different_ips_have_separate_counters(override_limiter_defaults: None) -> None:  # noqa: ARG001
     async with AsyncTestClient(app=application) as client:
         # Exhaust limit for IP 1
