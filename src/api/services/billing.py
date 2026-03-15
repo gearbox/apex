@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import structlog
 
@@ -15,6 +15,7 @@ from src.api.services.billing_errors import (
     RefundNotEligibleError,
 )
 from src.core.enums import AccountType, TransactionType
+from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.user import UserRepository
 
@@ -39,7 +40,7 @@ class BillingService:
         account = await repo.get_account_by_user(user_id)
         if account is not None:
             return account
-        return await repo.create_personal_account(id=uuid4(), user_id=user_id)
+        return await repo.create_personal_account(id=new_id(), user_id=user_id)
 
     async def resolve_account_for_user(
         self, user_id: UUID, *, session: AsyncSession
@@ -159,7 +160,7 @@ class BillingService:
         token_cost: int,
         job_id: UUID,
         *,
-        metadata: dict,
+        metadata: dict[str, Any],
         session: AsyncSession,
     ) -> TokenTransaction:
         """Atomically check balance and create a debit transaction.
@@ -192,7 +193,7 @@ class BillingService:
         # Create debit
         new_balance = balance - token_cost
         txn = await repo.create_transaction(
-            id=uuid4(),
+            id=new_id(),
             account_id=account_id,
             transaction_type=TransactionType.DEBIT.value,
             amount=-token_cost,
@@ -248,7 +249,7 @@ class BillingService:
         new_balance = balance + refund_amount
 
         txn = await repo.create_transaction(
-            id=uuid4(),
+            id=new_id(),
             account_id=debit.account_id,
             transaction_type=TransactionType.REFUND.value,
             amount=refund_amount,
@@ -289,7 +290,7 @@ class BillingService:
         new_balance = balance + amount
 
         txn = await repo.create_transaction(
-            id=uuid4(),
+            id=new_id(),
             account_id=account_id,
             transaction_type=TransactionType.CREDIT.value,
             amount=amount,
@@ -335,7 +336,7 @@ class BillingService:
             raise InsufficientBalanceError(balance=balance, required=abs(amount))
 
         txn = await repo.create_transaction(
-            id=uuid4(),
+            id=new_id(),
             account_id=account_id,
             transaction_type=TransactionType.ADMIN_ADJUSTMENT.value,
             amount=amount,

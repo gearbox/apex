@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -404,7 +405,7 @@ class AdminController(Controller):
         rule_id: UUID,
         session: AsyncSession,
         pricing_service: PricingService,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Soft deactivate a pricing rule."""
         logger.info(
             "admin.deactivating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id)

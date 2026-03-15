@@ -7,8 +7,8 @@ import hashlib
 import hmac
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import stripe
 import structlog
@@ -19,6 +19,7 @@ from src.api.services.billing_errors import (
 )
 from src.core.config import TOKEN_PACKAGES
 from src.core.enums import PaymentStatus
+from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
@@ -107,7 +108,7 @@ class PaymentService:
             cancel_url="https://app.example.com/billing?cancelled=true",
         )
 
-        payment_id = uuid4()
+        payment_id = new_id()
         await repo.create_payment(
             id=payment_id,
             account_id=account_id,
@@ -144,7 +145,7 @@ class PaymentService:
         stripe.api_key = self._settings.stripe_secret_key
 
         try:
-            event = stripe.Webhook.construct_event(
+            event = stripe.Webhook.construct_event(  # type: ignore[no-untyped-call]
                 payload,
                 stripe_signature,
                 self._settings.stripe_webhook_secret,
@@ -214,7 +215,7 @@ class PaymentService:
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found")
 
-        payment_id = uuid4()
+        payment_id = new_id()
         order_id = json.dumps(
             {
                 "account_id": str(account_id),
@@ -264,7 +265,7 @@ class PaymentService:
 
     async def handle_nowpayments_webhook(
         self,
-        payload: dict,
+        payload: dict[str, Any],
         hmac_signature: str,
         *,
         session: AsyncSession,

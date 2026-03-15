@@ -6,7 +6,7 @@ from enum import Enum, StrEnum
 class Provider(str, Enum):
     """Generation provider."""
 
-    COMFYUI = "comfyui"
+    AISHA = "aisha"
     GROK = "grok"
 
 
@@ -26,7 +26,7 @@ class ModelType(str, Enum):
     @property
     def provider(self) -> Provider:
         """Get the provider for this model type."""
-        return Provider.GROK if self.value.startswith("grok") else Provider.COMFYUI
+        return Provider.GROK if self.value.startswith("grok") else Provider.AISHA
 
     @property
     def supports_image_input(self) -> bool:
@@ -69,7 +69,7 @@ class ModelType(str, Enum):
         """
         if self.is_video_model:
             return 1
-        return 4 if self.provider == Provider.COMFYUI else 10
+        return 4 if self.provider == Provider.AISHA else 10
 
 
 class GenerationType(str, Enum):

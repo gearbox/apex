@@ -30,9 +30,9 @@ from src.core.enums import (
 class TestModelType:
     """Tests for ModelType enum."""
 
-    def test_provider_property_comfyui(self) -> None:
-        """Test ComfyUI models return ComfyUI provider."""
-        assert ModelType.AISHA.provider == Provider.COMFYUI
+    def test_provider_property_aisha(self) -> None:
+        """Test Aisha models return Aisha provider."""
+        assert ModelType.AISHA.provider == Provider.AISHA
 
     def test_provider_property_grok(self) -> None:
         """Test Grok models return Grok provider."""

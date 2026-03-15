@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -39,7 +39,6 @@ class Organization(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
@@ -90,7 +89,6 @@ class OrganizationMember(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
     )
     organization_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -133,7 +131,6 @@ class TokenAccount(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
     )
     account_type: Mapped[str] = mapped_column(String(20), nullable=False)
     user_id: Mapped[UUID | None] = mapped_column(
@@ -210,7 +207,6 @@ class TokenTransaction(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
     )
     account_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -231,7 +227,7 @@ class TokenTransaction(Base):
         nullable=True,
     )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    metadata_: Mapped[dict] = mapped_column(
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
         JSONB,
         nullable=False,
@@ -273,7 +269,6 @@ class PricingRule(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
     )
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     generation_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -335,7 +330,6 @@ class Payment(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
     )
     account_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -359,7 +353,7 @@ class Payment(Base):
         nullable=False,
         server_default=text("'USD'"),
     )
-    provider_metadata: Mapped[dict] = mapped_column(
+    provider_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
         server_default=text("'{}'::jsonb"),

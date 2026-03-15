@@ -92,7 +92,7 @@ class UnifiedJobResponse(msgspec.Struct, kw_only=True):
     """Current lifecycle status."""
 
     provider: str
-    """Generation provider identifier, e.g. ``grok`` or ``comfyui``."""
+    """Generation provider identifier, e.g. ``grok`` or ``aisha``."""
 
     model: str | None = None
     """Model identifier, e.g. ``grok-imagine-image``. None for legacy ComfyUI jobs."""

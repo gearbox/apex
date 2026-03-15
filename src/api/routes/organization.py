@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -232,7 +233,7 @@ class OrganizationController(Controller):
         session: AsyncSession,
         organization_service: OrganizationService,
         force_delete: bool = False,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Delete an organization (soft-delete). Only the owner or a system admin may call this.
 
         Returns 409 if the org has a positive token balance. Pass
@@ -262,7 +263,7 @@ class OrganizationController(Controller):
         user_id: UUID,
         session: AsyncSession,
         organization_service: OrganizationService,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Remove a member. Requires admin or owner role. Cannot remove owner."""
         await organization_service.remove_member(
             org_id, user_id, actor_id=current_user_id, session=session

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Protocol
+from typing import Any, Protocol
 
 
 @dataclasses.dataclass(frozen=True)
@@ -20,7 +20,7 @@ class ModerationDetector(Protocol):
 
     def classify(
         self,
-        provider_response: dict | None,
+        provider_response: dict[str, Any] | None,
         exception: Exception | None,
     ) -> ModerationResult: ...
 
@@ -38,7 +38,7 @@ class GrokModerationDetector:
 
     def classify(
         self,
-        provider_response: dict | None,
+        provider_response: dict[str, Any] | None,
         exception: Exception | None,
     ) -> ModerationResult:
         if exception is not None:
@@ -67,7 +67,7 @@ class ComfyUIModerationDetector:
 
     def classify(
         self,
-        provider_response: dict | None,  # noqa: ARG002
+        provider_response: dict[str, Any] | None,  # noqa: ARG002
         exception: Exception | None,
     ) -> ModerationResult:
         if exception is not None:
@@ -81,5 +81,5 @@ class ComfyUIModerationDetector:
 
 MODERATION_DETECTORS: dict[str, ModerationDetector] = {
     "grok": GrokModerationDetector(),
-    "comfyui": ComfyUIModerationDetector(),
+    "aisha": ComfyUIModerationDetector(),
 }

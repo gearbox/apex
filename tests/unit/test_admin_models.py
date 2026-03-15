@@ -52,7 +52,7 @@ class TestListModels:
     ) -> None:
         """GET /v1/admin/models returns all models when enabled_only=False."""
         db_models = [
-            _make_db_model("aisha", "comfyui", is_enabled=True),
+            _make_db_model("aisha", "aisha", is_enabled=True),
             _make_db_model("grok-imagine-image", "grok", is_enabled=False),
         ]
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import structlog
 
@@ -15,6 +15,7 @@ from src.api.security import (
     generate_token,
     hash_token,
 )
+from src.core.uid import new_id
 from src.db.repositories import UserRepository
 from src.db.repositories.billing import BillingRepository
 
@@ -137,7 +138,7 @@ class AuthService:
             raise EmailAlreadyExistsError(f"Email {email} is already registered")
 
         # Create user
-        user_id = uuid4()
+        user_id = new_id()
         password_hash = self._password.hash(password)
 
         user = await self._repo.create_user(
@@ -150,7 +151,7 @@ class AuthService:
         # Create personal token account in the same transaction
         if self._session is not None:
             billing_repo = BillingRepository(self._session)
-            await billing_repo.create_personal_account(id=uuid4(), user_id=user_id)
+            await billing_repo.create_personal_account(id=new_id(), user_id=user_id)
             logger.info("billing.account_created", user_id=str(user_id))
 
         logger.info("user.registered", user_id=str(user_id))
@@ -354,10 +355,10 @@ class AuthService:
         refresh_expires_at = datetime.now(UTC) + self._jwt.refresh_token_lifetime
 
         await self._repo.create_refresh_token(
-            id=uuid4(),
+            id=new_id(),
             user_id=user_id,
             token_hash=refresh_token_hash,
-            family_id=family_id or uuid4(),
+            family_id=family_id or new_id(),
             expires_at=refresh_expires_at,
             user_agent=user_agent,
             ip_address=ip_address,

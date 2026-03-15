@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time
-import uuid
 
 import structlog
+from litestar.enums import ScopeType
 from litestar.middleware import AbstractMiddleware
 from litestar.types import Receive, Scope, Send
 from structlog.contextvars import bind_contextvars, clear_contextvars
+
+from src.core.uid import new_id
 
 logger = structlog.get_logger(__name__)
 
@@ -29,7 +31,7 @@ class RequestLoggingMiddleware(AbstractMiddleware):
             receive: ASGI receive callable.
             send: ASGI send callable.
         """
-        if scope["type"] != "http":
+        if scope["type"] != ScopeType.HTTP:
             await self.app(scope, receive, send)
             return
 
@@ -37,7 +39,7 @@ class RequestLoggingMiddleware(AbstractMiddleware):
 
         headers = dict(scope.get("headers", []))
         rid_bytes = headers.get(b"x-request-id")
-        request_id = rid_bytes.decode() if rid_bytes else str(uuid.uuid4())
+        request_id = rid_bytes.decode() if rid_bytes else str(new_id())
 
         client = scope.get("client")
         client_ip = client[0] if client else "unknown"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
@@ -136,7 +136,7 @@ def get_db_manager() -> DatabaseManager:
 
 def init_db(
     database_url: str,
-    **kwargs,
+    **kwargs: Any,
 ) -> DatabaseManager:
     """Initialize the global database manager.
 

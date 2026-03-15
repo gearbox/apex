@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 from sqlalchemy import Boolean, DateTime, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from src.core.uid import new_id
 from src.db.models.base import Base
 
 __all__ = ["GenerationModel"]
@@ -17,15 +19,15 @@ class GenerationModel(Base):
     """Persisted enable/disable flag for each generation model.
 
     model_key matches the string value of ModelType enum.
-    provider is "grok" or "comfyui".
+    provider is "grok" or "aisha".
     """
 
     __tablename__ = "generation_models"
 
-    id: Mapped[object] = mapped_column(
+    id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
+        default=new_id,
     )
     model_key: Mapped[str] = mapped_column(
         String(50),

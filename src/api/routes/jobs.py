@@ -68,7 +68,7 @@ class UnifiedJobController(Controller):
 
         Query parameters:
           - ``status``: Filter by job status (pending, queued, running, completed, failed)
-          - ``provider``: Filter by provider (grok, comfyui)
+          - ``provider``: Filter by provider (grok, aisha)
           - ``generation_type``: Filter by type (t2i, i2i, t2v, i2v, v2v)
           - ``limit``: Page size (default 20, max 100)
           - ``offset``: Page offset (default 0)

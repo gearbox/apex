@@ -30,7 +30,7 @@ class TokenCleanupWorker:
         """
         self._db_manager = db_manager
         self._interval = interval
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self._running = False
 
     async def start(self) -> None:

@@ -3,6 +3,7 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import structlog
 from litestar import Litestar, Request, Response
@@ -78,20 +79,24 @@ _STATUS_TO_ERROR_CODE: dict[int, str] = {
 }
 
 
-def _error(error: str, message: str, status_code: int, detail: dict | None = None) -> Response:
+def _error(
+    error: str, message: str, status_code: int, detail: dict[str, Any] | None = None
+) -> Response[Any]:
     return Response(
         content=ErrorEnvelope(error=error, message=message, status_code=status_code, detail=detail),
         status_code=status_code,
     )
 
 
-def http_exception_handler(request: Request, exc: HTTPException) -> Response:  # noqa: ARG001
+def http_exception_handler(request: Request[Any, Any, Any], exc: HTTPException) -> Response[Any]:  # noqa: ARG001
     error_code = _STATUS_TO_ERROR_CODE.get(exc.status_code, "error")
     message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
     return _error(error_code, message, exc.status_code)
 
 
-def insufficient_balance_handler(request: Request, exc: InsufficientBalanceError) -> Response:  # noqa: ARG001
+def insufficient_balance_handler(
+    request: Request[Any, Any, Any], exc: InsufficientBalanceError
+) -> Response[Any]:  # noqa: ARG001
     return _error(
         "insufficient_balance",
         str(exc),
@@ -100,23 +105,33 @@ def insufficient_balance_handler(request: Request, exc: InsufficientBalanceError
     )
 
 
-def account_not_found_handler(request: Request, exc: AccountNotFoundError) -> Response:  # noqa: ARG001
+def account_not_found_handler(
+    request: Request[Any, Any, Any], exc: AccountNotFoundError
+) -> Response[Any]:  # noqa: ARG001
     return _error("account_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
-def account_inactive_handler(request: Request, exc: AccountInactiveError) -> Response:  # noqa: ARG001
+def account_inactive_handler(
+    request: Request[Any, Any, Any], exc: AccountInactiveError
+) -> Response[Any]:  # noqa: ARG001
     return _error("account_inactive", str(exc), HTTP_403_FORBIDDEN)
 
 
-def refund_not_eligible_handler(request: Request, exc: RefundNotEligibleError) -> Response:  # noqa: ARG001
+def refund_not_eligible_handler(
+    request: Request[Any, Any, Any], exc: RefundNotEligibleError
+) -> Response[Any]:  # noqa: ARG001
     return _error("refund_not_eligible", str(exc), HTTP_409_CONFLICT)
 
 
-def price_not_found_handler(request: Request, exc: PriceNotFoundError) -> Response:  # noqa: ARG001
+def price_not_found_handler(
+    request: Request[Any, Any, Any], exc: PriceNotFoundError
+) -> Response[Any]:  # noqa: ARG001
     return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
-def moderation_error_handler(request: Request, exc: ModerationError) -> Response:  # noqa: ARG001
+def moderation_error_handler(
+    request: Request[Any, Any, Any], exc: ModerationError
+) -> Response[Any]:  # noqa: ARG001
     return _error(
         "moderation",
         str(exc),
@@ -125,15 +140,21 @@ def moderation_error_handler(request: Request, exc: ModerationError) -> Response
     )
 
 
-def payment_verification_handler(request: Request, exc: PaymentVerificationError) -> Response:  # noqa: ARG001
+def payment_verification_handler(
+    request: Request[Any, Any, Any], exc: PaymentVerificationError
+) -> Response[Any]:  # noqa: ARG001
     return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
 
 
-def organization_permission_handler(request: Request, exc: OrganizationPermissionError) -> Response:  # noqa: ARG001
+def organization_permission_handler(
+    request: Request[Any, Any, Any], exc: OrganizationPermissionError
+) -> Response[Any]:  # noqa: ARG001
     return _error("permission_denied", str(exc), HTTP_403_FORBIDDEN)
 
 
-def organization_balance_handler(request: Request, exc: OrganizationBalanceError) -> Response:  # noqa: ARG001
+def organization_balance_handler(
+    request: Request[Any, Any, Any], exc: OrganizationBalanceError
+) -> Response[Any]:  # noqa: ARG001
     return _error(
         "organization_balance_nonzero",
         str(exc),

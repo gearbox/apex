@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -254,10 +255,10 @@ class BillingWebhookController(Controller):
     @post("/stripe")
     async def stripe_webhook(
         self,
-        request: Request,
+        request: Request[Any, Any, Any],
         session: AsyncSession,
         payment_service: PaymentService,
-    ) -> Response[dict]:
+    ) -> Response[dict[str, Any]]:
         """Handle Stripe webhook."""
         payload = await request.body()
         signature = request.headers.get("stripe-signature", "")
@@ -268,10 +269,10 @@ class BillingWebhookController(Controller):
     @post("/nowpayments")
     async def nowpayments_webhook(
         self,
-        request: Request,
+        request: Request[Any, Any, Any],
         session: AsyncSession,
         payment_service: PaymentService,
-    ) -> Response[dict]:
+    ) -> Response[dict[str, Any]]:
         """Handle NowPayments IPN webhook."""
         payload = await request.json()
         hmac_sig = request.headers.get("x-nowpayments-sig", "")

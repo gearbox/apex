@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 import unicodedata
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import structlog
 
 from src.api.services.billing_errors import OrganizationBalanceError, OrganizationPermissionError
 from src.core.enums import OrgRole, TransactionType, UserRole
+from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.user import UserRepository
 
@@ -64,7 +65,7 @@ class OrganizationService:
 
         # Create organization
         org = await repo.create_organization(
-            id=uuid4(),
+            id=new_id(),
             name=name,
             slug=slug,
             owner_id=owner_id,
@@ -72,13 +73,13 @@ class OrganizationService:
 
         # Create enterprise token account
         account = await repo.create_enterprise_account(
-            id=uuid4(),
+            id=new_id(),
             organization_id=org.id,
         )
 
         # Create owner membership
         await repo.create_membership(
-            id=uuid4(),
+            id=new_id(),
             organization_id=org.id,
             user_id=owner_id,
             role=OrgRole.OWNER.value,
@@ -149,7 +150,7 @@ class OrganizationService:
             raise ValueError(f"User {user_id} is already a member of organization {org_id}")
 
         return await repo.create_membership(
-            id=uuid4(),
+            id=new_id(),
             organization_id=org_id,
             user_id=user_id,
             role=role,
@@ -272,7 +273,7 @@ class OrganizationService:
                     raise OrganizationBalanceError(balance)
                 # Zero out the balance with an adjustment transaction
                 await repo.create_transaction(
-                    id=uuid4(),
+                    id=new_id(),
                     account_id=account.id,
                     transaction_type=TransactionType.ADMIN_ADJUSTMENT.value,
                     amount=-balance,

@@ -83,7 +83,7 @@ async def test_list_enabled_includes_newly_enabled_row(
 ) -> None:
     """list_enabled includes a row that was just inserted with is_enabled=True."""
     key = f"test-on-{uuid4().hex[:8]}"
-    db_session.add(GenerationModel(model_key=key, provider="comfyui", name="On", is_enabled=True))
+    db_session.add(GenerationModel(model_key=key, provider="aisha", name="On", is_enabled=True))
     await db_session.flush()
 
     rows = await generation_model_repo.list_enabled()
@@ -142,7 +142,7 @@ async def test_set_enabled_true_reappears_in_list_enabled(
     """set_enabled(key, True) on a disabled row makes it reappear in list_enabled."""
     key = f"test-reenable-{uuid4().hex[:8]}"
     db_session.add(
-        GenerationModel(model_key=key, provider="comfyui", name="Reenable", is_enabled=False)
+        GenerationModel(model_key=key, provider="aisha", name="Reenable", is_enabled=False)
     )
     await db_session.flush()
 

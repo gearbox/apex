@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
@@ -179,7 +179,7 @@ class AuthController(Controller):
     @post("/login")
     async def login(
         self,
-        request: Request,
+        request: Request[Any, Any, Any],
         data: Annotated[LoginRequest, Body()],
         auth_service: AuthService,
     ) -> Response[TokenResponse | ErrorEnvelope]:
@@ -237,7 +237,7 @@ class AuthController(Controller):
     @post("/refresh")
     async def refresh_tokens(
         self,
-        request: Request,
+        request: Request[Any, Any, Any],
         data: Annotated[RefreshTokenRequest, Body()],
         auth_service: AuthService,
     ) -> Response[TokenResponse | ErrorEnvelope]:
@@ -320,7 +320,7 @@ class AuthController(Controller):
     @post("/forgot-password")
     async def forgot_password(
         self,
-        request: Request,
+        request: Request[Any, Any, Any],
         data: Annotated[ForgotPasswordRequest, Body()],
         session: AsyncSession,
         email_verification_service: EmailVerificationService,

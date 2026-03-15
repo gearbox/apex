@@ -336,19 +336,19 @@ class Settings(BaseSettings):
     # Computed fields
     # -------------------------------------------------------------------------
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def comfyui_base_url(self) -> str:
         """Construct ComfyUI base URL."""
         return f"http://{self.comfyui_host}:{self.comfyui_port}"
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def r2_endpoint_url(self) -> str:
         """Construct R2 endpoint URL."""
         return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def max_upload_size_bytes(self) -> int:
         """Maximum upload size in bytes."""
@@ -359,7 +359,7 @@ class Settings(BaseSettings):
         """Check if R2 is properly configured."""
         return bool(self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def grok_configured(self) -> bool:
         """Check if Grok API is configured."""

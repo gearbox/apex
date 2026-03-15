@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -117,7 +117,7 @@ class BillingRepository:
         job_id: UUID | None = None,
         payment_id: UUID | None = None,
         description: str | None = None,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
         created_by: UUID | None = None,
     ) -> TokenTransaction:
         txn = TokenTransaction(
@@ -299,7 +299,7 @@ class BillingRepository:
         amount_usd: object,  # Decimal
         tokens_granted: int,
         currency: str = "USD",
-        provider_metadata: dict | None = None,
+        provider_metadata: dict[str, Any] | None = None,
         created_by: UUID,
     ) -> Payment:
         payment = Payment(
@@ -308,7 +308,7 @@ class BillingRepository:
             payment_provider=payment_provider,
             external_id=external_id,
             status=status,
-            amount_usd=amount_usd,  # type: ignore[arg-type]
+            amount_usd=amount_usd,
             tokens_granted=tokens_granted,
             currency=currency,
             provider_metadata=provider_metadata or {},

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import structlog
 
 from src.api.services.billing_errors import PriceNotFoundError
+from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ class PricingService:
     ) -> PricingRule:
         repo = BillingRepository(session)
         return await repo.create_pricing_rule(
-            id=uuid4(),
+            id=new_id(),
             provider=provider,
             generation_type=generation_type,
             model=model,

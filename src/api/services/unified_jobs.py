@@ -111,7 +111,7 @@ class UnifiedJobService:
             user_id: Owner.
             session: DB session.
             status: Optional status filter.
-            provider: Optional provider filter (``grok``, ``comfyui``).
+            provider: Optional provider filter (``grok``, ``aisha``).
             generation_type: Optional type filter.
             limit: Page size (max 100).
             offset: Page offset.

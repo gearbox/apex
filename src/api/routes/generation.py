@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import structlog
 from litestar import Controller, Response, get, post
@@ -31,6 +31,7 @@ from src.api.services.job_manager import JobManager
 from src.api.services.pricing import PricingService
 from src.api.services.workflow_service import WorkflowError, WorkflowService
 from src.core.enums import GenerationType, JobStatus
+from src.core.uid import new_id
 
 logger = structlog.get_logger(__name__)
 
@@ -91,7 +92,7 @@ class LegacyGenerationController(Controller):
         # --- SAGA: Pre-flight check ---
         account = await billing_service.resolve_account_for_user(current_user_id, session=session)
         token_cost = await pricing_service.get_price(
-            "comfyui", GenerationType.T2I.value, data.model_type.value, session=session
+            "aisha", GenerationType.T2I.value, data.model_type.value, session=session
         )
         await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
 
@@ -103,7 +104,7 @@ class LegacyGenerationController(Controller):
         try:
             db_job_id = UUID(job.job_id)
         except ValueError:
-            db_job_id = uuid4()
+            db_job_id = new_id()
             # If the job manager changes later, we should ideally use its real UUID.
 
         txn = None
@@ -114,7 +115,7 @@ class LegacyGenerationController(Controller):
                 token_cost,
                 db_job_id,
                 metadata={
-                    "provider": "comfyui",
+                    "provider": "aisha",
                     "generation_type": data.generation_type.value,
                     "model": data.model_type.value,
                     "prompt": data.prompt[:100],
@@ -228,7 +229,7 @@ class LegacyGenerationController(Controller):
         account = await billing_service.resolve_account_for_user(current_user_id, session=session)
         # Assuming we charge based on generation type requested (I2I vs T2I)
         token_cost = await pricing_service.get_price(
-            "comfyui", data.generation_type.value, data.model_type.value, session=session
+            "aisha", data.generation_type.value, data.model_type.value, session=session
         )
         await billing_service.assert_sufficient_balance(account.id, token_cost, session=session)
 
@@ -236,7 +237,7 @@ class LegacyGenerationController(Controller):
         try:
             db_job_id = UUID(job.job_id)
         except ValueError:
-            db_job_id = uuid4()
+            db_job_id = new_id()
 
         uploaded_image_1: str | None = None
         uploaded_image_2: str | None = None
@@ -249,7 +250,7 @@ class LegacyGenerationController(Controller):
                 token_cost,
                 db_job_id,
                 metadata={
-                    "provider": "comfyui",
+                    "provider": "aisha",
                     "generation_type": data.generation_type.value,
                     "model": data.model_type.value,
                     "prompt": data.prompt[:100],
@@ -369,7 +370,7 @@ class ImageController(Controller):
             # Generate unique filename preserving extension
             ext = data.filename.rsplit(".", 1)[-1] if data.filename else "png"
             logger.debug("image.uploading", ext=ext)
-            unique_filename = f"upload_{uuid4().hex[:12]}.{ext}"
+            unique_filename = f"upload_{new_id().hex[:12]}.{ext}"
 
             result = await comfyui_client.upload_image(image_data, unique_filename)
 

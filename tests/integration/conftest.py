@@ -272,7 +272,7 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
         generation_type: str = "t2i",
         prompt: str = "a test image",
         name: str = "Test Job",
-        provider: str = "comfyui",
+        provider: str = "aisha",
         model: str | None = None,
         job_id: UUID | None = None,
     ) -> GenerationJob:

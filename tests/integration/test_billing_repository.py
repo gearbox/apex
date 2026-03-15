@@ -542,7 +542,7 @@ async def test_create_and_get_pricing_rule(billing_repo: BillingRepository, make
     admin = await make_user(email=f"adminrule-{uuid4().hex[:6]}@example.com")
     rule = await billing_repo.create_pricing_rule(
         id=uuid4(),
-        provider="comfyui",
+        provider="aisha",
         generation_type="t2i",
         model=None,
         token_cost=50,

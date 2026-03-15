@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 import msgspec
@@ -29,7 +30,7 @@ class TransactionResponse(msgspec.Struct, kw_only=True):
     amount: int
     balance_after: int
     description: str | None
-    metadata: dict
+    metadata: dict[str, Any]
     job_id: UUID | None
     payment_id: UUID | None
     created_at: datetime

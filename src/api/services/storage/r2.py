@@ -6,12 +6,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import aioboto3
 import structlog
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+from src.core.uid import new_id
 
 from .exceptions import (
     StorageConnectionError,
@@ -106,14 +108,14 @@ class R2StorageService:
         Yields:
             Configured S3 client.
         """
-        async with self._session.client(  # type: ignore[reportGeneralTypeIssues]
+        async with self._session.client(  # type: ignore[attr-defined]
             "s3",
             endpoint_url=self._settings.endpoint_url,
             aws_access_key_id=self._settings.access_key_id,
             aws_secret_access_key=self._settings.secret_access_key,
             config=self._client_config,
         ) as client:
-            yield client  # type: ignore[misc]
+            yield client
 
     def _validate_upload(
         self,
@@ -198,7 +200,7 @@ class R2StorageService:
         image_format = self._validate_upload(data, content_type, filename)
 
         # Generate unique file ID
-        file_id = uuid4()
+        file_id = new_id()
 
         # Build storage key
         storage_key = self.build_storage_key(

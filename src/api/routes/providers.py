@@ -93,7 +93,7 @@ class ProvidersController(Controller):
 
         providers = [
             ProviderInfo(
-                provider=Provider.COMFYUI.value,
+                provider=Provider.AISHA.value,
                 name="Aisha",
                 available=True,
             ),

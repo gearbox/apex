@@ -191,10 +191,13 @@ class TestGenerationServiceGenerate:
             generation_type=GenerationType.T2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
-        with patch(
-            "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
-            new=AsyncMock(return_value=_make_enabled_model_mock()),
-        ), pytest.raises((ProviderUnavailableError, ModelDisabledError)):
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            pytest.raises((ProviderUnavailableError, ModelDisabledError)),
+        ):
             await service.generate(
                 request,
                 user_id=uuid4(),
@@ -219,7 +222,7 @@ class TestGenerationServiceGenerate:
 
     async def test_rejects_n_exceeding_model_cap(self) -> None:
         """Aisha supports max 4 outputs."""
-        service = _make_service(providers={Provider.COMFYUI: _make_mock_provider()})
+        service = _make_service(providers={Provider.AISHA: _make_mock_provider()})
         request = UnifiedGenerationRequest(
             prompt="Cats",
             generation_type=GenerationType.T2I,
@@ -256,10 +259,13 @@ class TestGenerationServiceGenerate:
             generation_type=GenerationType.T2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
-        with patch(
-            "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
-            new=AsyncMock(return_value=_make_enabled_model_mock()),
-        ), pytest.raises(GenerationError, match="GPU exploded"):
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            pytest.raises(GenerationError, match="GPU exploded"),
+        ):
             await service.generate(
                 request,
                 user_id=uuid4(),

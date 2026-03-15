@@ -12,11 +12,12 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.uid import new_id
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 
 # Token lifetimes
@@ -71,7 +72,7 @@ class AuthTokenRepository:
 
         raw_token = generate_raw_token()
         token = EmailVerificationToken(
-            id=uuid4(),
+            id=new_id(),
             user_id=user_id,
             token_hash=_hash_token(raw_token),
             expires_at=datetime.now(UTC) + timedelta(hours=_VERIFICATION_EXPIRE_HOURS),
@@ -156,7 +157,7 @@ class AuthTokenRepository:
 
         raw_token = generate_raw_token()
         token = PasswordResetToken(
-            id=uuid4(),
+            id=new_id(),
             user_id=user_id,
             token_hash=_hash_token(raw_token),
             ip_address=ip_address,

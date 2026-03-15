@@ -133,18 +133,18 @@ class TestGetPricing:
     async def test_multiple_pricing_rules(self) -> None:
         rules = [
             MagicMock(provider="grok", generation_type="t2i", model="m1", token_cost=50),
-            MagicMock(provider="comfyui", generation_type="i2i", model=None, token_cost=20),
+            MagicMock(provider="aisha", generation_type="i2i", model=None, token_cost=20),
         ]
         session = self._make_session(rules)
         result = await PublicBillingController.get_pricing.fn(MagicMock(), session)
 
         assert len(result.prices) == 2
         providers = {p.provider for p in result.prices}
-        assert providers == {"grok", "comfyui"}
+        assert providers == {"grok", "aisha"}
 
     async def test_rule_with_no_model(self) -> None:
         rule = MagicMock()
-        rule.provider = "comfyui"
+        rule.provider = "aisha"
         rule.generation_type = "t2i"
         rule.model = None
         rule.token_cost = 10

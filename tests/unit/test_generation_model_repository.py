@@ -40,7 +40,7 @@ def mock_session() -> AsyncMock:
 class TestListAll:
     async def test_returns_all_rows(self, mock_session: AsyncMock) -> None:
         """list_all returns all models regardless of is_enabled."""
-        models = [_make_model("aisha", "comfyui"), _make_model("grok-imagine-image", "grok")]
+        models = [_make_model("aisha", "aisha"), _make_model("grok-imagine-image", "grok")]
         result_mock = MagicMock()
         result_mock.scalars.return_value.all.return_value = models
         mock_session.execute = AsyncMock(return_value=result_mock)

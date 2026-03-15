@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
@@ -38,7 +38,7 @@ from src.api.services.user import (
 logger = structlog.get_logger(__name__)
 
 
-async def get_current_user_id(request: Request) -> UUID:
+async def get_current_user_id(request: Request[Any, Any, Any]) -> UUID:
     """Extract current user ID from request state.
 
     Args:
@@ -53,7 +53,7 @@ async def get_current_user_id(request: Request) -> UUID:
     user_id = request.state.get("user_id")
     if user_id is None:
         raise NotAuthorizedException(detail="Not authenticated")
-    return user_id
+    return UUID(str(user_id))
 
 
 class UserController(Controller):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from litestar.connection import ASGIConnection
@@ -61,7 +61,7 @@ def extract_token_from_header(authorization: str | None) -> str | None:
     return None if len(parts) != 2 or parts[0].lower() != "bearer" else parts[1]
 
 
-async def auth_guard(connection: ASGIConnection, _: BaseRouteHandler) -> None:
+async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
     """Guard that requires valid JWT authentication.
 
     Extracts and validates JWT from Authorization header.
@@ -94,7 +94,9 @@ async def auth_guard(connection: ASGIConnection, _: BaseRouteHandler) -> None:
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
 
 
-async def optional_auth_guard(connection: ASGIConnection, _: BaseRouteHandler) -> None:
+async def optional_auth_guard(
+    connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler
+) -> None:
     """Guard that optionally extracts JWT authentication.
 
     Does not raise if no token provided, but validates if present.

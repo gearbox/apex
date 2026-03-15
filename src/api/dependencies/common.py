@@ -248,16 +248,16 @@ def get_email_service() -> EmailService:
     Raises:
         RuntimeError: If not initialized.
     """
-    if _services.email_service is None:  # type: ignore[attr-defined]
+    if _services.email_service is None:
         raise RuntimeError("Email service not initialized")
-    return _services.email_service  # type: ignore[attr-defined]
+    return _services.email_service
 
 
 def get_email_verification_service() -> EmailVerificationService:
     """Provide email verification service singleton."""
-    if _services.email_verification_service is None:  # type: ignore[attr-defined]
+    if _services.email_verification_service is None:
         raise RuntimeError("Email verification service not initialized")
-    return _services.email_verification_service  # type: ignore[attr-defined]
+    return _services.email_verification_service
 
 
 # -----------------------------------------------------------------------------
@@ -277,9 +277,9 @@ async def get_grok_job_service() -> GrokJobService | None:
 
 def get_unified_job_service() -> UnifiedJobService:
     """Provide unified job service singleton."""
-    if _services.unified_job_service is None:  # type: ignore[attr-defined]
+    if _services.unified_job_service is None:
         raise RuntimeError("Unified job service not initialized")
-    return _services.unified_job_service  # type: ignore[attr-defined]
+    return _services.unified_job_service
 
 
 def get_generation_service() -> GenerationService:
@@ -444,7 +444,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     from src.core.enums import Provider
 
     generation_providers: dict[Provider, object] = {
-        Provider.COMFYUI: AishaGenerationProvider(
+        Provider.AISHA: AishaGenerationProvider(
             comfyui_client=_services.comfyui_client,
             job_manager=_services.job_manager,
             workflow_service=_services.workflow_service,

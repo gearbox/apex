@@ -120,7 +120,7 @@ class GenerationJob(Base):
     # Provider and model tracking
     provider: Mapped[str] = mapped_column(
         String(20),
-        default=Provider.COMFYUI.value,
+        default=Provider.AISHA.value,
         index=True,
         nullable=False,
     )

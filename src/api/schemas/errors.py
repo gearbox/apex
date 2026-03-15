@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import msgspec
 
 
@@ -15,4 +17,4 @@ class ErrorEnvelope(msgspec.Struct, kw_only=True):
     error: str  # machine-readable code, e.g. "not_found", "insufficient_balance"
     message: str  # human-readable, safe to display in UI
     status_code: int  # mirrors the HTTP status (useful in batch/aggregate responses)
-    detail: dict | None = None  # optional structured context
+    detail: dict[str, Any] | None = None  # optional structured context

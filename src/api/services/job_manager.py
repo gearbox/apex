@@ -1,6 +1,5 @@
 """In-memory job manager for tracking generation jobs."""
 
-import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -9,6 +8,7 @@ import structlog
 
 from src.api.schemas.generation import GenerationRequest, JobStatus
 from src.api.services.comfyui_client import ComfyUIClient
+from src.core.uid import new_id
 
 logger = structlog.get_logger(__name__)
 
@@ -61,7 +61,7 @@ class JobManager:
         Returns:
             Created job instance.
         """
-        job_id = str(uuid.uuid4())
+        job_id = str(new_id())
         job = Job(
             job_id=job_id,
             prompt_id=None,

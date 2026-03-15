@@ -121,7 +121,7 @@ class ComfyUIClient:
                     status_code=response.status_code,
                 )
 
-            result = response.json()
+            result: dict[str, Any] = response.json()
             logger.debug("comfyui.prompt_queued", prompt_id=result.get("prompt_id"))
             return result
 
@@ -141,7 +141,8 @@ class ComfyUIClient:
         try:
             response = await self.client.get(f"/history/{prompt_id}")
 
-            return response.json() if response.status_code == 200 else {}
+            data: dict[str, Any] = response.json() if response.status_code == 200 else {}
+            return data
         except httpx.RequestError as e:
             logger.warning("comfyui.get_history_failed", prompt_id=prompt_id, error=str(e))
             return {}
@@ -155,7 +156,8 @@ class ComfyUIClient:
         try:
             response = await self.client.get("/queue")
             if response.status_code == 200:
-                return response.json()
+                queue_data: dict[str, Any] = response.json()
+                return queue_data
             return {"queue_running": [], "queue_pending": []}
         except httpx.RequestError as e:
             logger.warning("comfyui.get_queue_failed", error=str(e))
@@ -196,9 +198,9 @@ class ComfyUIClient:
                     status_code=response.status_code,
                 )
 
-            result = response.json()
-            logger.debug("comfyui.image_uploaded", name=result.get("name"))
-            return result
+            upload_result: dict[str, Any] = response.json()
+            logger.debug("comfyui.image_uploaded", name=upload_result.get("name"))
+            return upload_result
 
         except httpx.RequestError as e:
             logger.error("comfyui.image_upload_failed", error=str(e))

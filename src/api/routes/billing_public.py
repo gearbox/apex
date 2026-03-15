@@ -123,7 +123,7 @@ class PublicBillingController(Controller):
         """
         from sqlalchemy import select
 
-        from src.db.models.billing import PricingRule  # type: ignore[attr-defined]
+        from src.db.models.billing import PricingRule
 
         result = await session.execute(
             select(PricingRule).where(PricingRule.is_active == True)  # noqa: E712

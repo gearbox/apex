@@ -81,13 +81,11 @@ class ResendEmailService(EmailService):
         }
 
         if message.reply_to:
-            params["reply_to"] = message.reply_to  # type: ignore[assignment]
+            params["reply_to"] = message.reply_to
 
         if message.tags:
             # Resend expects tags as list of {name, value} dicts
-            params["tags"] = [  # type: ignore[assignment]
-                {"name": k, "value": v} for k, v in message.tags.items()
-            ]
+            params["tags"] = [{"name": k, "value": v} for k, v in message.tags.items()]
 
         try:
             result = resend.Emails.send(params)

@@ -1,7 +1,7 @@
 # Apex API - Makefile
 # Common commands for development and deployment
 
-.PHONY: help dev prod down logs migrate shell db-shell test test-cov test-integration test-integration-local test-all lint clean
+.PHONY: help dev prod down logs migrate shell db-shell test test-cov test-integration test-integration-local test-all lint clean migrate-reset
 
 # Default target
 help:
@@ -81,6 +81,10 @@ migrate-down:
 
 migrate-history:
 	docker compose exec api alembic history
+
+migrate-reset: ## Drop and recreate the local dev database, then migrate
+	docker compose exec postgres psql -U apex -d postgres -c "DROP DATABASE IF EXISTS apex;" -c "CREATE DATABASE apex;"
+	uv run alembic upgrade head
 
 # =============================================================================
 # Testing

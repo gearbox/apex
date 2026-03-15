@@ -6,11 +6,14 @@ Uses the `limits` library for sliding-window counters backed by Redis
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from limits import parse
 from limits.storage import MemoryStorage, RedisStorage, Storage
 from limits.strategies import MovingWindowRateLimiter
 from litestar import Request, Response
+from litestar.enums import ScopeType
 from litestar.middleware import MiddlewareProtocol
 from litestar.status_codes import HTTP_429_TOO_MANY_REQUESTS
 from litestar.types import ASGIApp, Receive, Scope, Send
@@ -60,7 +63,7 @@ def get_rate_limiter_storage() -> Storage:
     return _limiter_storage
 
 
-def get_real_ip(request: Request) -> str:
+def get_real_ip(request: Request[Any, Any, Any]) -> str:
     """Extract real client IP address.
 
     Respects X-Forwarded-For if present (assuming litestar runs behind a proxy),
@@ -119,10 +122,10 @@ class RateLimitMiddleware(MiddlewareProtocol):
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Handle incoming ASGI request."""
-        if scope["type"] != "http":
+        if scope["type"] != ScopeType.HTTP:
             return await self.app(scope, receive, send)
 
-        request = Request(scope)
+        request: Request[Any, Any, Any] = Request(scope)
         method = request.method
         path = request.url.path
         route_key = f"{method} {path}"

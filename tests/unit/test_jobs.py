@@ -195,7 +195,7 @@ class TestGetJob:
             name="My Generation",
             prompt="a sunset",
             negative_prompt="blurry",
-            provider="comfyui",
+            provider="aisha",
             model=None,
             generation_type=GenerationType.I2I.value,
             status=JobStatus.FAILED.value,
@@ -211,7 +211,7 @@ class TestGetJob:
         assert result.name == "My Generation"
         assert result.prompt == "a sunset"
         assert result.negative_prompt == "blurry"
-        assert result.provider == "comfyui"
+        assert result.provider == "aisha"
         assert result.model is None
         assert result.generation_type == GenerationType.I2I
         assert result.status == JobStatus.FAILED
@@ -318,7 +318,7 @@ class TestGetJob:
         user_id = uuid4()
         job = _make_job(
             user_id=user_id,
-            provider="comfyui",
+            provider="aisha",
             generation_type=GenerationType.T2V.value,
             status=JobStatus.RUNNING.value,
         )
@@ -668,7 +668,7 @@ class TestSchemas:
             id=uuid4(),
             name="Full response",
             status=JobStatus.FAILED,
-            provider="comfyui",
+            provider="aisha",
             generation_type=GenerationType.I2V,
             prompt="ocean waves",
             model="aisha",

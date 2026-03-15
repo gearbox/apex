@@ -99,7 +99,7 @@ class AishaGenerationProvider:
             prompt=request.prompt,
             generation_type=request.generation_type,
             status=JobStatus.PENDING,
-            provider=Provider.COMFYUI,
+            provider=Provider.AISHA,
             model=request.model.value,
             aspect_ratio=request.aspect_ratio.value,
         )
@@ -110,7 +110,7 @@ class AishaGenerationProvider:
             token_cost,
             job_id,
             metadata={
-                "provider": Provider.COMFYUI.value,
+                "provider": Provider.AISHA.value,
                 "generation_type": request.generation_type.value,
                 "model": request.model.value,
             },

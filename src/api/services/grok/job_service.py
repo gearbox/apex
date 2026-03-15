@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import httpx
 import structlog
@@ -35,6 +35,7 @@ from src.core.enums import (
     Provider,
     VideoResolution,
 )
+from src.core.uid import new_id
 from src.db import StorageRepository
 
 from .enums import ResponseImageFormat
@@ -173,7 +174,7 @@ class GrokJobService:
                 name += "..."
 
         # Create job record
-        job_id = uuid4()
+        job_id = new_id()
         job: GenerationJob | None = await repo.create_job(
             id=job_id,
             user_id=user_id,
@@ -347,7 +348,7 @@ class GrokJobService:
             image_format = MediaFormat.JPEG
 
         # Upload to R2
-        output_id = uuid4()
+        output_id = new_id()
         storage_key = self._storage.build_storage_key(
             user_id=user_id,
             file_id=output_id,
@@ -439,7 +440,7 @@ class GrokJobService:
                 name += "..."
 
         # Create job record
-        job_id = uuid4()
+        job_id = new_id()
         job: GenerationJob | None = await repo.create_job(
             id=job_id,
             user_id=user_id,
@@ -638,7 +639,7 @@ class GrokJobService:
         video_data = response.content
 
         # Upload to R2
-        output_id = uuid4()
+        output_id = new_id()
         storage_key = self._storage.build_storage_key(
             user_id=user_id,
             file_id=output_id,
@@ -676,7 +677,7 @@ class GrokJobService:
 
         thumbnail_bytes = await extract_video_thumbnail(video_data)
         if thumbnail_bytes:
-            thumb_id = uuid4()
+            thumb_id = new_id()
             thumb_key = self._storage.build_storage_key(
                 user_id=user_id,
                 file_id=thumb_id,

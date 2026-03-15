@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -67,12 +67,17 @@ class StorageRepository:
             Model instance or ``None``.
         """
         if user_id is None:
-            return await self._session.get(model, pk)
+            return cast(
+                UserImage | GenerationOutput | GenerationJob | None,
+                await self._session.get(model, pk),
+            )
 
         result = await self._session.execute(
             select(model).where(model.id == pk, model.user_id == user_id)
         )
-        return result.scalar_one_or_none()
+        return cast(
+            UserImage | GenerationOutput | GenerationJob | None, result.scalar_one_or_none()
+        )
 
     # -------------------------------------------------------------------------
     # UserImage operations
@@ -242,7 +247,7 @@ class StorageRepository:
         prompt: str,
         generation_type: GenerationType = GenerationType.I2I,
         status: JobStatus = JobStatus.PENDING,
-        provider: Provider = Provider.COMFYUI,
+        provider: Provider = Provider.AISHA,
         model: str | None = None,
         aspect_ratio: str | None = None,
     ) -> GenerationJob:
@@ -255,7 +260,7 @@ class StorageRepository:
             prompt: Generation prompt.
             generation_type: Type of generation (t2i, i2i, t2v, i2v).
             status: Initial status.
-            provider: Generation provider (comfyui, grok).
+            provider: Generation provider (aisha, grok).
             model: Model identifier.
             aspect_ratio: Aspect ratio string, e.g. ``16:9``.
 

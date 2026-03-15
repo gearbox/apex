@@ -6,6 +6,7 @@ context from request state (set by auth_guard).
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from litestar import Request
@@ -17,7 +18,7 @@ from src.db.models import User
 from src.db.repositories import UserRepository
 
 
-async def get_current_user_id(request: Request) -> UUID:
+async def get_current_user_id(request: Request[Any, Any, Any]) -> UUID:
     """Extract current user ID from request state.
 
     Must be used in routes protected by auth_guard, which populates
@@ -35,10 +36,10 @@ async def get_current_user_id(request: Request) -> UUID:
     user_id = request.state.get("user_id")
     if user_id is None:
         raise NotAuthorizedException(detail="Not authenticated")
-    return user_id
+    return UUID(str(user_id))
 
 
-async def get_current_admin_user(request: Request, session: AsyncSession) -> User:
+async def get_current_admin_user(request: Request[Any, Any, Any], session: AsyncSession) -> User:
     """Load and verify the current user is an admin.
 
     Uses the request-scoped session and UserRepository to load the
