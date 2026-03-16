@@ -53,6 +53,11 @@ class Organization(Base):
         default=True,
         server_default=text("true"),
     )
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -102,6 +107,11 @@ class OrganizationMember(Base):
         index=True,
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
+    )
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -150,6 +160,11 @@ class TokenAccount(Base):
         nullable=False,
         default=True,
         server_default=text("true"),
+    )
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -227,6 +242,11 @@ class TokenTransaction(Base):
         nullable=True,
     )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
+    )
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
         JSONB,
@@ -357,6 +377,11 @@ class Payment(Base):
         JSONB,
         nullable=False,
         server_default=text("'{}'::jsonb"),
+    )
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

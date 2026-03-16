@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import aioboto3
@@ -108,13 +108,14 @@ class R2StorageService:
         Yields:
             Configured S3 client.
         """
-        async with self._session.client(  # type: ignore[attr-defined]
+        client_ctx: Any = self._session.client(
             "s3",
             endpoint_url=self._settings.endpoint_url,
             aws_access_key_id=self._settings.access_key_id,
             aws_secret_access_key=self._settings.secret_access_key,
             config=self._client_config,
-        ) as client:
+        )
+        async with client_ctx as client:
             yield client
 
     def _validate_upload(

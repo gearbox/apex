@@ -136,6 +136,7 @@ class AishaJobService:
                         job=job,
                         img_info=img_info,
                         output_index=idx,
+                        product_id=job.product_id,
                     )
                     stored += 1
                 except Exception:
@@ -200,6 +201,7 @@ class AishaJobService:
         job: GenerationJob,
         img_info: dict[str, Any],
         output_index: int,
+        product_id: str,
     ) -> None:
         """Download one ComfyUI output image and persist it in R2 + DB."""
         filename: str = img_info.get("filename", "")
@@ -235,6 +237,7 @@ class AishaJobService:
             format=ext,
             output_index=output_index,
             expires_at=expires_at,
+            product_id=product_id,
         )
 
         logger.debug(

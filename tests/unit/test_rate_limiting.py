@@ -10,6 +10,9 @@ from src.api.middleware.rate_limit import (
 )
 from src.core.config import Settings
 
+# Default headers to satisfy ProductMiddleware in unit tests
+_PRODUCT_HEADERS = {"X-Product-Id": "vex"}
+
 
 @pytest.fixture
 def override_limiter_defaults() -> None:
@@ -36,7 +39,9 @@ async def test_register_rate_limit_allows_under_threshold(override_limiter_defau
         for i in range(5):
             # Using incorrect input on purpose, we only care about if the rate limit middleware allows it through
             response = await client.post(
-                "/v1/auth/register", json={"email": f"test{i}@example.com"}
+                "/v1/auth/register",
+                json={"email": f"test{i}@example.com"},
+                headers=_PRODUCT_HEADERS,
             )
             # The body validation might fail, returning 422 Unprocessable Entity
             # The core point is that it DOES NOT return 429
@@ -48,10 +53,10 @@ async def test_register_rate_limit_blocks_over_threshold(override_limiter_defaul
     async with AsyncTestClient(app=application) as client:
         # 5 requests allowed
         for _ in range(5):
-            await client.post("/v1/auth/register", json={})
+            await client.post("/v1/auth/register", json={}, headers=_PRODUCT_HEADERS)
 
         # 6th request should hit 429 Too Many Requests
-        response = await client.post("/v1/auth/register", json={})
+        response = await client.post("/v1/auth/register", json={}, headers=_PRODUCT_HEADERS)
         assert response.status_code == HTTP_429_TOO_MANY_REQUESTS
         assert "retry-after" in response.headers
 
@@ -61,18 +66,20 @@ async def test_login_rate_limit_separate_window(override_limiter_defaults: None)
     async with AsyncTestClient(app=application) as client:
         # Exhaust register rate limit (5)
         for _ in range(5):
-            await client.post("/v1/auth/register", json={})
+            await client.post("/v1/auth/register", json={}, headers=_PRODUCT_HEADERS)
 
-        response_register = await client.post("/v1/auth/register", json={})
+        response_register = await client.post(
+            "/v1/auth/register", json={}, headers=_PRODUCT_HEADERS
+        )
         assert response_register.status_code == HTTP_429_TOO_MANY_REQUESTS
 
         # Login rate limit is independent (10/min) and should succeed
         for _ in range(10):
-            response_login = await client.post("/v1/auth/login", json={})
+            response_login = await client.post("/v1/auth/login", json={}, headers=_PRODUCT_HEADERS)
             assert response_login.status_code != HTTP_429_TOO_MANY_REQUESTS
 
         # 11th should fail
-        response_login_11 = await client.post("/v1/auth/login", json={})
+        response_login_11 = await client.post("/v1/auth/login", json={}, headers=_PRODUCT_HEADERS)
         assert response_login_11.status_code == HTTP_429_TOO_MANY_REQUESTS
 
 
@@ -81,11 +88,13 @@ async def test_forgot_password_rate_limit(override_limiter_defaults: None) -> No
     async with AsyncTestClient(app=application) as client:
         # 3 requests allowed
         for _ in range(3):
-            response = await client.post("/v1/auth/forgot-password", json={})
+            response = await client.post(
+                "/v1/auth/forgot-password", json={}, headers=_PRODUCT_HEADERS
+            )
             assert response.status_code != HTTP_429_TOO_MANY_REQUESTS
 
         # 4th should fail
-        response = await client.post("/v1/auth/forgot-password", json={})
+        response = await client.post("/v1/auth/forgot-password", json={}, headers=_PRODUCT_HEADERS)
         assert response.status_code == HTTP_429_TOO_MANY_REQUESTS
 
 
@@ -94,18 +103,22 @@ async def test_resend_verification_rate_limit(override_limiter_defaults: None) -
     async with AsyncTestClient(app=application) as client:
         # 3 requests allowed
         for _ in range(3):
-            response = await client.post("/v1/auth/resend-verification", json={})
+            response = await client.post(
+                "/v1/auth/resend-verification", json={}, headers=_PRODUCT_HEADERS
+            )
             assert response.status_code != HTTP_429_TOO_MANY_REQUESTS
 
         # 4th should fail
-        response = await client.post("/v1/auth/resend-verification", json={})
+        response = await client.post(
+            "/v1/auth/resend-verification", json={}, headers=_PRODUCT_HEADERS
+        )
         assert response.status_code == HTTP_429_TOO_MANY_REQUESTS
 
 
 @pytest.mark.asyncio
 async def test_rate_limit_headers_on_allowed_requests(override_limiter_defaults: None) -> None:  # noqa: ARG001
     async with AsyncTestClient(app=application) as client:
-        response = await client.post("/v1/auth/register", json={})
+        response = await client.post("/v1/auth/register", json={}, headers=_PRODUCT_HEADERS)
         assert response.status_code != HTTP_429_TOO_MANY_REQUESTS
         assert "x-ratelimit-limit" in response.headers
         assert "x-ratelimit-remaining" in response.headers
@@ -118,9 +131,9 @@ async def test_rate_limit_headers_on_allowed_requests(override_limiter_defaults:
 async def test_rate_limit_headers_on_429(override_limiter_defaults: None) -> None:  # noqa: ARG001
     async with AsyncTestClient(app=application) as client:
         for _ in range(5):
-            await client.post("/v1/auth/register", json={})
+            await client.post("/v1/auth/register", json={}, headers=_PRODUCT_HEADERS)
 
-        response = await client.post("/v1/auth/register", json={})
+        response = await client.post("/v1/auth/register", json={}, headers=_PRODUCT_HEADERS)
         assert response.status_code == HTTP_429_TOO_MANY_REQUESTS
 
         # All four headers must be present
@@ -141,7 +154,7 @@ async def test_rate_limit_headers_on_429(override_limiter_defaults: None) -> Non
 async def test_different_ips_have_separate_counters(override_limiter_defaults: None) -> None:  # noqa: ARG001
     async with AsyncTestClient(app=application) as client:
         # Exhaust limit for IP 1
-        headers_ip1 = {"X-Forwarded-For": "192.168.1.1"}
+        headers_ip1 = {"X-Forwarded-For": "192.168.1.1", **_PRODUCT_HEADERS}
         for _ in range(5):
             await client.post("/v1/auth/register", json={}, headers=headers_ip1)
 
@@ -149,6 +162,6 @@ async def test_different_ips_have_separate_counters(override_limiter_defaults: N
         assert response_ip1.status_code == HTTP_429_TOO_MANY_REQUESTS
 
         # IP 2 should have its own fresh counter
-        headers_ip2 = {"X-Forwarded-For": "192.168.1.2"}
+        headers_ip2 = {"X-Forwarded-For": "192.168.1.2", **_PRODUCT_HEADERS}
         response_ip2 = await client.post("/v1/auth/register", json={}, headers=headers_ip2)
         assert response_ip2.status_code != HTTP_429_TOO_MANY_REQUESTS

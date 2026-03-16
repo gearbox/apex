@@ -139,7 +139,9 @@ async def test_get_account_by_organization_no_account_returns_none(
 async def test_create_personal_account(billing_repo: BillingRepository, make_user) -> None:
     """create_personal_account creates an account with type=personal."""
     user = await make_user(email=f"newpersonal-{uuid4().hex[:6]}@example.com")
-    account = await billing_repo.create_personal_account(id=uuid4(), user_id=user.id)
+    account = await billing_repo.create_personal_account(
+        id=uuid4(), user_id=user.id, product_id="vex"
+    )
     assert account.account_type == AccountType.PERSONAL.value
     assert account.user_id == user.id
 
@@ -151,7 +153,7 @@ async def test_create_personal_account_duplicate_user_raises(
     user = await make_user(email=f"dupaccount-{uuid4().hex[:6]}@example.com")
     await make_token_account(account_type="personal", user=user)
     with pytest.raises(IntegrityError):
-        await billing_repo.create_personal_account(id=uuid4(), user_id=user.id)
+        await billing_repo.create_personal_account(id=uuid4(), user_id=user.id, product_id="vex")
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +164,9 @@ async def test_create_personal_account_duplicate_user_raises(
 async def test_create_enterprise_account(billing_repo: BillingRepository, make_org) -> None:
     """create_enterprise_account creates an account with type=enterprise."""
     org = await make_org()
-    account = await billing_repo.create_enterprise_account(id=uuid4(), organization_id=org.id)
+    account = await billing_repo.create_enterprise_account(
+        id=uuid4(), organization_id=org.id, product_id="vex"
+    )
     assert account.account_type == AccountType.ENTERPRISE.value
     assert account.organization_id == org.id
 
@@ -194,6 +198,7 @@ async def test_get_balance_after_credit(
         amount=500,
         balance_after=500,
         created_by=user.id,
+        product_id="vex",
     )
     balance = await billing_repo.get_balance(account.id)
     assert balance == 500
@@ -212,6 +217,7 @@ async def test_get_balance_debit_then_credit(
         amount=1000,
         balance_after=1000,
         created_by=user.id,
+        product_id="vex",
     )
     await billing_repo.create_transaction(
         id=uuid4(),
@@ -220,6 +226,7 @@ async def test_get_balance_debit_then_credit(
         amount=-300,
         balance_after=700,
         created_by=user.id,
+        product_id="vex",
     )
     balance = await billing_repo.get_balance(account.id)
     assert balance == 700
@@ -244,6 +251,7 @@ async def test_create_transaction_persists(
         balance_after=100,
         description="Test credit",
         created_by=user.id,
+        product_id="vex",
     )
     assert txn.amount == 100
     assert txn.transaction_type == TransactionType.CREDIT.value
@@ -263,6 +271,7 @@ async def test_create_transaction_amount_nonzero_constraint(
             amount=0,
             balance_after=0,
             created_by=user.id,
+            product_id="vex",
         )
 
 
@@ -285,6 +294,7 @@ async def test_list_transactions_returns_ordered_by_created_at_desc(
             amount=100 + i,
             balance_after=100 + i,
             created_by=user.id,
+            product_id="vex",
         )
     txns, total = await billing_repo.list_transactions(account.id)
     assert total == 3
@@ -317,6 +327,7 @@ async def test_list_transactions_filter_by_type(
         amount=100,
         balance_after=100,
         created_by=user.id,
+        product_id="vex",
     )
     await billing_repo.create_transaction(
         id=uuid4(),
@@ -325,6 +336,7 @@ async def test_list_transactions_filter_by_type(
         amount=-50,
         balance_after=50,
         created_by=user.id,
+        product_id="vex",
     )
     credits, total = await billing_repo.list_transactions(
         account.id, transaction_type=TransactionType.CREDIT.value
@@ -353,6 +365,7 @@ async def test_get_debit_for_job_found(
         balance_after=400,
         job_id=job.id,
         created_by=user.id,
+        product_id="vex",
     )
     found = await billing_repo.get_debit_for_job(job.id)
     assert found is not None
@@ -388,6 +401,7 @@ async def test_has_refund_for_job_true_with_refund(
         balance_after=600,
         job_id=job.id,
         created_by=user.id,
+        product_id="vex",
     )
     assert await billing_repo.has_refund_for_job(job.id) is True
 
@@ -435,6 +449,7 @@ async def test_create_organization(billing_repo: BillingRepository, make_user) -
         name="My Org",
         slug="my-org-slug",
         owner_id=user.id,
+        product_id="vex",
     )
     assert org.name == "My Org"
     assert org.owner_id == user.id
@@ -456,6 +471,7 @@ async def test_create_and_get_membership(
         organization_id=org.id,
         user_id=user.id,
         role="member",
+        product_id="vex",
     )
     assert member.role == "member"
 
@@ -478,7 +494,7 @@ async def test_delete_membership(billing_repo: BillingRepository, make_user, mak
     user = await make_user(email=f"delmember-{uuid4().hex[:6]}@example.com")
     org = await make_org()
     await billing_repo.create_membership(
-        id=uuid4(), organization_id=org.id, user_id=user.id, role="member"
+        id=uuid4(), organization_id=org.id, user_id=user.id, role="member", product_id="vex"
     )
     result = await billing_repo.delete_membership(org.id, user.id)
     assert result is True
@@ -500,7 +516,7 @@ async def test_list_members(billing_repo: BillingRepository, make_user, make_org
     for i in range(3):
         user = await make_user(email=f"listmember{i}-{uuid4().hex[:6]}@example.com")
         await billing_repo.create_membership(
-            id=uuid4(), organization_id=org.id, user_id=user.id, role="member"
+            id=uuid4(), organization_id=org.id, user_id=user.id, role="member", product_id="vex"
         )
     members = await billing_repo.list_members(org.id)
     assert len(members) >= 3
@@ -518,7 +534,7 @@ async def test_get_active_membership_returns_membership(
     user = await make_user(email=f"activemember-{uuid4().hex[:6]}@example.com")
     org = await make_org()
     await billing_repo.create_membership(
-        id=uuid4(), organization_id=org.id, user_id=user.id, role="member"
+        id=uuid4(), organization_id=org.id, user_id=user.id, role="member", product_id="vex"
     )
     found = await billing_repo.get_active_membership(user.id)
     assert found is not None
@@ -599,6 +615,7 @@ async def test_create_and_get_payment(
         amount_usd=Decimal("9.99"),
         tokens_granted=1000,
         created_by=user.id,
+        product_id="vex",
     )
     found = await billing_repo.get_payment(payment.id)
     assert found is not None
@@ -621,6 +638,7 @@ async def test_get_payment_by_external_id(
         amount_usd=Decimal("4.99"),
         tokens_granted=500,
         created_by=user.id,
+        product_id="vex",
     )
     found = await billing_repo.get_payment_by_external_id(ext_id)
     assert found is not None
@@ -642,6 +660,7 @@ async def test_list_payments_filter_by_status(
         amount_usd=Decimal("9.99"),
         tokens_granted=1000,
         created_by=user.id,
+        product_id="vex",
     )
     await billing_repo.create_payment(
         id=uuid4(),
@@ -652,6 +671,7 @@ async def test_list_payments_filter_by_status(
         amount_usd=Decimal("4.99"),
         tokens_granted=500,
         created_by=user.id,
+        product_id="vex",
     )
     completed, total = await billing_repo.list_payments(status="completed")
     assert total >= 1
@@ -686,6 +706,7 @@ class TestListOrganizations:
             slug=f"inactive-{uuid4().hex[:8]}",
             owner_id=owner.id,
             is_active=False,
+            product_id="vex",
         )
         db_session.add(inactive_org)
         await db_session.flush()
@@ -703,7 +724,11 @@ class TestListOrganizations:
         for i in range(2):
             member = await make_user(email=f"memcount-{uuid4().hex[:6]}-{i}@example.com")
             await billing_repo.create_membership(
-                id=uuid4(), organization_id=org.id, user_id=member.id, role="member"
+                id=uuid4(),
+                organization_id=org.id,
+                user_id=member.id,
+                role="member",
+                product_id="vex",
             )
 
         rows, _ = await billing_repo.list_organizations()
@@ -725,6 +750,7 @@ class TestListOrganizations:
             amount=750,
             balance_after=750,
             created_by=user.id,
+            product_id="vex",
         )
 
         rows, _ = await billing_repo.list_organizations()
@@ -762,6 +788,7 @@ class TestListOrganizations:
                 slug=f"inactive-total-{uuid4().hex[:8]}",
                 owner_id=owner.id,
                 is_active=False,
+                product_id="vex",
             )
             db_session.add(inactive_org)
         await db_session.flush()

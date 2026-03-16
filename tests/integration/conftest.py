@@ -182,6 +182,7 @@ async def make_user(db_session: AsyncSession) -> UserFactory:
         display_name: str | None = None,
         is_active: bool = True,
         user_id: UUID | None = None,
+        product_id: str = "vex",
     ) -> User:
         user = User(
             id=user_id or uuid4(),
@@ -189,6 +190,7 @@ async def make_user(db_session: AsyncSession) -> UserFactory:
             password_hash=password_hash,
             display_name=display_name,
             is_active=is_active,
+            product_id=product_id,
         )
         db_session.add(user)
         await db_session.flush()
@@ -207,6 +209,7 @@ async def make_org(db_session: AsyncSession, make_user: UserFactory) -> OrgFacto
         slug: str | None = None,
         owner: User | None = None,
         org_id: UUID | None = None,
+        product_id: str = "vex",
     ) -> Organization:
         if owner is None:
             owner = await make_user(email=f"owner-{uuid4().hex[:8]}@example.com")
@@ -215,6 +218,7 @@ async def make_org(db_session: AsyncSession, make_user: UserFactory) -> OrgFacto
             name=name,
             slug=slug or f"test-org-{uuid4().hex[:8]}",
             owner_id=owner.id,
+            product_id=product_id,
         )
         db_session.add(org)
         await db_session.flush()
@@ -237,6 +241,7 @@ async def make_token_account(
         user: User | None = None,
         org: Organization | None = None,
         account_id: UUID | None = None,
+        product_id: str = "vex",
     ) -> TokenAccount:
         if account_type == "personal":
             if user is None:
@@ -245,6 +250,7 @@ async def make_token_account(
                 id=account_id or uuid4(),
                 account_type="personal",
                 user_id=user.id,
+                product_id=product_id,
             )
         else:
             if org is None:
@@ -253,6 +259,7 @@ async def make_token_account(
                 id=account_id or uuid4(),
                 account_type="enterprise",
                 organization_id=org.id,
+                product_id=product_id,
             )
         db_session.add(account)
         await db_session.flush()
@@ -275,6 +282,7 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
         provider: str = "aisha",
         model: str | None = None,
         job_id: UUID | None = None,
+        product_id: str = "vex",
     ) -> GenerationJob:
         if user is None:
             user = await make_user(email=f"jobuser-{uuid4().hex[:8]}@example.com")
@@ -287,6 +295,7 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
             generation_type=generation_type,
             provider=provider,
             model=model,
+            product_id=product_id,
         )
         db_session.add(job)
         await db_session.flush()
@@ -309,6 +318,7 @@ async def make_user_image(db_session: AsyncSession, make_user: UserFactory) -> U
         format: str = "png",
         expires_at: datetime | None = None,
         image_id: UUID | None = None,
+        product_id: str = "vex",
     ) -> UserImage:
         if user is None:
             user = await make_user(email=f"imguser-{uuid4().hex[:8]}@example.com")
@@ -322,6 +332,7 @@ async def make_user_image(db_session: AsyncSession, make_user: UserFactory) -> U
             size_bytes=size_bytes,
             format=format,
             expires_at=expires_at or datetime.now(UTC) + timedelta(days=7),
+            product_id=product_id,
         )
         db_session.add(image)
         await db_session.flush()

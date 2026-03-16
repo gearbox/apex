@@ -73,21 +73,27 @@ class BillingRepository:
         )
         return result.scalar_one_or_none()
 
-    async def create_personal_account(self, *, id: UUID, user_id: UUID) -> TokenAccount:
+    async def create_personal_account(
+        self, *, id: UUID, user_id: UUID, product_id: str
+    ) -> TokenAccount:
         account = TokenAccount(
             id=id,
             account_type=AccountType.PERSONAL.value,
             user_id=user_id,
+            product_id=product_id,
         )
         self._session.add(account)
         await self._session.flush()
         return account
 
-    async def create_enterprise_account(self, *, id: UUID, organization_id: UUID) -> TokenAccount:
+    async def create_enterprise_account(
+        self, *, id: UUID, organization_id: UUID, product_id: str
+    ) -> TokenAccount:
         account = TokenAccount(
             id=id,
             account_type=AccountType.ENTERPRISE.value,
             organization_id=organization_id,
+            product_id=product_id,
         )
         self._session.add(account)
         await self._session.flush()
@@ -114,6 +120,7 @@ class BillingRepository:
         transaction_type: str,
         amount: int,
         balance_after: int,
+        product_id: str,
         job_id: UUID | None = None,
         payment_id: UUID | None = None,
         description: str | None = None,
@@ -131,6 +138,7 @@ class BillingRepository:
             description=description,
             metadata_=metadata or {},
             created_by=created_by,
+            product_id=product_id,
         )
         self._session.add(txn)
         await self._session.flush()
@@ -334,6 +342,7 @@ class BillingRepository:
         status: str,
         amount_usd: object,  # Decimal
         tokens_granted: int,
+        product_id: str,
         currency: str = "USD",
         provider_metadata: dict[str, Any] | None = None,
         created_by: UUID,
@@ -349,6 +358,7 @@ class BillingRepository:
             currency=currency,
             provider_metadata=provider_metadata or {},
             created_by=created_by,
+            product_id=product_id,
         )
         self._session.add(payment)
         await self._session.flush()
@@ -398,8 +408,9 @@ class BillingRepository:
         name: str,
         slug: str,
         owner_id: UUID,
+        product_id: str,
     ) -> Organization:
-        org = Organization(id=id, name=name, slug=slug, owner_id=owner_id)
+        org = Organization(id=id, name=name, slug=slug, owner_id=owner_id, product_id=product_id)
         self._session.add(org)
         await self._session.flush()
         return org
@@ -433,12 +444,14 @@ class BillingRepository:
         organization_id: UUID,
         user_id: UUID,
         role: str,
+        product_id: str,
     ) -> OrganizationMember:
         member = OrganizationMember(
             id=id,
             organization_id=organization_id,
             user_id=user_id,
             role=role,
+            product_id=product_id,
         )
         self._session.add(member)
         await self._session.flush()

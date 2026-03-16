@@ -41,6 +41,9 @@ def upgrade() -> None:
         sa.Column("locale", sa.String(10), nullable=False, server_default="en"),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("email_verified_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("product_id", sa.String(32), nullable=False),
+        sa.Column("age_verified_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("date_of_birth", sa.Date(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -55,9 +58,14 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    # Partial unique index: only active users must have unique email
-    op.execute("CREATE UNIQUE INDEX ix_users_email ON users(email) WHERE is_active = TRUE")
+    # Partial unique index: only active users must have unique (email, product_id)
+    op.execute(
+        "CREATE UNIQUE INDEX ix_users_email_product"
+        " ON users(email, product_id)"
+        " WHERE is_active = TRUE"
+    )
     op.create_index("ix_users_email_active", "users", ["email", "is_active"])
+    op.create_index("ix_users_product", "users", ["product_id"])
     op.create_index(op.f("ix_users_is_active"), "users", ["is_active"])
 
     # -------------------------------------------------------------------------
@@ -77,6 +85,7 @@ def upgrade() -> None:
         sa.Column("user_agent", sa.Text(), nullable=True),
         sa.Column("ip_address", sa.String(45), nullable=True),
         sa.Column("is_revoked", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -99,6 +108,7 @@ def upgrade() -> None:
         "refresh_tokens",
         ["user_id", "is_revoked", "expires_at"],
     )
+    op.create_index(op.f("ix_refresh_tokens_product_id"), "refresh_tokens", ["product_id"])
 
     # -------------------------------------------------------------------------
     # email_verification_tokens
@@ -202,6 +212,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -237,6 +248,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("role", sa.String(20), nullable=False),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "joined_at",
             sa.DateTime(timezone=True),
@@ -247,6 +259,10 @@ def upgrade() -> None:
         sa.UniqueConstraint("organization_id", "user_id", name="uq_org_member"),
     )
     op.create_index(op.f("ix_organization_members_user_id"), "organization_members", ["user_id"])
+    op.create_index(
+        op.f("ix_organization_members_product_id"), "organization_members", ["product_id"]
+    )
+    op.create_index(op.f("ix_organizations_product_id"), "organizations", ["product_id"])
 
     # -------------------------------------------------------------------------
     # token_accounts
@@ -268,6 +284,7 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -292,6 +309,8 @@ def upgrade() -> None:
             name="chk_account_owner",
         ),
     )
+
+    op.create_index(op.f("ix_token_accounts_product_id"), "token_accounts", ["product_id"])
 
     # -------------------------------------------------------------------------
     # payments
@@ -324,6 +343,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'{}'::jsonb"),
         ),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -344,6 +364,7 @@ def upgrade() -> None:
     )
     op.create_index(op.f("ix_payments_account_id"), "payments", ["account_id"])
     op.create_index("ix_payments_status_created", "payments", ["status", "created_at"])
+    op.create_index(op.f("ix_payments_product_id"), "payments", ["product_id"])
 
     # -------------------------------------------------------------------------
     # token_transactions  (append-only ledger)
@@ -379,6 +400,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'{}'::jsonb"),
         ),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -401,6 +423,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_token_transactions_job_id", "token_transactions", ["job_id"])
     op.create_index("ix_token_transactions_payment_id", "token_transactions", ["payment_id"])
+    op.create_index(op.f("ix_token_transactions_product_id"), "token_transactions", ["product_id"])
 
     # Immutability trigger — prevent UPDATE/DELETE on token_transactions
     op.execute("""
@@ -451,6 +474,7 @@ def upgrade() -> None:
         ),
         sa.Column("token_cost", sa.Integer(), nullable=True),
         sa.Column("debit_transaction_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -474,6 +498,7 @@ def upgrade() -> None:
     op.create_index(op.f("ix_generation_jobs_user_id"), "generation_jobs", ["user_id"])
     op.create_index("ix_generation_jobs_user_created", "generation_jobs", ["user_id", "created_at"])
     op.create_index("ix_generation_jobs_user_status", "generation_jobs", ["user_id", "status"])
+    op.create_index(op.f("ix_generation_jobs_product_id"), "generation_jobs", ["product_id"])
 
     # Add cross-reference FKs now that both tables exist
     op.create_foreign_key(
@@ -508,6 +533,7 @@ def upgrade() -> None:
         sa.Column("content_type", sa.String(100), nullable=False),
         sa.Column("size_bytes", sa.Integer(), nullable=False),
         sa.Column("format", sa.String(10), nullable=False),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -522,6 +548,7 @@ def upgrade() -> None:
     op.create_index(op.f("ix_user_images_expires_at"), "user_images", ["expires_at"])
     op.create_index("ix_user_images_user_created", "user_images", ["user_id", "created_at"])
     op.create_index("ix_user_images_cleanup", "user_images", ["expires_at"])
+    op.create_index(op.f("ix_user_images_product_id"), "user_images", ["product_id"])
 
     # -------------------------------------------------------------------------
     # generation_outputs
@@ -553,6 +580,7 @@ def upgrade() -> None:
         sa.Column("format", sa.String(10), nullable=False),
         sa.Column("output_index", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("is_thumbnail", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -573,6 +601,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_generation_outputs_thumbnail", "generation_outputs", ["job_id", "is_thumbnail"]
     )
+    op.create_index(op.f("ix_generation_outputs_product_id"), "generation_outputs", ["product_id"])
 
     # -------------------------------------------------------------------------
     # pricing_catalog

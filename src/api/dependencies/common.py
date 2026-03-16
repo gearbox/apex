@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
+from litestar import Request
 from litestar.di import Provide
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +31,7 @@ from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
 from src.api.services.workflow_service import WorkflowService
 from src.core.config import Settings, get_settings
+from src.core.product import ProductConfig
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 from src.workers.token_cleanup import TokenCleanupWorker
@@ -136,6 +138,7 @@ async def get_user_content(
     r2_storage: R2StorageService,
     session: AsyncSession,
     settings: Settings,
+    product_id: str,
 ) -> UserContentService:
     """Provide user content service.
 
@@ -145,6 +148,7 @@ async def get_user_content(
         r2_storage: R2 storage service.
         session: Database session.
         settings: Application settings.
+        product_id: Product slug from ProductMiddleware.
 
     Returns:
         Configured UserContentService.
@@ -152,6 +156,7 @@ async def get_user_content(
     return UserContentService(
         storage=r2_storage,
         session=session,
+        product_id=product_id,
         retention_days=settings.retention_days,
     )
 
@@ -315,6 +320,43 @@ def provide_settings() -> Settings:
         Application settings.
     """
     return get_settings()
+
+
+# -----------------------------------------------------------------------------
+# Product dependencies
+# -----------------------------------------------------------------------------
+
+
+def get_product_config(request: Request) -> ProductConfig:  # type: ignore[type-arg]
+    """Extract product config set by ProductMiddleware.
+
+    Args:
+        request: Litestar Request object.
+
+    Returns:
+        ProductConfig resolved by the middleware.
+
+    Raises:
+        ValueError: If ProductMiddleware did not run.
+    """
+    config: ProductConfig | None = getattr(request.state, "product_config", None)
+    if config is None:
+        raise ValueError(
+            "ProductMiddleware did not run — product_config missing from request state"
+        )
+    return config
+
+
+def get_product_id(request: Request) -> str:  # type: ignore[type-arg]
+    """Extract product slug set by ProductMiddleware.
+
+    Args:
+        request: Litestar Request object.
+
+    Returns:
+        Product slug string.
+    """
+    return request.state.product_id  # type: ignore[no-any-return]
 
 
 # -----------------------------------------------------------------------------
@@ -530,4 +572,7 @@ dependencies = {
     "unified_job_service": Provide(get_unified_job_service, sync_to_thread=False),
     # Unified generation service
     "generation_service": Provide(get_generation_service, sync_to_thread=False),
+    # Product context (resolved by ProductMiddleware)
+    "product_config": Provide(get_product_config, sync_to_thread=False),
+    "product_id": Provide(get_product_id, sync_to_thread=False),
 }

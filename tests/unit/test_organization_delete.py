@@ -304,6 +304,7 @@ class TestDeleteOrganizationService:
             billing_repo.get_membership = AsyncMock(return_value=membership)
             billing_repo.get_account_by_organization = AsyncMock(return_value=account)
             billing_repo.get_balance = AsyncMock(return_value=500)
+            billing_repo.get_organization = AsyncMock(return_value=None)
 
             user_repo = MockUserRepo.return_value
             user_repo.get_active_user = AsyncMock(return_value=regular_user)
@@ -433,6 +434,7 @@ class TestDeleteOrganizationService:
             billing_repo.get_membership = AsyncMock(return_value=membership)
             billing_repo.get_account_by_organization = AsyncMock(return_value=account)
             billing_repo.get_balance = AsyncMock(return_value=1234)
+            billing_repo.get_organization = AsyncMock(return_value=None)
 
             user_repo = MockUserRepo.return_value
             user_repo.get_active_user = AsyncMock(return_value=regular_user)

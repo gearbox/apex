@@ -66,6 +66,7 @@ class PaymentService:
         user_id: UUID,
         *,
         session: AsyncSession,
+        product_id: str,
     ) -> StripeCheckoutResult:
         """Create a Stripe Checkout Session.
 
@@ -120,6 +121,7 @@ class PaymentService:
             currency="USD",
             provider_metadata={"checkout_session_id": checkout_session.id},
             created_by=user_id,
+            product_id=product_id,
         )
 
         return StripeCheckoutResult(
@@ -186,6 +188,7 @@ class PaymentService:
             description="Token purchase via Stripe",
             payment_provider="stripe",
             session=session,
+            product_id=payment.product_id,
         )
 
     async def create_nowpayments_invoice(
@@ -196,6 +199,7 @@ class PaymentService:
         user_id: UUID,
         *,
         session: AsyncSession,
+        product_id: str,
     ) -> NowPaymentsInvoiceResult:
         """Create a NowPayments invoice.
 
@@ -256,6 +260,7 @@ class PaymentService:
             currency=pay_currency.upper(),
             provider_metadata=data,
             created_by=user_id,
+            product_id=product_id,
         )
 
         return NowPaymentsInvoiceResult(
@@ -317,6 +322,7 @@ class PaymentService:
                 description="Token purchase via NowPayments",
                 payment_provider="nowpayments",
                 session=session,
+                product_id=payment.product_id,
             )
         else:
             # Intermediate status — update payment but don't credit

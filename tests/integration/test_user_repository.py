@@ -26,6 +26,7 @@ async def test_create_user_returns_user(user_repo: UserRepository) -> None:
         id=uuid4(),
         email="Alice@Example.Com",
         password_hash="hashed",
+        product_id="vex",
         display_name="Alice",
     )
     assert user.email == "alice@example.com"
@@ -40,6 +41,7 @@ async def test_create_user_lowercases_email(user_repo: UserRepository) -> None:
         id=uid,
         email="UPPER@EXAMPLE.COM",
         password_hash="x",
+        product_id="vex",
     )
     assert user.email == "upper@example.com"
 
@@ -55,6 +57,7 @@ async def test_create_user_duplicate_email_raises(
             id=uuid4(),
             email="dup@example.com",
             password_hash="x",
+            product_id="vex",
         )
 
 
@@ -274,6 +277,7 @@ async def test_create_refresh_token(user_repo: UserRepository, make_user) -> Non
         token_hash="hash123",
         family_id=uuid4(),
         expires_at=expires,
+        product_id="vex",
         user_agent="TestAgent/1.0",
         ip_address="127.0.0.1",
     )
@@ -291,6 +295,7 @@ async def test_get_refresh_token_by_hash_found(user_repo: UserRepository, make_u
         token_hash="myhash",
         family_id=uuid4(),
         expires_at=expires,
+        product_id="vex",
     )
     found = await user_repo.get_refresh_token_by_hash("myhash")
     assert found is not None
@@ -314,6 +319,7 @@ async def test_get_valid_refresh_token_returns_active(user_repo: UserRepository,
         token_hash="validhash",
         family_id=uuid4(),
         expires_at=expires,
+        product_id="vex",
     )
     found = await user_repo.get_valid_refresh_token("validhash")
     assert found is not None
@@ -334,6 +340,7 @@ async def test_get_valid_refresh_token_returns_none_for_revoked(
         token_hash="revokedhash",
         family_id=uuid4(),
         expires_at=expires,
+        product_id="vex",
     )
     await user_repo.revoke_refresh_token(token_id)
     found = await user_repo.get_valid_refresh_token("revokedhash")
@@ -350,6 +357,7 @@ async def test_revoke_refresh_token_returns_true(user_repo: UserRepository, make
         token_hash="revhash",
         family_id=uuid4(),
         expires_at=datetime.now(UTC) + timedelta(days=1),
+        product_id="vex",
     )
     result = await user_repo.revoke_refresh_token(token_id)
     assert result is True
@@ -374,6 +382,7 @@ async def test_revoke_token_family(user_repo: UserRepository, make_user) -> None
             token_hash=f"familyhash{i}",
             family_id=family_id,
             expires_at=expires,
+            product_id="vex",
         )
     count = await user_repo.revoke_token_family(family_id)
     assert count == 3
@@ -390,6 +399,7 @@ async def test_revoke_all_user_tokens(user_repo: UserRepository, make_user) -> N
             token_hash=f"allhash{i}",
             family_id=uuid4(),
             expires_at=expires,
+            product_id="vex",
         )
     count = await user_repo.revoke_all_user_tokens(user.id)
     assert count == 2
@@ -416,6 +426,7 @@ async def test_cleanup_expired_tokens_deletes_expired(user_repo: UserRepository,
             token_hash=f"expiredhash{i}",
             family_id=uuid4(),
             expires_at=past,
+            product_id="vex",
         )
     await user_repo.create_refresh_token(
         id=uuid4(),
@@ -423,6 +434,7 @@ async def test_cleanup_expired_tokens_deletes_expired(user_repo: UserRepository,
         token_hash="validhashclean",
         family_id=uuid4(),
         expires_at=future,
+        product_id="vex",
     )
 
     deleted = await user_repo.cleanup_expired_tokens()
@@ -440,6 +452,7 @@ async def test_cleanup_expired_tokens_no_expired_returns_zero(
         token_hash="futurehash",
         family_id=uuid4(),
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     deleted = await user_repo.cleanup_expired_tokens()
     assert deleted == 0
@@ -514,6 +527,7 @@ async def test_cascade_delete_user_removes_refresh_tokens(
         token_hash="cascadehash",
         family_id=uuid4(),
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
 
     await db_session.delete(user)
@@ -533,7 +547,12 @@ class TestListUsers:
         self, user_repo: UserRepository, db_session: AsyncSession
     ) -> None:
         """list_users returns active non-SYSTEM users when no filters applied."""
-        user = User(id=uuid4(), email=f"listall-{uuid4().hex[:6]}@example.com", password_hash="x")
+        user = User(
+            id=uuid4(),
+            email=f"listall-{uuid4().hex[:6]}@example.com",
+            password_hash="x",
+            product_id="vex",
+        )
         db_session.add(user)
         await db_session.flush()
 
@@ -550,6 +569,7 @@ class TestListUsers:
             email=f"inactive-filter-{uuid4().hex[:6]}@example.com",
             password_hash="x",
             is_active=False,
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -568,6 +588,7 @@ class TestListUsers:
             email=f"admin-role-{uuid4().hex[:6]}@example.com",
             password_hash="x",
             role=UserRole.ADMIN,
+            product_id="vex",
         )
         db_session.add(admin)
         await db_session.flush()
@@ -586,6 +607,7 @@ class TestListUsers:
             id=uuid4(),
             email=f"searchable-{unique}@example.com",
             password_hash="x",
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -603,6 +625,7 @@ class TestListUsers:
             email=f"system-{uuid4().hex[:6]}@example.com",
             password_hash="x",
             role=UserRole.SYSTEM,
+            product_id="vex",
         )
         db_session.add(system)
         await db_session.flush()
@@ -621,6 +644,7 @@ class TestListUsers:
                     id=uuid4(),
                     email=f"page-{uuid4().hex[:6]}-{i}@example.com",
                     password_hash="x",
+                    product_id="vex",
                 )
             )
         await db_session.flush()
@@ -645,6 +669,7 @@ class TestListUsers:
                     id=uuid4(),
                     email=f"totaltest-{unique}-{i}@example.com",
                     password_hash="x",
+                    product_id="vex",
                 )
             )
         await db_session.flush()
@@ -667,6 +692,7 @@ class TestUpdateUserAdmin:
             id=uuid4(),
             email=f"promote-{uuid4().hex[:6]}@example.com",
             password_hash="x",
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -683,6 +709,7 @@ class TestUpdateUserAdmin:
             id=uuid4(),
             email=f"tier-{uuid4().hex[:6]}@example.com",
             password_hash="x",
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -701,6 +728,7 @@ class TestUpdateUserAdmin:
             id=uuid4(),
             email=f"deactivate-{uuid4().hex[:6]}@example.com",
             password_hash="x",
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -717,6 +745,7 @@ class TestUpdateUserAdmin:
             id=uuid4(),
             email=f"noop-{uuid4().hex[:6]}@example.com",
             password_hash="x",
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -740,6 +769,7 @@ class TestUpdateUserAdmin:
             id=uuid4(),
             email=f"system-guard-{uuid4().hex[:6]}@example.com",
             password_hash="x",
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -755,6 +785,7 @@ class TestUpdateUserAdmin:
             id=uuid4(),
             email=f"timestamp-{uuid4().hex[:6]}@example.com",
             password_hash="x",
+            product_id="vex",
         )
         db_session.add(user)
         await db_session.flush()
@@ -792,6 +823,7 @@ async def _make_output_row(
         format="jpeg",
         output_index=output_index,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
 
 

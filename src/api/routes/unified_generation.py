@@ -11,6 +11,7 @@ from litestar.di import Provide
 from litestar.status_codes import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
+    HTTP_403_FORBIDDEN,
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
@@ -26,8 +27,10 @@ from src.api.services.generation.service import (
     GenerationError,
     GenerationService,
     ModelDisabledError,
+    ModelNotAllowedError,
     ProviderUnavailableError,
 )
+from src.core.product import ProductConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -47,6 +50,7 @@ class UnifiedGenerationController(Controller):
         data: UnifiedGenerationRequest,
         session: AsyncSession,
         generation_service: GenerationService,
+        product_config: ProductConfig,
     ) -> Response[JobCreatedResponse | ErrorEnvelope]:
         """Submit a generation request.
 
@@ -60,6 +64,7 @@ class UnifiedGenerationController(Controller):
                 data,
                 user_id=current_user_id,
                 session=session,
+                product_config=product_config,
             )
             return Response(content=result, status_code=HTTP_201_CREATED)
 
@@ -89,6 +94,17 @@ class UnifiedGenerationController(Controller):
                     status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        except ModelNotAllowedError as exc:
+            logger.info("generation.model_not_allowed", error=str(exc))
+            return Response(
+                content=ErrorEnvelope(
+                    error="model_not_allowed",
+                    message=str(exc),
+                    status_code=HTTP_403_FORBIDDEN,
+                ),
+                status_code=HTTP_403_FORBIDDEN,
             )
 
         except ModelDisabledError as exc:

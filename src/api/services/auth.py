@@ -118,6 +118,7 @@ class AuthService:
         *,
         email: str,
         password: str,
+        product_id: str,
         display_name: str | None = None,
     ) -> tuple[User, TokenPair]:
         """Register a new user.
@@ -125,16 +126,17 @@ class AuthService:
         Args:
             email: User email.
             password: Plain text password.
+            product_id: Product the user is registering on.
             display_name: Optional display name.
 
         Returns:
             Tuple of (User, TokenPair).
 
         Raises:
-            EmailAlreadyExistsError: If email is taken.
+            EmailAlreadyExistsError: If email is taken on this product.
         """
-        # Check for existing email
-        if await self._repo.email_exists(email):
+        # Check for existing email within the same product
+        if await self._repo.email_exists(email, product_id=product_id):
             raise EmailAlreadyExistsError(f"Email {email} is already registered")
 
         # Create user
@@ -145,19 +147,22 @@ class AuthService:
             id=user_id,
             email=email,
             password_hash=password_hash,
+            product_id=product_id,
             display_name=display_name,
         )
 
         # Create personal token account in the same transaction
         if self._session is not None:
             billing_repo = BillingRepository(self._session)
-            await billing_repo.create_personal_account(id=new_id(), user_id=user_id)
+            await billing_repo.create_personal_account(
+                id=new_id(), user_id=user_id, product_id=product_id
+            )
             logger.info("billing.account_created", user_id=str(user_id))
 
         logger.info("user.registered", user_id=str(user_id))
 
         # Generate tokens
-        tokens = await self._create_token_pair(user_id)
+        tokens = await self._create_token_pair(user_id, product_id=product_id)
 
         # Send verification email — non-blocking failure: if the email provider
         # is down we still complete registration and let the user resend manually.
@@ -180,6 +185,7 @@ class AuthService:
         *,
         email: str,
         password: str,
+        product_id: str,
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> tuple[User, TokenPair]:
@@ -188,6 +194,7 @@ class AuthService:
         Args:
             email: User email.
             password: Plain text password.
+            product_id: Product the user is logging into.
             user_agent: Client user agent (optional).
             ip_address: Client IP address (optional).
 
@@ -195,10 +202,11 @@ class AuthService:
             Tuple of (User, TokenPair).
 
         Raises:
-            InvalidCredentialsError: If email or password is wrong.
+            InvalidCredentialsError: If email or password is wrong, or user
+                does not exist on this product.
             UserInactiveError: If user account is deactivated.
         """
-        user = await self._repo.get_active_user_by_email(email)
+        user = await self._repo.get_active_user_by_email(email, product_id=product_id)
 
         if user is None:
             # Prevent timing attacks — covers both not-found and inactive accounts
@@ -218,6 +226,7 @@ class AuthService:
 
         tokens = await self._create_token_pair(
             user.id,
+            product_id=product_id,
             user_agent=user_agent,
             ip_address=ip_address,
         )
@@ -284,6 +293,7 @@ class AuthService:
         # Issue new token pair in same family
         tokens = await self._create_token_pair(
             stored_token.user_id,
+            product_id=stored_token.product_id,
             family_id=stored_token.family_id,
             user_agent=user_agent,
             ip_address=ip_address,
@@ -330,6 +340,7 @@ class AuthService:
         self,
         user_id: UUID,
         *,
+        product_id: str | None = None,
         family_id: UUID | None = None,
         user_agent: str | None = None,
         ip_address: str | None = None,
@@ -338,6 +349,7 @@ class AuthService:
 
         Args:
             user_id: User ID.
+            product_id: Product scope to embed in the JWT.
             family_id: Token family ID (for rotation).
             user_agent: Client user agent.
             ip_address: Client IP address.
@@ -346,7 +358,7 @@ class AuthService:
             TokenPair with both tokens.
         """
         # Create access token
-        access_token, expires_at = self._jwt.create_access_token(user_id)
+        access_token, expires_at = self._jwt.create_access_token(user_id, product_id=product_id)
         expires_in = int(self._jwt.access_token_lifetime.total_seconds())
 
         # Create refresh token
@@ -360,6 +372,7 @@ class AuthService:
             token_hash=refresh_token_hash,
             family_id=family_id or new_id(),
             expires_at=refresh_expires_at,
+            product_id=product_id or "vex",
             user_agent=user_agent,
             ip_address=ip_address,
         )

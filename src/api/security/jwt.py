@@ -21,6 +21,7 @@ class TokenPayload:
     iat: int  # Issued at timestamp
     jti: str  # JWT ID (for tracking/revocation)
     type: str = "access"  # Token type
+    product_id: str | None = None  # Product scope (optional for backward compat)
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class JWTService:
         self,
         user_id: UUID,
         *,
+        product_id: str | None = None,
         jti: str | None = None,
         extra_claims: dict[str, Any] | None = None,
     ) -> tuple[str, datetime]:
@@ -87,6 +89,9 @@ class JWTService:
             "jti": jti or generate_token(16),
             "type": "access",
         }
+
+        if product_id is not None:
+            payload["product_id"] = product_id
 
         if self._config.issuer:
             payload["iss"] = self._config.issuer
@@ -119,7 +124,7 @@ class JWTService:
                 token,
                 self._config.secret_key,
                 algorithms=[self._config.algorithm],
-                options=options,
+                options=options,  # type: ignore[arg-type]
                 issuer=self._config.issuer,
                 audience=self._config.audience,
             )
@@ -134,6 +139,7 @@ class JWTService:
                 iat=payload["iat"],
                 jti=payload["jti"],
                 type=payload.get("type", "access"),
+                product_id=payload.get("product_id"),
             )
 
         except jwt.ExpiredSignatureError:

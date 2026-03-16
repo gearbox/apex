@@ -205,9 +205,9 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     op.execute(
         sa.text("""
-            INSERT INTO users (id, email, password_hash, role, is_active, subscription_tier, locale)
+            INSERT INTO users (id, email, password_hash, role, is_active, subscription_tier, locale, product_id)
             VALUES (
-                :id, 'system@internal', '', 'system', false, 'free', 'en'
+                :id, 'system@internal', '', 'system', false, 'free', 'en', 'vex'
             )
             ON CONFLICT DO NOTHING
         """).bindparams(id=UUID(SYSTEM_USER_ID))

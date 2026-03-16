@@ -68,22 +68,28 @@ class AdminController(Controller):
         self,
         admin_user: User,
         session: AsyncSession,
+        product_id: str,
         is_active: bool | None = None,
         role: str | None = None,
         email: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> PaginatedResponse[AdminUserResponse]:
-        """List all users with optional filtering. Excludes SYSTEM role users."""
+        """List all users with optional filtering. Excludes SYSTEM role users.
+
+        Admin data is always scoped to the current product context.
+        """
         logger.info(
             "admin.listing_users",
             admin_id=str(admin_user.id),
+            product_id=product_id,
             is_active=is_active,
             role=role,
             email=email,
         )
         repo = UserRepository(session)
         users, total = await repo.list_users(
+            product_id=product_id,
             is_active=is_active,
             role=role,
             email_contains=email,
@@ -280,6 +286,7 @@ class AdminController(Controller):
         data: AdminAdjustRequest,
         session: AsyncSession,
         billing_service: BillingService,
+        product_id: str,
     ) -> AdminAdjustResponse:
         """Admin balance adjustment. Positive = credit, negative = debit."""
         logger.info(
@@ -294,6 +301,7 @@ class AdminController(Controller):
             admin_user.id,
             description=data.description,
             session=session,
+            product_id=product_id,
         )
         await session.commit()
         new_balance = await billing_service.get_balance(account_id, session=session)

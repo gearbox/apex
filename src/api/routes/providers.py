@@ -28,6 +28,7 @@ from src.api.security import optional_auth_guard
 from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import GenerationType, ModelType, Provider
 from src.core.model_registry import get_model_meta
+from src.core.product import ProductConfig
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 
@@ -102,14 +103,16 @@ class ProvidersController(Controller):
         session: AsyncSession,
         grok_job_service: GrokJobService | None,
         current_user_id: UUID | None,
+        product_config: ProductConfig,
     ) -> ProvidersResponse:
         """List available providers and their models.
 
         Returns provider-grouped model catalog with capability metadata.
         When authenticated, includes user_context with subscription tier.
+        Models are filtered by the current product's allowlist/blocklist.
         """
         repo = GenerationModelRepository(session)
-        db_models = await repo.list_enabled()
+        db_models = await repo.list_enabled_for_product(product_config)
 
         # Group models by provider
         provider_models: dict[Provider, list[ModelInfo]] = {}

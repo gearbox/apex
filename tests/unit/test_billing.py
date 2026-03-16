@@ -96,6 +96,7 @@ class TestCheckAndReserve:
                 job_id,
                 metadata={"provider": "grok"},
                 session=mock_session,
+                product_id="vex",
             )
 
         assert result.id == txn.id
@@ -123,6 +124,7 @@ class TestCheckAndReserve:
                     uuid4(),
                     metadata={},
                     session=mock_session,
+                    product_id="vex",
                 )
 
             assert exc_info.value.balance == 5
@@ -137,7 +139,7 @@ class TestCheckAndReserve:
 
             with pytest.raises(AccountNotFoundError):
                 await billing_service.check_and_reserve(
-                    uuid4(), 10, uuid4(), metadata={}, session=mock_session
+                    uuid4(), 10, uuid4(), metadata={}, session=mock_session, product_id="vex"
                 )
 
     async def test_inactive_account(
@@ -151,7 +153,7 @@ class TestCheckAndReserve:
 
             with pytest.raises(AccountInactiveError):
                 await billing_service.check_and_reserve(
-                    account.id, 10, uuid4(), metadata={}, session=mock_session
+                    account.id, 10, uuid4(), metadata={}, session=mock_session, product_id="vex"
                 )
 
 
@@ -179,7 +181,7 @@ class TestRefund:
             repo.create_transaction = AsyncMock(return_value=refund_txn)
 
             result = await billing_service.refund(
-                job_id, description="test refund", session=mock_session
+                job_id, description="test refund", session=mock_session, product_id="vex"
             )
 
         assert result.amount == 25
@@ -196,7 +198,9 @@ class TestRefund:
             repo.get_debit_for_job = AsyncMock(return_value=None)
 
             with pytest.raises(RefundNotEligibleError):
-                await billing_service.refund(uuid4(), description="test", session=mock_session)
+                await billing_service.refund(
+                    uuid4(), description="test", session=mock_session, product_id="vex"
+                )
 
     async def test_already_refunded(
         self, billing_service: BillingService, mock_session: AsyncMock
@@ -209,7 +213,9 @@ class TestRefund:
             repo.has_refund_for_job = AsyncMock(return_value=True)
 
             with pytest.raises(RefundNotEligibleError):
-                await billing_service.refund(uuid4(), description="test", session=mock_session)
+                await billing_service.refund(
+                    uuid4(), description="test", session=mock_session, product_id="vex"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +327,7 @@ class TestAdminAdjust:
                 admin_id,
                 description="bonus",
                 session=mock_session,
+                product_id="vex",
             )
 
         call_kwargs = repo.create_transaction.call_args.kwargs
@@ -345,4 +352,5 @@ class TestAdminAdjust:
                     uuid4(),
                     description="deduction",
                     session=mock_session,
+                    product_id="vex",
                 )

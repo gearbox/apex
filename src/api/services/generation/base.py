@@ -43,6 +43,7 @@ class GenerationProvider(Protocol):
         billing_service: BillingService,
         account_id: UUID,
         token_cost: int,
+        product_id: str,
     ) -> GenerationJob:
         """Submit the generation request to the provider.
 
@@ -57,6 +58,7 @@ class GenerationProvider(Protocol):
             billing_service: For stamping the debit transaction on the job.
             account_id: Pre-resolved token account.
             token_cost: Pre-calculated cost.
+            product_id: Product this generation belongs to.
 
         Returns:
             The created GenerationJob (status may be QUEUED, COMPLETED, or RUNNING

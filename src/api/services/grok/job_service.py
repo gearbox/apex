@@ -131,6 +131,7 @@ class GrokJobService:
         billing_service: BillingService,
         account_id: UUID,
         token_cost: int,
+        product_id: str,
     ) -> GenerationJob | None:
         """Create and execute an image generation job.
 
@@ -185,6 +186,7 @@ class GrokJobService:
             provider=Provider.GROK,
             model=model.value,
             aspect_ratio=aspect_ratio.value,
+            product_id=product_id,
         )
 
         # Update with negative prompt if provided
@@ -211,6 +213,7 @@ class GrokJobService:
                     "model": model.value,
                 },
                 session=session,
+                product_id=product_id,
             )
             if job is not None:
                 job.token_cost = token_cost
@@ -252,6 +255,7 @@ class GrokJobService:
                     result=image_result,
                     output_index=idx,
                     input_image_id=input_image_id,
+                    product_id=product_id,
                 )
 
             # Mark job complete
@@ -281,6 +285,7 @@ class GrokJobService:
                     job_id,
                     description=f"Provider error refund: {getattr(e, 'message', str(e))}",
                     session=session,
+                    product_id=product_id,
                 )
                 await session.flush()
             except Exception as refund_error:
@@ -307,6 +312,7 @@ class GrokJobService:
                     job_id,
                     description=f"Unexpected error refund: {str(e)}",
                     session=session,
+                    product_id=product_id,
                 )
                 await session.flush()
             except Exception as refund_error:
@@ -326,6 +332,7 @@ class GrokJobService:
         result: GrokImageResult,
         output_index: int,
         input_image_id: UUID | None,
+        product_id: str,
     ) -> None:
         """Download and store an image result in R2."""
         if not result.has_url:
@@ -379,6 +386,7 @@ class GrokJobService:
             output_index=output_index,
             expires_at=expires_at,
             input_image_id=input_image_id,
+            product_id=product_id,
         )
 
         logger.debug("grok.image_output_stored", output_id=str(output_id), job_id=str(job_id))
@@ -404,6 +412,7 @@ class GrokJobService:
         billing_service: BillingService,
         account_id: UUID,
         token_cost: int,
+        product_id: str,
     ) -> GenerationJob | None:
         """Start an async video generation job.
 
@@ -451,6 +460,7 @@ class GrokJobService:
             provider=Provider.GROK,
             model=model.value,
             aspect_ratio=aspect_ratio.value,
+            product_id=product_id,
         )
 
         try:
@@ -465,6 +475,7 @@ class GrokJobService:
                     "model": model.value,
                 },
                 session=session,
+                product_id=product_id,
             )
             if job is not None:
                 job.token_cost = token_cost
@@ -512,6 +523,7 @@ class GrokJobService:
                     job_id,
                     description=f"Provider error refund: {getattr(e, 'message', str(e))}",
                     session=session,
+                    product_id=product_id,
                 )
                 await session.flush()
             except Exception as refund_error:
@@ -538,6 +550,7 @@ class GrokJobService:
                     job_id,
                     description=f"Unexpected error refund: {str(e)}",
                     session=session,
+                    product_id=product_id,
                 )
                 await session.flush()
             except Exception as refund_error:
@@ -599,6 +612,7 @@ class GrokJobService:
                 user_id=job.user_id,
                 job_id=job_id,
                 result=result,
+                product_id=job.product_id,
             )
 
             # Mark complete
@@ -631,6 +645,7 @@ class GrokJobService:
         user_id: UUID,
         job_id: UUID,
         result: GrokVideoResult,
+        product_id: str,
     ) -> None:
         """Download, store a video result in R2, and extract a thumbnail frame."""
         # Download video from xAI CDN
@@ -671,6 +686,7 @@ class GrokJobService:
             expires_at=expires_at,
             input_image_id=None,
             is_thumbnail=False,
+            product_id=product_id,
         )
 
         logger.debug("grok.video_output_stored", output_id=str(output_id), job_id=str(job_id))
@@ -705,6 +721,7 @@ class GrokJobService:
                 expires_at=expires_at,
                 input_image_id=None,
                 is_thumbnail=True,  # <-- marks this as poster frame
+                product_id=product_id,
             )
             logger.debug("grok.thumbnail_stored", thumb_id=str(thumb_id), job_id=str(job_id))
         else:

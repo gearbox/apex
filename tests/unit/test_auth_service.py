@@ -176,6 +176,7 @@ class TestAuthServiceRegister:
             email=email,
             password="secure_password",
             display_name="Test User",
+            product_id="vex",
         )
 
         assert user.email == email
@@ -196,6 +197,7 @@ class TestAuthServiceRegister:
             await auth_service.register(
                 email="existing@example.com",
                 password="password123",
+                product_id="vex",
             )
 
 
@@ -229,6 +231,7 @@ class TestAuthServiceLogin:
         user, tokens = await auth_service.login(
             email=email,
             password=password,
+            product_id="vex",
         )
 
         assert user.email == email
@@ -254,6 +257,7 @@ class TestAuthServiceLogin:
             await auth_service.login(
                 email="test@example.com",
                 password="wrong_password",
+                product_id="vex",
             )
 
     @pytest.mark.asyncio
@@ -269,6 +273,7 @@ class TestAuthServiceLogin:
             await auth_service.login(
                 email="nonexistent@example.com",
                 password="password",
+                product_id="vex",
             )
 
     @pytest.mark.asyncio
@@ -285,6 +290,7 @@ class TestAuthServiceLogin:
             await auth_service.login(
                 email="inactive@example.com",
                 password="password",
+                product_id="vex",
             )
 
 
@@ -307,6 +313,7 @@ class TestAuthServiceRefresh:
         mock_token.id = uuid4()
         mock_token.user_id = user_id
         mock_token.family_id = family_id
+        mock_token.product_id = "vex"
         mock_token.is_revoked = False
         mock_token.expires_at = datetime.now(UTC) + timedelta(days=1)
         mock_repository.get_refresh_token_by_hash.return_value = mock_token

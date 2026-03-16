@@ -47,6 +47,7 @@ class OrganizationService:
         owner_id: UUID,
         *,
         session: AsyncSession,
+        product_id: str,
     ) -> tuple[Organization, TokenAccount]:
         """Create Organization + enterprise TokenAccount + owner membership.
 
@@ -69,12 +70,14 @@ class OrganizationService:
             name=name,
             slug=slug,
             owner_id=owner_id,
+            product_id=product_id,
         )
 
         # Create enterprise token account
         account = await repo.create_enterprise_account(
             id=new_id(),
             organization_id=org.id,
+            product_id=product_id,
         )
 
         # Create owner membership
@@ -83,6 +86,7 @@ class OrganizationService:
             organization_id=org.id,
             user_id=owner_id,
             role=OrgRole.OWNER.value,
+            product_id=product_id,
         )
 
         logger.info(
@@ -132,6 +136,7 @@ class OrganizationService:
         *,
         actor_id: UUID,
         session: AsyncSession,
+        product_id: str,
     ) -> OrganizationMember:
         """Add a member to an organization.
 
@@ -154,6 +159,7 @@ class OrganizationService:
             organization_id=org_id,
             user_id=user_id,
             role=role,
+            product_id=product_id,
         )
 
     async def remove_member(
@@ -266,6 +272,8 @@ class OrganizationService:
 
         # Check balance on the enterprise token account
         account = await repo.get_account_by_organization(org_id)
+        org_for_product = await repo.get_organization(org_id)
+        org_product_id = org_for_product.product_id if org_for_product is not None else "vex"
         if account is not None:
             balance = await repo.get_balance(account.id)
             if balance > 0:
@@ -280,6 +288,7 @@ class OrganizationService:
                     balance_after=0,
                     description="Organization is force deleted by owner",
                     created_by=actor_id,
+                    product_id=org_product_id,
                 )
 
         # Soft-delete the organization

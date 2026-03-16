@@ -61,6 +61,7 @@ class AishaGenerationProvider:
         billing_service: BillingService,
         account_id: UUID,
         token_cost: int,
+        product_id: str,
     ) -> GenerationJob:
         """Build workflow, queue with ComfyUI, create DB job record.
 
@@ -95,6 +96,7 @@ class AishaGenerationProvider:
             provider=Provider.AISHA,
             model=request.model.value,
             aspect_ratio=request.aspect_ratio.value,
+            product_id=product_id,
         )
 
         # Billing reservation
@@ -108,6 +110,7 @@ class AishaGenerationProvider:
                 "model": request.model.value,
             },
             session=session,
+            product_id=product_id,
         )
         if db_job is not None:
             db_job.token_cost = token_cost

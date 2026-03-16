@@ -50,10 +50,11 @@ class OrganizationController(Controller):
         session: AsyncSession,
         organization_service: OrganizationService,
         billing_service: BillingService,
+        product_id: str,
     ) -> Response[OrgCreateResponse]:
         """Create a new organization."""
         org, account = await organization_service.create_organization(
-            data.name, current_user_id, session=session
+            data.name, current_user_id, session=session, product_id=product_id
         )
         balance = await billing_service.get_balance(account.id, session=session)
 
@@ -205,6 +206,7 @@ class OrganizationController(Controller):
         data: AddMemberRequest,
         session: AsyncSession,
         organization_service: OrganizationService,
+        product_id: str,
     ) -> Response[MemberResponse]:
         """Add a member. Requires admin or owner role."""
         member = await organization_service.add_member(
@@ -213,6 +215,7 @@ class OrganizationController(Controller):
             data.role,
             actor_id=current_user_id,
             session=session,
+            product_id=product_id,
         )
         await session.commit()
         return Response(

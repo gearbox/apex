@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -67,6 +67,21 @@ class User(Base):
         nullable=False,
         default=SupportedLocale.EN.value,
         server_default="en",
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+
+    age_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    date_of_birth: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
     )
 
     # Account status
@@ -138,15 +153,18 @@ class User(Base):
     )
 
     __table_args__ = (
-        # Partial unique index: only active users must have a unique email.
+        # Partial unique index: only active users must have a unique (email, product_id).
         # Allows re-registration after account deletion (is_active=False).
+        # Also allows the same email to register independently on different products.
         Index(
-            "ix_users_email",
+            "ix_users_email_product",
             "email",
+            "product_id",
             unique=True,
             postgresql_where=text("is_active = TRUE"),
         ),
         Index("ix_users_email_active", "email", "is_active"),
+        Index("ix_users_product", "product_id"),
     )
 
     def __repr__(self) -> str:
@@ -184,6 +202,12 @@ class RefreshToken(Base):
     # we revoke the entire family (potential token theft)
     family_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
+        nullable=False,
+        index=True,
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        String(32),
         nullable=False,
         index=True,
     )

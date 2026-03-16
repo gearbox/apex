@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from src.db.repositories.user import UserRepository
-
 from tests.integration.conftest import UserFactory
 
 
 async def test_new_user_has_default_locale(
-    user_repo: UserRepository, make_user: UserFactory
+    make_user: UserFactory,
 ) -> None:
     """New users default to 'en' locale."""
     user = await make_user(email="locale_default@example.com")

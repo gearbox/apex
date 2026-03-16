@@ -3,6 +3,13 @@ from __future__ import annotations
 from enum import Enum, StrEnum
 
 
+class Product(str, Enum):
+    """Product identifiers."""
+
+    VEX = "vex"
+    SYNTHARA = "synthara"
+
+
 class Provider(str, Enum):
     """Generation provider."""
 

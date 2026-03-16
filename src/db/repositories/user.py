@@ -42,14 +42,16 @@ class UserRepository:
         id: UUID,
         email: str,
         password_hash: str,
+        product_id: str,
         display_name: str | None = None,
     ) -> User:
         """Create a new user.
 
         Args:
             id: User ID.
-            email: User email (must be unique).
+            email: User email (must be unique within product).
             password_hash: Hashed password.
+            product_id: Product the user is registering on.
             display_name: Optional display name.
 
         Returns:
@@ -59,6 +61,7 @@ class UserRepository:
             id=id,
             email=email.lower(),
             password_hash=password_hash,
+            product_id=product_id,
             display_name=display_name,
         )
         self._session.add(user)
@@ -102,25 +105,39 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_active_user_by_email(self, email: str) -> User | None:
-        """Get active user by email.
+    async def get_active_user_by_email(
+        self,
+        email: str,
+        *,
+        product_id: str | None = None,
+    ) -> User | None:
+        """Get active user by email, optionally scoped to a product.
 
         Args:
             email: User email.
+            product_id: When provided, only return user if product_id matches.
 
         Returns:
             User if found and active, None otherwise.
         """
-        result = await self._session.execute(
-            select(User).where(User.email == email.lower(), User.is_active == True)  # noqa: E712
-        )
+        conditions = [User.email == email.lower(), User.is_active == True]  # noqa: E712
+        if product_id is not None:
+            conditions.append(User.product_id == product_id)
+        result = await self._session.execute(select(User).where(*conditions))
         return result.scalar_one_or_none()
 
-    async def email_exists(self, email: str, exclude_user_id: UUID | None = None) -> bool:
+    async def email_exists(
+        self,
+        email: str,
+        *,
+        product_id: str | None = None,
+        exclude_user_id: UUID | None = None,
+    ) -> bool:
         """Check if email is already registered by an active user.
 
         Args:
             email: Email to check.
+            product_id: When provided, scope check to this product.
             exclude_user_id: Optional user ID to exclude from check.
 
         Returns:
@@ -131,6 +148,8 @@ class UserRepository:
             .select_from(User)
             .where(User.email == email.lower(), User.is_active == True)  # noqa: E712
         )
+        if product_id is not None:
+            query = query.where(User.product_id == product_id)
         if exclude_user_id:
             query = query.where(User.id != exclude_user_id)
         result = await self._session.execute(query)
@@ -242,6 +261,7 @@ class UserRepository:
         token_hash: str,
         family_id: UUID,
         expires_at: datetime,
+        product_id: str,
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> RefreshToken:
@@ -253,6 +273,7 @@ class UserRepository:
             token_hash: Hashed token value.
             family_id: Token family ID for rotation tracking.
             expires_at: Token expiration time.
+            product_id: Product this token is scoped to.
             user_agent: Client user agent (optional).
             ip_address: Client IP address (optional).
 
@@ -265,6 +286,7 @@ class UserRepository:
             token_hash=token_hash,
             family_id=family_id,
             expires_at=expires_at,
+            product_id=product_id,
             user_agent=user_agent,
             ip_address=ip_address,
         )
@@ -394,6 +416,7 @@ class UserRepository:
     async def list_users(
         self,
         *,
+        product_id: str | None = None,
         is_active: bool | None = None,
         role: str | None = None,
         email_contains: str | None = None,
@@ -403,6 +426,7 @@ class UserRepository:
         """List users with optional filtering, excluding SYSTEM role users.
 
         Args:
+            product_id: When provided, filter by product.
             is_active: Filter by active status when not None.
             role: Filter by exact role value when not None.
             email_contains: Case-insensitive partial email match when not None.
@@ -417,6 +441,9 @@ class UserRepository:
             select(func.count(User.id)).select_from(User).where(User.role != UserRole.SYSTEM.value)
         )
 
+        if product_id is not None:
+            base = base.where(User.product_id == product_id)
+            count_base = count_base.where(User.product_id == product_id)
         if is_active is not None:
             base = base.where(User.is_active == is_active)
             count_base = count_base.where(User.is_active == is_active)

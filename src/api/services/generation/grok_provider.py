@@ -52,6 +52,7 @@ class GrokGenerationProvider:
         billing_service: BillingService,
         account_id: UUID,
         token_cost: int,
+        product_id: str,
     ) -> GenerationJob:
         """Delegate to GrokJobService.create_image_job or start_video_job."""
         if request.generation_type.is_video:
@@ -62,6 +63,7 @@ class GrokGenerationProvider:
                 billing_service=billing_service,
                 account_id=account_id,
                 token_cost=token_cost,
+                product_id=product_id,
             )
         return await self._submit_image(
             request,
@@ -70,6 +72,7 @@ class GrokGenerationProvider:
             billing_service=billing_service,
             account_id=account_id,
             token_cost=token_cost,
+            product_id=product_id,
         )
 
     async def _resolve_input_image_url(
@@ -103,6 +106,7 @@ class GrokGenerationProvider:
         billing_service: BillingService,
         account_id: UUID,
         token_cost: int,
+        product_id: str,
     ) -> GenerationJob:
         """Delegate to GrokJobService.create_image_job."""
         input_image_url = await self._resolve_input_image_url(request, session)
@@ -122,6 +126,7 @@ class GrokGenerationProvider:
             billing_service=billing_service,
             account_id=account_id,
             token_cost=token_cost,
+            product_id=product_id,
         )
         if job is None:
             raise ValueError("Grok image job creation returned None")
@@ -136,6 +141,7 @@ class GrokGenerationProvider:
         billing_service: BillingService,
         account_id: UUID,
         token_cost: int,
+        product_id: str,
     ) -> GenerationJob:
         """Delegate to GrokJobService.start_video_job."""
         input_image_url = await self._resolve_input_image_url(request, session)
@@ -155,6 +161,7 @@ class GrokGenerationProvider:
             billing_service=billing_service,
             account_id=account_id,
             token_cost=token_cost,
+            product_id=product_id,
         )
         if job is None:
             raise ValueError("Grok video job creation returned None")

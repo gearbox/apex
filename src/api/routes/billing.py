@@ -227,6 +227,7 @@ class BillingController(Controller):
         session: AsyncSession,
         billing_service: BillingService,
         payment_service: PaymentService,
+        product_id: str,
     ) -> Response[StripeCheckoutResponse]:
         """Create a Stripe checkout session for token purchase."""
         account = await billing_service.resolve_account_for_user(current_user_id, session=session)
@@ -235,6 +236,7 @@ class BillingController(Controller):
             data.package_id,
             current_user_id,
             session=session,
+            product_id=product_id,
         )
         await session.commit()
         return Response(
@@ -254,6 +256,7 @@ class BillingController(Controller):
         session: AsyncSession,
         billing_service: BillingService,
         payment_service: PaymentService,
+        product_id: str,
     ) -> Response[NowPaymentsInvoiceResponse]:
         """Create a NowPayments invoice for token purchase."""
         account = await billing_service.resolve_account_for_user(current_user_id, session=session)
@@ -263,6 +266,7 @@ class BillingController(Controller):
             data.pay_currency,
             current_user_id,
             session=session,
+            product_id=product_id,
         )
         await session.commit()
         return Response(

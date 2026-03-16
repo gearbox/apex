@@ -24,6 +24,7 @@ from litestar.status_codes import (
 
 from src.api.dependencies.common import dependencies, init_services, shutdown_services
 from src.api.middleware.logging import RequestLoggingMiddleware
+from src.api.middleware.product import ProductMiddleware
 from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_config
 from src.api.routes.admin import AdminController
 from src.api.routes.auth import AuthController
@@ -89,8 +90,9 @@ def http_exception_handler(request: Request[Any, Any, Any], exc: HTTPException) 
 
 
 def insufficient_balance_handler(
-    request: Request[Any, Any, Any], exc: InsufficientBalanceError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: InsufficientBalanceError,
+) -> Response[Any]:
     return _error(
         "insufficient_balance",
         str(exc),
@@ -100,32 +102,37 @@ def insufficient_balance_handler(
 
 
 def account_not_found_handler(
-    request: Request[Any, Any, Any], exc: AccountNotFoundError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: AccountNotFoundError,
+) -> Response[Any]:
     return _error("account_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
 def account_inactive_handler(
-    request: Request[Any, Any, Any], exc: AccountInactiveError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: AccountInactiveError,
+) -> Response[Any]:
     return _error("account_inactive", str(exc), HTTP_403_FORBIDDEN)
 
 
 def refund_not_eligible_handler(
-    request: Request[Any, Any, Any], exc: RefundNotEligibleError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: RefundNotEligibleError,
+) -> Response[Any]:
     return _error("refund_not_eligible", str(exc), HTTP_409_CONFLICT)
 
 
 def price_not_found_handler(
-    request: Request[Any, Any, Any], exc: PriceNotFoundError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: PriceNotFoundError,
+) -> Response[Any]:
     return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
 def moderation_error_handler(
-    request: Request[Any, Any, Any], exc: ModerationError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: ModerationError,
+) -> Response[Any]:
     return _error(
         "moderation",
         str(exc),
@@ -135,20 +142,23 @@ def moderation_error_handler(
 
 
 def payment_verification_handler(
-    request: Request[Any, Any, Any], exc: PaymentVerificationError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: PaymentVerificationError,
+) -> Response[Any]:
     return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
 
 
 def organization_permission_handler(
-    request: Request[Any, Any, Any], exc: OrganizationPermissionError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: OrganizationPermissionError,
+) -> Response[Any]:
     return _error("permission_denied", str(exc), HTTP_403_FORBIDDEN)
 
 
 def organization_balance_handler(
-    request: Request[Any, Any, Any], exc: OrganizationBalanceError
-) -> Response[Any]:  # noqa: ARG001
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: OrganizationBalanceError,
+) -> Response[Any]:
     return _error(
         "organization_balance_nonzero",
         str(exc),
@@ -276,6 +286,7 @@ def create_app() -> Litestar:
         dependencies=dependencies,
         lifespan=[lifespan],
         middleware=[
+            ProductMiddleware,
             RequestLoggingMiddleware,
             DefineMiddleware(
                 RateLimitMiddleware,

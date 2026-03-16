@@ -54,6 +54,12 @@ class UserImage(Base):
         index=True,
     )
 
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
+    )
+
     # Storage location
     storage_key: Mapped[str] = mapped_column(
         String(512),
@@ -117,6 +123,12 @@ class GenerationJob(Base):
         nullable=False,
         index=True,
     )
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
+    )
+
     # Provider and model tracking
     provider: Mapped[str] = mapped_column(
         String(20),
@@ -240,6 +252,12 @@ class GenerationOutput(Base):
         PG_UUID(as_uuid=True),
         ForeignKey("generation_jobs.id", ondelete="CASCADE"),
         nullable=False,
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
     )
 
     # Optional link to input image (for i2i)

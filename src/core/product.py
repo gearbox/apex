@@ -1,0 +1,149 @@
+"""Product configuration registry.
+
+Each product defines its own policies for auth, models, content, billing,
+and rate limits. Loaded once at startup, immutable at runtime.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+
+from src.core.enums import ModelType, Product
+
+
+class AgeGatePolicy(str, Enum):
+    """Age verification requirements."""
+
+    NONE = "none"
+    CHECKBOX = "checkbox"  # Simple "I am 18+" confirmation
+    DATE_OF_BIRTH = "date_of_birth"  # DOB entry with validation
+    # IDENTITY_VERIFICATION = "identity_verification"  # Future: Jumio/Veriff
+
+
+class AuthMethod(str, Enum):
+    """Supported authentication methods."""
+
+    EMAIL_PASSWORD = "email_password"
+    GOOGLE_OAUTH = "google_oauth"
+    APPLE_OAUTH = "apple_oauth"
+    # SSO_SAML = "sso_saml"  # Future: enterprise SSO
+
+
+class PaymentProvider(str, Enum):
+    """Supported payment providers."""
+
+    STRIPE = "stripe"
+    NOWPAYMENTS = "nowpayments"  # Crypto
+
+
+class ContentRating(str, Enum):
+    """Content rating levels."""
+
+    SFW = "sfw"  # Safe for work only
+    PERMISSIVE = "permissive"  # Adult content allowed with age gate
+
+
+@dataclass(frozen=True)
+class ContentPolicyConfig:
+    """Content moderation policy per product."""
+
+    rating: ContentRating
+    allow_nsfw_generation: bool
+    allow_nsfw_uploads: bool
+    require_pre_moderation: bool  # Run content safety checks before generation
+    max_prompt_length: int = 4096
+
+
+@dataclass(frozen=True)
+class ProductRateLimits:
+    """Rate limit configuration per product.
+
+    Format: "N/period" compatible with the `limits` library.
+    """
+
+    generation_per_user: str = "60/hour"
+    generation_per_user_burst: str = "10/minute"
+    upload_per_user: str = "100/hour"
+    api_global: str = "1000/minute"
+
+
+@dataclass(frozen=True)
+class StripeConfig:
+    """Per-product Stripe configuration.
+
+    Actual keys come from Settings (env vars). This just holds
+    the env var names to look up, plus product-specific Stripe metadata.
+    """
+
+    secret_key_env: str  # e.g. "stripe_secret_key_vex"
+    webhook_secret_env: str  # e.g. "stripe_webhook_secret_vex"
+    publishable_key_env: str  # e.g. "stripe_publishable_key_vex"
+
+
+@dataclass(frozen=True)
+class NowPaymentsConfig:
+    """Per-product NowPayments configuration."""
+
+    api_key_env: str  # e.g. "nowpayments_api_key_vex"
+    ipn_secret_env: str  # e.g. "nowpayments_ipn_secret_vex"
+
+
+@dataclass(frozen=True)
+class ProductConfig:
+    """Complete configuration for a product.
+
+    Immutable at runtime. Loaded once at startup from the product registry.
+    """
+
+    product: Product
+    slug: str
+    display_name: str
+    domains: frozenset[str]
+
+    # Auth
+    age_gate: AgeGatePolicy
+    allowed_auth_methods: frozenset[AuthMethod]
+
+    # Models — None means "all enabled models", otherwise explicit allowlist
+    allowed_models: frozenset[ModelType] | None = None
+    blocked_models: frozenset[ModelType] = field(default_factory=frozenset)
+
+    # Content
+    content_policy: ContentPolicyConfig = field(
+        default_factory=lambda: ContentPolicyConfig(
+            rating=ContentRating.SFW,
+            allow_nsfw_generation=False,
+            allow_nsfw_uploads=False,
+            require_pre_moderation=True,
+        )
+    )
+
+    # Billing
+    payment_providers: frozenset[PaymentProvider] = field(
+        default_factory=lambda: frozenset({PaymentProvider.STRIPE})
+    )
+    stripe_config: StripeConfig | None = None
+    nowpayments_config: NowPaymentsConfig | None = None
+
+    # Rate limits
+    rate_limits: ProductRateLimits = field(default_factory=ProductRateLimits)
+
+    # Feature flags — extensible set of feature slugs
+    features: frozenset[str] = field(default_factory=frozenset)
+
+    def is_model_allowed(self, model: ModelType) -> bool:
+        """Check if a model is accessible on this product."""
+        if model in self.blocked_models:
+            return False
+        if self.allowed_models is not None:
+            return model in self.allowed_models
+        return True
+
+    def has_feature(self, feature: str) -> bool:
+        """Check if a feature flag is enabled for this product."""
+        return feature in self.features
+
+    def supports_payment_provider(self, provider: PaymentProvider) -> bool:
+        """Check if a payment provider is enabled for this product."""
+        return provider in self.payment_providers

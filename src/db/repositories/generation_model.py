@@ -9,6 +9,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.enums import ModelType
 from src.db.models.generation_model import GenerationModel
 
 __all__ = ["GenerationModelRepository"]
@@ -37,6 +38,29 @@ class GenerationModelRepository:
             .order_by(GenerationModel.provider, GenerationModel.model_key)
         )
         return result.scalars().all()
+
+    async def list_enabled_for_product(self, product_config: object) -> list[GenerationModel]:
+        """List models that are both DB-enabled AND allowed by product config.
+
+        Args:
+            product_config: ProductConfig instance with is_model_allowed() method.
+
+        Returns:
+            List of GenerationModel records accessible for the product.
+        """
+        from src.core.product import ProductConfig
+
+        assert isinstance(product_config, ProductConfig)
+        db_models = await self.list_enabled()
+        allowed: list[GenerationModel] = []
+        for m in db_models:
+            try:
+                model_type = ModelType(m.model_key)
+            except ValueError:
+                continue
+            if product_config.is_model_allowed(model_type):
+                allowed.append(m)
+        return allowed
 
     async def get_by_key(self, model_key: str) -> GenerationModel | None:
         """Fetch a single model by its model_key."""

@@ -94,6 +94,7 @@ class StorageRepository:
         size_bytes: int,
         format: str,
         expires_at: datetime,
+        product_id: str,
     ) -> UserImage:
         """Create a new user upload record.
 
@@ -106,6 +107,7 @@ class StorageRepository:
             size_bytes: File size.
             format: Image format (png, jpeg, webp).
             expires_at: When the upload should be cleaned up.
+            product_id: Product this upload belongs to.
 
         Returns:
             Created UserImage instance.
@@ -119,6 +121,7 @@ class StorageRepository:
             size_bytes=size_bytes,
             format=format,
             expires_at=expires_at,
+            product_id=product_id,
         )
         self._session.add(upload)
         await self._session.flush()
@@ -278,6 +281,7 @@ class StorageRepository:
         user_id: UUID,
         name: str,
         prompt: str,
+        product_id: str,
         generation_type: GenerationType = GenerationType.I2I,
         status: JobStatus = JobStatus.PENDING,
         provider: Provider = Provider.AISHA,
@@ -291,6 +295,7 @@ class StorageRepository:
             user_id: Owner of the job.
             name: Job name.
             prompt: Generation prompt.
+            product_id: Product this job belongs to.
             generation_type: Type of generation (t2i, i2i, t2v, i2v).
             status: Initial status.
             provider: Generation provider (aisha, grok).
@@ -310,6 +315,7 @@ class StorageRepository:
             provider=provider,
             model=model,
             aspect_ratio=aspect_ratio,
+            product_id=product_id,
         )
         self._session.add(job)
         await self._session.flush()
@@ -453,6 +459,7 @@ class StorageRepository:
         format: str,
         output_index: int,
         expires_at: datetime,
+        product_id: str,
         input_image_id: UUID | None = None,
         is_thumbnail: bool = False,
     ) -> GenerationOutput:
@@ -468,6 +475,7 @@ class StorageRepository:
             format: Image format.
             output_index: Index in batch (0-based).
             expires_at: When the output should be cleaned up.
+            product_id: Product this output belongs to.
             input_image_id: Associated input image (for i2i).
             is_thumbnail: Whether this output is a thumbnail (e.g. video poster frame).
 
@@ -486,6 +494,7 @@ class StorageRepository:
             expires_at=expires_at,
             input_image_id=input_image_id,
             is_thumbnail=is_thumbnail,
+            product_id=product_id,
         )
         self._session.add(output)
         await self._session.flush()

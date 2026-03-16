@@ -34,14 +34,16 @@ class BillingService:
     """Service for token account and transaction operations."""
 
     async def get_or_create_personal_account(
-        self, user_id: UUID, *, session: AsyncSession
+        self, user_id: UUID, *, session: AsyncSession, product_id: str
     ) -> TokenAccount:
         """Idempotent — returns existing account or creates new one."""
         repo = BillingRepository(session)
         account = await repo.get_account_by_user(user_id)
         if account is not None:
             return account
-        return await repo.create_personal_account(id=new_id(), user_id=user_id)
+        return await repo.create_personal_account(
+            id=new_id(), user_id=user_id, product_id=product_id
+        )
 
     async def resolve_account_for_user(
         self, user_id: UUID, *, session: AsyncSession
@@ -163,6 +165,7 @@ class BillingService:
         *,
         metadata: dict[str, Any],
         session: AsyncSession,
+        product_id: str,
     ) -> TokenTransaction:
         """Atomically check balance and create a debit transaction.
 
@@ -202,6 +205,7 @@ class BillingService:
             job_id=job_id,
             description="Generation charge",
             metadata=metadata,
+            product_id=product_id,
         )
 
         logger.info(
@@ -223,6 +227,7 @@ class BillingService:
         *,
         description: str,
         session: AsyncSession,
+        product_id: str,
     ) -> TokenTransaction:
         """Create a refund (positive) transaction linked to job_id.
 
@@ -257,6 +262,7 @@ class BillingService:
             balance_after=new_balance,
             job_id=job_id,
             description=description,
+            product_id=product_id,
         )
 
         logger.info(
@@ -279,6 +285,7 @@ class BillingService:
         description: str,
         payment_provider: str = "",
         session: AsyncSession,
+        product_id: str,
     ) -> TokenTransaction:
         """Credit tokens to an account from a payment."""
         repo = BillingRepository(session)
@@ -298,6 +305,7 @@ class BillingService:
             balance_after=new_balance,
             payment_id=payment_id,
             description=description,
+            product_id=product_id,
         )
 
         logger.info(
@@ -319,6 +327,7 @@ class BillingService:
         *,
         description: str,
         session: AsyncSession,
+        product_id: str,
     ) -> TokenTransaction:
         """Admin adjustment: positive = credit, negative = debit.
 
@@ -344,6 +353,7 @@ class BillingService:
             balance_after=new_balance,
             description=description,
             created_by=admin_id,
+            product_id=product_id,
         )
 
         logger.info(

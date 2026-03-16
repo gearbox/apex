@@ -84,9 +84,7 @@ def _service(
 
 def _history_with_outputs(prompt_id: str, filenames: list[str]) -> dict:
     outputs: dict = {
-        str(i): {
-            "images": [{"filename": fname, "subfolder": "", "type": "output"}]
-        }
+        str(i): {"images": [{"filename": fname, "subfolder": "", "type": "output"}]}
         for i, fname in enumerate(filenames)
     }
     return {prompt_id: {"outputs": outputs}}

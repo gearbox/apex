@@ -6,8 +6,9 @@ from collections.abc import Sequence
 from typing import Annotated, Any
 from uuid import UUID
 
+import msgspec
 import structlog
-from litestar import Controller, Request, Response, post
+from litestar import Controller, Request, Response, get, post
 from litestar.di import Provide
 from litestar.params import Body
 from litestar.status_codes import (
@@ -44,9 +45,32 @@ from src.api.services.email_verification import (
     InvalidTokenError,
     UserNotFoundError,
 )
+from src.core.product import ProductConfig
 from src.db.repositories.user import UserRepository
 
 logger = structlog.get_logger(__name__)
+
+
+class ProductInfoResponse(msgspec.Struct, kw_only=True):
+    """Product context returned by GET /v1/auth/product-info."""
+
+    product: str
+    """Product slug, e.g. 'vex' or 'synthara'."""
+
+    display_name: str
+    """Human-readable product name."""
+
+    age_gate: str
+    """Age verification requirement: 'none' | 'checkbox' | 'date_of_birth'."""
+
+    allowed_auth_methods: list[str]
+    """Authentication methods enabled for this product."""
+
+    content_rating: str
+    """Content rating: 'sfw' | 'permissive'."""
+
+    payment_providers: list[str]
+    """Enabled payment providers for this product."""
 
 
 class AuthController(Controller):
@@ -60,6 +84,7 @@ class AuthController(Controller):
         self,
         data: Annotated[RegisterRequest, Body()],
         auth_service: AuthService,
+        product_id: str,
     ) -> Response[TokenResponse | ErrorEnvelope]:
         """Register a new user account.
 
@@ -69,6 +94,7 @@ class AuthController(Controller):
             user, tokens = await auth_service.register(
                 email=data.email,
                 password=data.password,
+                product_id=product_id,
                 display_name=data.display_name,
             )
 
@@ -182,6 +208,7 @@ class AuthController(Controller):
         request: Request[Any, Any, Any],
         data: Annotated[LoginRequest, Body()],
         auth_service: AuthService,
+        product_id: str,
     ) -> Response[TokenResponse | ErrorEnvelope]:
         """Authenticate user and return tokens.
 
@@ -200,6 +227,7 @@ class AuthController(Controller):
             user, tokens = await auth_service.login(
                 email=data.email,
                 password=data.password,
+                product_id=product_id,
                 user_agent=user_agent,
                 ip_address=ip_address,
             )
@@ -386,3 +414,23 @@ class AuthController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
+
+    @get("/product-info")
+    async def product_info(
+        self,
+        product_config: ProductConfig,
+    ) -> ProductInfoResponse:
+        """Return product context for the current origin.
+
+        Public endpoint — no authentication required.
+        The frontend calls this on load to configure the UI
+        (age gate requirements, allowed auth methods, content rating).
+        """
+        return ProductInfoResponse(
+            product=product_config.slug,
+            display_name=product_config.display_name,
+            age_gate=product_config.age_gate.value,
+            allowed_auth_methods=[m.value for m in product_config.allowed_auth_methods],
+            content_rating=product_config.content_policy.rating.value,
+            payment_providers=[p.value for p in product_config.payment_providers],
+        )

@@ -53,10 +53,41 @@ GET /v1/jobs?limit=20&offset=40
 
 ---
 
+## 0. Multi-Product Architecture
+
+The backend serves two distinct products from the same codebase:
+
+| Product | Slug | Domains | Audience | Content |
+|---------|------|---------|----------|---------|
+| **vex.pics** | `vex` | `vex.pics`, `www.vex.pics`, `app.vex.pics` | Consumer / creator | Permissive — NSFW-capable models available |
+| **Synthara** | `synthara` | `synthara.app`, `www.synthara.app`, `app.synthara.app` | Enterprise / business | SFW only, professional |
+
+### Product Resolution
+
+Every request is resolved to a product via:
+1. `Origin` header domain (preferred)
+2. `Host` header domain
+3. `X-Product-Id` header (`vex` or `synthara`) — dev fallback
+4. `localhost` / `127.0.0.1` / `0.0.0.0` → uses `DEFAULT_PRODUCT` env var (default: `vex`)
+
+If no product can be resolved: `400 Bad Request` with `{ "error": "unknown_product" }`.
+
+The response always includes `X-Product-Id` header for debugging.
+
+### User Scoping
+
+Accounts are **product-scoped** — the same email address can register independently on both products. Users cannot authenticate across products.
+
+### JWT Token Scoping
+
+JWT tokens embed a `product_id` claim. Tokens issued for one product are rejected on the other product.
+
+---
+
 ## 1. Base URL & CORS
 
 - **Local dev:** `http://localhost:8000`
-- **Production:** `https://api.apex.example.com` (configure via `VITE_API_BASE_URL`)
+- **Production:** Determined by `Origin`/`Host` header per-product (no single base URL)
 - **CORS:** Backend allows `*` origins in dev; tighten for production
 
 ---
@@ -73,13 +104,28 @@ GET /v1/jobs?limit=20&offset=40
 
 ### 2.2 Auth Endpoints
 
+#### `GET /v1/auth/product-info`
+
+```
+Response: {
+  product: string,              // "vex" | "synthara"
+  display_name: string,         // e.g. "vex.pics"
+  age_gate: string,             // "none" | "checkbox" | "date_of_birth"
+  allowed_auth_methods: string[],  // e.g. ["email_password", "google_oauth"]
+  content_rating: string,       // "sfw" | "permissive"
+  payment_providers: string[]   // e.g. ["stripe", "nowpayments"]
+}
+Note:     Public endpoint — no auth needed. Frontend calls this on load.
+```
+
 #### `POST /v1/auth/register`
 
 ```
-Request:  { email: string, password: string, display_name?: string }
+Request:  { email: string, password: string, display_name?: string, age_confirmed?: bool, date_of_birth?: date }
 Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime }
 Status:   201 Created
-Errors:   400 (validation), 409 email_exists
+Errors:   400 (validation), 409 email_exists, 403 age_verification_required
+Note:     age_confirmed required for vex.pics (age_gate=checkbox). date_of_birth for date_of_birth mode.
 ```
 
 #### `POST /v1/auth/login`
@@ -251,7 +297,7 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 model_not_allowed (model unavailable on this product), 429 rate_limited, 503 service_unavailable
 ```
 
 ### JobCreatedResponse Schema
@@ -277,6 +323,8 @@ Errors:   400 (model_disabled | validation_error | generation_failed), 402 insuf
 #### `GET /v1/providers`
 
 Auth-optional: unauthenticated callers get the full capabilities catalog; authenticated callers additionally receive `user_context` with their subscription tier.
+
+Models are **filtered by the current product** — Synthara only returns SFW-safe models; vex.pics returns all enabled models.
 
 ```
 Response: {
@@ -942,7 +990,26 @@ Errors:   404
 
 ---
 
-## 11. Enums Reference
+## 11. Product Reference
+
+### Products
+
+| Slug | Display Name | Domains | Content Rating | Age Gate | Payment Providers | Org Feature |
+|------|-------------|---------|---------------|----------|------------------|-------------|
+| `vex` | vex.pics | vex.pics, www.vex.pics, app.vex.pics | permissive | checkbox | Stripe + NowPayments | No |
+| `synthara` | Synthara | synthara.app, www.synthara.app, app.synthara.app | sfw | none | Stripe only | Yes |
+
+### AgeGatePolicy
+
+Values: `"none"`, `"checkbox"`, `"date_of_birth"`
+
+### ContentRating
+
+Values: `"sfw"`, `"permissive"`
+
+---
+
+## 12. Enums Reference
 
 ### ModelType
 
@@ -1021,7 +1088,7 @@ Values: `"en"` (English), `"ru"` (Russian), `"sr"` (Serbian Latin)
 
 ---
 
-## 12. Error Response Format
+## 13. Error Response Format
 
 All non-2xx responses use a single unified envelope:
 
@@ -1038,10 +1105,10 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 
 | HTTP | `error` | `detail` keys |
 |------|---------|---------------|
-| 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed` | — |
+| 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed`, `unknown_product` | — |
 | 401 | `unauthorized`, `invalid_credentials`, `account_inactive`, `token_reuse_detected` | — |
 | 402 | `insufficient_balance` | `balance`, `required` |
-| 403 | `forbidden`, `account_inactive`, `permission_denied` | — |
+| 403 | `forbidden`, `account_inactive`, `permission_denied`, `age_verification_required`, `model_not_allowed` | — |
 | 404 | `not_found`, `account_not_found`, `price_not_found` | — |
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero` | `balance` |
 | 422 | `validation_error`, `moderation` | `provider`, `policy` |
@@ -1079,7 +1146,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 13. Presigned URL Notes
+## 14. Presigned URL Notes
 
 - All R2 presigned URLs are valid for **~1 hour** by default
 - Do **not** aggressively cache them — use `staleTime` of ~30 minutes in TanStack Query
@@ -1090,7 +1157,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 14. Rate Limits
+## 15. Rate Limits
 
 | Endpoint | Limit |
 |----------|-------|
@@ -1103,7 +1170,7 @@ Rate limit headers are **not currently exposed** in responses. The frontend shou
 
 ---
 
-## 15. Health Check
+## 16. Health Check
 
 #### `GET /health/`
 
@@ -1114,7 +1181,7 @@ Note:     Public endpoint, no auth needed
 
 ---
 
-## 16. OpenAPI Documentation Endpoints
+## 17. OpenAPI Documentation Endpoints
 
 The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
 

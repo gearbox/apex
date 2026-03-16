@@ -48,7 +48,9 @@ def admin_user() -> MagicMock:
 
 class TestListModels:
     async def test_returns_all_models_when_enabled_only_false(
-        self, mock_session: AsyncMock, admin_user: MagicMock
+        self,
+        mock_session: AsyncMock,  # noqa: ARG002
+        admin_user: MagicMock,  # noqa: ARG002
     ) -> None:
         """GET /v1/admin/models returns all models when enabled_only=False."""
         db_models = [
@@ -86,7 +88,9 @@ class TestListModels:
         repo.list_enabled.assert_not_awaited()
 
     async def test_calls_list_enabled_when_enabled_only_true(
-        self, mock_session: AsyncMock, admin_user: MagicMock
+        self,
+        mock_session: AsyncMock,  # noqa: ARG002
+        admin_user: MagicMock,  # noqa: ARG002
     ) -> None:
         """GET /v1/admin/models?enabled_only=true calls list_enabled."""
         db_models = [_make_db_model("grok-imagine-image", "grok", is_enabled=True)]
@@ -118,7 +122,9 @@ class TestListModels:
 
 class TestToggleModel:
     async def test_returns_updated_response(
-        self, mock_session: AsyncMock, admin_user: MagicMock
+        self,
+        mock_session: AsyncMock,  # noqa: ARG002
+        admin_user: MagicMock,  # noqa: ARG002
     ) -> None:
         """PATCH /v1/admin/models/{key} returns updated GenerationModelResponse."""
         updated = _make_db_model("grok-imagine-image", "grok", is_enabled=False)
@@ -144,7 +150,9 @@ class TestToggleModel:
         repo.set_enabled.assert_awaited_once_with("grok-imagine-image", False)
 
     async def test_raises_404_for_nonexistent_key(
-        self, mock_session: AsyncMock, admin_user: MagicMock
+        self,
+        mock_session: AsyncMock,  # noqa: ARG002
+        admin_user: MagicMock,  # noqa: ARG002
     ) -> None:
         """PATCH /v1/admin/models/nonexistent raises NotFoundException."""
         from litestar.exceptions import NotFoundException

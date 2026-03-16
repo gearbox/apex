@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import msgspec
-import pytest
 
 from src.api.schemas.providers import (
     ImageConstraints,

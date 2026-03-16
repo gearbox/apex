@@ -60,6 +60,7 @@ class UserContentService:
         storage: R2StorageService,
         session: AsyncSession,
         *,
+        product_id: str,
         retention_days: int = 7,
     ) -> None:
         """Initialize user content service.
@@ -67,10 +68,12 @@ class UserContentService:
         Args:
             storage: R2 storage service for file operations.
             session: Database session for metadata operations.
+            product_id: Product this service is operating on.
             retention_days: Days to retain content before cleanup.
         """
         self._storage = storage
         self._repo = StorageRepository(session)
+        self._product_id = product_id
         self._retention_days = retention_days
 
     # -------------------------------------------------------------------------
@@ -126,6 +129,7 @@ class UserContentService:
                 size_bytes=len(data),
                 format=image_format.value,
                 expires_at=expires_at,
+                product_id=self._product_id,
             )
 
             logger.info(
@@ -354,6 +358,7 @@ class UserContentService:
             output_index=output_index,
             expires_at=expires_at,
             input_image_id=input_image_id,
+            product_id=self._product_id,
         )
 
         logger.info(

@@ -14,6 +14,7 @@ from src.api.services.generation.base import GenerationProvider
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.pricing import PricingService
 from src.core.enums import JobStatus, Provider
+from src.core.product import ProductConfig
 from src.db.repositories.generation_model import GenerationModelRepository
 
 logger = structlog.get_logger(__name__)
@@ -29,6 +30,10 @@ class ProviderUnavailableError(GenerationError):
 
 class ModelDisabledError(GenerationError):
     """Raised when the requested model is disabled via generation_models."""
+
+
+class ModelNotAllowedError(GenerationError):
+    """Raised when the model is not available on the current product."""
 
 
 class GenerationService:
@@ -64,12 +69,19 @@ class GenerationService:
         *,
         user_id: UUID,
         session: AsyncSession,
+        product_config: ProductConfig | None = None,
     ) -> JobCreatedResponse:
         """Execute the full generation pipeline."""
         # 1. Model-generation_type compatibility (declarative, enum-driven)
         if not request.model.supports_generation_type(request.generation_type):
             raise ValueError(
                 f"Model '{request.model.value}' does not support generation type '{request.generation_type.value}'"
+            )
+
+        # 1.5. Product model access check
+        if product_config is not None and not product_config.is_model_allowed(request.model):
+            raise ModelNotAllowedError(
+                f"Model '{request.model.value}' is not available on {product_config.display_name}"
             )
 
         # 2. Cross-cutting input validation
@@ -111,6 +123,7 @@ class GenerationService:
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)
 
         # 8. Submit to provider (with billing saga)
+        product_id = product_config.slug if product_config is not None else "vex"
         job = None
         try:
             job = await provider.submit(
@@ -120,6 +133,7 @@ class GenerationService:
                 billing_service=self._billing,
                 account_id=account.id,
                 token_cost=token_cost,
+                product_id=product_id,
             )
             await session.commit()
 
@@ -131,6 +145,7 @@ class GenerationService:
                         job.id,
                         description=f"Generation failed: {str(exc)[:200]}",
                         session=session,
+                        product_id=product_id,
                     )
                     await session.commit()
                 except Exception as refund_err:

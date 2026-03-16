@@ -30,6 +30,7 @@ async def test_create_user_image(storage_repo: StorageRepository, make_user) -> 
         size_bytes=2048,
         format="png",
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     assert image.id == img_id
     assert image.user_id == user.id
@@ -51,6 +52,7 @@ async def test_create_user_image_duplicate_key_raises(
         size_bytes=100,
         format="png",
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     with pytest.raises(IntegrityError):
         await storage_repo.create_user_image(
@@ -62,6 +64,7 @@ async def test_create_user_image_duplicate_key_raises(
             size_bytes=100,
             format="png",
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
         )
 
 
@@ -102,6 +105,7 @@ async def test_get_user_image_by_key(storage_repo: StorageRepository, make_user)
         size_bytes=512,
         format="png",
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     found = await storage_repo.get_user_image_by_key(key)
     assert found is not None
@@ -155,6 +159,7 @@ async def test_get_expired_images(storage_repo: StorageRepository, make_user) ->
         size_bytes=100,
         format="png",
         expires_at=past,
+        product_id="vex",
     )
     expired = await storage_repo.get_expired_images()
     assert any(img.id == img_id for img in expired)
@@ -174,6 +179,7 @@ async def test_create_job(storage_repo: StorageRepository, make_user) -> None:
         name="My Job",
         prompt="A beautiful landscape",
         generation_type=GenerationType.T2I,
+        product_id="vex",
     )
     assert job.status == "pending"
     assert job.prompt == "A beautiful landscape"
@@ -289,6 +295,7 @@ async def test_create_output(storage_repo: StorageRepository, make_user, make_jo
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     assert output.id == out_id
     assert output.job_id == job.id
@@ -310,6 +317,7 @@ async def test_create_output_invalid_job_raises(storage_repo: StorageRepository,
             format="png",
             output_index=0,
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
         )
 
 
@@ -328,6 +336,7 @@ async def test_get_output_found(storage_repo: StorageRepository, make_user, make
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     found = await storage_repo.get_output(output.id)
     assert found is not None
@@ -357,6 +366,7 @@ async def test_get_output_ownership_enforced(
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     assert await storage_repo.get_output(output.id, user_id=other.id) is None
 
@@ -377,6 +387,7 @@ async def test_list_job_outputs(storage_repo: StorageRepository, make_user, make
             format="png",
             output_index=i,
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
         )
     outputs = await storage_repo.list_job_outputs(job.id)
     assert len(outputs) == 3
@@ -405,6 +416,7 @@ async def test_delete_output(storage_repo: StorageRepository, make_user, make_jo
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     assert await storage_repo.delete_output(output.id) is True
     assert await storage_repo.get_output(output.id) is None
@@ -434,6 +446,7 @@ async def test_delete_outputs_batch(storage_repo: StorageRepository, make_user, 
             format="png",
             output_index=i,
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
         )
         output_ids.append(out_id)
     deleted = await storage_repo.delete_outputs_batch(output_ids)
@@ -456,6 +469,7 @@ async def test_get_expired_outputs(storage_repo: StorageRepository, make_user, m
         format="png",
         output_index=0,
         expires_at=past,
+        product_id="vex",
     )
     expired = await storage_repo.get_expired_outputs()
     assert any(o.id == out_id for o in expired)
@@ -491,6 +505,7 @@ async def test_get_user_storage_stats_counts_files(
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     stats = await storage_repo.get_user_storage_stats(user.id)
     assert stats["upload_count"] >= 1
@@ -520,6 +535,7 @@ async def test_cascade_delete_job_removes_outputs(
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
 
     job_obj = await storage_repo.get_job(job.id)
@@ -555,6 +571,7 @@ async def test_expired_images_count_accuracy(storage_repo: StorageRepository, ma
             size_bytes=100,
             format="png",
             expires_at=past,
+            product_id="vex",
         )
         expired_ids.add(img_id)
 
@@ -569,6 +586,7 @@ async def test_expired_images_count_accuracy(storage_repo: StorageRepository, ma
             size_bytes=100,
             format="png",
             expires_at=future,
+            product_id="vex",
         )
 
     expired = await storage_repo.get_expired_images()

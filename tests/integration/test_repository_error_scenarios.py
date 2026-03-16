@@ -45,6 +45,7 @@ async def test_output_fk_violation_raises(db_session: AsyncSession, make_user) -
             format="png",
             output_index=0,
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
         )
     )
     with pytest.raises(IntegrityError):
@@ -69,6 +70,7 @@ async def test_transaction_zero_amount_check_constraint(
             transaction_type="credit",
             amount=0,
             balance_after=0,
+            product_id="vex",
         )
     )
     with pytest.raises(IntegrityError):
@@ -92,6 +94,7 @@ async def test_personal_account_with_org_id_check_constraint(
             account_type="personal",
             user_id=user.id,
             organization_id=org.id,  # invalid for personal
+            product_id="vex",
         )
     )
     with pytest.raises(IntegrityError):
@@ -115,6 +118,7 @@ async def test_session_usable_after_savepoint_rollback(db_session: AsyncSession,
                 id=uuid4(),
                 email=user1.email,  # duplicate — active unique index
                 password_hash="x",
+                product_id="vex",
             )
         )
         await db_session.flush()
@@ -137,11 +141,11 @@ async def test_duplicate_org_slug_raises(billing_repo: BillingRepository, make_u
     """Creating two organizations with the same slug raises IntegrityError."""
     user = await make_user(email=f"slugdup-{uuid4().hex[:6]}@example.com")
     await billing_repo.create_organization(
-        id=uuid4(), name="Org A", slug="dup-slug", owner_id=user.id
+        id=uuid4(), name="Org A", slug="dup-slug", owner_id=user.id, product_id="vex"
     )
     with pytest.raises(IntegrityError):
         await billing_repo.create_organization(
-            id=uuid4(), name="Org B", slug="dup-slug", owner_id=user.id
+            id=uuid4(), name="Org B", slug="dup-slug", owner_id=user.id, product_id="vex"
         )
 
 
@@ -161,6 +165,7 @@ async def test_large_prompt_stored_without_truncation(
         user_id=user.id,
         name="Big Prompt Job",
         prompt=long_prompt,
+        product_id="vex",
     )
     found = await storage_repo.get_job(job.id)
     assert found is not None
@@ -194,6 +199,7 @@ async def test_refresh_token_expires_at_is_timezone_aware(
         token_hash="tz_hash",
         family_id=uuid4(),
         expires_at=expires,
+        product_id="vex",
     )
     token = await user_repo.get_refresh_token_by_hash("tz_hash")
     assert token is not None
@@ -215,6 +221,7 @@ async def test_user_image_timestamps_are_timezone_aware(
         size_bytes=512,
         format="png",
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     found = await storage_repo.get_user_image(image.id)
     assert found is not None
@@ -239,6 +246,7 @@ async def test_generation_output_timestamps_are_timezone_aware(
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     found = await storage_repo.get_output(output.id)
     assert found is not None
@@ -264,6 +272,7 @@ async def test_user_image_missing_storage_key_raises(db_session: AsyncSession, m
             size_bytes=100,
             format="png",
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
         )
     )
     with pytest.raises(IntegrityError):
@@ -285,6 +294,7 @@ async def test_duplicate_refresh_token_hash_raises(user_repo: UserRepository, ma
         token_hash="shared_hash",
         family_id=uuid4(),
         expires_at=expires,
+        product_id="vex",
     )
     with pytest.raises(IntegrityError):
         await user_repo.create_refresh_token(
@@ -293,6 +303,7 @@ async def test_duplicate_refresh_token_hash_raises(user_repo: UserRepository, ma
             token_hash="shared_hash",
             family_id=uuid4(),
             expires_at=expires,
+            product_id="vex",
         )
 
 
@@ -319,6 +330,7 @@ async def test_duplicate_storage_key_for_output_raises(
         format="png",
         output_index=0,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
     )
     with pytest.raises(IntegrityError):
         await storage_repo.create_output(
@@ -331,6 +343,7 @@ async def test_duplicate_storage_key_for_output_raises(
             format="png",
             output_index=1,
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
         )
 
 

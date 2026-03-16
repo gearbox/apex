@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import structlog
 from litestar.connection import ASGIConnection
 from litestar.exceptions import NotAuthorizedException
 from litestar.handlers import BaseRouteHandler
@@ -12,6 +14,8 @@ from litestar.handlers import BaseRouteHandler
 if TYPE_CHECKING:
     from src.api.security.jwt import JWTService
     from src.db.models import User
+
+logger = structlog.get_logger(__name__)
 
 
 class AuthenticatedUser:
@@ -85,9 +89,32 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
     if jwt_service is None:
         raise RuntimeError("JWT service not configured")
 
-    user_id = jwt_service.get_user_id_from_token(token)
-    if user_id is None:
+    token_payload = jwt_service.decode_access_token(token)
+    if token_payload is None:
         raise NotAuthorizedException(detail="Invalid or expired token")
+
+    try:
+        user_id = UUID(token_payload.sub)
+    except ValueError as exc:
+        raise NotAuthorizedException(detail="Invalid token subject") from exc
+
+    # Validate product_id claim matches request product context
+    request_product_id: str | None = None
+    with contextlib.suppress(Exception):
+        request_product_id = connection.state.get("product_id")
+
+    if request_product_id is not None:
+        token_product_id = token_payload.product_id
+        if token_product_id is None:
+            # Backward compat: missing claim → assume "vex" and log warning
+            # TODO: remove this fallback once all existing tokens have expired
+            logger.warning(
+                "auth.token_missing_product_id",
+                user_id=str(user_id),
+                request_product=request_product_id,
+            )
+        elif token_product_id != request_product_id:
+            raise NotAuthorizedException(detail="Token was issued for a different product")
 
     # Store user_id in connection state for dependency injection
     connection.state["user_id"] = user_id

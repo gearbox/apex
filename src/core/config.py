@@ -271,30 +271,82 @@ class Settings(BaseSettings):
         description="Sender display name shown in email clients.",
     )
 
+    # Product
+    default_product: str = Field(
+        default="vex",
+        description="Default product slug for localhost/dev requests.",
+    )
+
+    # Per-product app URLs (for email links)
+    app_url_vex: str = Field(
+        default="https://vex.pics",
+        description="Base URL for vex.pics frontend (used in email links).",
+    )
+    app_url_synthara: str = Field(
+        default="https://synthara.app",
+        description="Base URL for Synthara frontend (used in email links).",
+    )
+
     # Billing & Payment settings
     grok_moderation_billing_policy: Literal["charge", "refund"] = Field(
         default="charge",
         description="Policy for Grok moderation: 'charge' or 'refund'",
     )
 
-    # Stripe
+    # Stripe (legacy single-product — kept for backward compatibility)
     stripe_secret_key: str = Field(
         default="",
-        description="Stripe secret API key",
+        description="Stripe secret API key (legacy). Prefer per-product keys.",
     )
     stripe_webhook_secret: str = Field(
         default="",
-        description="Stripe webhook endpoint signing secret",
+        description="Stripe webhook endpoint signing secret (legacy). Prefer per-product keys.",
     )
 
-    # NowPayments
+    # Per-product Stripe keys
+    stripe_secret_key_vex: str | None = Field(
+        default=None,
+        description="Stripe secret key for vex.pics",
+    )
+    stripe_webhook_secret_vex: str | None = Field(
+        default=None,
+        description="Stripe webhook secret for vex.pics",
+    )
+    stripe_publishable_key_vex: str | None = Field(
+        default=None,
+        description="Stripe publishable key for vex.pics",
+    )
+    stripe_secret_key_synthara: str | None = Field(
+        default=None,
+        description="Stripe secret key for Synthara",
+    )
+    stripe_webhook_secret_synthara: str | None = Field(
+        default=None,
+        description="Stripe webhook secret for Synthara",
+    )
+    stripe_publishable_key_synthara: str | None = Field(
+        default=None,
+        description="Stripe publishable key for Synthara",
+    )
+
+    # NowPayments (legacy single-product — kept for backward compatibility)
     nowpayments_api_key: str = Field(
         default="",
-        description="NowPayments API key",
+        description="NowPayments API key (legacy). Prefer per-product keys.",
     )
     nowpayments_ipn_secret: str = Field(
         default="",
-        description="NowPayments IPN HMAC secret",
+        description="NowPayments IPN HMAC secret (legacy). Prefer per-product keys.",
+    )
+
+    # Per-product NowPayments keys (vex.pics only — crypto payments for consumers)
+    nowpayments_api_key_vex: str | None = Field(
+        default=None,
+        description="NowPayments API key for vex.pics",
+    )
+    nowpayments_ipn_secret_vex: str | None = Field(
+        default=None,
+        description="NowPayments IPN HMAC secret for vex.pics",
     )
 
     # -------------------------------------------------------------------------
@@ -374,13 +426,20 @@ class Settings(BaseSettings):
 
     @property
     def stripe_configured(self) -> bool:
-        """Check if Stripe is configured."""
-        return bool(self.stripe_secret_key and self.stripe_webhook_secret)
+        """Check if Stripe is configured for at least one product."""
+        per_product = bool(
+            (self.stripe_secret_key_vex and self.stripe_webhook_secret_vex)
+            or (self.stripe_secret_key_synthara and self.stripe_webhook_secret_synthara)
+        )
+        legacy = bool(self.stripe_secret_key and self.stripe_webhook_secret)
+        return per_product or legacy
 
     @property
     def nowpayments_configured(self) -> bool:
-        """Check if NowPayments is configured."""
-        return bool(self.nowpayments_api_key and self.nowpayments_ipn_secret)
+        """Check if NowPayments is configured for at least one product."""
+        per_product = bool(self.nowpayments_api_key_vex and self.nowpayments_ipn_secret_vex)
+        legacy = bool(self.nowpayments_api_key and self.nowpayments_ipn_secret)
+        return per_product or legacy
 
     @property
     def email_configured(self) -> bool:
