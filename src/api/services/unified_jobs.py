@@ -19,9 +19,10 @@ from sqlalchemy.orm import selectinload
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
 from src.api.schemas.pagination import PaginatedResponse, decode_cursor, encode_cursor
+from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.storage import R2StorageService
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.models.storage import GenerationJob
 from src.db.repositories.storage import StorageRepository
 
@@ -45,9 +46,11 @@ class UnifiedJobService:
         *,
         storage: R2StorageService | None,
         grok_job_service: GrokJobService | None,
+        aisha_job_service: AishaJobService | None = None,
     ) -> None:
         self._storage = storage
         self._grok = grok_job_service
+        self._aisha = aisha_job_service
 
     # -------------------------------------------------------------------------
     # Public API
@@ -82,7 +85,7 @@ class UnifiedJobService:
         # background worker being required for MVP.
         if (
             self._grok is not None
-            and job.provider == "grok"
+            and job.provider == Provider.GROK.value
             and job.generation_type in ("t2v", "i2v", "v2v")
             and job.status in (JobStatus.QUEUED.value, JobStatus.RUNNING.value)
         ):
@@ -92,6 +95,19 @@ class UnifiedJobService:
                     job = updated
             except Exception:
                 logger.exception("unified_jobs.poll_on_read_failed", job_id=str(job_id))
+
+        # Poll Aisha image jobs on read — downloads outputs and transitions status.
+        if (
+            self._aisha is not None
+            and job.provider == Provider.AISHA.value
+            and job.status in (JobStatus.QUEUED.value, JobStatus.RUNNING.value)
+        ):
+            try:
+                updated = await self._aisha.poll_image_job(session, job_id)
+                if updated is not None:
+                    job = updated
+            except Exception:
+                logger.exception("unified_jobs.aisha_poll_on_read_failed", job_id=str(job_id))
 
         return await self._build_response(job, session=session)
 

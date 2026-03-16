@@ -1,7 +1,8 @@
-"""Aisha generation provider — adapter for ComfyUI JobManager + WorkflowService."""
+"""Aisha generation provider — adapter for ComfyUI WorkflowService."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -9,9 +10,9 @@ import structlog
 
 from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationRequest
 from src.api.services.comfyui_client import ComfyUIClient
-from src.api.services.job_manager import JobManager
 from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, Provider
+from src.core.uid import new_id
 from src.db import StorageRepository
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ logger = structlog.get_logger(__name__)
 
 
 class AishaGenerationProvider:
-    """Adapts the ComfyUI stack (JobManager + WorkflowService) to the GenerationProvider protocol.
+    """Adapts the ComfyUI stack (WorkflowService) to the GenerationProvider protocol.
 
     Model-generation_type compatibility and n-cap validation are handled
     by the GenerationService orchestrator via ModelType enum properties.
@@ -39,11 +40,9 @@ class AishaGenerationProvider:
     def __init__(
         self,
         comfyui_client: ComfyUIClient,
-        job_manager: JobManager,
         workflow_service: WorkflowService,
     ) -> None:
         self._client = comfyui_client
-        self._job_manager = job_manager
         self._workflow = workflow_service
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
@@ -65,12 +64,11 @@ class AishaGenerationProvider:
     ) -> GenerationJob:
         """Build workflow, queue with ComfyUI, create DB job record.
 
-        NOTE: This method bridges the legacy in-memory JobManager with the
-        database-backed GenerationJob. The in-memory job is still created for
-        the ComfyUI polling flow; the DB job is created for unified job history.
-        Long-term, the in-memory JobManager should be retired in favor of
-        full DB-backed job tracking.
+        The full job lifecycle (polling, output storage, status transitions)
+        is handled DB-side via AishaJobService on subsequent poll-on-read calls.
         """
+        job_id = new_id()
+
         # Map unified request -> legacy GenerationRequest for workflow_service
         legacy_request = GenerationRequest(
             prompt=request.prompt,
@@ -85,11 +83,7 @@ class AishaGenerationProvider:
             steps=request.steps or 12,
         )
 
-        # Create in-memory job (for ComfyUI polling)
-        mem_job = self._job_manager.create_job(legacy_request)
-
-        # Create DB job record (for unified job history)
-        job_id = UUID(mem_job.job_id)
+        # Create DB job record
         repo = StorageRepository(session)
         db_job = await repo.create_job(
             id=job_id,
@@ -126,22 +120,21 @@ class AishaGenerationProvider:
         configured = self._workflow.apply_parameters(
             workflow=workflow,
             request=legacy_request,
-            filename_prefix=f"gen_{mem_job.job_id[:8]}",
+            filename_prefix=f"gen_{str(job_id)[:8]}",
         )
 
         result = await self._client.queue_prompt(configured)
         if prompt_id := result.get("prompt_id"):
-            self._job_manager.set_queued(mem_job.job_id, prompt_id)
             if db_job is not None:
                 db_job.status = JobStatus.QUEUED
+                db_job.started_at = datetime.now(UTC)
                 db_job.external_request_id = prompt_id
-        else:
-            self._job_manager.set_failed(mem_job.job_id, "No prompt_id from ComfyUI")
-            if db_job is not None:
-                db_job.status = JobStatus.FAILED
-                db_job.error_message = "No prompt_id from ComfyUI"
+        elif db_job is not None:
+            db_job.status = JobStatus.FAILED
+            db_job.error_message = "No prompt_id from ComfyUI"
 
         if db_job is None:
             raise ValueError("Failed to create Aisha job record")
 
+        await session.flush()
         return db_job

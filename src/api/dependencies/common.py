@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.rate_limit import init_rate_limiter
 from src.api.security import JWTConfig, JWTService, PasswordService
+from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
 from src.api.services.comfyui_client import ComfyUIClient
@@ -20,7 +21,6 @@ from src.api.services.email_verification import EmailVerificationService
 from src.api.services.generation.service import GenerationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
-from src.api.services.job_manager import JobManager
 from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
@@ -50,7 +50,7 @@ class ServiceContainer:
     """
 
     comfyui_client: ComfyUIClient | None = None
-    job_manager: JobManager | None = None
+    aisha_job_service: AishaJobService | None = None
     workflow_service: WorkflowService | None = None
     r2_storage: R2StorageService | None = None
     db_manager: DatabaseManager | None = None
@@ -84,20 +84,6 @@ async def get_comfyui_client() -> ComfyUIClient:
     if _services.comfyui_client is None:
         raise RuntimeError("ComfyUI client not initialized")
     return _services.comfyui_client
-
-
-async def get_job_manager() -> JobManager:
-    """Provide job manager instance.
-
-    Returns:
-        Singleton job manager.
-
-    Raises:
-        RuntimeError: If manager not initialized.
-    """
-    if _services.job_manager is None:
-        raise RuntimeError("Job manager not initialized")
-    return _services.job_manager
 
 
 async def get_workflow_service() -> WorkflowService:
@@ -364,9 +350,6 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     await _services.comfyui_client.connect()
     logger.info("comfyui.connected", url=settings.comfyui_base_url)
 
-    # Initialize job manager with client
-    _services.job_manager = JobManager(_services.comfyui_client)
-
     # Initialize workflow service
     _services.workflow_service = WorkflowService(base_path=base_path)
 
@@ -384,6 +367,15 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         logger.info("r2.initialized", bucket=settings.r2_bucket_name)
     else:
         logger.warning("r2.not_configured")
+
+    # Initialize Aisha job service (if R2 is configured)
+    if _services.r2_storage is not None and _services.comfyui_client is not None:
+        _services.aisha_job_service = AishaJobService(
+            comfyui_client=_services.comfyui_client,
+            storage=_services.r2_storage,
+            retention_days=settings.retention_days,
+        )
+        logger.info("aisha_job_service.initialized")
 
     # Initialize Grok provider (if configured)
     if settings.grok_configured and _services.r2_storage is not None:
@@ -435,6 +427,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     _services.unified_job_service = UnifiedJobService(
         storage=_services.r2_storage,
         grok_job_service=_services.grok_job_service,
+        aisha_job_service=_services.aisha_job_service,
     )
     logger.info("unified_job_service.initialized")
 
@@ -446,7 +439,6 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     generation_providers: dict[Provider, object] = {
         Provider.AISHA: AishaGenerationProvider(
             comfyui_client=_services.comfyui_client,
-            job_manager=_services.job_manager,
             workflow_service=_services.workflow_service,
         )
     }
@@ -519,7 +511,6 @@ dependencies = {
     "user_service": Provide(get_user_service),
     # Core services
     "comfyui_client": Provide(get_comfyui_client),
-    "job_manager": Provide(get_job_manager),
     "workflow_service": Provide(get_workflow_service),
     "settings": Provide(provide_settings, sync_to_thread=False),
     # Storage services
