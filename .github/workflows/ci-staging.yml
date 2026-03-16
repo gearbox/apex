@@ -195,16 +195,16 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Job 4: Build & Push Docker Image
-  # Only runs on `develop` branch (not PRs), after tests pass
+  # Only runs on `master` branch (not PRs), after tests pass
   # ---------------------------------------------------------------------------
   build-and-push:
     name: Build & Push Image
     runs-on: ubuntu-latest
     needs: [unit-tests, integration-tests]
 
-    # Only push image on actual commits to develop (not PRs)
+    # Only push image on actual commits to master (not PRs)
     if: |
-      github.event_name == 'push' && github.ref == 'refs/heads/develop' ||
+      github.event_name == 'push' && github.ref == 'refs/heads/master' ||
       github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
 
     permissions:
@@ -237,12 +237,12 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Always tag as :staging for develop branch
+            # Always tag as :staging for master branch
             type=raw,value=staging,enable={{is_default_branch}}
-            type=raw,value=staging,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=raw,value=staging,enable=${{ github.ref == 'refs/heads/master' }}
             # Also tag with short SHA for traceability (e.g. :sha-abc1234)
             type=sha,prefix=sha-,format=short
-            # Tag with branch name (e.g. :develop)
+            # Tag with branch name (e.g. :master)
             type=ref,event=branch
 
       - name: Build and push Docker image
