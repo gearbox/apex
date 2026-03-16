@@ -63,7 +63,7 @@ jobs:
           enable-cache: true           # Cache uv's package cache between runs
 
       - name: Install dependencies
-        run: uv sync --frozen          # Respects uv.lock — no surprise upgrades
+        run: uv sync --frozen --extra dev  # Include dev extras (ruff, mypy, pytest-cov)
 
       - name: Run ruff linter
         run: uv run ruff check src/
@@ -96,7 +96,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra dev
 
       - name: Run unit tests
         run: |
@@ -159,7 +159,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra dev
 
       - name: Run database migrations
         run: uv run alembic upgrade head
