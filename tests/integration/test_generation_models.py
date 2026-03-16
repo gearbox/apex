@@ -57,12 +57,19 @@ async def test_list_all_includes_disabled_rows(
 async def test_list_enabled_returns_only_enabled_seeded_rows(
     generation_model_repo: GenerationModelRepository,
 ) -> None:
-    """list_enabled returns the seeded rows which all start enabled."""
+    """list_enabled returns only seeded rows with is_enabled=True.
+
+    Per migration 002, only grok-imagine-image and grok-imagine-video are
+    enabled by default. aisha-image and aisha-video are disabled until their
+    workflows are production-ready.
+    """
     rows = await generation_model_repo.list_enabled()
     assert all(r.is_enabled for r in rows)
     keys = {r.model_key for r in rows}
-    assert "aisha-image" in keys
     assert "grok-imagine-image" in keys
+    assert "grok-imagine-video" in keys
+    assert "aisha-image" not in keys
+    assert "aisha-video" not in keys
 
 
 async def test_list_enabled_excludes_disabled_row(

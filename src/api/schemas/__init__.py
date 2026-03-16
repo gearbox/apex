@@ -7,7 +7,6 @@ from .generation import (
     GenerationType,
     HealthResponse,
     ImageUploadResponse,
-    JobResponse,
     JobStatus,
     ModelType,
 )
@@ -22,7 +21,6 @@ __all__ = [
     "HealthResponse",
     "ImageUploadResponse",
     "JobCreatedResponse",
-    "JobResponse",
     "JobStatus",
     "ModelType",
     "PaginatedResponse",

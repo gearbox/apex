@@ -3,7 +3,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-03-15
+> **Last synced:** 2026-03-16
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -323,7 +323,6 @@ UserContext: {
 ```
 
 > **Deprecated flat format** (`providers` + `models` as a flat list) was removed in v2.
-> The old `GET /v1/grok` endpoint is still available for backward compatibility (see section 11).
 
 ---
 
@@ -943,100 +942,7 @@ Errors:   404
 
 ---
 
-## 11. Legacy Generation *(deprecated)*
-
-> These routes are kept for backwards compatibility. Prefer `POST /v1/generate` for all new code.
-
-#### `POST /v1/legacy/generate`
-
-```
-Request:  {
-  prompt: string (1–4096 chars),
-  name?: string,
-  negative_prompt?: string (max 2048 chars),
-  height?: int (256–2048, default 1024),
-  aspect_ratio?: AspectRatio (default "1:1"),
-  model_type?: ModelType (default "aisha-image"),
-  generation_type?: GenerationType (default "t2i"),
-  max_images?: int (1–4, default 1),
-  seed?: int,
-  steps?: int (1–20, default 12)
-}
-Response: { job_id: UUID, status: JobStatus, name: string, created_at: datetime, message?: string }
-```
-
-#### `POST /v1/legacy/generate/with-images`
-
-```
-Request:  multipart/form-data — same fields as above + image1?, image2? (file uploads)
-Response: same as /v1/legacy/generate
-```
-
-### Grok Provider *(deprecated)*
-
-> Prefer `POST /v1/generate` with `model: ModelType` for new code.
-
-#### `GET /v1/grok`
-
-```
-Response: {
-  provider: "grok",
-  name: "xAI Grok",
-  available: bool,
-  models: GrokModelInfo[]
-}
-
-GrokModelInfo: {
-  model: ModelType,
-  name: string,
-  description: string,
-  supports_t2i: bool,
-  supports_i2i: bool,
-  supports_t2v: bool,
-  supports_i2v: bool,
-  supports_v2v: bool,
-  max_images: int
-}
-```
-
-#### `POST /v1/grok/image`
-
-```
-Request:  { prompt: string (1–4096 chars), model?: ModelType, n?: int (1–10), aspect_ratio?: AspectRatio, name?: string }
-Response: JobCreatedResponse
-```
-
-#### `POST /v1/grok/image/edit`
-
-```
-Request:  { prompt: string, input_image_id: UUID, model?: ModelType, name?: string }
-Response: JobCreatedResponse
-```
-
-#### `POST /v1/grok/video`
-
-```
-Request:  { prompt: string, model?: ModelType, duration?: int (1–15), aspect_ratio?: AspectRatio, resolution?: VideoResolution, name?: string }
-Response: JobCreatedResponse
-```
-
-#### `POST /v1/grok/video/from-image`
-
-```
-Request:  { prompt: string, input_image_id: UUID, model?: ModelType, duration?: int, aspect_ratio?: AspectRatio, resolution?: VideoResolution, name?: string }
-Response: JobCreatedResponse
-```
-
-#### `POST /v1/grok/video/edit`
-
-```
-Request:  { prompt: string, input_video_url: string, model?: ModelType, name?: string }
-Response: JobCreatedResponse
-```
-
----
-
-## 12. Enums Reference
+## 11. Enums Reference
 
 ### ModelType
 
@@ -1115,7 +1021,7 @@ Values: `"en"` (English), `"ru"` (Russian), `"sr"` (Serbian Latin)
 
 ---
 
-## 13. Error Response Format
+## 12. Error Response Format
 
 All non-2xx responses use a single unified envelope:
 
@@ -1173,7 +1079,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 14. Presigned URL Notes
+## 13. Presigned URL Notes
 
 - All R2 presigned URLs are valid for **~1 hour** by default
 - Do **not** aggressively cache them — use `staleTime` of ~30 minutes in TanStack Query
@@ -1184,7 +1090,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 15. Rate Limits
+## 14. Rate Limits
 
 | Endpoint | Limit |
 |----------|-------|
@@ -1197,7 +1103,7 @@ Rate limit headers are **not currently exposed** in responses. The frontend shou
 
 ---
 
-## 16. Health Check
+## 15. Health Check
 
 #### `GET /health/`
 
@@ -1208,7 +1114,7 @@ Note:     Public endpoint, no auth needed
 
 ---
 
-## 17. OpenAPI Documentation Endpoints
+## 16. OpenAPI Documentation Endpoints
 
 The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
 

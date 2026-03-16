@@ -9,13 +9,11 @@ __all__ = [
     "GenerationType",
     "HealthResponse",
     "ImageUploadResponse",
-    "JobResponse",
     "JobStatus",
     "ModelType",
 ]
 
 import random
-from datetime import datetime
 from typing import Annotated, Literal
 
 import msgspec
@@ -68,16 +66,6 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     def get_calculated_width(self) -> int:
         """Calculate width from height and aspect ratio."""
         return self.aspect_ratio.calculate_width(self.height)
-
-
-class JobResponse(msgspec.Struct, kw_only=True):
-    """Response schema for job creation."""
-
-    job_id: str
-    status: JobStatus
-    name: str
-    created_at: datetime
-    message: str | None = None
 
 
 class ImageUploadResponse(msgspec.Struct, kw_only=True):

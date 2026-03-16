@@ -31,12 +31,6 @@ from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.generation import (
     HealthController,
     ImageController,
-    LegacyGenerationController,
-)
-from src.api.routes.grok import (
-    GrokImageController,
-    GrokProviderController,
-    GrokVideoController,
 )
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
@@ -264,11 +258,6 @@ def create_app() -> Litestar:
             ImageController,
             # Storage
             StorageController,
-            # Legacy generation (deprecated)
-            LegacyGenerationController,  # POST /v1/legacy/generate
-            GrokProviderController,
-            GrokImageController,
-            GrokVideoController,
             # Jobs (unified, cross-provider)
             UnifiedJobController,
         ],
