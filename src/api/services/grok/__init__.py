@@ -26,11 +26,11 @@ from src.core.enums import AspectRatio, ModelType, VideoResolution
 from .enums import ResponseImageFormat
 
 if TYPE_CHECKING:
-    from xai_sdk import AsyncClient as XAIAsyncClient  # type: ignore[import-untyped]
-    from xai_sdk.aio.image import ImageResponse  # type: ignore[import-untyped]
-    from xai_sdk.aio.video import VideoResponse  # type: ignore[import-untyped]
-    from xai_sdk.proto.v6.deferred_pb2 import StartDeferredResponse  # type: ignore[import-untyped]
-    from xai_sdk.proto.v6.video_pb2 import GetDeferredVideoResponse  # type: ignore[import-untyped]
+    from xai_sdk import AsyncClient as XAIAsyncClient
+    from xai_sdk.aio.image import ImageResponse
+    from xai_sdk.aio.video import VideoResponse
+    from xai_sdk.proto.v6.deferred_pb2 import StartDeferredResponse
+    from xai_sdk.proto.v6.video_pb2 import GetDeferredVideoResponse
 
 logger = structlog.get_logger(__name__)
 
