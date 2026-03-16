@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -146,7 +146,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -217,14 +217,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Speeds up multi-platform builds significantly
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -233,7 +233,7 @@ jobs:
       # Generates image tags and labels from git metadata
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -247,7 +247,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           dockerfile: Dockerfile
@@ -272,7 +272,7 @@ jobs:
     needs: [build-and-push]
     environment:
       name: staging
-      url: https://staging.yourdomain.com   # Update to your actual domain
+      url: https://apex.staging.cloudin.space   # Update to your actual domain
 
     steps:
       - name: Trigger Portainer stack redeploy
@@ -298,7 +298,7 @@ jobs:
       - name: Wait for staging to be healthy
         run: |
           echo "Waiting for staging API to become healthy..."
-          STAGING_URL="https://staging.yourdomain.com/health/"  # Update this
+          STAGING_URL="https://apex.staging.cloudin.space/health/"  # Update this
           MAX_ATTEMPTS=24    # 24 × 10s = 4 minutes max wait
           ATTEMPT=0
 
@@ -320,7 +320,7 @@ jobs:
           echo "Staging deployment complete!"
           echo "SHA: ${{ github.sha }}"
           echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
-          echo "URL: https://staging.yourdomain.com"
+          echo "URL: https://apex.staging.cloudin.space"
 
       - name: Notify deployment failure
         if: failure()
