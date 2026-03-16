@@ -9,10 +9,10 @@ name: CI / Deploy Staging
 on:
   push:
     branches:
-      - develop
+      - master
   pull_request:
     branches:
-      - main
+      - master
       - develop
   workflow_dispatch:          # Allow manual trigger from GitHub UI
     inputs:

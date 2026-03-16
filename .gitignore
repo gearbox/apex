@@ -32,6 +32,9 @@ htmlcov/
 # Environment
 .env
 .env.local
+.env.staging
+.env.production
+staging.env
 
 # OS
 .DS_Store
