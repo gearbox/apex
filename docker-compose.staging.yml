@@ -99,6 +99,23 @@ services:
       COMFYUI_PORT: ${COMFYUI_PORT:-18188}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
 
+    # Explicit command — does not rely on Dockerfile CMD.
+    # This is intentional: staging should be self-contained and resilient
+    # to Dockerfile changes. Direct uvicorn invocation also surfaces startup
+    # errors immediately in container logs (unlike python -m src.main which
+    # can crash silently before logging is configured).
+    command:
+      - uvicorn
+      - src.api.app:app
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--workers"
+      - "1"
+      - "--log-level"
+      - "warning"
+
     # Never expose the API port to the host — cloudflared connects to api:8000
     # inside the Docker network. This explicitly cancels any ports: defined in
     # the base docker-compose.yml.
