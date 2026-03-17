@@ -67,7 +67,7 @@ services:
       # --- Core ---
       DEBUG: "false"
       API_HOST: "0.0.0.0"
-      API_PORT: "8000"
+      API_PORT: "8100"
 
       # --- Logging ---
       # More verbose than prod: DEBUG level but still JSON for structured output
@@ -110,13 +110,13 @@ services:
       - "--host"
       - "0.0.0.0"
       - "--port"
-      - "8000"
+      - "8100"
       - "--workers"
       - "1"
       - "--log-level"
       - "warning"
 
-    # Never expose the API port to the host — cloudflared connects to api:8000
+    # Never expose the API port to the host — cloudflared connects to api:8100
     # inside the Docker network. This explicitly cancels any ports: defined in
     # the base docker-compose.yml.
     ports: []
@@ -165,7 +165,7 @@ services:
   # ===========================================================================
   # Prerequisites:
   #   1. Create a tunnel in Cloudflare Zero Trust dashboard
-  #   2. Add public hostname: staging.yourdomain.com → http://api:8000
+  #   2. Add public hostname: staging.yourdomain.com → http://api:8100
   #   3. Copy the tunnel token to CLOUDFLARE_TUNNEL_TOKEN in .env.staging
   #   4. (Optional) Add an Access policy to gate behind email auth
   cloudflared:
