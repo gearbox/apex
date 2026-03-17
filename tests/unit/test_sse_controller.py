@@ -94,7 +94,9 @@ class TestSSEControllerHandler:
     """Test the controller's create_sse_ticket and stream handler logic."""
 
     @patch("src.api.services.sse_ticket.get_redis_client")
-    async def test_create_sse_ticket_handler_logic(self, mock_get_client: MagicMock, user_id: UUID) -> None:
+    async def test_create_sse_ticket_handler_logic(
+        self, mock_get_client: MagicMock, user_id: UUID
+    ) -> None:
         """Simulates what the create_sse_ticket handler does."""
         mock_client = AsyncMock()
         mock_get_client.return_value = mock_client
@@ -120,7 +122,9 @@ class TestSSEControllerHandler:
         assert user_id is None
 
     @patch("src.api.services.sse_ticket.get_redis_client")
-    async def test_stream_valid_ticket_logic(self, mock_get_client: MagicMock, user_id: UUID) -> None:
+    async def test_stream_valid_ticket_logic(
+        self, mock_get_client: MagicMock, user_id: UUID
+    ) -> None:
         """Simulates what the stream handler does with a valid ticket."""
         mock_client = AsyncMock()
         mock_client.getdel.return_value = str(user_id)
@@ -182,7 +186,7 @@ async def _run_generator(  # type: ignore[no-untyped-def]
                         "data": bytes(envelope.payload).decode(),
                     }
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 results.append({"comment": "keepalive"})
                 break  # stop after first keepalive so the test terminates
             except StopAsyncIteration:
@@ -198,7 +202,7 @@ class TestSSEEventGenerator:
         """EventEnvelope from EventBus.subscribe is mapped to SSE event/id/data."""
         envelope = _make_envelope(EventType.JOB_STATUS_CHANGED)
 
-        async def mock_subscribe(user_id):  # type: ignore[no-untyped-def]
+        async def mock_subscribe(_):  # type: ignore[no-untyped-def]
             yield envelope
 
         results = await _run_generator(mock_subscribe)
@@ -214,20 +218,20 @@ class TestSSEEventGenerator:
         for i, env in enumerate(envelopes):
             object.__setattr__(env, "event_id", f"evt-{i}")
 
-        async def mock_subscribe(user_id):  # type: ignore[no-untyped-def]
+        async def mock_subscribe(_):  # type: ignore[no-untyped-def]
             for env in envelopes:
                 yield env
 
         results = await _run_generator(mock_subscribe)
 
         assert len(results) == 3
-        for i, result in enumerate(results):
+        for result in results:
             assert result["event"] == EventType.JOB_STATUS_CHANGED.value
 
     async def test_timeout_yields_keepalive_comment(self) -> None:
         """When wait_for times out, a keepalive comment is produced."""
 
-        async def never_yields(user_id):  # type: ignore[no-untyped-def]
+        async def never_yields(_):  # type: ignore[no-untyped-def]
             # An async generator that never yields — causes wait_for to time out
             await asyncio.sleep(10)
             if False:  # pragma: no cover

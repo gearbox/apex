@@ -117,7 +117,7 @@ class SSEController(Controller):
                             "id": envelope.event_id,
                             "data": bytes(envelope.payload).decode(),
                         }
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Send SSE comment as keepalive
                         yield {"comment": "keepalive"}
                     except StopAsyncIteration:

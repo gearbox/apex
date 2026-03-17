@@ -56,7 +56,7 @@ class TestEventBusPublish:
         )
 
         mock_client.publish.assert_awaited_once()
-        mock_client.aclose.assert_awaited_once()
+        mock_client.aclose.assert_not_awaited()
 
         # Check channel name
         channel_arg = mock_client.publish.call_args[0][0]
@@ -82,7 +82,7 @@ class TestEventBusPublish:
         assert inner.status == "completed"
 
     @patch("src.api.services.event_bus.get_redis_client")
-    async def test_publish_closes_client_on_error(
+    async def test_publish_does_not_close_shared_pool_on_error(
         self, mock_get_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
     ) -> None:
         mock_client = AsyncMock()
@@ -96,8 +96,8 @@ class TestEventBusPublish:
                 payload=job_status_payload,
             )
 
-        # aclose must still be called even after error
-        mock_client.aclose.assert_awaited_once()
+        # aclose must NOT be called — closing the client would tear down the shared pool
+        mock_client.aclose.assert_not_awaited()
 
 
 class TestEventBusPublishSystem:
@@ -117,7 +117,7 @@ class TestEventBusPublishSystem:
         mock_client.publish.assert_awaited_once()
         channel_arg = mock_client.publish.call_args[0][0]
         assert channel_arg == "system:broadcast"
-        mock_client.aclose.assert_awaited_once()
+        mock_client.aclose.assert_not_awaited()
 
     @patch("src.api.services.event_bus.get_redis_client")
     async def test_publish_system_data_is_valid_envelope(
@@ -216,7 +216,7 @@ class TestEventBusSubscribe:
 
         mock_pubsub.unsubscribe.assert_awaited_once()
         mock_pubsub.aclose.assert_awaited_once()
-        mock_client.aclose.assert_awaited_once()
+        mock_client.aclose.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

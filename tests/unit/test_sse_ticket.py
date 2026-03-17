@@ -38,7 +38,7 @@ class TestCreateTicket:
         assert value_arg == str(user_id)
 
     @patch("src.api.services.sse_ticket.get_redis_client")
-    async def test_create_ticket_closes_client(
+    async def test_create_ticket_does_not_close_shared_pool(
         self, mock_get_client, service: SSETicketService, user_id: UUID
     ) -> None:
         mock_client = AsyncMock()
@@ -46,7 +46,8 @@ class TestCreateTicket:
 
         await service.create_ticket(user_id)
 
-        mock_client.aclose.assert_awaited_once()
+        # aclose must NOT be called — closing the client would tear down the shared pool
+        mock_client.aclose.assert_not_awaited()
 
     @patch("src.api.services.sse_ticket.get_redis_client")
     async def test_create_ticket_returns_unique_tickets(
@@ -89,7 +90,7 @@ class TestRedeemTicket:
         assert result is None
 
     @patch("src.api.services.sse_ticket.get_redis_client")
-    async def test_redeem_ticket_closes_client(
+    async def test_redeem_ticket_does_not_close_shared_pool(
         self, mock_get_client, service: SSETicketService, user_id: UUID
     ) -> None:
         mock_client = AsyncMock()
@@ -98,7 +99,8 @@ class TestRedeemTicket:
 
         await service.redeem_ticket("ticket")
 
-        mock_client.aclose.assert_awaited_once()
+        # aclose must NOT be called — closing the client would tear down the shared pool
+        mock_client.aclose.assert_not_awaited()
 
     @patch("src.api.services.sse_ticket.get_redis_client")
     async def test_redeem_uses_getdel_for_atomic_one_time_use(

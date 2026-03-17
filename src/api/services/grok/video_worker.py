@@ -205,7 +205,9 @@ class GrokVideoWorker:
                 )
                 await self._emit_status_changed(job, previous_status, updated_job.status)
             elif updated_job.status == JobStatus.RUNNING.value:
-                await self._emit_progress(job, progress_pct=50)  # Grok API does not expose granular progress
+                await self._emit_progress(
+                    job, progress_pct=50
+                )  # Grok API does not expose granular progress
 
         except Exception as e:
             logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))
