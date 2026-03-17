@@ -103,6 +103,15 @@ services:
     # Staging: restart unless-stopped so crashes are inspectable before Docker restarts
     restart: unless-stopped
 
+    # Override the command in the staging compose to be explicit and match the
+    # Dockerfile fix, ensuring staging doesn't silently use a wrong CMD from the
+    # base image layer
+    command: ["uvicorn", "src.api.app:app",
+              "--host", "0.0.0.0",
+              "--port", "8000",
+              "--workers", "1",
+              "--log-level", "warning"]
+
     # Relaxed resource limits vs production
     deploy:
       resources:

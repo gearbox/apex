@@ -3,11 +3,13 @@
 import uvicorn
 
 from src.core.config import get_settings
+from src.core.logging import configure_logging
 
 
 def main() -> None:
     """Run the API server with uvicorn."""
     settings = get_settings()
+    configure_logging(settings)
 
     uvicorn.run(
         "src.api.app:app",
