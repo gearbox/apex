@@ -11,7 +11,7 @@ import structlog
 from litestar import Controller, Response, get, post
 from litestar.di import Provide
 from litestar.response import ServerSentEvent
-from litestar.status_codes import HTTP_401_UNAUTHORIZED
+from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAILABLE
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
@@ -44,12 +44,22 @@ class SSEController(Controller):
         self,
         current_user_id: UUID,
         sse_ticket_service: SSETicketService,
-    ) -> SSETicketResponse:
+    ) -> SSETicketResponse | Response[ErrorEnvelope]:
         """Issue a short-lived one-time ticket for SSE connection.
 
         The ticket is valid for ~30 seconds and single-use.
         Pass it as `?ticket=<value>` when opening the EventSource.
         """
+        settings = get_settings()
+        if settings.redis_url is None:
+            return Response(
+                content=ErrorEnvelope(
+                    error="service_unavailable",
+                    message="Real-time events are not available.",
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                ),
+                status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            )
         ticket = await sse_ticket_service.create_ticket(current_user_id)
         return SSETicketResponse(ticket=ticket)
 
@@ -65,6 +75,17 @@ class SSEController(Controller):
         Auth: pass `?ticket=<ticket>` obtained from POST /v1/events/sse-ticket.
         No Bearer header required (EventSource limitation).
         """
+        settings = get_settings()
+        if settings.redis_url is None:
+            return Response(
+                content=ErrorEnvelope(
+                    error="service_unavailable",
+                    message="Real-time events are not available.",
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                ),
+                status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         user_id = await sse_ticket_service.redeem_ticket(ticket)
         if user_id is None:
             return Response(
@@ -75,8 +96,6 @@ class SSEController(Controller):
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
-
-        settings = get_settings()
 
         async def event_generator() -> AsyncGenerator[dict[str, str]]:
             """Yield SSE-formatted events from the EventBus."""
@@ -98,7 +117,7 @@ class SSEController(Controller):
                             "id": envelope.event_id,
                             "data": bytes(envelope.payload).decode(),
                         }
-                    except TimeoutError:
+                    except asyncio.TimeoutError:
                         # Send SSE comment as keepalive
                         yield {"comment": "keepalive"}
                     except StopAsyncIteration:

@@ -15,6 +15,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import select
 
+from src.api.schemas.events import EventType, JobProgressPayload, JobStatusPayload
 from src.core.enums import GenerationType, JobStatus
 from src.db.models import GenerationJob
 
@@ -58,6 +59,43 @@ class GrokVideoWorker:
         self._event_bus = event_bus
         self._running = False
         self._task: asyncio.Task[None] | None = None
+
+    @staticmethod
+    def _normalize_status(status: JobStatus | str) -> str:
+        return status if isinstance(status, str) else status.value
+
+    async def _emit_status_changed(
+        self,
+        job: GenerationJob,
+        previous_status: str,
+        new_status: str,
+    ) -> None:
+        if not self._event_bus:
+            return
+        await self._event_bus.publish(
+            user_id=job.user_id,
+            event_type=EventType.JOB_STATUS_CHANGED,
+            payload=JobStatusPayload(
+                job_id=job.id,
+                status=new_status,
+                previous_status=previous_status,
+                generation_type=job.generation_type,
+                provider=job.provider,
+            ),
+        )
+
+    async def _emit_progress(self, job: GenerationJob, progress_pct: int) -> None:
+        if not self._event_bus:
+            return
+        await self._event_bus.publish(
+            user_id=job.user_id,
+            event_type=EventType.JOB_PROGRESS,
+            payload=JobProgressPayload(
+                job_id=job.id,
+                progress_pct=progress_pct,
+                generation_type=job.generation_type,
+            ),
+        )
 
     async def start(self) -> None:
         """Start the background worker."""
@@ -139,32 +177,17 @@ class GrokVideoWorker:
             elapsed = (datetime.now(UTC) - job.started_at).total_seconds()
             if elapsed > self._max_poll_time:
                 logger.warning("grok.video_job_timeout", job_id=str(job_id), elapsed_s=int(elapsed))
-                previous_status = job.status
+                prev_status = self._normalize_status(job.status)
                 job.status = JobStatus.FAILED
                 job.error_message = f"Video generation timed out after {elapsed:.0f} seconds"
                 job.completed_at = datetime.now(UTC)
                 await session.commit()
-                if self._event_bus:
-                    from src.api.schemas.events import EventType, JobStatusPayload
-
-                    await self._event_bus.publish(
-                        user_id=job.user_id,
-                        event_type=EventType.JOB_STATUS_CHANGED,
-                        payload=JobStatusPayload(
-                            job_id=job.id,
-                            status=JobStatus.FAILED.value,
-                            previous_status=previous_status
-                            if isinstance(previous_status, str)
-                            else previous_status.value,
-                            generation_type=job.generation_type,
-                            provider=job.provider,
-                        ),
-                    )
+                await self._emit_status_changed(job, prev_status, JobStatus.FAILED.value)
                 return
 
         try:
             # Capture status before polling so we can emit the delta
-            previous_status = job.status if isinstance(job.status, str) else job.status.value
+            previous_status = self._normalize_status(job.status)
             # Poll the job
             updated_job = await self._job_service.poll_video_job(session, job_id)
             await session.commit()
@@ -175,50 +198,14 @@ class GrokVideoWorker:
 
             if updated_job.status == JobStatus.COMPLETED.value:
                 logger.info("grok.video_job_completed", job_id=str(job_id))
-                if self._event_bus:
-                    from src.api.schemas.events import EventType, JobStatusPayload
-
-                    await self._event_bus.publish(
-                        user_id=job.user_id,
-                        event_type=EventType.JOB_STATUS_CHANGED,
-                        payload=JobStatusPayload(
-                            job_id=job.id,
-                            status=updated_job.status,
-                            previous_status=previous_status,
-                            generation_type=job.generation_type,
-                            provider=job.provider,
-                        ),
-                    )
+                await self._emit_status_changed(job, previous_status, updated_job.status)
             elif updated_job.status == JobStatus.FAILED.value:
                 logger.warning(
                     "grok.video_job_failed", job_id=str(job_id), error=updated_job.error_message
                 )
-                if self._event_bus:
-                    from src.api.schemas.events import EventType, JobStatusPayload
-
-                    await self._event_bus.publish(
-                        user_id=job.user_id,
-                        event_type=EventType.JOB_STATUS_CHANGED,
-                        payload=JobStatusPayload(
-                            job_id=job.id,
-                            status=updated_job.status,
-                            previous_status=previous_status,
-                            generation_type=job.generation_type,
-                            provider=job.provider,
-                        ),
-                    )
-            elif updated_job.status == JobStatus.RUNNING.value and self._event_bus:
-                from src.api.schemas.events import EventType, JobProgressPayload
-
-                await self._event_bus.publish(
-                    user_id=job.user_id,
-                    event_type=EventType.JOB_PROGRESS,
-                    payload=JobProgressPayload(
-                        job_id=job.id,
-                        progress_pct=50,  # Grok API does not expose granular progress
-                        generation_type=job.generation_type,
-                    ),
-                )
+                await self._emit_status_changed(job, previous_status, updated_job.status)
+            elif updated_job.status == JobStatus.RUNNING.value:
+                await self._emit_progress(job, progress_pct=50)  # Grok API does not expose granular progress
 
         except Exception as e:
             logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))

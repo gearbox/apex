@@ -37,11 +37,7 @@ class SSETicketService:
         key = f"{SSE_TICKET_PREFIX}{ticket}"
 
         client = get_redis_client()
-        try:
-            await client.setex(key, self._ttl, str(user_id))
-        finally:
-            await client.aclose()
-
+        await client.setex(key, self._ttl, str(user_id))
         logger.debug("sse_ticket.created", user_id=str(user_id), ttl=self._ttl)
         return ticket
 
@@ -56,11 +52,8 @@ class SSETicketService:
         key = f"{SSE_TICKET_PREFIX}{ticket}"
 
         client = get_redis_client()
-        try:
-            # GETDEL is atomic — gets value and deletes key in one round-trip
-            value = await client.getdel(key)
-        finally:
-            await client.aclose()
+        # GETDEL is atomic — gets value and deletes key in one round-trip
+        value = await client.getdel(key)
 
         if value is None:
             logger.debug("sse_ticket.invalid_or_expired", ticket=ticket[:8])

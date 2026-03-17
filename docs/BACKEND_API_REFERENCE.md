@@ -1022,7 +1022,7 @@ Note:     Ticket is single-use and expires in 30 seconds. Obtain a fresh ticket
 #### `GET /v1/events/stream`
 
 ```
-Query:   ticket=<string>   // required — one-time ticket from POST /sse-ticket
+Query:   ticket=<string>   // required — one-time ticket from POST /v1/events/sse-ticket
 Headers: Accept: text/event-stream
 Response: 200 text/event-stream (chunked)
 Errors:  401 (missing/expired/invalid ticket), 503 (Redis not configured)
@@ -1109,7 +1109,7 @@ Events are automatically published by the backend at:
 | `job.status_changed` | Generation request submitted (status → `pending`) |
 | `job.status_changed` | Grok video job completes, fails, or times out |
 | `job.progress` | Grok video job enters `running` state |
-| `balance.updated` | `check_and_reserve` (debit), `refund`, `credit`, `admin_adjust` |
+| `balance.updated` | `check_and_reserve` (debit), `refund`, `credit`, `admin_adjustment` |
 | `system.notification` | Admin calls `POST /v1/admin/broadcast` |
 
 ### Admin Broadcast
@@ -1121,7 +1121,7 @@ Request: {
   level: "info" | "warning" | "critical",
   title: string,
   message: string,
-  expires_at?: datetime | null
+  expires_at?: string | null  // ISO datetime
 }
 Response: { message: string }
 Status:  200 OK

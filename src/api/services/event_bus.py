@@ -62,15 +62,12 @@ class EventBus:
         data = _encoder.encode(envelope)
 
         client = get_redis_client()
-        try:
-            await client.publish(channel, data)
-            logger.debug(
-                "event_bus.published",
-                channel=channel,
-                event_type=event_type.value,
-            )
-        finally:
-            await client.aclose()
+        await client.publish(channel, data)
+        logger.debug(
+            "event_bus.published",
+            channel=channel,
+            event_type=event_type.value,
+        )
 
     async def publish_system(
         self,
@@ -88,14 +85,11 @@ class EventBus:
         data = _encoder.encode(envelope)
 
         client = get_redis_client()
-        try:
-            await client.publish(self.SYSTEM_CHANNEL, data)
-            logger.debug(
-                "event_bus.published_system",
-                event_type=event_type.value,
-            )
-        finally:
-            await client.aclose()
+        await client.publish(self.SYSTEM_CHANNEL, data)
+        logger.debug(
+            "event_bus.published_system",
+            event_type=event_type.value,
+        )
 
     async def subscribe(
         self,
@@ -130,5 +124,4 @@ class EventBus:
         finally:
             await pubsub.unsubscribe(user_channel, self.SYSTEM_CHANNEL)
             await pubsub.aclose()  # type: ignore[no-untyped-call]
-            await client.aclose()
             logger.info("event_bus.unsubscribed", user_id=str(user_id))
