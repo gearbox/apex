@@ -113,7 +113,7 @@ jobs:
           JWT_SECRET_KEY: "ci-unit-test-secret-key-32-bytes-long"
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()                   # Upload even if tests fail
         with:
           name: unit-coverage
@@ -186,7 +186,7 @@ jobs:
           R2_BUCKET_NAME: apex-test
 
       - name: Upload integration coverage report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: integration-coverage
