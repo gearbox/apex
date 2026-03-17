@@ -36,6 +36,7 @@ from src.api.routes.generation import (
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.providers import ProvidersController
+from src.api.routes.sse import SSEController
 from src.api.routes.storage import StorageController
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.routes.user import UserController
@@ -270,6 +271,8 @@ def create_app() -> Litestar:
             StorageController,
             # Jobs (unified, cross-provider)
             UnifiedJobController,
+            # Real-time events (SSE)
+            SSEController,
         ],
         exception_handlers={
             HTTPException: http_exception_handler,

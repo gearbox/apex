@@ -30,6 +30,7 @@ from src.api.schemas.billing import (
     PricingRuleResponse,
     TransactionResponse,
 )
+from src.api.schemas.events import SystemBroadcastRequest
 from src.api.schemas.models import (
     GenerationModelResponse,
     ModelListResponse,
@@ -39,6 +40,7 @@ from src.api.schemas.pagination import PaginatedResponse
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import AccountNotFoundError
+from src.api.services.event_bus import EventBus
 from src.api.services.pricing import PricingService
 from src.core.enums import UserRole
 from src.db.models import User
@@ -613,3 +615,24 @@ class AdminController(Controller):
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
+
+    @post("/broadcast", status_code=HTTP_200_OK)
+    async def broadcast_notification(
+        self,
+        admin_user: User,  # noqa: ARG002
+        data: SystemBroadcastRequest,
+        event_bus: EventBus,
+    ) -> Response[dict[str, str]]:
+        """Broadcast a system notification to all connected SSE clients."""
+        from src.api.schemas.events import EventType, SystemNotificationPayload
+
+        await event_bus.publish_system(
+            event_type=EventType.SYSTEM_NOTIFICATION,
+            payload=SystemNotificationPayload(
+                level=data.level,
+                title=data.title,
+                message=data.message,
+                expires_at=data.expires_at,
+            ),
+        )
+        return Response(content={"message": "Broadcast sent"}, status_code=HTTP_200_OK)

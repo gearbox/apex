@@ -3,7 +3,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-03-16
+> **Last synced:** 2026-03-17
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -990,7 +990,186 @@ Errors:   404
 
 ---
 
-## 11. Product Reference
+## 11. Real-Time Events (SSE + Pub/Sub)
+
+The backend supports real-time event streaming via **Server-Sent Events (SSE)** backed by Redis Pub/Sub. Because `EventSource` cannot send custom headers, authentication uses a short-lived **one-time ticket** pattern.
+
+> **Requires Redis**: SSE is only active when `REDIS_URL` is configured on the server. When Redis is not configured, the `/v1/events/stream` endpoint returns `503 Service Unavailable`.
+
+### Flow
+
+```
+1. Client (authenticated)  POST /v1/events/sse-ticket  →  { ticket: "abc123" }
+2. Client                  GET  /v1/events/stream?ticket=abc123  →  text/event-stream
+3. Server streams EventEnvelopes until client disconnects
+```
+
+### Auth & Ticket
+
+#### `POST /v1/events/sse-ticket` *(authenticated)*
+
+```
+Response: { ticket: string }   // opaque URL-safe token
+Status:   201 Created
+Errors:   401 unauthorized
+Rate:     10/minute per user
+Note:     Ticket is single-use and expires in 30 seconds. Obtain a fresh ticket
+          immediately before opening the SSE stream.
+```
+
+### Streaming Endpoint
+
+#### `GET /v1/events/stream`
+
+```
+Query:   ticket=<string>   // required — one-time ticket from POST /v1/events/sse-ticket
+Headers: Accept: text/event-stream
+Response: 200 text/event-stream (chunked)
+Errors:  401 (missing/expired/invalid ticket), 503 (Redis not configured)
+Note:    Long-lived HTTP connection. Heartbeat comments sent every ~15 seconds
+         to keep connection alive through proxies.
+```
+
+**SSE frame format** (each event):
+
+```
+id: <event_id>
+event: <EventType>
+data: <JSON-encoded inner payload>
+
+```
+
+**Heartbeat** (sent when idle to maintain connection):
+
+```
+: keepalive
+
+```
+
+### Event Types
+
+| `event` field | Description | Payload type |
+|---------------|-------------|--------------|
+| `job.status_changed` | Job moved to a new status | `JobStatusPayload` |
+| `job.progress` | Job progress update | `JobProgressPayload` |
+| `balance.updated` | Token balance changed (debit, credit, refund) | `BalanceUpdatedPayload` |
+| `system.notification` | Broadcast system message (maintenance, outage) | `SystemNotificationPayload` |
+
+### Event Payload Schemas
+
+```typescript
+// job.status_changed
+interface JobStatusPayload {
+  job_id: string;           // UUID
+  status: JobStatus;        // new status
+  previous_status: string;  // previous status (or "none" on first publish)
+  generation_type: string;  // e.g. "t2v"
+  provider: string;         // e.g. "grok"
+}
+
+// job.progress
+interface JobProgressPayload {
+  job_id: string;
+  progress_pct: number;     // 0–100
+  generation_type: string;
+}
+
+// balance.updated
+interface BalanceUpdatedPayload {
+  account_id: string;       // UUID
+  balance: number;          // new balance (tokens)
+  delta: number;            // change (negative = debit)
+  transaction_type: string; // "debit" | "credit" | "refund" | "admin_adjustment"
+}
+
+// system.notification
+interface SystemNotificationPayload {
+  level: string;            // "info" | "warning" | "critical"
+  title: string;
+  message: string;
+  expires_at: string | null; // ISO datetime
+}
+```
+
+### Channel Topology
+
+| Channel | Subscribers | Events |
+|---------|-------------|--------|
+| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `balance.updated` |
+| `system:broadcast` | All connected clients | `system.notification` |
+
+Each SSE connection subscribes to both the per-user channel and `system:broadcast`.
+
+### Publish Points
+
+Events are automatically published by the backend at:
+
+| Event | Published when |
+|-------|---------------|
+| `job.status_changed` | Generation request submitted (status → `pending`) |
+| `job.status_changed` | Grok video job completes, fails, or times out |
+| `job.progress` | Grok video job enters `running` state |
+| `balance.updated` | `check_and_reserve` (debit), `refund`, `credit`, `admin_adjustment` |
+| `system.notification` | Admin calls `POST /v1/admin/broadcast` |
+
+### Admin Broadcast
+
+#### `POST /v1/admin/broadcast` *(admin only)*
+
+```
+Request: {
+  level: "info" | "warning" | "critical",
+  title: string,
+  message: string,
+  expires_at?: string | null  // ISO datetime
+}
+Response: { message: string }
+Status:  200 OK
+Note:    Publishes to system:broadcast channel — delivered to all active SSE connections
+```
+
+### Frontend Usage Example
+
+```typescript
+async function openEventStream(apiFetch: Fetcher) {
+  // 1. Get a fresh ticket
+  const { ticket } = await apiFetch<{ ticket: string }>(
+    '/v1/events/sse-ticket', { method: 'POST' }
+  );
+
+  // 2. Open SSE stream
+  const es = new EventSource(`/v1/events/stream?ticket=${ticket}`);
+
+  es.addEventListener('job.status_changed', (e) => {
+    const payload = JSON.parse(e.data);
+    console.log('Job status:', payload.status);
+  });
+
+  es.addEventListener('balance.updated', (e) => {
+    const payload = JSON.parse(e.data);
+    console.log('New balance:', payload.balance);
+  });
+
+  es.addEventListener('system.notification', (e) => {
+    const payload = JSON.parse(e.data);
+    showBanner(payload.level, payload.title, payload.message);
+  });
+
+  es.onerror = () => {
+    // Reconnect with a fresh ticket — the old ticket is expired/used
+    es.close();
+    setTimeout(() => openEventStream(apiFetch), 2000);
+  };
+
+  return es;
+}
+```
+
+> **Reconnection note:** `EventSource` auto-reconnects on error, but the ticket is single-use and already expired. Always close and re-obtain a fresh ticket on error.
+
+---
+
+## 12. Product Reference
 
 ### Products
 
@@ -1009,7 +1188,7 @@ Values: `"sfw"`, `"permissive"`
 
 ---
 
-## 12. Enums Reference
+## 13. Enums Reference
 
 ### ModelType
 
@@ -1088,7 +1267,7 @@ Values: `"en"` (English), `"ru"` (Russian), `"sr"` (Serbian Latin)
 
 ---
 
-## 13. Error Response Format
+## 14. Error Response Format
 
 All non-2xx responses use a single unified envelope:
 
@@ -1146,7 +1325,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 14. Presigned URL Notes
+## 15. Presigned URL Notes
 
 - All R2 presigned URLs are valid for **~1 hour** by default
 - Do **not** aggressively cache them — use `staleTime` of ~30 minutes in TanStack Query
@@ -1157,7 +1336,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 15. Rate Limits
+## 16. Rate Limits
 
 | Endpoint | Limit |
 |----------|-------|
@@ -1165,12 +1344,13 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 | `POST /auth/login` | 10/minute per IP |
 | `POST /auth/forgot-password` | 3/hour per IP |
 | `POST /auth/resend-verification` | 3/hour per IP |
+| `POST /v1/events/sse-ticket` | 10/minute per user |
 
 Rate limit headers are **not currently exposed** in responses. The frontend should handle 429 responses gracefully with a user-friendly message.
 
 ---
 
-## 16. Health Check
+## 17. Health Check
 
 #### `GET /health/`
 
@@ -1181,7 +1361,7 @@ Note:     Public endpoint, no auth needed
 
 ---
 
-## 17. OpenAPI Documentation Endpoints
+## 18. OpenAPI Documentation Endpoints
 
 The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
 

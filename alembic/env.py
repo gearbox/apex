@@ -1,6 +1,7 @@
 """Alembic environment configuration for async SQLAlchemy."""
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -8,7 +9,6 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-from src.core.config import get_settings
 from src.db.models import Base
 
 # Alembic Config object for access to .ini values
@@ -21,9 +21,8 @@ if config.config_file_name is not None:
 # Model metadata for autogenerate support
 target_metadata = Base.metadata
 
-# Get database URL from settings
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+if _db_url := os.environ.get("DATABASE_URL"):
+    config.set_main_option("sqlalchemy.url", _db_url)
 
 
 def run_migrations_offline() -> None:

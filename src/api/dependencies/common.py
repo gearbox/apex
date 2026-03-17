@@ -19,12 +19,14 @@ from src.api.services.billing import BillingService
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.email import EmailService, LogEmailService, ResendEmailService
 from src.api.services.email_verification import EmailVerificationService
+from src.api.services.event_bus import EventBus
 from src.api.services.generation.service import GenerationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
+from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
@@ -64,6 +66,8 @@ class ServiceContainer:
     unified_job_service: UnifiedJobService | None = None
     token_cleanup_worker: TokenCleanupWorker | None = None
     generation_service: GenerationService | None = None
+    event_bus: EventBus | None = None
+    sse_ticket_service: SSETicketService | None = None
 
 
 _services = ServiceContainer()
@@ -285,9 +289,23 @@ def get_generation_service() -> GenerationService:
 # -----------------------------------------------------------------------------
 
 
+def get_event_bus() -> EventBus:
+    """Provide EventBus singleton."""
+    if _services.event_bus is None:
+        raise RuntimeError("EventBus not initialized")
+    return _services.event_bus
+
+
+def get_sse_ticket_service() -> SSETicketService:
+    """Provide SSETicketService singleton."""
+    if _services.sse_ticket_service is None:
+        raise RuntimeError("SSETicketService not initialized")
+    return _services.sse_ticket_service
+
+
 def get_billing_service() -> BillingService:
     """Provide BillingService singleton."""
-    return BillingService()
+    return BillingService(event_bus=_services.event_bus)
 
 
 def get_pricing_service() -> PricingService:
@@ -383,6 +401,18 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         echo=settings.db_echo,
     )
     logger.info("db.pool_initialized")
+
+    # Initialize Redis (required for pub/sub and rate limiting)
+    from src.core.redis import init_redis_pool
+
+    if settings.redis_url:
+        init_redis_pool(settings.redis_url)
+        _services.event_bus = EventBus()
+        logger.info("event_bus.initialized")
+        _services.sse_ticket_service = SSETicketService(ttl_seconds=settings.sse_ticket_ttl_seconds)
+        logger.info("sse_ticket_service.initialized")
+    else:
+        logger.warning("redis.not_configured — event_bus and sse_ticket_service disabled")
 
     # Initialize rate limiter
     init_rate_limiter(settings)
@@ -500,6 +530,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         billing_service=get_billing_service(),
         pricing_service=get_pricing_service(),
         rate_limiter=model_rate_limiter,
+        event_bus=_services.event_bus,
     )
     logger.info(
         "generation_service.initialized",
@@ -542,6 +573,10 @@ async def shutdown_services() -> None:
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
 
+    from src.core.redis import close_redis_pool
+
+    await close_redis_pool()
+
     # Reset container to clean state
     _services = ServiceContainer()
 
@@ -572,6 +607,9 @@ dependencies = {
     "unified_job_service": Provide(get_unified_job_service, sync_to_thread=False),
     # Unified generation service
     "generation_service": Provide(get_generation_service, sync_to_thread=False),
+    # Real-time events
+    "event_bus": Provide(get_event_bus, sync_to_thread=False),
+    "sse_ticket_service": Provide(get_sse_ticket_service, sync_to_thread=False),
     # Product context (resolved by ProductMiddleware)
     "product_config": Provide(get_product_config, sync_to_thread=False),
     "product_id": Provide(get_product_id, sync_to_thread=False),

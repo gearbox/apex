@@ -12,6 +12,11 @@ services:
     ports:
       - "5432:5432"
 
+  redis:
+    # Expose port for local Redis tools (redis-cli, RedisInsight, etc.)
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+
   api:
     build:
       context: .

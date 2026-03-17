@@ -5,6 +5,20 @@
 
 services:
   # ===========================================================================
+  # Redis Test Instance (ephemeral, no persistence)
+  # ===========================================================================
+  redis-test:
+    image: redis:7-alpine
+    container_name: apex-redis-test
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - apex-test-network
+
+  # ===========================================================================
   # PostgreSQL Test Database (ephemeral)
   # ===========================================================================
   postgres-test:
@@ -39,6 +53,8 @@ services:
     depends_on:
       postgres-test:
         condition: service_healthy
+      redis-test:
+        condition: service_healthy
     environment:
       TEST_DATABASE_URL: "postgresql+asyncpg://apex_test:apex_test@postgres-test:5432/apex_test"
       DATABASE_URL: "postgresql+asyncpg://apex_test:apex_test@postgres-test:5432/apex_test"
@@ -50,6 +66,7 @@ services:
       R2_ACCESS_KEY_ID: "test"
       R2_SECRET_ACCESS_KEY: "test"
       R2_BUCKET_NAME: "test-bucket"
+      REDIS_URL: "redis://redis-test:6379/0"
     command:
       [
         "pytest",

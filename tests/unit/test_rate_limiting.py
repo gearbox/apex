@@ -1,3 +1,6 @@
+from collections.abc import Generator
+from unittest.mock import patch
+
 import pytest
 from limits.storage import MemoryStorage
 from litestar.status_codes import HTTP_429_TOO_MANY_REQUESTS
@@ -13,23 +16,36 @@ from src.core.config import Settings
 # Default headers to satisfy ProductMiddleware in unit tests
 _PRODUCT_HEADERS = {"X-Product-Id": "vex"}
 
+# Shared test settings — redis_url=None forces MemoryStorage so the rate limit
+# counters are process-local and isolated across tests even when REDIS_URL is
+# present in the environment (e.g. `make test-all` Docker environment).
+_TEST_SETTINGS = Settings(
+    redis_url=None,
+    rate_limit_register="5/hour",
+    rate_limit_login="10/minute",
+    rate_limit_forgot_password="3/hour",
+    rate_limit_resend_verification="3/hour",
+    rate_limit_sse_ticket="10/minute",
+)
+
 
 @pytest.fixture
-def override_limiter_defaults() -> None:
-    """Fixture to ensure MemoryStorage is used."""
-    settings = Settings(
-        redis_url=None,
-        rate_limit_register="5/hour",
-        rate_limit_login="10/minute",
-        rate_limit_forgot_password="3/hour",
-        rate_limit_resend_verification="3/hour",
-    )
-    init_rate_limiter(settings)
+def override_limiter_defaults() -> Generator[None]:
+    """Ensure MemoryStorage is used for every rate-limiting unit test.
 
-    # We also need to clear history if it was already used
-    storage = get_rate_limiter_storage()
-    if isinstance(storage, MemoryStorage):
-        storage.storage.clear()
+    Patches get_settings() in both the app lifespan and the dependency
+    container so the lifespan never creates a RedisStorage that would
+    persist counters across tests.
+    """
+    with (
+        patch("src.api.app.get_settings", return_value=_TEST_SETTINGS),
+        patch("src.api.dependencies.common.get_settings", return_value=_TEST_SETTINGS),
+    ):
+        init_rate_limiter(_TEST_SETTINGS)
+        storage = get_rate_limiter_storage()
+        if isinstance(storage, MemoryStorage):
+            storage.storage.clear()
+        yield
 
 
 @pytest.mark.asyncio

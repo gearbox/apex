@@ -5,6 +5,25 @@
 
 services:
   # ===========================================================================
+  # Redis (pub/sub and rate limiting)
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: apex-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - apex-network
+
+  # ===========================================================================
   # PostgreSQL Database
   # ===========================================================================
   postgres:
@@ -40,6 +59,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
       # API Settings
@@ -95,6 +116,9 @@ services:
       EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-noreply@apex.ai}
       EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Apex}
 
+      # Redis
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+
       # App frontend URL (used for building verification/reset links)
       APP_URL: ${APP_URL:-http://localhost:3000}
 
@@ -149,4 +173,6 @@ networks:
 # =============================================================================
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
     driver: local

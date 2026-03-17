@@ -65,16 +65,6 @@ def _run_migrations(db_url: str) -> None:
     env = {
         **os.environ,
         "DATABASE_URL": db_url,
-        # Provide minimal required settings so pydantic-settings validation passes
-        "JWT_SECRET_KEY": os.environ.get(
-            "JWT_SECRET_KEY", "test-secret-key-for-integration-tests-only-32b"
-        ),
-        "COMFYUI_HOST": os.environ.get("COMFYUI_HOST", "127.0.0.1"),
-        "COMFYUI_PORT": os.environ.get("COMFYUI_PORT", "18188"),
-        "R2_ACCOUNT_ID": os.environ.get("R2_ACCOUNT_ID", "test"),
-        "R2_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID", "test"),
-        "R2_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY", "test"),
-        "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME", "test-bucket"),
     }
     result = subprocess.run(
         ["alembic", "upgrade", "head"],

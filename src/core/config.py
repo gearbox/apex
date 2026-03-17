@@ -145,9 +145,29 @@ class Settings(BaseSettings):
     redis_url: str | None = Field(
         default=None,
         description=(
-            "Redis URL for rate limiting, e.g. redis://localhost:6379/0. "
-            "When None, falls back to in-memory storage (single-process only)."
+            "Redis URL for rate limiting and pub/sub, e.g. redis://localhost:6379/0. "
+            "When None, falls back to in-memory storage for rate limiting (single-process only) "
+            "and SSE/pub-sub will not function. Recommended: set to redis://redis:6379/0 in "
+            "production Docker environments."
         ),
+    )
+    rate_limit_sse_ticket: str = Field(
+        default="10/minute",
+        description="SSE ticket issuance endpoint rate limit.",
+    )
+
+    # SSE settings
+    sse_ticket_ttl_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="TTL for one-time SSE connection tickets.",
+    )
+    sse_heartbeat_interval: int = Field(
+        default=15,
+        ge=5,
+        le=60,
+        description="Seconds between SSE keepalive comments.",
     )
     rate_limit_register: str = Field(
         default="5/hour",

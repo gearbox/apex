@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -16,6 +17,9 @@ from src.api.services.pricing import PricingService
 from src.core.enums import JobStatus, Provider
 from src.core.product import ProductConfig
 from src.db.repositories.generation_model import GenerationModelRepository
+
+if TYPE_CHECKING:
+    from src.api.services.event_bus import EventBus
 
 logger = structlog.get_logger(__name__)
 
@@ -57,11 +61,13 @@ class GenerationService:
         billing_service: BillingService,
         pricing_service: PricingService,
         rate_limiter: ModelRateLimiter,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._providers = providers
         self._billing = billing_service
         self._pricing = pricing_service
         self._rate_limiter = rate_limiter
+        self._event_bus = event_bus
 
     async def generate(
         self,
@@ -136,6 +142,21 @@ class GenerationService:
                 product_id=product_id,
             )
             await session.commit()
+
+            if self._event_bus is not None:
+                from src.api.schemas.events import EventType, JobStatusPayload
+
+                await self._event_bus.publish(
+                    user_id=user_id,
+                    event_type=EventType.JOB_STATUS_CHANGED,
+                    payload=JobStatusPayload(
+                        job_id=job.id,
+                        status=job.status if isinstance(job.status, str) else job.status.value,
+                        previous_status="none",
+                        generation_type=request.generation_type.value,
+                        provider=request.model.provider.value,
+                    ),
+                )
 
         except Exception as exc:
             # 9. Refund on failure
