@@ -21,19 +21,6 @@
 services:
 
   # ===========================================================================
-  # Redis - Staging (no exposed port)
-  # ===========================================================================
-  redis:
-    container_name: apex-redis-staging
-    ports: []  # Never expose Redis externally in staging
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "5m"
-        max-file: "2"
-
-  # ===========================================================================
   # PostgreSQL - Staging (isolated volume)
   # ===========================================================================
   postgres:
@@ -53,6 +40,20 @@ services:
         max-size: "10m"
         max-file: "3"
 
+
+  # ===========================================================================
+  # Redis - Staging (rate limiting backend)
+  # ===========================================================================
+  redis:
+    container_name: apex-redis-staging
+    ports: []  # Never expose Redis to the host
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ===========================================================================
   # Apex API - Staging
   # ===========================================================================
@@ -66,7 +67,7 @@ services:
       # --- Core ---
       DEBUG: "false"
       API_HOST: "0.0.0.0"
-      API_PORT: "8001"
+      API_PORT: "8000"
 
       # --- Logging ---
       # More verbose than prod: DEBUG level but still JSON for structured output
@@ -92,25 +93,19 @@ services:
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is required}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME:-apex-staging}
 
-      # --- Redis ---
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-
       # --- AI Providers ---
       XAI_API_KEY: ${XAI_API_KEY:-}
       COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
       COMFYUI_PORT: ${COMFYUI_PORT:-18188}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+
+    # Never expose the API port to the host — cloudflared connects to api:8000
+    # inside the Docker network. This explicitly cancels any ports: defined in
+    # the base docker-compose.yml.
+    ports: []
 
     # Staging: restart unless-stopped so crashes are inspectable before Docker restarts
     restart: unless-stopped
-
-    # Override the command in the staging compose to be explicit and match the
-    # Dockerfile fix, ensuring staging doesn't silently use a wrong CMD from the
-    # base image layer
-    command: ["uvicorn", "src.api.app:app",
-              "--host", "0.0.0.0",
-              "--port", "8001",
-              "--workers", "1",
-              "--log-level", "warning"]
 
     # Relaxed resource limits vs production
     deploy:
@@ -153,7 +148,7 @@ services:
   # ===========================================================================
   # Prerequisites:
   #   1. Create a tunnel in Cloudflare Zero Trust dashboard
-  #   2. Add public hostname: staging.yourdomain.com → http://api:8001
+  #   2. Add public hostname: staging.yourdomain.com → http://api:8000
   #   3. Copy the tunnel token to CLOUDFLARE_TUNNEL_TOKEN in .env.staging
   #   4. (Optional) Add an Access policy to gate behind email auth
   cloudflared:
