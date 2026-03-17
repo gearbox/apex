@@ -2,6 +2,17 @@
 # Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 services:
+  redis:
+    # In production, don't expose port externally
+    ports: []
+    restart: always
+    # Production logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   postgres:
     # In production, don't expose port externally
     ports: []

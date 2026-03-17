@@ -35,6 +35,11 @@ class RequestLoggingMiddleware(AbstractMiddleware):
             await self.app(scope, receive, send)
             return
 
+        # Skip SSE stream — it's long-lived; request.finished would fire only on disconnect
+        if scope.get("path", "").startswith("/v1/events/stream"):
+            await self.app(scope, receive, send)
+            return
+
         clear_contextvars()
 
         headers = dict(scope.get("headers", []))

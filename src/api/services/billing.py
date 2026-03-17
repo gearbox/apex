@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.services.event_bus import EventBus
     from src.db.models.billing import TokenAccount, TokenTransaction
 
 logger = structlog.get_logger(__name__)
@@ -32,6 +33,9 @@ logger = structlog.get_logger(__name__)
 
 class BillingService:
     """Service for token account and transaction operations."""
+
+    def __init__(self, event_bus: EventBus | None = None) -> None:
+        self._event_bus = event_bus
 
     async def get_or_create_personal_account(
         self, user_id: UUID, *, session: AsyncSession, product_id: str
@@ -166,6 +170,7 @@ class BillingService:
         metadata: dict[str, Any],
         session: AsyncSession,
         product_id: str,
+        user_id: UUID | None = None,
     ) -> TokenTransaction:
         """Atomically check balance and create a debit transaction.
 
@@ -219,6 +224,20 @@ class BillingService:
             model=metadata.get("model"),
         )
 
+        if self._event_bus is not None and user_id is not None:
+            from src.api.schemas.events import BalanceUpdatedPayload, EventType
+
+            await self._event_bus.publish(
+                user_id=user_id,
+                event_type=EventType.BALANCE_UPDATED,
+                payload=BalanceUpdatedPayload(
+                    account_id=account_id,
+                    balance=new_balance,
+                    delta=-token_cost,
+                    transaction_type=TransactionType.DEBIT.value,
+                ),
+            )
+
         return txn
 
     async def refund(
@@ -228,6 +247,7 @@ class BillingService:
         description: str,
         session: AsyncSession,
         product_id: str,
+        user_id: UUID | None = None,
     ) -> TokenTransaction:
         """Create a refund (positive) transaction linked to job_id.
 
@@ -274,6 +294,20 @@ class BillingService:
             reason=description,
         )
 
+        if self._event_bus is not None and user_id is not None:
+            from src.api.schemas.events import BalanceUpdatedPayload, EventType
+
+            await self._event_bus.publish(
+                user_id=user_id,
+                event_type=EventType.BALANCE_UPDATED,
+                payload=BalanceUpdatedPayload(
+                    account_id=debit.account_id,
+                    balance=new_balance,
+                    delta=refund_amount,
+                    transaction_type=TransactionType.REFUND.value,
+                ),
+            )
+
         return txn
 
     async def credit(
@@ -286,6 +320,7 @@ class BillingService:
         payment_provider: str = "",
         session: AsyncSession,
         product_id: str,
+        user_id: UUID | None = None,
     ) -> TokenTransaction:
         """Credit tokens to an account from a payment."""
         repo = BillingRepository(session)
@@ -317,6 +352,20 @@ class BillingService:
             payment_provider=payment_provider,
         )
 
+        if self._event_bus is not None and user_id is not None:
+            from src.api.schemas.events import BalanceUpdatedPayload, EventType
+
+            await self._event_bus.publish(
+                user_id=user_id,
+                event_type=EventType.BALANCE_UPDATED,
+                payload=BalanceUpdatedPayload(
+                    account_id=account_id,
+                    balance=new_balance,
+                    delta=amount,
+                    transaction_type=TransactionType.CREDIT.value,
+                ),
+            )
+
         return txn
 
     async def admin_adjust(
@@ -328,6 +377,7 @@ class BillingService:
         description: str,
         session: AsyncSession,
         product_id: str,
+        user_id: UUID | None = None,
     ) -> TokenTransaction:
         """Admin adjustment: positive = credit, negative = debit.
 
@@ -364,6 +414,20 @@ class BillingService:
             balance_after=new_balance,
             description=description,
         )
+
+        if self._event_bus is not None and user_id is not None:
+            from src.api.schemas.events import BalanceUpdatedPayload, EventType
+
+            await self._event_bus.publish(
+                user_id=user_id,
+                event_type=EventType.BALANCE_UPDATED,
+                payload=BalanceUpdatedPayload(
+                    account_id=account_id,
+                    balance=new_balance,
+                    delta=amount,
+                    transaction_type=TransactionType.ADMIN_ADJUSTMENT.value,
+                ),
+            )
 
         return txn
 
