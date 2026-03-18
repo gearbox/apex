@@ -1,0 +1,210 @@
+# =============================================================================
+# Apex API - Staging (single-file for Portainer editor)
+# =============================================================================
+# This is a merged version of docker-compose.yml + docker-compose.staging.yml
+# for use in Portainer's stack editor (which requires a single file).
+#
+# DO NOT use this file for local development — use the split compose files.
+# This file is regenerated from the two source files; edit those instead.
+#
+# Required env vars (set in Portainer stack environment):
+#   API_IMAGE               ghcr.io/yourorg/apex-api:staging
+#   POSTGRES_PASSWORD       strong password
+#   JWT_SECRET_KEY          output of: python -c "import secrets; print(secrets.token_urlsafe(48))"
+#   R2_ACCOUNT_ID           Cloudflare account ID
+#   R2_ACCESS_KEY_ID        R2 API token key ID
+#   R2_SECRET_ACCESS_KEY    R2 API token secret
+#   CLOUDFLARE_TUNNEL_TOKEN token from Zero Trust → Tunnels
+#   XAI_API_KEY             xAI API key (optional)
+# =============================================================================
+
+services:
+
+  # ===========================================================================
+  # PostgreSQL - Staging (isolated volume, no host port exposure)
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: apex-postgres-staging
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apex_staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-apex_staging}
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+    ports: []
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apex_staging} -d ${POSTGRES_DB:-apex_staging}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - apex-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Redis - Staging (rate limiting, no host port exposure)
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: apex-redis-staging
+    restart: unless-stopped
+    ports: []
+    volumes:
+      - redis_staging_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - apex-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ===========================================================================
+  # Migrations - runs once on deploy, then exits
+  # ===========================================================================
+  migrations:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    container_name: apex-migrations-staging
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex_staging}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apex_staging}"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - apex-network
+
+  # ===========================================================================
+  # Apex API - Staging
+  # ===========================================================================
+  api:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    container_name: apex-api-staging
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Explicit command — does not rely on Dockerfile CMD.
+    # Direct uvicorn invocation surfaces startup errors immediately in logs.
+    # Port 8100 avoids conflict with Portainer which occupies 8000 on this host.
+    command:
+      - uvicorn
+      - src.api.app:app
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8100"
+      - "--workers"
+      - "1"
+      - "--log-level"
+      - "warning"
+    environment:
+      # --- Core ---
+      DEBUG: "false"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8100"
+
+      # --- Logging ---
+      LOG_LEVEL: "DEBUG"
+      LOG_FORMAT: "json"
+
+      # --- Database ---
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex_staging}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apex_staging}"
+      DB_POOL_SIZE: "3"
+      DB_MAX_OVERFLOW: "5"
+      DB_ECHO: "false"
+
+      # --- Redis ---
+      REDIS_URL: "redis://redis:6379/0"
+
+      # --- JWT ---
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      JWT_ALGORITHM: "HS256"
+      JWT_ISSUER: "apex-api-staging"
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: "7"
+
+      # --- Cloudflare R2 (use a separate staging bucket!) ---
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:?R2_ACCOUNT_ID is required}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID is required}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is required}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-apex-staging}
+
+      # --- AI Providers ---
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
+      COMFYUI_PORT: ${COMFYUI_PORT:-18188}
+
+    # No host port binding — cloudflared connects to api:8100 inside the network
+    ports: []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    networks:
+      - apex-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ===========================================================================
+  # Cloudflare Tunnel
+  # Exposes staging.yourdomain.com → http://api:8100 via Zero Trust
+  # ===========================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: apex-cloudflared-staging
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+    depends_on:
+      - api
+    networks:
+      - apex-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_staging_data:
+    name: apex_postgres_staging_data
+  redis_staging_data:
+    name: apex_redis_staging_data
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  apex-network:
+    name: apex-staging-network

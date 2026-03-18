@@ -279,6 +279,8 @@ jobs:
         run: |
           echo "Triggering Portainer redeploy for staging stack..."
           HTTP_STATUS=$(curl \
+            -H "CF-Access-Client-Id: ${{ secrets.CF_CLIENT_ID }}" \
+            -H "CF-Access-Client-Secret: ${{ secrets.CF_CLIENT_SECRET }}" \
             --silent \
             --output /dev/null \
             --write-out "%{http_code}" \
@@ -299,7 +301,7 @@ jobs:
         run: |
           echo "Waiting for staging API to become healthy..."
           STAGING_URL="https://apex.staging.cloudin.space/health/"  # Update this
-          MAX_ATTEMPTS=24    # 24 × 10s = 4 minutes max wait
+          MAX_ATTEMPTS=24    # 24 x 10s = 4 minutes max wait
           ATTEMPT=0
 
           until curl --silent --fail --max-time 5 "$STAGING_URL" > /dev/null 2>&1; do

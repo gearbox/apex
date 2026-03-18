@@ -388,6 +388,3 @@ staging-migrate:
 | All `.env.staging` vars | Portainer Stack env | Runtime config for containers |
 | `CLOUDFLARE_TUNNEL_TOKEN` | Portainer Stack env | Cloudflare tunnel auth |
 | GHCR PAT | Portainer Registries | For Portainer to pull the image |
-
-
-https://192.168.0.25:9443/api/stacks/webhooks/591d9a03-6b0a-4ea8-83e2-05a0f09c22b2
