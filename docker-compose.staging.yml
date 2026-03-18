@@ -68,6 +68,7 @@ services:
       DEBUG: "false"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
+      WORKERS: "2"
 
       # --- Logging ---
       # More verbose than prod: DEBUG level but still JSON for structured output
@@ -98,23 +99,6 @@ services:
       COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
       COMFYUI_PORT: ${COMFYUI_PORT:-18188}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-
-    # Explicit command — does not rely on Dockerfile CMD.
-    # This is intentional: staging should be self-contained and resilient
-    # to Dockerfile changes. Direct uvicorn invocation also surfaces startup
-    # errors immediately in container logs (unlike python -m src.main which
-    # can crash silently before logging is configured).
-    command:
-      - uvicorn
-      - src.api.app:app
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8100"
-      - "--workers"
-      - "1"
-      - "--log-level"
-      - "warning"
 
     # Never expose the API port to the host — cloudflared connects to api:8100
     # inside the Docker network. This explicitly cancels any ports: defined in

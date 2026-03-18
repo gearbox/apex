@@ -99,25 +99,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Explicit command — does not rely on Dockerfile CMD.
-    # Direct uvicorn invocation surfaces startup errors immediately in logs.
-    # Port 8100 avoids conflict with Portainer which occupies 8000 on this host.
-    command:
-      - uvicorn
-      - src.api.app:app
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8100"
-      - "--workers"
-      - "1"
-      - "--log-level"
-      - "warning"
     environment:
       # --- Core ---
       DEBUG: "false"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
+      WORKERS: "2"
 
       # --- Logging ---
       LOG_LEVEL: "DEBUG"

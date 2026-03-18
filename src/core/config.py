@@ -68,6 +68,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # -------------------------------------------------------------------------
+    # Generation & AI service settings
+    # -------------------------------------------------------------------------
+
     # ComfyUI connection settings
     comfyui_host: str = Field(default="127.0.0.1", description="ComfyUI server host")
     comfyui_port: int = Field(default=18188, description="ComfyUI server port")
@@ -102,10 +106,69 @@ class Settings(BaseSettings):
         description="Maximum seconds to poll for video completion",
     )
 
+    # Generation defaults
+    default_steps: int = Field(default=12, description="Default generation steps")
+    max_steps: int = Field(default=20, description="Maximum generation steps")
+    default_cfg: float = Field(default=1.1, description="Default CFG scale")
+    default_sampler: str = Field(default="euler", description="Default sampler")
+    default_scheduler: str = Field(default="beta", description="Default scheduler")
+
+    # -------------------------------------------------------------------------
+    # System settings
+    # -------------------------------------------------------------------------
+
     # API settings
     api_host: str = Field(default="0.0.0.0", description="API server host")
     api_port: int = Field(default=8000, description="API server port")
     debug: bool = Field(default=False, description="Enable debug mode")
+
+    # ASGI Granian settings
+    asgi_workers: int = Field(
+        default=1,
+        ge=1,
+        le=32,
+        description="Number of worker processes for ASGI server. Increase in production based on CPU cores and expected load.",
+    )
+
+    # App URL (used for building verification / reset links)
+    app_url: str = Field(
+        default="http://localhost:3000",
+        description=(
+            "Base URL of the frontend application. "
+            "Used to build verification and password reset links. "
+            "Must be set to the real frontend URL in production."
+        ),
+    )
+
+    # JWT Authentication Settings
+    jwt_secret_key: str = Field(
+        default="CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
+        description=(
+            "Secret key for JWT signing. "
+            'Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))". '
+            "Must be at least 32 bytes. No safe default — must be set explicitly."
+        ),
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT signing algorithm",
+    )
+    jwt_access_token_expire_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=60,
+        description="Access token expiration in minutes",
+    )
+    jwt_refresh_token_expire_days: int = Field(
+        default=7,
+        ge=1,
+        le=30,
+        description="Refresh token expiration in days",
+    )
+    jwt_issuer: str | None = Field(
+        default="apex-api",
+        description="JWT issuer claim",
+    )
 
     # Logging settings
     log_level: str = Field(
@@ -123,23 +186,6 @@ class Settings(BaseSettings):
         le=86400,
         description="Seconds between expired token cleanup runs.",
     )
-
-    # App URL (used for building verification / reset links)
-    app_url: str = Field(
-        default="http://localhost:3000",
-        description=(
-            "Base URL of the frontend application. "
-            "Used to build verification and password reset links. "
-            "Must be set to the real frontend URL in production."
-        ),
-    )
-
-    # Generation defaults
-    default_steps: int = Field(default=12, description="Default generation steps")
-    max_steps: int = Field(default=20, description="Maximum generation steps")
-    default_cfg: float = Field(default=1.1, description="Default CFG scale")
-    default_sampler: str = Field(default="euler", description="Default sampler")
-    default_scheduler: str = Field(default="beta", description="Default scheduler")
 
     # Rate Limiting
     redis_url: str | None = Field(
@@ -186,6 +232,10 @@ class Settings(BaseSettings):
         description="Resend-verification endpoint rate limit.",
     )
 
+    # --------------------------------------------------------------------------
+    # Storage & External Services
+    # --------------------------------------------------------------------------
+
     # Database settings
     database_url: str = Field(
         default="postgresql+asyncpg://apex:apex@localhost:5432/apex",
@@ -231,49 +281,6 @@ class Settings(BaseSettings):
         description="Maximum upload file size in MB",
     )
 
-    # JWT Authentication Settings
-    jwt_secret_key: str = Field(
-        default="CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
-        description=(
-            "Secret key for JWT signing. "
-            'Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))". '
-            "Must be at least 32 bytes. No safe default — must be set explicitly."
-        ),
-    )
-    jwt_algorithm: str = Field(
-        default="HS256",
-        description="JWT signing algorithm",
-    )
-    jwt_access_token_expire_minutes: int = Field(
-        default=15,
-        ge=1,
-        le=60,
-        description="Access token expiration in minutes",
-    )
-    jwt_refresh_token_expire_days: int = Field(
-        default=7,
-        ge=1,
-        le=30,
-        description="Refresh token expiration in days",
-    )
-    jwt_issuer: str | None = Field(
-        default="apex-api",
-        description="JWT issuer claim",
-    )
-
-    # Branding
-    app_name: str = Field(
-        default="Apex",
-        description=(
-            "Public-facing product name used in emails and UI copy. "
-            "Override via APP_NAME env var when the brand/domain changes."
-        ),
-    )
-    support_email: str = Field(
-        default="support@apex.ai",
-        description="Support email address shown in transactional emails.",
-    )
-
     # Email
     resend_api_key: str = Field(
         default="",
@@ -291,21 +298,9 @@ class Settings(BaseSettings):
         description="Sender display name shown in email clients.",
     )
 
-    # Product
-    default_product: str = Field(
-        default="vex",
-        description="Default product slug for localhost/dev requests.",
-    )
-
-    # Per-product app URLs (for email links)
-    app_url_vex: str = Field(
-        default="https://vex.pics",
-        description="Base URL for vex.pics frontend (used in email links).",
-    )
-    app_url_synthara: str = Field(
-        default="https://synthara.app",
-        description="Base URL for Synthara frontend (used in email links).",
-    )
+    # -------------------------------------------------------------------------
+    # Billing & Payment settings
+    # -------------------------------------------------------------------------
 
     # Billing & Payment settings
     grok_moderation_billing_policy: Literal["charge", "refund"] = Field(
@@ -367,6 +362,39 @@ class Settings(BaseSettings):
     nowpayments_ipn_secret_vex: str | None = Field(
         default=None,
         description="NowPayments IPN HMAC secret for vex.pics",
+    )
+
+    # -------------------------------------------------------------------------
+    # Branding & Product Segmentation Settings
+    # -------------------------------------------------------------------------
+
+    # Branding
+    app_name: str = Field(
+        default="Apex",
+        description=(
+            "Public-facing product name used in emails and UI copy. "
+            "Override via APP_NAME env var when the brand/domain changes."
+        ),
+    )
+    support_email: str = Field(
+        default="support@apex.ai",
+        description="Support email address shown in transactional emails.",
+    )
+
+    # Product
+    default_product: str = Field(
+        default="vex",
+        description="Default product slug for localhost/dev requests.",
+    )
+
+    # Per-product app URLs (for email links)
+    app_url_vex: str = Field(
+        default="https://vex.pics",
+        description="Base URL for vex.pics frontend (used in email links).",
+    )
+    app_url_synthara: str = Field(
+        default="https://synthara.app",
+        description="Base URL for Synthara frontend (used in email links).",
     )
 
     # -------------------------------------------------------------------------

@@ -85,7 +85,6 @@ class TokenCleanupWorker:
             duration_ms = int((time.perf_counter() - start_time) * 1000)
             logger.info(
                 "token_cleanup",
-                event="token_cleanup",
                 refresh=refresh_count,
                 email_verification=email_count,
                 password_reset=password_count,

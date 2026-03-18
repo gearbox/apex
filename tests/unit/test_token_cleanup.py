@@ -118,7 +118,6 @@ async def test_worker_runs_cleanup_on_interval() -> None:
         # Verify logger struct
         logger_mock.info.assert_called_with(
             "token_cleanup",
-            event="token_cleanup",
             refresh=5,
             email_verification=3,
             password_reset=2,

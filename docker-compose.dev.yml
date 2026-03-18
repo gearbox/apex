@@ -34,14 +34,7 @@ services:
       - ./tests:/app/tests:ro
       # Pass through coverage report to local filesystem
       - ./htmlcov:/app/htmlcov
-    # Override command to use uvicorn with reload
-    command: >
-      uvicorn src.api.app:app 
-      --host 0.0.0.0 
-      --port 8000 
-      --reload 
-      --reload-dir /app/src
-
+    
   # Don't need separate migrations container in dev - run manually
   migrations:
     profiles:
