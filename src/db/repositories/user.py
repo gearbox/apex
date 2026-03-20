@@ -685,4 +685,3 @@ class UserRepository:
             .where(GenerationOutput.job_id == job_id)
         )
         return int(result.scalar() or 0)
-

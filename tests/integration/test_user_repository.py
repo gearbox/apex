@@ -793,4 +793,3 @@ class TestUpdateUserAdmin:
         updated = await user_repo.update_user_admin(user.id, is_active=False)
         assert updated is not None
         assert updated.updated_at >= original_updated_at
-
