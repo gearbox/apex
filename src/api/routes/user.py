@@ -10,7 +10,7 @@ import structlog
 from litestar import Controller, Request, Response, delete, get, patch, post
 from litestar.di import Provide
 from litestar.exceptions import NotAuthorizedException, NotFoundException
-from litestar.params import Body, Parameter
+from litestar.params import Body
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_400_BAD_REQUEST,
@@ -18,11 +18,9 @@ from litestar.status_codes import (
 
 from src.api.schemas.auth import MessageResponse
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.schemas.pagination import PaginatedResponse
 from src.api.schemas.user import (
     ChangePasswordRequest,
     DeleteAccountResponse,
-    JobSummaryResponse,
     UpdateProfileRequest,
     UserProfileResponse,
     UserStatsResponse,
@@ -180,35 +178,6 @@ class UserController(Controller):
         try:
             stats = await user_service.get_stats(current_user_id)
             return Response(content=stats, status_code=HTTP_200_OK)
-
-        except UserNotFoundError as e:
-            raise NotFoundException(detail="User not found") from e
-
-    @get("/me/jobs")
-    async def get_jobs(
-        self,
-        current_user_id: UUID,
-        user_service: UserService,
-        limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
-        offset: Annotated[int, Parameter(ge=0)] = 0,
-        cursor: str | None = None,
-    ) -> Response[PaginatedResponse[JobSummaryResponse]]:
-        """Get current user's generation jobs.
-
-        Query parameters:
-          - ``limit``: Page size 1–100 (default 50)
-          - ``offset``: Page offset (default 0, ignored when ``cursor`` is supplied)
-          - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
-            field.  When supplied, enables efficient keyset pagination.
-        """
-        try:
-            jobs = await user_service.get_jobs(
-                current_user_id,
-                limit=limit,
-                offset=offset,
-                cursor=cursor,
-            )
-            return Response(content=jobs, status_code=HTTP_200_OK)
 
         except UserNotFoundError as e:
             raise NotFoundException(detail="User not found") from e

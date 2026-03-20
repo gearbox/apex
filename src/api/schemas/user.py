@@ -61,20 +61,6 @@ class UserStatsResponse(msgspec.Struct, kw_only=True):
     storage_used_bytes: int
 
 
-class JobSummaryResponse(msgspec.Struct, kw_only=True):
-    """Generation job summary for user's job list."""
-
-    id: str
-    name: str
-    status: str
-    generation_type: str
-    prompt: str
-    output_count: int
-    thumbnail_url: str | None
-    created_at: datetime
-    completed_at: datetime | None
-
-
 class DeleteAccountResponse(msgspec.Struct, kw_only=True):
     """Account deletion response."""
 

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
 
-from src.api.schemas.pagination import PaginatedResponse, decode_cursor, encode_cursor
 from src.api.schemas.user import (
-    JobSummaryResponse,
     UserProfileResponse,
     UserStatsResponse,
 )
@@ -229,103 +226,6 @@ class UserService:
             total_outputs=output_count,
             total_uploads=upload_count,
             storage_used_bytes=storage_bytes,
-        )
-
-    async def get_jobs(
-        self,
-        user_id: UUID,
-        *,
-        limit: int = 50,
-        offset: int = 0,
-        cursor: str | None = None,
-    ) -> PaginatedResponse[JobSummaryResponse]:
-        """Get user's generation jobs.
-
-        Supports both offset-based and cursor-based pagination.  When
-        ``cursor`` is supplied the offset is ignored and keyset filtering is
-        applied instead.
-
-        Args:
-            user_id: User ID.
-            limit: Max results.
-            offset: Results to skip (ignored when cursor supplied).
-            cursor: Opaque cursor token from a previous response's
-                ``next_cursor`` field.
-
-        Returns:
-            PaginatedResponse[JobSummaryResponse].
-
-        Raises:
-            UserNotFoundError: If user not found.
-        """
-        user = await self._repo.get_user(user_id)
-        if user is None:
-            raise UserNotFoundError(f"User {user_id} not found")
-
-        # Decode cursor if provided
-        cursor_ts = None
-        cursor_id = None
-        effective_offset = offset
-        if cursor is not None:
-            cursor_ts, cursor_id = decode_cursor(cursor)
-            effective_offset = 0
-
-        jobs = await self._repo.list_user_jobs(
-            user_id,
-            limit=limit,
-            offset=effective_offset,
-            cursor_ts=cursor_ts,
-            cursor_id=cursor_id,
-        )
-        total = await self._repo.count_user_jobs(user_id)
-
-        job_ids = [job.id for job in jobs]
-
-        # Both batch queries in a single round-trip each — no N+1
-        output_counts, first_outputs = await asyncio.gather(
-            self._repo.count_outputs_for_jobs(job_ids),
-            self._repo.get_first_outputs_for_jobs(job_ids),
-        )
-
-        # Sign thumbnail URLs in parallel (pure HMAC, no R2 round-trips)
-        thumbnail_urls: dict[UUID, str] = {}
-        if self._r2 and first_outputs:
-            sign_results = await asyncio.gather(
-                *(self._r2.sign_key(out.storage_key) for out in first_outputs.values()),
-                return_exceptions=True,
-            )
-            for job_id, result in zip(first_outputs.keys(), sign_results, strict=True):
-                if isinstance(result, str):
-                    thumbnail_urls[job_id] = result
-
-        items = [
-            JobSummaryResponse(
-                id=str(job.id),
-                name=job.name,
-                status=str(job.status),
-                generation_type=str(job.generation_type),
-                prompt=(f"{job.prompt[:200]}..." if len(job.prompt) > 200 else job.prompt),
-                output_count=output_counts.get(job.id, 0),
-                thumbnail_url=thumbnail_urls.get(job.id),
-                created_at=job.created_at,
-                completed_at=job.completed_at,
-            )
-            for job in jobs
-        ]
-
-        has_more = effective_offset + len(items) < total
-        next_cursor: str | None = None
-        if has_more and jobs:
-            last = jobs[-1]
-            next_cursor = encode_cursor(last.created_at, last.id)
-
-        return PaginatedResponse(
-            items=items,
-            total=total,
-            limit=limit,
-            offset=effective_offset,
-            has_more=has_more,
-            next_cursor=next_cursor,
         )
 
     def _to_profile_response(self, user: User) -> UserProfileResponse:

@@ -26,7 +26,7 @@ interface PaginatedResponse<T> {
 
 ### Cursor-based pagination (keyset)
 
-Priority list endpoints (`/v1/jobs`, `/v1/users/me/jobs`, `/v1/storage/outputs`,
+Priority list endpoints (`/v1/jobs`, `/v1/storage/outputs`,
 `/v1/billing/transactions`, `/v1/storage/uploads`) support an optional `cursor`
 query parameter alongside the existing `limit`/`offset` parameters.
 
@@ -242,25 +242,9 @@ Response: {
 }
 ```
 
-#### `GET /v1/users/me/jobs`
-
-```
-Query:    limit? (1-100, default 50), offset? (default 0), cursor? (opaque token)
-Response: PaginatedResponse<JobSummaryResponse>
-  // has_more, next_cursor for cursor-based paging
-
-JobSummaryResponse: {
-  id: UUID,
-  name: string,
-  status: JobStatus,
-  generation_type: GenerationType,
-  prompt: string,
-  output_count: int,
-  thumbnail_url: string | null,   // presigned URL for first output; null if no outputs yet
-  created_at: datetime,
-  completed_at: datetime | null
-}
-```
+> **Deprecated:** `GET /v1/users/me/jobs` has been removed.
+> Use `GET /v1/jobs` (Section 6) which provides the same data plus filtering
+> by `status`, `provider`, and `generation_type`, and the full output list per job.
 
 #### `POST /v1/users/me/logout-all`
 

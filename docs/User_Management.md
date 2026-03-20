@@ -29,7 +29,6 @@
 | POST | `/api/v1/users/me/password` | Change password |
 | DELETE | `/api/v1/users/me` | Soft delete account |
 | GET | `/api/v1/users/me/stats` | Get usage statistics |
-| GET | `/api/v1/users/me/jobs` | List generation jobs |
 | POST | `/api/v1/users/me/logout-all` | Logout all devices |
 
 ## Usage Examples
