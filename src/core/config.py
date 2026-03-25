@@ -267,6 +267,13 @@ class Settings(BaseSettings):
         description="Public URL base for R2 content (if using custom domain)",
     )
 
+    content_url_ttl: int = Field(
+        default=10800,
+        ge=60,
+        le=86400,
+        description="Cache-Control max-age for content proxy responses (seconds).",
+    )
+
     # Storage retention settings
     retention_days: int = Field(
         default=7,

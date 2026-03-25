@@ -38,6 +38,10 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     input_image_id: UUID | None = None
     """Required for i2i, i2v, flf2v. ID of a previously uploaded image (via POST /v1/storage/upload)."""
 
+    source_output_id: UUID | None = None
+    """ID of a GenerationOutput to use as input (remix).
+    Mutually exclusive with input_image_id."""
+
     input_video_url: str | None = None
     """Required for v2v. Publicly-accessible URL of the source video."""
 

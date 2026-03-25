@@ -176,6 +176,26 @@ class GenerationJob(Base):
         nullable=True,
     )
 
+    # --- Lineage: remix tracking ---
+    source_job_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    source_output_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("generation_outputs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    input_image_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("user_images.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # External provider tracking
     # For ComfyUI: stores prompt_id
     # For Grok: stores request_id (for video polling)
@@ -217,12 +237,32 @@ class GenerationJob(Base):
         "GenerationOutput",
         back_populates="job",
         cascade="all, delete-orphan",
+        foreign_keys="GenerationOutput.job_id",
+    )
+    source_job: Mapped[GenerationJob | None] = relationship(
+        "GenerationJob",
+        remote_side="GenerationJob.id",
+        foreign_keys="GenerationJob.source_job_id",
+        uselist=False,
+    )
+    source_output: Mapped[GenerationOutput | None] = relationship(
+        "GenerationOutput",
+        foreign_keys="GenerationJob.source_output_id",
+        uselist=False,
+        overlaps="job",
+    )
+    input_image: Mapped[UserImage | None] = relationship(
+        "UserImage",
+        foreign_keys="GenerationJob.input_image_id",
+        uselist=False,
+        overlaps="generation_outputs",
     )
 
     __table_args__ = (
         Index("ix_generation_jobs_user_status", "user_id", "status"),
         Index("ix_generation_jobs_user_created", "user_id", "created_at"),
         Index("ix_generation_jobs_provider_status", "provider", "status"),
+        Index("ix_generation_jobs_gallery", "user_id", "product_id", "status", "created_at"),
     )
 
     def __repr__(self) -> str:
@@ -309,6 +349,7 @@ class GenerationOutput(Base):
     )
     job: Mapped[GenerationJob] = relationship(
         "GenerationJob",
+        foreign_keys="GenerationOutput.job_id",
         back_populates="outputs",
     )
     input_image: Mapped[UserImage | None] = relationship(

@@ -62,6 +62,8 @@ class AishaGenerationProvider:
         account_id: UUID,
         token_cost: int,
         product_id: str,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
     ) -> GenerationJob:
         """Build workflow, queue with ComfyUI, create DB job record.
 
@@ -97,6 +99,9 @@ class AishaGenerationProvider:
             model=request.model.value,
             aspect_ratio=request.aspect_ratio.value,
             product_id=product_id,
+            source_job_id=source_job_id,
+            source_output_id=source_output_id,
+            input_image_id=request.input_image_id,
         )
 
         # Billing reservation

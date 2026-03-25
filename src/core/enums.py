@@ -220,6 +220,27 @@ class MediaFormat(StrEnum):
         return self == MediaFormat.MP4
 
 
+class OutputMediaType(StrEnum):
+    """Media type classification for gallery filtering."""
+
+    IMAGE = "image"
+    VIDEO = "video"
+
+
+class GalleryBadge(StrEnum):
+    """Badge type for gallery grid — describes the input source."""
+
+    IMAGE = "image"
+    PROMPT = "prompt"
+
+
+class GallerySourceType(StrEnum):
+    """Type of input source for lineage display."""
+
+    UPLOAD = "upload"
+    GENERATION = "generation"
+
+
 class SubscriptionTier(StrEnum):
     """User subscription tiers."""
 

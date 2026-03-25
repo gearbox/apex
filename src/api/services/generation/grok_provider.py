@@ -53,6 +53,8 @@ class GrokGenerationProvider:
         account_id: UUID,
         token_cost: int,
         product_id: str,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
     ) -> GenerationJob:
         """Delegate to GrokJobService.create_image_job or start_video_job."""
         if request.generation_type.is_video:
@@ -64,6 +66,8 @@ class GrokGenerationProvider:
                 account_id=account_id,
                 token_cost=token_cost,
                 product_id=product_id,
+                source_job_id=source_job_id,
+                source_output_id=source_output_id,
             )
         return await self._submit_image(
             request,
@@ -73,14 +77,26 @@ class GrokGenerationProvider:
             account_id=account_id,
             token_cost=token_cost,
             product_id=product_id,
+            source_job_id=source_job_id,
+            source_output_id=source_output_id,
         )
 
-    async def _resolve_input_image_url(
+    async def _resolve_input_url(
         self,
         request: UnifiedGenerationRequest,
         session: AsyncSession,
     ) -> str | None:
-        """Resolve input_image_id -> presigned R2 URL."""
+        """Resolve input URL from either source_output_id or input_image_id."""
+        if request.source_output_id is not None:
+            from src.db import StorageRepository
+
+            repo = StorageRepository(session)
+            output = await repo.get_output(request.source_output_id)
+            if output is None:
+                raise ValueError(f"Source output {request.source_output_id} not found")
+            url_result = await self._r2.get_presigned_url(output.storage_key, expires_in=3600)
+            return url_result.presigned_url
+
         if request.input_image_id is None:
             return None
 
@@ -90,7 +106,6 @@ class GrokGenerationProvider:
         input_image = await repo.get_user_image(request.input_image_id)
         if input_image is None:
             raise ValueError(f"Input image {request.input_image_id} not found")
-
         url_result = await self._r2.get_presigned_url(
             input_image.storage_key,
             expires_in=3600,
@@ -107,9 +122,11 @@ class GrokGenerationProvider:
         account_id: UUID,
         token_cost: int,
         product_id: str,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
     ) -> GenerationJob:
         """Delegate to GrokJobService.create_image_job."""
-        input_image_url = await self._resolve_input_image_url(request, session)
+        input_image_url = await self._resolve_input_url(request, session)
 
         job = await self._grok.create_image_job(
             session=session,
@@ -127,6 +144,8 @@ class GrokGenerationProvider:
             account_id=account_id,
             token_cost=token_cost,
             product_id=product_id,
+            source_job_id=source_job_id,
+            source_output_id=source_output_id,
         )
         if job is None:
             raise ValueError("Grok image job creation returned None")
@@ -142,9 +161,11 @@ class GrokGenerationProvider:
         account_id: UUID,
         token_cost: int,
         product_id: str,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
     ) -> GenerationJob:
         """Delegate to GrokJobService.start_video_job."""
-        input_image_url = await self._resolve_input_image_url(request, session)
+        input_image_url = await self._resolve_input_url(request, session)
 
         job = await self._grok.start_video_job(
             session=session,
@@ -162,6 +183,8 @@ class GrokGenerationProvider:
             account_id=account_id,
             token_cost=token_cost,
             product_id=product_id,
+            source_job_id=source_job_id,
+            source_output_id=source_output_id,
         )
         if job is None:
             raise ValueError("Grok video job creation returned None")

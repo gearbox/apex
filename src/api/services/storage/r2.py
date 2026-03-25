@@ -519,6 +519,44 @@ class R2StorageService:
             logger.warning("r2.key_parse_failed", key=storage_key, error=str(e))
             return None
 
+    @asynccontextmanager
+    async def stream_object(
+        self,
+        storage_key: str,
+    ) -> AsyncIterator[tuple[AsyncIterator[bytes], str, int]]:
+        """Context-managed R2 object stream.
+
+        Yields:
+            (byte_iterator, content_type, size_bytes)
+            The client connection stays open for the lifetime of the context.
+
+        Raises:
+            StorageNotFoundError: If the key doesn't exist.
+            StorageDownloadError: If the stream fails.
+        """
+        async with self._get_client() as client:
+            try:
+                response = await client.get_object(
+                    Bucket=self._settings.bucket_name,
+                    Key=storage_key,
+                )
+            except ClientError as e:
+                if _get_error_code(e) in ("NoSuchKey", "404"):
+                    raise StorageNotFoundError(f"File not found: {storage_key}") from e
+                raise StorageDownloadError(
+                    f"Stream failed: {_get_error_message(e)}",
+                    cause=e,
+                ) from e
+
+            content_type = response.get("ContentType", "application/octet-stream")
+            size_bytes = response.get("ContentLength", 0)
+
+            async def _iter_chunks() -> AsyncIterator[bytes]:
+                async for chunk in response["Body"].iter_chunks(chunk_size=65536):
+                    yield chunk
+
+            yield _iter_chunks(), content_type, size_bytes
+
     async def health_check(self) -> bool:
         """Check if R2 storage is accessible."""
         try:

@@ -3,7 +3,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-03-17
+> **Last synced:** 2026-03-25
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -254,7 +254,9 @@ Request: {
   prompt: string (1–4096 chars),
   generation_type: GenerationType,
   model: ModelType,
-  input_image_id?: UUID,          // required for i2i / i2v / flf2v
+  input_image_id?: UUID,          // required for i2i / i2v / flf2v if source_output_id not set
+  source_output_id?: UUID,        // alternative to input_image_id — use an existing generation output as input
+                                  // mutually exclusive with input_image_id
   input_video_url?: string,       // required for v2v (public URL)
   negative_prompt?: string,
   aspect_ratio?: AspectRatio (default "1:1"),
@@ -269,6 +271,8 @@ Request: {
 Response: JobCreatedResponse
 Status:   201 Created
 Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 model_not_allowed (model unavailable on this product), 429 rate_limited, 503 service_unavailable
+Note:     source_output_id enables "remix from gallery" — the backend resolves lineage automatically
+          (source_job_id + source_output_id) and records it on the new job.
 ```
 
 ### JobCreatedResponse Schema
@@ -542,7 +546,152 @@ Response: {
 
 ---
 
-## 8. Billing *(authenticated)*
+## 8. Content Proxy *(authenticated)*
+
+Provides stable, non-expiring authenticated URLs for user content. The server resolves ownership, checks product scoping, then streams bytes directly from R2. **No presigned URLs are exposed** — the client only ever sees `/v1/content/...` paths.
+
+> **Why use this instead of presigned URLs?** Content proxy URLs are permanent (for the lifetime of the resource), cacheable with `Cache-Control: private, max-age=<ttl>, immutable`, and enforce per-request authorization. They are the preferred URL format for Gallery and any UI that persists content references.
+
+### Response Headers
+
+All successful responses include:
+- `Content-Type` — from R2 object metadata
+- `Content-Length` — from R2 object metadata
+- `Cache-Control: private, max-age=10800, immutable` — 3-hour client cache (default; configurable via `CONTENT_URL_TTL`)
+- `ETag: "<content_id>"` — the output/upload UUID, for conditional requests
+- `X-Content-Id: <content_id>` — same UUID, without quotes
+
+#### `GET /v1/content/outputs/{output_id}`
+
+```
+Path:     output_id (UUID)
+Response: 200 Raw bytes (chunked streaming, appropriate Content-Type)
+Errors:   404 not_found (ownership check failed or wrong product),
+          502 upstream_error (R2 fetch failed)
+Note:     Only returns outputs owned by the authenticated user and matching the current product.
+```
+
+#### `GET /v1/content/uploads/{image_id}`
+
+```
+Path:     image_id (UUID)
+Response: 200 Raw bytes (chunked streaming, appropriate Content-Type)
+Errors:   404 not_found (ownership check failed or wrong product),
+          502 upstream_error (R2 fetch failed)
+Note:     Only returns uploads owned by the authenticated user and matching the current product.
+```
+
+---
+
+## 9. Gallery *(authenticated)*
+
+Gallery presents completed generation jobs as a visual grid. Each **gallery item** is one `GenerationJob` (a "group") with its cover image/video, metadata, and output list.
+
+- Only `completed` jobs are returned.
+- Results are ordered by `created_at DESC` (newest first).
+- Uses the same **cursor pagination** as all other list endpoints.
+- Content URLs in responses are always `/v1/content/...` paths (permanent, auth-gated).
+
+#### `GET /v1/gallery/`
+
+```
+Query:    limit? (1–25, default 20),
+          cursor? (opaque token),
+          media_type? ("image" | "video"),
+          generation_type? (GenerationType value),
+          model? (string — model key)
+Response: CursorPage<GalleryGridItem>
+```
+
+#### `GET /v1/gallery/{job_id}`
+
+```
+Path:     job_id (UUID)
+Response: GalleryGroupDetail
+Errors:   404 not_found (job not completed, wrong user, or wrong product)
+```
+
+### Gallery Schemas
+
+```typescript
+interface GalleryGridItem {
+  job_id: UUID;
+  cover_url: string;        // "/v1/content/outputs/{id}" or "/v1/content/uploads/{id}"
+  video_url: string | null; // present for video generation types; autoplay source
+  badge: GalleryBadge;      // "prompt" (t2i/t2v) or "image" (i2i/i2v/flf2v/v2v)
+  media_type: OutputMediaType; // "image" or "video"
+  output_count: number;     // non-thumbnail outputs in this group
+  generation_type: GenerationType;
+  model: string | null;
+  aspect_ratio: string | null; // e.g. "16:9"
+  prompt_snippet: string;   // first 100 chars of the prompt
+  created_at: string;       // ISO datetime
+}
+
+interface GalleryGroupDetail {
+  job_id: UUID;
+  // Header
+  badge: GalleryBadge;
+  input_image_url: string | null; // present when badge == "image"
+  prompt: string;
+  negative_prompt: string | null;
+  // Outputs
+  outputs: GalleryOutputItem[];   // non-thumbnail outputs, ordered by output_index
+  // Metadata
+  media_type: OutputMediaType;
+  model: string | null;
+  provider: string;
+  generation_type: GenerationType;
+  aspect_ratio: string | null;
+  token_cost: number | null;
+  created_at: string;
+  completed_at: string | null;
+  // Lineage
+  lineage: GalleryLineage | null;
+}
+
+interface GalleryOutputItem {
+  id: UUID;
+  url: string;              // "/v1/content/outputs/{id}"
+  thumbnail_url: string | null; // video poster frame URL (if applicable)
+  content_type: string;     // "image/jpeg", "video/mp4", etc.
+  media_type: OutputMediaType;
+  format: string;           // "jpeg", "webp", "mp4"
+  size_bytes: number;
+  output_index: number;     // 0-based
+  created_at: string;
+}
+
+interface GalleryLineage {
+  source_type: GallerySourceType;    // "upload" or "generation"
+  source_upload_id: UUID | null;     // set when source_type == "upload"
+  source_job_id: UUID | null;        // set when source_type == "generation"
+  source_job_name: string | null;    // human-readable name of the source job
+  source_output_id: UUID | null;     // specific output used as input
+}
+```
+
+### Cover URL Resolution
+
+| Generation type | `cover_url` source | `video_url` |
+|----------------|-------------------|-------------|
+| `t2i` | Last generated output | `null` |
+| `t2v` | Video thumbnail (poster frame) | Video output |
+| `i2i` | Source output → input upload → last output | `null` |
+| `i2v` | Source output → input upload → last output | Video output |
+| `flf2v` | Source output → input upload → last output | Video output |
+| `v2v` | Source output → thumbnail → last output | Video output |
+
+### Gallery Badge Logic
+
+| Badge value | Generation types |
+|-------------|-----------------|
+| `"prompt"` | `t2i`, `t2v` — text-only input |
+| `"image"` | `i2i`, `i2v`, `flf2v`, `v2v` — image/video input |
+
+---
+
+## 10. Billing *(authenticated)*
 
 #### `GET /v1/billing/balance`
 
@@ -679,7 +828,7 @@ Note:     Internal endpoint for NowPayments events
 
 ---
 
-## 9. Organizations *(authenticated)*
+## 11. Organizations *(authenticated)*
 
 #### `POST /v1/organizations/`
 
@@ -770,7 +919,7 @@ MemberResponse: {
 
 ---
 
-## 10. Admin *(authenticated — admin only)*
+## 12. Admin *(authenticated — admin only)*
 
 ### User Management
 
@@ -955,7 +1104,7 @@ Errors:   404
 
 ---
 
-## 11. Real-Time Events (SSE + Pub/Sub)
+## 13. Real-Time Events (SSE + Pub/Sub)
 
 The backend supports real-time event streaming via **Server-Sent Events (SSE)** backed by Redis Pub/Sub. Because `EventSource` cannot send custom headers, authentication uses a short-lived **one-time ticket** pattern.
 
@@ -1134,7 +1283,7 @@ async function openEventStream(apiFetch: Fetcher) {
 
 ---
 
-## 12. Product Reference
+## 14. Product Reference
 
 ### Products
 
@@ -1153,7 +1302,7 @@ Values: `"sfw"`, `"permissive"`
 
 ---
 
-## 13. Enums Reference
+## 15. Enums Reference
 
 ### ModelType
 
@@ -1230,9 +1379,29 @@ Values: `"pending"`, `"completed"`, `"failed"`, `"refunded"`
 
 Values: `"en"` (English), `"ru"` (Russian), `"sr"` (Serbian Latin)
 
+### OutputMediaType
+
+Values: `"image"`, `"video"`
+
+Used in Gallery to distinguish image vs. video generation groups and outputs.
+
+### GalleryBadge
+
+Values: `"prompt"`, `"image"`
+
+Indicates the primary input type for a gallery item:
+- `"prompt"` — text-to-image or text-to-video (no image input)
+- `"image"` — image/video input types (i2i, i2v, flf2v, v2v)
+
+### GallerySourceType
+
+Values: `"upload"`, `"generation"`
+
+Used in `GalleryLineage.source_type` to indicate whether the input came from a direct upload or a previous generation output.
+
 ---
 
-## 14. Error Response Format
+## 16. Error Response Format
 
 All non-2xx responses use a single unified envelope:
 
@@ -1290,9 +1459,26 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 15. Presigned URL Notes
+## 17. Content URLs
 
-- All R2 presigned URLs are valid for **~1 hour** by default
+### Content Proxy URLs (preferred for Gallery / persistent UI)
+
+Gallery responses and the `/v1/content/` endpoints return **content proxy URLs** — permanent, auth-gated paths:
+
+- `GET /v1/content/outputs/{output_id}` — streams a generated output
+- `GET /v1/content/uploads/{image_id}` — streams an uploaded image
+
+These URLs:
+- Are **stable** for the lifetime of the resource (no expiry)
+- Return `Cache-Control: private, max-age=10800, immutable` (3-hour client cache, configurable via `CONTENT_URL_TTL`)
+- Enforce ownership and product scoping on every request
+- Are suitable for `<img src>`, `<video src>`, or background image CSS
+
+**Frontend caching:** Because responses are `immutable`, browsers will serve cached bytes without revalidating for the `max-age` window. Use these URLs directly in `<img>` and `<video>` tags.
+
+### Presigned URLs (jobs / storage endpoints)
+
+- All R2 presigned URLs returned by `/v1/jobs` and `/v1/storage` endpoints are valid for **~1 hour** by default
 - Do **not** aggressively cache them — use `staleTime` of ~30 minutes in TanStack Query
 - URLs are generated on-demand when fetching jobs/outputs/uploads
 - R2 storage key pattern:
@@ -1301,7 +1487,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 16. Rate Limits
+## 18. Rate Limits
 
 | Endpoint | Limit |
 |----------|-------|
@@ -1315,7 +1501,7 @@ Rate limit headers are **not currently exposed** in responses. The frontend shou
 
 ---
 
-## 17. Health Check
+## 19. Health Check
 
 #### `GET /health/`
 
@@ -1326,7 +1512,7 @@ Note:     Public endpoint, no auth needed
 
 ---
 
-## 18. OpenAPI Documentation Endpoints
+## 20. OpenAPI Documentation Endpoints
 
 The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
 

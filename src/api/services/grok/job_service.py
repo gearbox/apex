@@ -132,6 +132,8 @@ class GrokJobService:
         account_id: UUID,
         token_cost: int,
         product_id: str,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
     ) -> GenerationJob | None:
         """Create and execute an image generation job.
 
@@ -187,6 +189,9 @@ class GrokJobService:
             model=model.value,
             aspect_ratio=aspect_ratio.value,
             product_id=product_id,
+            source_job_id=source_job_id,
+            source_output_id=source_output_id,
+            input_image_id=input_image_id,
         )
 
         # Update with negative prompt if provided
@@ -413,6 +418,8 @@ class GrokJobService:
         account_id: UUID,
         token_cost: int,
         product_id: str,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
     ) -> GenerationJob | None:
         """Start an async video generation job.
 
@@ -461,6 +468,8 @@ class GrokJobService:
             model=model.value,
             aspect_ratio=aspect_ratio.value,
             product_id=product_id,
+            source_job_id=source_job_id,
+            source_output_id=source_output_id,
         )
 
         try:

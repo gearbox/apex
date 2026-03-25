@@ -44,6 +44,8 @@ class GenerationProvider(Protocol):
         account_id: UUID,
         token_cost: int,
         product_id: str,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
     ) -> GenerationJob:
         """Submit the generation request to the provider.
 

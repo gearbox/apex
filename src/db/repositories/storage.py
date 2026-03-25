@@ -263,6 +263,9 @@ class StorageRepository:
         provider: Provider = Provider.AISHA,
         model: str | None = None,
         aspect_ratio: str | None = None,
+        source_job_id: UUID | None = None,
+        source_output_id: UUID | None = None,
+        input_image_id: UUID | None = None,
     ) -> GenerationJob:
         """Create a new generation job.
 
@@ -277,6 +280,9 @@ class StorageRepository:
             provider: Generation provider (aisha, grok).
             model: Model identifier.
             aspect_ratio: Aspect ratio string, e.g. ``16:9``.
+            source_job_id: ID of the source job for lineage tracking.
+            source_output_id: ID of the source output used as input.
+            input_image_id: ID of the uploaded image used as input.
 
         Returns:
             Created GenerationJob instance.
@@ -292,6 +298,9 @@ class StorageRepository:
             model=model,
             aspect_ratio=aspect_ratio,
             product_id=product_id,
+            source_job_id=source_job_id,
+            source_output_id=source_output_id,
+            input_image_id=input_image_id,
         )
         self._session.add(job)
         await self._session.flush()

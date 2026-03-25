@@ -130,6 +130,19 @@ class GenerationService:
 
         # 8. Submit to provider (with billing saga)
         product_id = product_config.slug if product_config is not None else "vex"
+
+        # Resolve lineage: if source_output_id is provided, look up the source job
+        source_job_id: UUID | None = None
+        resolved_source_output_id: UUID | None = request.source_output_id
+        if request.source_output_id is not None:
+            from src.db.repositories.storage import StorageRepository
+
+            repo = StorageRepository(session)
+            source_output = await repo.get_output(request.source_output_id, user_id=user_id)
+            if source_output is None:
+                raise ValueError("Source output not found")
+            source_job_id = source_output.job_id
+
         job = None
         try:
             job = await provider.submit(
@@ -140,6 +153,8 @@ class GenerationService:
                 account_id=account.id,
                 token_cost=token_cost,
                 product_id=product_id,
+                source_job_id=source_job_id,
+                source_output_id=resolved_source_output_id,
             )
             await session.commit()
 
@@ -193,9 +208,13 @@ class GenerationService:
     @staticmethod
     def _validate_inputs(request: UnifiedGenerationRequest) -> None:
         """Cross-cutting validation: generation_type vs required inputs."""
-        if request.generation_type.requires_image_input and request.input_image_id is None:
+        if request.input_image_id is not None and request.source_output_id is not None:
+            raise ValueError("input_image_id and source_output_id are mutually exclusive")
+        if request.generation_type.requires_image_input and (
+            request.input_image_id is None and request.source_output_id is None
+        ):
             raise ValueError(
-                f"generation_type '{request.generation_type.value}' requires input_image_id"
+                f"generation_type '{request.generation_type.value}' requires input_image_id or source_output_id"
             )
         if request.generation_type.requires_video_input and request.input_video_url is None:
             raise ValueError(

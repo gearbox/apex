@@ -17,9 +17,11 @@ from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
 from src.api.services.comfyui_client import ComfyUIClient
+from src.api.services.content_proxy import ContentProxyService
 from src.api.services.email import EmailService, LogEmailService, ResendEmailService
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
+from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
@@ -331,6 +333,19 @@ def get_payment_service() -> PaymentService:
 # -----------------------------------------------------------------------------
 
 
+def get_content_proxy(
+    r2_storage: R2StorageService,
+    settings: Settings,
+) -> ContentProxyService:
+    """Provide ContentProxyService per-request."""
+    return ContentProxyService(storage=r2_storage, settings=settings)
+
+
+def get_gallery_service(session: AsyncSession) -> GalleryService:
+    """Provide GalleryService per-request."""
+    return GalleryService(session=session)
+
+
 def provide_settings() -> Settings:
     """Provide settings instance.
 
@@ -613,4 +628,8 @@ dependencies = {
     # Product context (resolved by ProductMiddleware)
     "product_config": Provide(get_product_config, sync_to_thread=False),
     "product_id": Provide(get_product_id, sync_to_thread=False),
+    # Content proxy
+    "content_proxy": Provide(get_content_proxy, sync_to_thread=False),
+    # Gallery
+    "gallery_service": Provide(get_gallery_service, sync_to_thread=False),
 }

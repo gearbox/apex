@@ -29,6 +29,8 @@ from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_
 from src.api.routes.admin import AdminController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
+from src.api.routes.content import ContentProxyController
+from src.api.routes.gallery import GalleryController
 from src.api.routes.generation import (
     HealthController,
     ImageController,
@@ -273,6 +275,10 @@ def create_app() -> Litestar:
             UnifiedJobController,
             # Real-time events (SSE)
             SSEController,
+            # Gallery
+            GalleryController,
+            # Content proxy
+            ContentProxyController,
         ],
         exception_handlers={
             HTTPException: http_exception_handler,
