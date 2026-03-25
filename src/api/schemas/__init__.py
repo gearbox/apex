@@ -11,11 +11,12 @@ from .generation import (
     ModelType,
 )
 from .jobs import JobCreatedResponse, UnifiedJobResponse
-from .pagination import PaginatedResponse
+from .pagination import CursorPage
 
 __all__ = [
     "DEFAULT_NEGATIVE_PROMPT",
     "AspectRatio",
+    "CursorPage",
     "GenerationRequest",
     "GenerationType",
     "HealthResponse",
@@ -23,6 +24,5 @@ __all__ = [
     "JobCreatedResponse",
     "JobStatus",
     "ModelType",
-    "PaginatedResponse",
     "UnifiedJobResponse",
 ]

@@ -4,7 +4,7 @@ Covers:
   - UnifiedJobService.get_job (including Grok poll-on-read)
   - UnifiedJobService.list_jobs (pagination, limit capping)
   - _build_response output/thumbnail logic (presigned URL failures, thumbnail flag)
-  - Schema round-trip serialization (UnifiedJobResponse, PaginatedResponse,
+  - Schema round-trip serialization (UnifiedJobResponse, CursorPage,
     JobOutputItem)
 """
 
@@ -21,7 +21,7 @@ from src.api.schemas.jobs import (
     JobOutputItem,
     UnifiedJobResponse,
 )
-from src.api.schemas.pagination import PaginatedResponse
+from src.api.schemas.pagination import CursorPage
 from src.api.services.unified_jobs import UnifiedJobService
 from src.core.enums import GenerationType, JobStatus
 
@@ -126,24 +126,19 @@ def _session_for_get(
 
 
 def _session_for_list(
-    count: int,
     jobs: list,
     outputs_per_job: list[list] | None = None,
 ) -> AsyncMock:
     """Build a mock AsyncSession for ``list_jobs`` calls.
 
     Side-effect order:
-    1. count query
-    2. data (jobs) query
-    3+. one list_job_outputs call per job
+    1. data (jobs) query
+    2+. one list_job_outputs call per job
     """
-    count_result = MagicMock()
-    count_result.scalar_one.return_value = count
-
     jobs_result = MagicMock()
     jobs_result.scalars.return_value.all.return_value = jobs
 
-    side_effects: list = [count_result, jobs_result]
+    side_effects: list = [jobs_result]
 
     for outputs in outputs_per_job or [[] for _ in jobs]:
         out_result = MagicMock()
@@ -376,42 +371,39 @@ class TestGetJob:
 
 class TestListJobs:
     async def test_empty_result(self) -> None:
-        session = _session_for_list(count=0, jobs=[])
+        session = _session_for_list(jobs=[])
 
         result = await _service().list_jobs(uuid4(), session=session)
 
-        assert isinstance(result, PaginatedResponse)
-        assert result.total == 0
+        assert isinstance(result, CursorPage)
+        assert result.has_more is False
         assert result.items == []
 
     async def test_default_pagination_params(self) -> None:
-        session = _session_for_list(count=0, jobs=[])
+        session = _session_for_list(jobs=[])
 
         result = await _service().list_jobs(uuid4(), session=session)
 
         assert result.limit == 20
-        assert result.offset == 0
 
     async def test_limit_capped_at_100(self) -> None:
-        session = _session_for_list(count=0, jobs=[])
+        session = _session_for_list(jobs=[])
 
         result = await _service().list_jobs(uuid4(), session=session, limit=500)
 
         assert result.limit == 100
 
-    async def test_custom_pagination_reflected_in_response(self) -> None:
-        session = _session_for_list(count=200, jobs=[])
+    async def test_custom_limit_reflected_in_response(self) -> None:
+        session = _session_for_list(jobs=[])
 
-        result = await _service().list_jobs(uuid4(), session=session, limit=10, offset=50)
+        result = await _service().list_jobs(uuid4(), session=session, limit=10)
 
         assert result.limit == 10
-        assert result.offset == 50
-        assert result.total == 200
 
     async def test_returns_one_item_per_job(self) -> None:
         user_id = uuid4()
         jobs = [_make_job(user_id=user_id) for _ in range(3)]
-        session = _session_for_list(count=3, jobs=jobs)
+        session = _session_for_list(jobs=jobs)
 
         result = await _service().list_jobs(user_id, session=session)
 
@@ -420,7 +412,7 @@ class TestListJobs:
     async def test_all_items_are_unified_job_responses(self) -> None:
         user_id = uuid4()
         jobs = [_make_job(user_id=user_id) for _ in range(2)]
-        session = _session_for_list(count=2, jobs=jobs)
+        session = _session_for_list(jobs=jobs)
 
         result = await _service().list_jobs(user_id, session=session)
 
@@ -430,7 +422,7 @@ class TestListJobs:
     async def test_job_fields_mapped_correctly_in_list(self) -> None:
         user_id = uuid4()
         job = _make_job(user_id=user_id, name="Gallery Job", prompt="neon city")
-        session = _session_for_list(count=1, jobs=[job])
+        session = _session_for_list(jobs=[job])
 
         result = await _service().list_jobs(user_id, session=session)
 
@@ -692,17 +684,15 @@ class TestSchemas:
         assert decoded.thumbnail_url == "https://r2.example.com/thumb.jpg"
         assert decoded.error == "Connection reset by peer"
 
-    def test_paginated_response_round_trip(self) -> None:
-        resp: PaginatedResponse[UnifiedJobResponse] = PaginatedResponse(
-            items=[], total=42, limit=10, offset=20, has_more=True, next_cursor="tok"
+    def test_cursor_page_round_trip(self) -> None:
+        resp: CursorPage[UnifiedJobResponse] = CursorPage(
+            items=[], limit=10, has_more=True, next_cursor="tok"
         )
 
         encoded = msgspec.json.encode(resp)
-        decoded = msgspec.json.decode(encoded, type=PaginatedResponse[UnifiedJobResponse])
+        decoded = msgspec.json.decode(encoded, type=CursorPage[UnifiedJobResponse])
 
-        assert decoded.total == 42
         assert decoded.limit == 10
-        assert decoded.offset == 20
         assert decoded.has_more is True
         assert decoded.next_cursor == "tok"
         assert decoded.items == []

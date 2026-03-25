@@ -1,7 +1,7 @@
-from enum import Enum
+from enum import StrEnum
 
 
-class ResponseImageFormat(str, Enum):
+class ResponseImageFormat(StrEnum):
     """Image formats for API responses."""
 
     URL = "url"

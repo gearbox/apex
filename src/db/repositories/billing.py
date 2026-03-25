@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -164,67 +164,47 @@ class BillingRepository:
         )
         return int(result.scalar_one()) > 0
 
-    async def list_transactions(
+    async def get_transaction_history(
         self,
         account_id: UUID,
         *,
         limit: int = 50,
-        offset: int = 0,
         transaction_type: str | None = None,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
-    ) -> tuple[Sequence[TokenTransaction], int]:
-        """List transactions with count. Returns (transactions, total_count).
+    ) -> Sequence[TokenTransaction]:
+        """List transactions using cursor-based pagination.
 
-        Supports both offset-based and cursor-based (keyset) pagination.
-        When ``cursor_ts`` and ``cursor_id`` are supplied, offset is ignored
-        and keyset filtering is applied instead.
+        Uses limit+1 fetch pattern — caller checks ``len(result) > limit``
+        to determine ``has_more``.
 
         Args:
             account_id: Account to list transactions for.
-            limit: Max results.
-            offset: Results to skip (ignored when cursor supplied).
+            limit: Max results (fetch limit+1 for has_more).
             transaction_type: Optional transaction type filter.
             cursor_ts: ``created_at`` of the last item on the previous page.
             cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            ``(transactions, total_count)`` tuple.
+            Sequence of TokenTransaction instances.
         """
-        from sqlalchemy import and_, or_
-
         base = select(TokenTransaction).where(TokenTransaction.account_id == account_id)
-        count_base = select(func.count(TokenTransaction.id)).where(
-            TokenTransaction.account_id == account_id
-        )
 
         if transaction_type is not None:
             base = base.where(TokenTransaction.transaction_type == transaction_type)
-            count_base = count_base.where(TokenTransaction.transaction_type == transaction_type)
-
-        count_result = await self._session.execute(count_base)
-        total = int(count_result.scalar_one())
 
         if cursor_ts is not None and cursor_id is not None:
             base = base.where(
-                or_(
-                    TokenTransaction.created_at < cursor_ts,
-                    and_(
-                        TokenTransaction.created_at == cursor_ts,
-                        TokenTransaction.id < cursor_id,
-                    ),
-                )
+                tuple_(TokenTransaction.created_at, TokenTransaction.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
             )
-            result = await self._session.execute(
-                base.order_by(TokenTransaction.created_at.desc(), TokenTransaction.id.desc()).limit(
-                    limit
-                )
+
+        result = await self._session.execute(
+            base.order_by(TokenTransaction.created_at.desc(), TokenTransaction.id.desc()).limit(
+                limit + 1
             )
-        else:
-            result = await self._session.execute(
-                base.order_by(TokenTransaction.created_at.desc()).limit(limit).offset(offset)
-            )
-        return result.scalars().all(), total
+        )
+        return result.scalars().all()
 
     # -------------------------------------------------------------------------
     # PricingRule
@@ -370,25 +350,41 @@ class BillingRepository:
         status: str | None = None,
         payment_provider: str | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> tuple[Sequence[Payment], int]:
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> Sequence[Payment]:
+        """List payments using cursor-based pagination.
+
+        Uses limit+1 fetch pattern — caller checks ``len(result) > limit``
+        to determine ``has_more``.
+
+        Args:
+            status: Optional status filter.
+            payment_provider: Optional provider filter.
+            limit: Max results (fetch limit+1 for has_more).
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
+
+        Returns:
+            Sequence of Payment instances.
+        """
         base = select(Payment)
-        count_base = select(func.count(Payment.id))
 
         if status is not None:
             base = base.where(Payment.status == status)
-            count_base = count_base.where(Payment.status == status)
         if payment_provider is not None:
             base = base.where(Payment.payment_provider == payment_provider)
-            count_base = count_base.where(Payment.payment_provider == payment_provider)
 
-        count_result = await self._session.execute(count_base)
-        total = int(count_result.scalar_one())
+        if cursor_ts is not None and cursor_id is not None:
+            base = base.where(
+                tuple_(Payment.created_at, Payment.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
 
         result = await self._session.execute(
-            base.order_by(Payment.created_at.desc()).limit(limit).offset(offset)
+            base.order_by(Payment.created_at.desc(), Payment.id.desc()).limit(limit + 1)
         )
-        return result.scalars().all(), total
+        return result.scalars().all()
 
     # -------------------------------------------------------------------------
     # Organization
@@ -470,21 +466,24 @@ class BillingRepository:
         *,
         is_active: bool | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> tuple[Sequence[tuple[Organization, int, int]], int]:
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> Sequence[tuple[Organization, int, int]]:
         """List organisations with aggregated member count and token balance.
 
         Uses a single SQL statement with LEFT JOINs and GROUP BY to avoid N+1.
         Balance is the sum of all token_transactions for the org's enterprise account.
+        Uses limit+1 fetch pattern — caller checks ``len(result) > limit``
+        to determine ``has_more``.
 
         Args:
             is_active: Filter by active status when not None.
-            limit: Maximum number of results to return.
-            offset: Number of results to skip.
+            limit: Maximum number of results to return (fetch limit+1 for has_more).
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            Tuple of (rows, total_count) where each row is
-            (Organization, member_count, token_balance).
+            Sequence of (Organization, member_count, token_balance) tuples.
         """
         member_count_col = func.count(func.distinct(OrganizationMember.id)).label("member_count")
         token_balance_col = func.coalesce(func.sum(TokenTransaction.amount), 0).label(
@@ -506,20 +505,20 @@ class BillingRepository:
             .group_by(Organization.id)
         )
 
-        count_q = select(func.count(Organization.id)).select_from(Organization)
-
         if is_active is not None:
             base_q = base_q.where(Organization.is_active == is_active)
-            count_q = count_q.where(Organization.is_active == is_active)
 
-        count_result = await self._session.execute(count_q)
-        total = int(count_result.scalar_one())
+        if cursor_ts is not None and cursor_id is not None:
+            base_q = base_q.where(
+                tuple_(Organization.created_at, Organization.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
 
         result = await self._session.execute(
-            base_q.order_by(Organization.created_at.desc()).limit(limit).offset(offset)
+            base_q.order_by(Organization.created_at.desc(), Organization.id.desc()).limit(limit + 1)
         )
         rows = result.all()
-        return [(row[0], int(row[1]), int(row[2])) for row in rows], total
+        return [(row[0], int(row[1]), int(row[2])) for row in rows]
 
     async def list_members(self, org_id: UUID) -> Sequence[OrganizationMember]:
         result = await self._session.execute(

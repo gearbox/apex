@@ -555,8 +555,8 @@ class TestListUsers:
         db_session.add(user)
         await db_session.flush()
 
-        users, total = await user_repo.list_users()
-        assert total >= 1
+        users = await user_repo.list_users()
+        assert len(users) >= 1
         assert any(u.id == user.id for u in users)
 
     async def test_list_users_filters_by_is_active_false(
@@ -573,8 +573,8 @@ class TestListUsers:
         db_session.add(user)
         await db_session.flush()
 
-        users, total = await user_repo.list_users(is_active=False)
-        assert total >= 1
+        users = await user_repo.list_users(is_active=False)
+        assert len(users) >= 1
         assert all(not u.is_active for u in users)
         assert any(u.id == user.id for u in users)
 
@@ -592,8 +592,8 @@ class TestListUsers:
         db_session.add(admin)
         await db_session.flush()
 
-        users, total = await user_repo.list_users(role=UserRole.ADMIN.value)
-        assert total >= 1
+        users = await user_repo.list_users(role=UserRole.ADMIN.value)
+        assert len(users) >= 1
         assert all(u.role == UserRole.ADMIN for u in users)
         assert any(u.id == admin.id for u in users)
 
@@ -611,8 +611,8 @@ class TestListUsers:
         db_session.add(user)
         await db_session.flush()
 
-        users, total = await user_repo.list_users(email_contains=unique.upper())
-        assert total >= 1
+        users = await user_repo.list_users(email_contains=unique.upper())
+        assert len(users) >= 1
         assert any(u.id == user.id for u in users)
 
     async def test_list_users_excludes_system_role_users(
@@ -629,14 +629,14 @@ class TestListUsers:
         db_session.add(system)
         await db_session.flush()
 
-        users, _ = await user_repo.list_users()
+        users = await user_repo.list_users()
         assert all(u.role != UserRole.SYSTEM for u in users)
         assert all(u.id != system.id for u in users)
 
-    async def test_list_users_pagination_limit_offset(
+    async def test_list_users_pagination_limit(
         self, user_repo: UserRepository, db_session: AsyncSession
     ) -> None:
-        """list_users respects limit and offset parameters."""
+        """list_users uses limit+1 fetch pattern for has_more detection."""
         for i in range(5):
             db_session.add(
                 User(
@@ -648,33 +648,35 @@ class TestListUsers:
             )
         await db_session.flush()
 
-        page1, total = await user_repo.list_users(limit=3, offset=0)
-        page2, _ = await user_repo.list_users(limit=3, offset=3)
-        assert len(page1) <= 3
-        assert len(page2) <= 3
-        # Pages should not overlap
-        page1_ids = {u.id for u in page1}
-        page2_ids = {u.id for u in page2}
-        assert page1_ids.isdisjoint(page2_ids)
+        # limit+1 pattern: requesting limit=3 returns up to 4 items
+        page1 = await user_repo.list_users(limit=3)
+        assert len(page1) <= 4  # at most limit+1
 
-    async def test_list_users_total_reflects_filtered_count(
+    async def test_list_users_cursor_pagination_non_overlapping(
         self, user_repo: UserRepository, db_session: AsyncSession
     ) -> None:
-        """total returned by list_users matches the count of filtered users."""
-        unique = uuid4().hex[:8]
-        for i in range(3):
+        """list_users cursor-based pagination returns non-overlapping pages."""
+        for i in range(5):
             db_session.add(
                 User(
                     id=uuid4(),
-                    email=f"totaltest-{unique}-{i}@example.com",
+                    email=f"cursorpage-{uuid4().hex[:6]}-{i}@example.com",
                     password_hash="x",
                     product_id="vex",
                 )
             )
         await db_session.flush()
 
-        _users, total = await user_repo.list_users(email_contains=unique)
-        assert total == 3
+        page1 = await user_repo.list_users(limit=3)
+        assert len(page1) >= 1
+
+        # Use last item of page1 as cursor
+        last = page1[-1]
+        page2 = await user_repo.list_users(limit=3, cursor_ts=last.created_at, cursor_id=last.id)
+
+        page1_ids = {u.id for u in page1}
+        page2_ids = {u.id for u in page2}
+        assert page1_ids.isdisjoint(page2_ids)
 
 
 # ---------------------------------------------------------------------------

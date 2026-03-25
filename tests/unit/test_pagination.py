@@ -3,7 +3,7 @@
 Covers:
   - encode_cursor / decode_cursor round-trips
   - decode_cursor error handling
-  - PaginatedResponse field values and msgspec serialization
+  - CursorPage field values and msgspec serialization
   - has_more / next_cursor logic
 """
 
@@ -17,7 +17,7 @@ import pytest
 
 from src.api.schemas.jobs import UnifiedJobResponse
 from src.api.schemas.pagination import (
-    PaginatedResponse,
+    CursorPage,
     decode_cursor,
     encode_cursor,
 )
@@ -108,101 +108,84 @@ class TestCursorEncoding:
 
 
 # ---------------------------------------------------------------------------
-# PaginatedResponse struct
+# CursorPage struct
 # ---------------------------------------------------------------------------
 
 
-class TestPaginatedResponse:
+class TestCursorPage:
     def test_fields_stored_correctly(self) -> None:
-        resp: PaginatedResponse[str] = PaginatedResponse(
+        resp: CursorPage[str] = CursorPage(
             items=["a", "b"],
-            total=10,
             limit=5,
-            offset=0,
             has_more=True,
             next_cursor="tok",
         )
         assert resp.items == ["a", "b"]
-        assert resp.total == 10
         assert resp.limit == 5
-        assert resp.offset == 0
         assert resp.has_more is True
         assert resp.next_cursor == "tok"
 
     def test_next_cursor_defaults_to_none(self) -> None:
-        resp: PaginatedResponse[str] = PaginatedResponse(
+        resp: CursorPage[str] = CursorPage(
             items=[],
-            total=0,
             limit=20,
-            offset=0,
             has_more=False,
         )
         assert resp.next_cursor is None
 
     def test_msgspec_round_trip_with_job_items(self) -> None:
         job = _job_response()
-        resp: PaginatedResponse[UnifiedJobResponse] = PaginatedResponse(
+        resp: CursorPage[UnifiedJobResponse] = CursorPage(
             items=[job],
-            total=100,
             limit=10,
-            offset=0,
             has_more=True,
             next_cursor="abc123",
         )
 
         encoded = msgspec.json.encode(resp)
-        decoded = msgspec.json.decode(encoded, type=PaginatedResponse[UnifiedJobResponse])
+        decoded = msgspec.json.decode(encoded, type=CursorPage[UnifiedJobResponse])
 
-        assert decoded.total == 100
         assert decoded.limit == 10
-        assert decoded.offset == 0
         assert decoded.has_more is True
         assert decoded.next_cursor == "abc123"
         assert len(decoded.items) == 1
         assert decoded.items[0].id == job.id
 
     def test_msgspec_round_trip_empty_page(self) -> None:
-        resp: PaginatedResponse[UnifiedJobResponse] = PaginatedResponse(
+        resp: CursorPage[UnifiedJobResponse] = CursorPage(
             items=[],
-            total=0,
             limit=20,
-            offset=0,
             has_more=False,
         )
 
         encoded = msgspec.json.encode(resp)
-        decoded = msgspec.json.decode(encoded, type=PaginatedResponse[UnifiedJobResponse])
+        decoded = msgspec.json.decode(encoded, type=CursorPage[UnifiedJobResponse])
 
         assert decoded.items == []
-        assert decoded.total == 0
         assert decoded.has_more is False
         assert decoded.next_cursor is None
 
     def test_has_more_true_when_more_items_exist(self) -> None:
         items = [_job_response() for _ in range(10)]
-        resp: PaginatedResponse[UnifiedJobResponse] = PaginatedResponse(
+        resp: CursorPage[UnifiedJobResponse] = CursorPage(
             items=items,
-            total=25,
             limit=10,
-            offset=0,
             has_more=True,
         )
         assert resp.has_more is True
 
     def test_has_more_false_on_last_page(self) -> None:
         items = [_job_response() for _ in range(5)]
-        resp: PaginatedResponse[UnifiedJobResponse] = PaginatedResponse(
+        resp: CursorPage[UnifiedJobResponse] = CursorPage(
             items=items,
-            total=5,
             limit=10,
-            offset=0,
             has_more=False,
         )
         assert resp.has_more is False
 
 
 # ---------------------------------------------------------------------------
-# Cursor encode → decode used inside PaginatedResponse workflow
+# Cursor encode → decode used inside CursorPage workflow
 # ---------------------------------------------------------------------------
 
 
@@ -226,11 +209,9 @@ class TestCursorWorkflow:
 
         cursor = encode_cursor(last_ts, last_id)
 
-        resp1: PaginatedResponse[UnifiedJobResponse] = PaginatedResponse(
+        resp1: CursorPage[UnifiedJobResponse] = CursorPage(
             items=items_page1,
-            total=6,
             limit=3,
-            offset=0,
             has_more=True,
             next_cursor=cursor,
         )

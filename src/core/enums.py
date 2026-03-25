@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-from enum import Enum, StrEnum
+from enum import StrEnum
 
 
-class Product(str, Enum):
+class Product(StrEnum):
     """Product identifiers."""
 
     VEX = "vex"
     SYNTHARA = "synthara"
 
 
-class Provider(str, Enum):
+class Provider(StrEnum):
     """Generation provider."""
 
     AISHA = "aisha"
     GROK = "grok"
 
 
-class ModelType(str, Enum):
+class ModelType(StrEnum):
     """Available model types."""
 
     AISHA_IMAGE = "aisha-image"
@@ -77,7 +77,7 @@ class ModelType(str, Enum):
         return get_model_meta(self).max_concurrent_outputs
 
 
-class GenerationType(str, Enum):
+class GenerationType(StrEnum):
     """Generation type - text-to-image or image-to-image."""
 
     T2I = "t2i"
@@ -108,7 +108,7 @@ class GenerationType(str, Enum):
         return self == GenerationType.V2V
 
 
-class JobStatus(str, Enum):
+class JobStatus(StrEnum):
     """Job execution status."""
 
     PENDING = "pending"
@@ -120,7 +120,7 @@ class JobStatus(str, Enum):
     MODERATED = "moderated"
 
 
-class AspectRatio(str, Enum):
+class AspectRatio(StrEnum):
     """Supported aspect ratios."""
 
     RATIO_2_3 = "2:3"
@@ -153,14 +153,14 @@ class AspectRatio(str, Enum):
         return (width + 4) // 8 * 8
 
 
-class VideoResolution(str, Enum):
+class VideoResolution(StrEnum):
     """Supported video resolutions for Grok."""
 
     RES_480P = "480p"
     RES_720P = "720p"
 
 
-class MediaFormat(str, Enum):
+class MediaFormat(StrEnum):
     """Supported media formats."""
 
     # Image formats
@@ -229,14 +229,14 @@ class SubscriptionTier(StrEnum):
     ENTERPRISE = "enterprise"
 
 
-class AccountType(str, Enum):
+class AccountType(StrEnum):
     """Token account types."""
 
     PERSONAL = "personal"
     ENTERPRISE = "enterprise"
 
 
-class TransactionType(str, Enum):
+class TransactionType(StrEnum):
     """Token transaction types."""
 
     CREDIT = "credit"
@@ -245,7 +245,7 @@ class TransactionType(str, Enum):
     ADMIN_ADJUSTMENT = "admin_adjustment"
 
 
-class PaymentStatus(str, Enum):
+class PaymentStatus(StrEnum):
     """Payment processing status."""
 
     PENDING = "pending"
@@ -254,7 +254,7 @@ class PaymentStatus(str, Enum):
     REFUNDED = "refunded"
 
 
-class OrgRole(str, Enum):
+class OrgRole(StrEnum):
     """Organization member roles."""
 
     OWNER = "owner"
@@ -262,7 +262,7 @@ class OrgRole(str, Enum):
     MEMBER = "member"
 
 
-class UserRole(str, Enum):
+class UserRole(StrEnum):
     """User account roles.
 
     SYSTEM — internal sentinel user (seeded by migration, cannot authenticate).
@@ -275,7 +275,7 @@ class UserRole(str, Enum):
     USER = "user"
 
 
-class SupportedLocale(str, Enum):
+class SupportedLocale(StrEnum):
     """Supported UI/email locales.
 
     Add new locales here AND create corresponding email template directories simultaneously.

@@ -13,12 +13,12 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
-from src.api.schemas.pagination import PaginatedResponse, decode_cursor, encode_cursor
+from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.storage import R2StorageService
@@ -120,14 +120,9 @@ class UnifiedJobService:
         provider: str | None = None,
         generation_type: GenerationType | None = None,
         limit: int = 20,
-        offset: int = 0,
         cursor: str | None = None,
-    ) -> PaginatedResponse[UnifiedJobResponse]:
-        """List jobs for a user with optional filters and pagination.
-
-        Supports both offset-based and cursor-based pagination.  When
-        ``cursor`` is supplied the offset is ignored and keyset filtering is
-        applied instead.
+    ) -> CursorPage[UnifiedJobResponse]:
+        """List jobs for a user with optional filters and cursor pagination.
 
         Args:
             user_id: Owner.
@@ -136,29 +131,19 @@ class UnifiedJobService:
             provider: Optional provider filter (``grok``, ``aisha``).
             generation_type: Optional type filter.
             limit: Page size (max 100).
-            offset: Page offset (ignored when cursor supplied).
             cursor: Opaque cursor token from a previous response's
                 ``next_cursor`` field.
 
         Returns:
-            Paginated job list.
+            Cursor-paginated job list.
         """
-        from sqlalchemy import and_, or_
-
         limit = min(limit, 100)
 
-        # Decode cursor if provided
         cursor_ts = None
         cursor_id = None
-        effective_offset = offset
         if cursor is not None:
             cursor_ts, cursor_id = decode_cursor(cursor)
-            effective_offset = 0
 
-        # Count query (unaffected by cursor — represents total matches)
-        count_q = (
-            select(func.count()).select_from(GenerationJob).where(GenerationJob.user_id == user_id)
-        )
         data_q = (
             select(GenerationJob)
             .where(GenerationJob.user_id == user_id)
@@ -166,59 +151,41 @@ class UnifiedJobService:
         )
 
         if status is not None:
-            count_q = count_q.where(GenerationJob.status == status.value)
             data_q = data_q.where(GenerationJob.status == status.value)
-
         if provider is not None:
-            count_q = count_q.where(GenerationJob.provider == provider)
             data_q = data_q.where(GenerationJob.provider == provider)
-
         if generation_type is not None:
-            count_q = count_q.where(GenerationJob.generation_type == generation_type.value)
             data_q = data_q.where(GenerationJob.generation_type == generation_type.value)
-
-        total_result = await session.execute(count_q)
-        total: int = total_result.scalar_one()
 
         if cursor_ts is not None and cursor_id is not None:
             data_q = data_q.where(
-                or_(
-                    GenerationJob.created_at < cursor_ts,
-                    and_(
-                        GenerationJob.created_at == cursor_ts,
-                        GenerationJob.id < cursor_id,
-                    ),
-                )
-            )
-            jobs_result = await session.execute(
-                data_q.order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc()).limit(
-                    limit
-                )
-            )
-        else:
-            jobs_result = await session.execute(
-                data_q.order_by(GenerationJob.created_at.desc())
-                .limit(limit)
-                .offset(effective_offset)
+                tuple_(GenerationJob.created_at, GenerationJob.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
             )
 
+        jobs_result = await session.execute(
+            data_q.order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc()).limit(
+                limit + 1
+            )
+        )
         jobs = list(jobs_result.scalars().all())
+
+        has_more = len(jobs) > limit
+        if has_more:
+            jobs = jobs[:limit]
 
         items = []
         for job in jobs:
             items.append(await self._build_response(job, session=session))
 
-        has_more = effective_offset + len(items) < total
         next_cursor: str | None = None
-        if has_more and items:
+        if has_more and jobs:
             last = jobs[-1]
             next_cursor = encode_cursor(last.created_at, last.id)
 
-        return PaginatedResponse(
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=effective_offset,
             has_more=has_more,
             next_cursor=next_cursor,
         )

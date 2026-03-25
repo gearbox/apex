@@ -297,8 +297,8 @@ class TestStorageControllerAuth:
         from src.api.services.user_content import UserContentService
 
         mock_content_service = AsyncMock(spec=UserContentService)
-        mock_content_service.list_user_uploads.return_value = ([], 0)
-        mock_content_service.list_user_outputs.return_value = ([], 0)
+        mock_content_service.list_user_uploads.return_value = []
+        mock_content_service.list_user_outputs.return_value = []
         mock_content_service.get_user_stats.return_value = {
             "upload_count": 0,
             "output_count": 0,
@@ -356,13 +356,13 @@ class TestStorageControllerAuth:
             resp = client.get("/v1/storage/uploads", headers=auth_header)
             assert resp.status_code == HTTP_200_OK
             body = resp.json()
-            assert body["total"] == 0
+            assert body["has_more"] is False
             assert body["items"] == []
 
         # Verify the service was called with the authenticated user's ID
         mock = app.state["mock_content_service"]
         mock.list_user_uploads.assert_called_once_with(
-            test_user_id, limit=50, offset=0, cursor_ts=None, cursor_id=None
+            test_user_id, limit=50, cursor_ts=None, cursor_id=None
         )
 
     def test_stats_with_auth_uses_authenticated_user_id(

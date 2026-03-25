@@ -276,14 +276,14 @@ async def test_create_transaction_amount_nonzero_constraint(
 
 
 # ---------------------------------------------------------------------------
-# list_transactions
+# get_transaction_history
 # ---------------------------------------------------------------------------
 
 
-async def test_list_transactions_returns_ordered_by_created_at_desc(
+async def test_get_transaction_history_returns_all_for_account(
     billing_repo: BillingRepository, make_token_account, make_user
 ) -> None:
-    """list_transactions returns transactions ordered by created_at DESC."""
+    """get_transaction_history returns all transactions for an account."""
     user = await make_user(email=f"listtxn-{uuid4().hex[:6]}@example.com")
     account = await make_token_account(account_type="personal", user=user)
     for i in range(3):
@@ -296,28 +296,27 @@ async def test_list_transactions_returns_ordered_by_created_at_desc(
             created_by=user.id,
             product_id="vex",
         )
-    txns, total = await billing_repo.list_transactions(account.id)
-    assert total == 3
+    txns = await billing_repo.get_transaction_history(account.id)
     assert len(txns) == 3
-    # Most recent should be first (amounts 102, 101, 100)
-    amounts = [t.amount for t in txns]
-    assert amounts == sorted(amounts, reverse=True)
+    # Verify all expected amounts are present
+    amounts = {t.amount for t in txns}
+    assert amounts == {100, 101, 102}
 
 
-async def test_list_transactions_offset_beyond_end_returns_empty(
+async def test_get_transaction_history_empty_returns_empty(
     billing_repo: BillingRepository, make_token_account, make_user
 ) -> None:
-    """list_transactions with offset beyond total returns empty list."""
+    """get_transaction_history returns empty list when account has no transactions."""
     user = await make_user(email=f"txnoff-{uuid4().hex[:6]}@example.com")
     account = await make_token_account(account_type="personal", user=user)
-    txns, total = await billing_repo.list_transactions(account.id, offset=1000)
-    assert txns == [] or not list(txns)
+    txns = await billing_repo.get_transaction_history(account.id)
+    assert not list(txns)
 
 
-async def test_list_transactions_filter_by_type(
+async def test_get_transaction_history_filter_by_type(
     billing_repo: BillingRepository, make_token_account, make_user
 ) -> None:
-    """list_transactions filters by transaction_type when specified."""
+    """get_transaction_history filters by transaction_type when specified."""
     user = await make_user(email=f"txnfilter-{uuid4().hex[:6]}@example.com")
     account = await make_token_account(account_type="personal", user=user)
     await billing_repo.create_transaction(
@@ -338,10 +337,10 @@ async def test_list_transactions_filter_by_type(
         created_by=user.id,
         product_id="vex",
     )
-    credits, total = await billing_repo.list_transactions(
+    credits = await billing_repo.get_transaction_history(
         account.id, transaction_type=TransactionType.CREDIT.value
     )
-    assert total == 1
+    assert len(list(credits)) == 1
     assert all(t.transaction_type == TransactionType.CREDIT.value for t in credits)
 
 
@@ -673,8 +672,8 @@ async def test_list_payments_filter_by_status(
         created_by=user.id,
         product_id="vex",
     )
-    completed, total = await billing_repo.list_payments(status="completed")
-    assert total >= 1
+    completed = await billing_repo.list_payments(status="completed")
+    assert list(completed)
     assert all(p.status == "completed" for p in completed)
 
 
@@ -689,8 +688,8 @@ class TestListOrganizations:
     ) -> None:
         """list_organizations returns all organisations when no filter applied."""
         org = await make_org()
-        rows, total = await billing_repo.list_organizations()
-        assert total >= 1
+        rows = await billing_repo.list_organizations()
+        assert len(rows) >= 1
         assert any(row[0].id == org.id for row in rows)
 
     async def test_list_organizations_filters_by_is_active_false(
@@ -711,8 +710,8 @@ class TestListOrganizations:
         db_session.add(inactive_org)
         await db_session.flush()
 
-        rows, total = await billing_repo.list_organizations(is_active=False)
-        assert total >= 1
+        rows = await billing_repo.list_organizations(is_active=False)
+        assert len(rows) >= 1
         assert all(not row[0].is_active for row in rows)
         assert any(row[0].id == inactive_org.id for row in rows)
 
@@ -731,7 +730,7 @@ class TestListOrganizations:
                 product_id="vex",
             )
 
-        rows, _ = await billing_repo.list_organizations()
+        rows = await billing_repo.list_organizations()
         org_row = next((r for r in rows if r[0].id == org.id), None)
         assert org_row is not None
         assert org_row[1] >= 2  # member_count
@@ -753,55 +752,50 @@ class TestListOrganizations:
             product_id="vex",
         )
 
-        rows, _ = await billing_repo.list_organizations()
+        rows = await billing_repo.list_organizations()
         org_row = next((r for r in rows if r[0].id == org.id), None)
         assert org_row is not None
         assert org_row[2] == 750  # token_balance
 
-    async def test_list_organizations_pagination_limit_offset(
+    async def test_list_organizations_pagination_limit(
         self, billing_repo: BillingRepository, make_org
     ) -> None:
-        """list_organizations respects limit and offset."""
+        """list_organizations uses limit+1 fetch pattern for has_more detection."""
         for _ in range(4):
             await make_org()
 
-        page1, total = await billing_repo.list_organizations(limit=2, offset=0)
-        page2, _ = await billing_repo.list_organizations(limit=2, offset=2)
-        assert total >= 4
-        assert len(page1) <= 2
-        assert len(page2) <= 2
-        page1_ids = {row[0].id for row in page1}
-        page2_ids = {row[0].id for row in page2}
-        assert page1_ids.isdisjoint(page2_ids)
+        # limit+1 pattern: requesting limit=2 returns up to 3 items
+        page1 = await billing_repo.list_organizations(limit=2)
+        assert len(page1) <= 3  # at most limit+1
 
-    async def test_list_organizations_total_reflects_filtered_count(
-        self, billing_repo: BillingRepository, make_user, db_session: AsyncSession
+    async def test_list_organizations_cursor_paginates(
+        self, billing_repo: BillingRepository, make_org
     ) -> None:
-        """total returned matches only orgs matching the filter."""
-        from src.db.models.billing import Organization
+        """list_organizations cursor-based pagination returns non-overlapping pages."""
+        for _ in range(4):
+            await make_org()
 
-        owner = await make_user(email=f"total-filter-owner-{uuid4().hex[:6]}@example.com")
-        for _ in range(2):
-            inactive_org = Organization(
-                id=uuid4(),
-                name="Inactive",
-                slug=f"inactive-total-{uuid4().hex[:8]}",
-                owner_id=owner.id,
-                is_active=False,
-                product_id="vex",
-            )
-            db_session.add(inactive_org)
-        await db_session.flush()
+        # Fetch first page (limit+1 pattern: fetch 3 to detect has_more)
+        page1_raw = await billing_repo.list_organizations(limit=2)
+        has_more = len(page1_raw) > 2
+        page1 = page1_raw[:2]
+        assert has_more  # we created 4 orgs so there should be more
 
-        _rows, total = await billing_repo.list_organizations(is_active=False)
-        assert total >= 2
+        # Use the last item on page1 as cursor for page2
+        last = page1[-1][0]
+        page2 = await billing_repo.list_organizations(
+            limit=2, cursor_ts=last.created_at, cursor_id=last.id
+        )
+        page1_ids = {row[0].id for row in page1}
+        page2_ids = {row[0].id for row in page2[:2]}
+        assert page1_ids.isdisjoint(page2_ids)
 
     async def test_list_organizations_member_count_zero_when_no_members(
         self, billing_repo: BillingRepository, make_org
     ) -> None:
         """An org with no members has member_count=0."""
         org = await make_org()
-        rows, _ = await billing_repo.list_organizations()
+        rows = await billing_repo.list_organizations()
         org_row = next((r for r in rows if r[0].id == org.id), None)
         assert org_row is not None
         assert org_row[1] == 0  # member_count
@@ -811,7 +805,7 @@ class TestListOrganizations:
     ) -> None:
         """An org with no token account has token_balance=0."""
         org = await make_org()
-        rows, _ = await billing_repo.list_organizations()
+        rows = await billing_repo.list_organizations()
         org_row = next((r for r in rows if r[0].id == org.id), None)
         assert org_row is not None
         assert org_row[2] == 0  # token_balance

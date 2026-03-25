@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.jobs import UnifiedJobResponse
-from src.api.schemas.pagination import PaginatedResponse
+from src.api.schemas.pagination import CursorPage
 from src.api.security import auth_guard
 from src.api.services.unified_jobs import UnifiedJobService
 from src.core.enums import GenerationType, JobStatus
@@ -60,9 +60,8 @@ class UnifiedJobController(Controller):
         provider: str | None = None,
         generation_type: GenerationType | None = None,
         limit: int = 20,
-        offset: int = 0,
         cursor: str | None = None,
-    ) -> PaginatedResponse[UnifiedJobResponse]:
+    ) -> CursorPage[UnifiedJobResponse]:
         """List generation jobs for the authenticated user.
 
         Supports filtering by status, provider, and generation type.
@@ -73,9 +72,8 @@ class UnifiedJobController(Controller):
           - ``provider``: Filter by provider (grok, aisha)
           - ``generation_type``: Filter by type (t2i, i2i, t2v, i2v, v2v)
           - ``limit``: Page size (default 20, max 100)
-          - ``offset``: Page offset (default 0, ignored when ``cursor`` is supplied)
           - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
-            field.  When supplied, enables efficient keyset pagination.
+            field.  Pass to fetch the next page.
         """
         return await unified_job_service.list_jobs(
             current_user_id,
@@ -84,7 +82,6 @@ class UnifiedJobController(Controller):
             provider=provider,
             generation_type=generation_type,
             limit=limit,
-            offset=offset,
             cursor=cursor,
         )
 

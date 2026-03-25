@@ -14,7 +14,7 @@ __all__ = [
 ]
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
@@ -23,7 +23,7 @@ import msgspec
 from src.core.enums import MediaFormat
 
 
-class StorageType(str, Enum):
+class StorageType(StrEnum):
     """Type of stored content."""
 
     UPLOAD = "upload"  # User-uploaded input images

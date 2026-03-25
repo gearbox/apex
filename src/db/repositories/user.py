@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import JobStatus, SubscriptionTier, UserRole
@@ -421,47 +421,47 @@ class UserRepository:
         role: str | None = None,
         email_contains: str | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> tuple[Sequence[User], int]:
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> Sequence[User]:
         """List users with optional filtering, excluding SYSTEM role users.
+
+        Uses cursor-based (keyset) pagination with limit+1 fetch pattern.
+        Caller checks ``len(result) > limit`` to determine ``has_more``.
 
         Args:
             product_id: When provided, filter by product.
             is_active: Filter by active status when not None.
             role: Filter by exact role value when not None.
             email_contains: Case-insensitive partial email match when not None.
-            limit: Maximum number of results to return.
-            offset: Number of results to skip.
+            limit: Maximum number of results to return (fetch limit+1 for has_more).
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            Tuple of (users, total_count) matching the filters.
+            Sequence of User instances matching the filters.
         """
         base = select(User).where(User.role != UserRole.SYSTEM.value)
-        count_base = (
-            select(func.count(User.id)).select_from(User).where(User.role != UserRole.SYSTEM.value)
-        )
 
         if product_id is not None:
             base = base.where(User.product_id == product_id)
-            count_base = count_base.where(User.product_id == product_id)
         if is_active is not None:
             base = base.where(User.is_active == is_active)
-            count_base = count_base.where(User.is_active == is_active)
         if role is not None:
             base = base.where(User.role == role)
-            count_base = count_base.where(User.role == role)
         if email_contains is not None:
             pattern = f"%{email_contains}%"
             base = base.where(User.email.ilike(pattern))
-            count_base = count_base.where(User.email.ilike(pattern))
 
-        count_result = await self._session.execute(count_base)
-        total = int(count_result.scalar_one())
+        if cursor_ts is not None and cursor_id is not None:
+            base = base.where(
+                tuple_(User.created_at, User.id) < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
 
         result = await self._session.execute(
-            base.order_by(User.created_at.desc()).limit(limit).offset(offset)
+            base.order_by(User.created_at.desc(), User.id.desc()).limit(limit + 1)
         )
-        return result.scalars().all(), total
+        return result.scalars().all()
 
     async def update_user_admin(
         self,

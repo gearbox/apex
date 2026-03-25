@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import GenerationType, JobStatus, Provider
@@ -162,63 +162,39 @@ class StorageRepository:
         )
         return result.scalar_one_or_none()
 
-    async def count_user_images(self, user_id: UUID) -> int:
-        """Count total uploaded images for a user.
-
-        Args:
-            user_id: User ID.
-
-        Returns:
-            Total image count.
-        """
-        result = await self._session.execute(
-            select(func.count()).select_from(UserImage).where(UserImage.user_id == user_id)
-        )
-        return int(result.scalar_one())
-
     async def list_user_images(
         self,
         user_id: UUID,
         *,
         limit: int = 100,
-        offset: int = 0,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
     ) -> Sequence[UserImage]:
         """List images for a user.
 
-        Supports both offset-based and cursor-based (keyset) pagination.
-        When ``cursor_ts`` and ``cursor_id`` are supplied, offset is ignored
-        and keyset filtering is applied instead.
+        Uses cursor-based (keyset) pagination with limit+1 fetch pattern.
+        Caller checks ``len(result) > limit`` to determine ``has_more``.
 
         Args:
             user_id: User to list images for.
-            limit: Maximum results to return.
-            offset: Number of results to skip (ignored when cursor supplied).
+            limit: Maximum results to return (fetch limit+1 for has_more).
             cursor_ts: ``created_at`` of the last item on the previous page.
             cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            List of UserImage instances ordered by ``created_at DESC``.
+            List of UserImage instances ordered by ``created_at DESC, id DESC``.
         """
-        from sqlalchemy import and_, or_
-
         query = select(UserImage).where(UserImage.user_id == user_id)
 
         if cursor_ts is not None and cursor_id is not None:
             query = query.where(
-                or_(
-                    UserImage.created_at < cursor_ts,
-                    and_(UserImage.created_at == cursor_ts, UserImage.id < cursor_id),
-                )
+                tuple_(UserImage.created_at, UserImage.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
             )
-            result = await self._session.execute(
-                query.order_by(UserImage.created_at.desc(), UserImage.id.desc()).limit(limit)
-            )
-        else:
-            result = await self._session.execute(
-                query.order_by(UserImage.created_at.desc()).limit(limit).offset(offset)
-            )
+
+        result = await self._session.execute(
+            query.order_by(UserImage.created_at.desc(), UserImage.id.desc()).limit(limit + 1)
+        )
         return result.scalars().all()
 
     async def delete_user_image(
@@ -537,70 +513,41 @@ class StorageRepository:
         )
         return result.scalars().all()
 
-    async def count_user_outputs(self, user_id: UUID) -> int:
-        """Count total generated outputs for a user.
-
-        Args:
-            user_id: User ID.
-
-        Returns:
-            Total output count.
-        """
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(GenerationOutput)
-            .where(GenerationOutput.user_id == user_id)
-        )
-        return int(result.scalar_one())
-
     async def list_user_outputs(
         self,
         user_id: UUID,
         *,
         limit: int = 100,
-        offset: int = 0,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
     ) -> Sequence[GenerationOutput]:
         """List outputs for a user.
 
-        Supports both offset-based and cursor-based (keyset) pagination.
-        When ``cursor_ts`` and ``cursor_id`` are supplied, offset is ignored
-        and keyset filtering is applied instead.
+        Uses cursor-based (keyset) pagination with limit+1 fetch pattern.
+        Caller checks ``len(result) > limit`` to determine ``has_more``.
 
         Args:
             user_id: User to list outputs for.
-            limit: Maximum results to return.
-            offset: Number of results to skip (ignored when cursor supplied).
+            limit: Maximum results to return (fetch limit+1 for has_more).
             cursor_ts: ``created_at`` of the last item on the previous page.
             cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            List of GenerationOutput instances ordered by ``created_at DESC``.
+            List of GenerationOutput instances ordered by ``created_at DESC, id DESC``.
         """
-        from sqlalchemy import and_, or_
-
         query = select(GenerationOutput).where(GenerationOutput.user_id == user_id)
 
         if cursor_ts is not None and cursor_id is not None:
             query = query.where(
-                or_(
-                    GenerationOutput.created_at < cursor_ts,
-                    and_(
-                        GenerationOutput.created_at == cursor_ts,
-                        GenerationOutput.id < cursor_id,
-                    ),
-                )
+                tuple_(GenerationOutput.created_at, GenerationOutput.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
             )
-            result = await self._session.execute(
-                query.order_by(
-                    GenerationOutput.created_at.desc(), GenerationOutput.id.desc()
-                ).limit(limit)
+
+        result = await self._session.execute(
+            query.order_by(GenerationOutput.created_at.desc(), GenerationOutput.id.desc()).limit(
+                limit + 1
             )
-        else:
-            result = await self._session.execute(
-                query.order_by(GenerationOutput.created_at.desc()).limit(limit).offset(offset)
-            )
+        )
         return result.scalars().all()
 
     async def get_expired_outputs(

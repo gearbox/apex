@@ -36,7 +36,7 @@ from src.api.schemas.models import (
     ModelListResponse,
     SetModelEnabledRequest,
 )
-from src.api.schemas.pagination import PaginatedResponse
+from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import AccountNotFoundError
@@ -75,8 +75,8 @@ class AdminController(Controller):
         role: str | None = None,
         email: str | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> PaginatedResponse[AdminUserResponse]:
+        cursor: str | None = None,
+    ) -> CursorPage[AdminUserResponse]:
         """List all users with optional filtering. Excludes SYSTEM role users.
 
         Admin data is always scoped to the current product context.
@@ -89,15 +89,26 @@ class AdminController(Controller):
             role=role,
             email=email,
         )
+        cursor_ts = None
+        cursor_id = None
+        if cursor is not None:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+
         repo = UserRepository(session)
-        users, total = await repo.list_users(
+        users = await repo.list_users(
             product_id=product_id,
             is_active=is_active,
             role=role,
             email_contains=email,
             limit=limit,
-            offset=offset,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
         )
+
+        has_more = len(users) > limit
+        if has_more:
+            users = list(users)[:limit]
+
         items = [
             AdminUserResponse(
                 id=u.id,
@@ -116,12 +127,17 @@ class AdminController(Controller):
             )
             for u in users
         ]
-        return PaginatedResponse(
+
+        next_cursor: str | None = None
+        if has_more and users:
+            last = users[-1]
+            next_cursor = encode_cursor(last.created_at, last.id)
+
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=offset,
-            has_more=offset + len(items) < total,
+            has_more=has_more,
+            next_cursor=next_cursor,
         )
 
     @patch("/users/{user_id:uuid}", status_code=HTTP_200_OK)
@@ -185,16 +201,27 @@ class AdminController(Controller):
         session: AsyncSession,
         is_active: bool | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> PaginatedResponse[AdminOrgResponse]:
+        cursor: str | None = None,
+    ) -> CursorPage[AdminOrgResponse]:
         """List all organisations with member count and token balance."""
         logger.info("admin.listing_organizations", admin_id=str(admin_user.id))
+        cursor_ts = None
+        cursor_id = None
+        if cursor is not None:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+
         repo = BillingRepository(session)
-        rows, total = await repo.list_organizations(
+        rows = await repo.list_organizations(
             is_active=is_active,
             limit=limit,
-            offset=offset,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
         )
+
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
         items = [
             AdminOrgResponse(
                 id=org.id,
@@ -208,12 +235,17 @@ class AdminController(Controller):
             )
             for org, member_count, token_balance in rows
         ]
-        return PaginatedResponse(
+
+        next_cursor: str | None = None
+        if has_more and rows:
+            last_org = rows[-1][0]
+            next_cursor = encode_cursor(last_org.created_at, last_org.id)
+
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=offset,
-            has_more=offset + len(items) < total,
+            has_more=has_more,
+            next_cursor=next_cursor,
         )
 
     # -------------------------------------------------------------------------
@@ -257,27 +289,43 @@ class AdminController(Controller):
         session: AsyncSession,
         billing_service: BillingService,
         limit: int = 50,
-        offset: int = 0,
         type: str | None = None,
-    ) -> PaginatedResponse[TransactionResponse]:
+        cursor: str | None = None,
+    ) -> CursorPage[TransactionResponse]:
         """Get transaction history for any account."""
         logger.info(
             "admin.viewing_transactions", admin_id=str(admin_user.id), account_id=str(account_id)
         )
-        transactions, total = await billing_service.get_transaction_history(
+        cursor_ts = None
+        cursor_id = None
+        if cursor is not None:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+
+        transactions = await billing_service.get_transaction_history(
             account_id,
             limit=limit,
-            offset=offset,
             transaction_type=type,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
             session=session,
         )
+
+        has_more = len(transactions) > limit
+        if has_more:
+            transactions = list(transactions)[:limit]
+
         items = [_txn_to_response(t) for t in transactions]
-        return PaginatedResponse(
+
+        next_cursor: str | None = None
+        if has_more and transactions:
+            last = transactions[-1]
+            next_cursor = encode_cursor(last.created_at, last.id)
+
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=offset,
-            has_more=offset + len(items) < total,
+            has_more=has_more,
+            next_cursor=next_cursor,
         )
 
     @post("/accounts/{account_id:uuid}/adjust")
@@ -446,17 +494,28 @@ class AdminController(Controller):
         status: str | None = None,
         payment_provider: str | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> PaginatedResponse[PaymentResponse]:
+        cursor: str | None = None,
+    ) -> CursorPage[PaymentResponse]:
         """List all payments."""
         logger.info("admin.listing_payments", admin_id=str(admin_user.id))
+        cursor_ts = None
+        cursor_id = None
+        if cursor is not None:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+
         repo = BillingRepository(session)
-        payments, total = await repo.list_payments(
+        payments = await repo.list_payments(
             status=status,
             payment_provider=payment_provider,
             limit=limit,
-            offset=offset,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
         )
+
+        has_more = len(payments) > limit
+        if has_more:
+            payments = list(payments)[:limit]
+
         items = [
             PaymentResponse(
                 id=p.id,
@@ -470,12 +529,17 @@ class AdminController(Controller):
             )
             for p in payments
         ]
-        return PaginatedResponse(
+
+        next_cursor: str | None = None
+        if has_more and payments:
+            last = payments[-1]
+            next_cursor = encode_cursor(last.created_at, last.id)
+
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=offset,
-            has_more=offset + len(items) < total,
+            has_more=has_more,
+            next_cursor=next_cursor,
         )
 
     @get("/payments/{payment_id:uuid}")

@@ -26,7 +26,7 @@ from src.api.schemas.billing import (
     TopUpStripeRequest,
     TransactionResponse,
 )
-from src.api.schemas.pagination import PaginatedResponse, decode_cursor, encode_cursor
+from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import OrganizationPermissionError
@@ -93,47 +93,46 @@ class BillingController(Controller):
         session: AsyncSession,
         billing_service: BillingService,
         limit: int = 50,
-        offset: int = 0,
         type: str | None = None,
         cursor: str | None = None,
-    ) -> PaginatedResponse[TransactionResponse]:
+    ) -> CursorPage[TransactionResponse]:
         """Get transaction history for the authenticated user's account.
 
         Query parameters:
           - ``limit``: Page size (default 50)
-          - ``offset``: Page offset (default 0, ignored when ``cursor`` is supplied)
           - ``type``: Filter by transaction type
           - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
-            field.  When supplied, enables efficient keyset pagination.
+            field.  Pass to fetch the next page.
         """
         cursor_ts = None
         cursor_id = None
-        effective_offset = offset
         if cursor is not None:
             cursor_ts, cursor_id = decode_cursor(cursor)
-            effective_offset = 0
 
         account = await billing_service.resolve_account_for_user(current_user_id, session=session)
-        transactions, total = await billing_service.get_transaction_history(
+        transactions = await billing_service.get_transaction_history(
             account.id,
             limit=limit,
-            offset=effective_offset,
             transaction_type=type,
             cursor_ts=cursor_ts,
             cursor_id=cursor_id,
             session=session,
         )
+
+        has_more = len(transactions) > limit
+        if has_more:
+            transactions = list(transactions)[:limit]
+
         items = [_txn_to_response(t) for t in transactions]
-        has_more = effective_offset + len(items) < total
+
         next_cursor: str | None = None
         if has_more and transactions:
             last = transactions[-1]
             next_cursor = encode_cursor(last.created_at, last.id)
-        return PaginatedResponse(
+
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=effective_offset,
             has_more=has_more,
             next_cursor=next_cursor,
         )

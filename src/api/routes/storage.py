@@ -27,7 +27,7 @@ from litestar.status_codes import (
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.schemas.pagination import PaginatedResponse, decode_cursor, encode_cursor
+from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.schemas.storage import (
     ImageAccessResponse,
     ImageListItem,
@@ -280,33 +280,32 @@ class StorageController(Controller):
         current_user_id: UUID,
         user_content: UserContentService,
         limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
-        offset: Annotated[int, Parameter(ge=0)] = 0,
         cursor: str | None = None,
-    ) -> PaginatedResponse[ImageListItem]:
+    ) -> CursorPage[ImageListItem]:
         """List uploaded images for a user.
 
         Returns paginated list of uploads ordered by creation date (newest first).
 
         Query parameters:
           - ``limit``: Page size 1–100 (default 50)
-          - ``offset``: Page offset (default 0, ignored when ``cursor`` is supplied)
           - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
-            field.  When supplied, enables efficient keyset pagination.
+            field.  Pass to fetch the next page.
         """
         cursor_ts = None
         cursor_id = None
-        effective_offset = offset
         if cursor is not None:
             cursor_ts, cursor_id = decode_cursor(cursor)
-            effective_offset = 0
 
-        images, total = await user_content.list_user_uploads(
+        images = await user_content.list_user_uploads(
             current_user_id,
             limit=limit,
-            offset=effective_offset,
             cursor_ts=cursor_ts,
             cursor_id=cursor_id,
         )
+
+        has_more = len(images) > limit
+        if has_more:
+            images = images[:limit]
 
         items = [
             ImageListItem(
@@ -320,17 +319,14 @@ class StorageController(Controller):
             for img in images
         ]
 
-        has_more = effective_offset + len(items) < total
         next_cursor: str | None = None
         if has_more and images:
             last = images[-1]
             next_cursor = encode_cursor(last.created_at, last.id)
 
-        return PaginatedResponse(
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=effective_offset,
             has_more=has_more,
             next_cursor=next_cursor,
         )
@@ -430,33 +426,32 @@ class StorageController(Controller):
         current_user_id: UUID,
         user_content: UserContentService,
         limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
-        offset: Annotated[int, Parameter(ge=0)] = 0,
         cursor: str | None = None,
-    ) -> PaginatedResponse[OutputListItem]:
+    ) -> CursorPage[OutputListItem]:
         """List generated outputs for a user.
 
         Returns paginated list ordered by creation date (newest first).
 
         Query parameters:
           - ``limit``: Page size 1–100 (default 50)
-          - ``offset``: Page offset (default 0, ignored when ``cursor`` is supplied)
           - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
-            field.  When supplied, enables efficient keyset pagination.
+            field.  Pass to fetch the next page.
         """
         cursor_ts = None
         cursor_id = None
-        effective_offset = offset
         if cursor is not None:
             cursor_ts, cursor_id = decode_cursor(cursor)
-            effective_offset = 0
 
-        outputs, total = await user_content.list_user_outputs(
+        outputs = await user_content.list_user_outputs(
             current_user_id,
             limit=limit,
-            offset=effective_offset,
             cursor_ts=cursor_ts,
             cursor_id=cursor_id,
         )
+
+        has_more = len(outputs) > limit
+        if has_more:
+            outputs = outputs[:limit]
 
         items = [
             OutputListItem(
@@ -471,17 +466,14 @@ class StorageController(Controller):
             for out in outputs
         ]
 
-        has_more = effective_offset + len(items) < total
         next_cursor: str | None = None
         if has_more and outputs:
             last = outputs[-1]
             next_cursor = encode_cursor(last.created_at, last.id)
 
-        return PaginatedResponse(
+        return CursorPage(
             items=items,
-            total=total,
             limit=limit,
-            offset=effective_offset,
             has_more=has_more,
             next_cursor=next_cursor,
         )
@@ -492,7 +484,7 @@ class StorageController(Controller):
         current_user_id: UUID,
         user_content: UserContentService,
         job_id: UUID,
-    ) -> Response[PaginatedResponse[OutputListItem] | ErrorEnvelope]:
+    ) -> Response[CursorPage[OutputListItem] | ErrorEnvelope]:
         """List outputs for a specific job.
 
         Returns outputs ordered by output index (batch order).
@@ -524,11 +516,9 @@ class StorageController(Controller):
         ]
 
         return Response(
-            content=PaginatedResponse(
+            content=CursorPage(
                 items=items,
-                total=len(items),
                 limit=len(items),
-                offset=0,
                 has_more=False,
                 next_cursor=None,
             ),

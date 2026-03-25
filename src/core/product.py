@@ -7,12 +7,12 @@ and rate limits. Loaded once at startup, immutable at runtime.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from src.core.enums import ModelType, Product
 
 
-class AgeGatePolicy(str, Enum):
+class AgeGatePolicy(StrEnum):
     """Age verification requirements."""
 
     NONE = "none"
@@ -21,7 +21,7 @@ class AgeGatePolicy(str, Enum):
     # IDENTITY_VERIFICATION = "identity_verification"  # Future: Jumio/Veriff
 
 
-class AuthMethod(str, Enum):
+class AuthMethod(StrEnum):
     """Supported authentication methods."""
 
     EMAIL_PASSWORD = "email_password"
@@ -30,14 +30,14 @@ class AuthMethod(str, Enum):
     # SSO_SAML = "sso_saml"  # Future: enterprise SSO
 
 
-class PaymentProvider(str, Enum):
+class PaymentProvider(StrEnum):
     """Supported payment providers."""
 
     STRIPE = "stripe"
     NOWPAYMENTS = "nowpayments"  # Crypto
 
 
-class ContentRating(str, Enum):
+class ContentRating(StrEnum):
     """Content rating levels."""
 
     SFW = "sfw"  # Safe for work only

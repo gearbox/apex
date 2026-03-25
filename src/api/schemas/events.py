@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID
 
 import msgspec
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Server-sent event types."""
 
     JOB_STATUS_CHANGED = "job.status_changed"

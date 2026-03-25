@@ -115,18 +115,21 @@ async def test_get_user_image_by_key(storage_repo: StorageRepository, make_user)
 async def test_list_user_images_paginated(
     storage_repo: StorageRepository, make_user, make_user_image
 ) -> None:
-    """list_user_images returns paginated results ordered by created_at DESC."""
+    """list_user_images returns paginated results using limit+1 fetch pattern."""
     user = await make_user(email=f"imglist-{uuid4().hex[:6]}@example.com")
     for i in range(5):
         await make_user_image(user=user, storage_key=f"users/{user.id}/uploads/{i}.png")
+    # limit+1 pattern: fetching limit=3 returns up to 4 items (limit+1)
     images = await storage_repo.list_user_images(user.id, limit=3)
-    assert len(images) == 3
+    assert len(images) == 4  # 3+1 since 5 > 3, has_more=True
 
 
-async def test_list_user_images_offset_past_end(storage_repo: StorageRepository, make_user) -> None:
-    """list_user_images with offset beyond count returns empty list."""
+async def test_list_user_images_empty_for_new_user(
+    storage_repo: StorageRepository, make_user
+) -> None:
+    """list_user_images returns empty list for a user with no uploads."""
     user = await make_user(email=f"imglistoff-{uuid4().hex[:6]}@example.com")
-    images = await storage_repo.list_user_images(user.id, offset=1000)
+    images = await storage_repo.list_user_images(user.id)
     assert not list(images)
 
 

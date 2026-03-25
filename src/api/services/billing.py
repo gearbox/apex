@@ -435,18 +435,20 @@ class BillingService:
         account_id: UUID,
         *,
         limit: int = 50,
-        offset: int = 0,
         transaction_type: str | None = None,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
         session: AsyncSession,
-    ) -> tuple[Sequence[TokenTransaction], int]:
-        """Returns (transactions, total_count). Ordered by created_at DESC."""
+    ) -> Sequence[TokenTransaction]:
+        """Returns transactions ordered by created_at DESC.
+
+        Uses limit+1 fetch pattern — caller checks ``len(result) > limit``
+        to determine ``has_more``.
+        """
         repo = BillingRepository(session)
-        return await repo.list_transactions(
+        return await repo.get_transaction_history(
             account_id,
             limit=limit,
-            offset=offset,
             transaction_type=transaction_type,
             cursor_ts=cursor_ts,
             cursor_id=cursor_id,
