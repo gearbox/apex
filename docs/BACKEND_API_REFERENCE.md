@@ -431,7 +431,7 @@ JobOutputItem: {
 #### `POST /v1/storage/upload`
 
 ```
-Request:  multipart/form-data, field "file" (max 20MB, PNG/JPEG/WebP)
+Request:  multipart/form-data, field "data" (max 20MB, PNG/JPEG/WebP)
 Response: {
   id: UUID,
   storage_key: string,

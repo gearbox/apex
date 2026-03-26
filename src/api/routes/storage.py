@@ -7,6 +7,7 @@ and managing user storage.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
@@ -53,6 +54,11 @@ ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
 
 
+@dataclass
+class UploadForm:
+    data: UploadFile
+
+
 # -----------------------------------------------------------------------------
 # Controller
 # -----------------------------------------------------------------------------
@@ -75,7 +81,7 @@ class StorageController(Controller):
         self,
         current_user_id: UUID,
         user_content: UserContentService,
-        data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART)],
+        data: Annotated[UploadForm, Body(media_type=RequestEncodingType.MULTI_PART)],
     ) -> Response[UploadResponse | ErrorEnvelope]:
         """Upload an image for use in generation.
 
@@ -86,7 +92,7 @@ class StorageController(Controller):
         Images are automatically deleted after the retention period.
         """
         # Validate content type
-        content_type = data.content_type or "application/octet-stream"
+        content_type = data.data.content_type or "application/octet-stream"
         if content_type not in ALLOWED_CONTENT_TYPES:
             return Response(
                 content=ErrorEnvelope(
@@ -99,7 +105,7 @@ class StorageController(Controller):
         logger.debug("storage.upload_started", content_type=content_type)
 
         # Read file data
-        file_bytes = await data.read()
+        file_bytes = await data.data.read()
 
         # Validate size
         if len(file_bytes) > MAX_UPLOAD_SIZE:
@@ -127,13 +133,13 @@ class StorageController(Controller):
             logger.debug(
                 "storage.uploading_image",
                 user_id=str(current_user_id),
-                filename=data.filename,
+                filename=data.data.filename,
                 bytes=len(file_bytes),
             )
             result = await user_content.upload_image(
                 user_id=current_user_id,
                 data=file_bytes,
-                filename=data.filename or "data.png",
+                filename=data.data.filename or "data.png",
                 content_type=content_type,
             )
 
