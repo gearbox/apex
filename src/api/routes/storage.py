@@ -75,7 +75,7 @@ class StorageController(Controller):
         self,
         current_user_id: UUID,
         user_content: UserContentService,
-        data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART, title="file")],
+        data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART)],
     ) -> Response[UploadResponse | ErrorEnvelope]:
         """Upload an image for use in generation.
 
@@ -133,7 +133,7 @@ class StorageController(Controller):
             result = await user_content.upload_image(
                 user_id=current_user_id,
                 data=file_bytes,
-                filename=data.filename or "upload.png",
+                filename=data.filename or "data.png",
                 content_type=content_type,
             )
 
