@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from src.api.schemas.events import EventType
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import (
     AccountInactiveError,
@@ -354,3 +355,141 @@ class TestAdminAdjust:
                     session=mock_session,
                     product_id="vex",
                 )
+
+    async def test_positive_adjustment_publishes_event_personal(
+        self, mock_session: AsyncMock
+    ) -> None:
+        """Personal account adjustment publishes balance.updated to the account owner."""
+        account_id = uuid4()
+        owner_user_id = uuid4()
+        admin_id = uuid4()
+        account = _make_account(account_id=account_id, account_type="personal")
+        account.user_id = owner_user_id
+        account.organization_id = None
+        txn = _make_transaction(account_id=account_id, amount=100)
+
+        mock_event_bus = AsyncMock()
+        service = BillingService(event_bus=mock_event_bus)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=50)
+            repo.create_transaction = AsyncMock(return_value=txn)
+
+            await service.admin_adjust(
+                account_id,
+                100,
+                admin_id,
+                description="bonus",
+                session=mock_session,
+                product_id="vex",
+            )
+
+        mock_event_bus.publish.assert_awaited_once()
+        call_kwargs = mock_event_bus.publish.call_args.kwargs
+        assert call_kwargs["user_id"] == owner_user_id
+        assert call_kwargs["event_type"] == EventType.BALANCE_UPDATED
+
+        payload = call_kwargs["payload"]
+        assert payload.account_id == account_id
+        assert payload.balance == 150
+        assert payload.delta == 100
+        assert payload.transaction_type == "admin_adjustment"
+
+    async def test_positive_adjustment_publishes_to_all_org_members(
+        self, mock_session: AsyncMock
+    ) -> None:
+        """Enterprise account adjustment publishes to every org member."""
+        account_id = uuid4()
+        org_id = uuid4()
+        member_ids = [uuid4(), uuid4(), uuid4()]
+        admin_id = uuid4()
+        account = _make_account(account_id=account_id, account_type="enterprise")
+        account.user_id = None
+        account.organization_id = org_id
+        txn = _make_transaction(account_id=account_id, amount=200)
+
+        mock_event_bus = AsyncMock()
+        service = BillingService(event_bus=mock_event_bus)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=300)
+            repo.create_transaction = AsyncMock(return_value=txn)
+            repo.get_member_user_ids = AsyncMock(return_value=member_ids)
+
+            await service.admin_adjust(
+                account_id,
+                200,
+                admin_id,
+                description="enterprise bonus",
+                session=mock_session,
+                product_id="synthara",
+            )
+
+        assert mock_event_bus.publish.await_count == 3
+        published_user_ids = {
+            call.kwargs["user_id"] for call in mock_event_bus.publish.call_args_list
+        }
+        assert published_user_ids == set(member_ids)
+
+    async def test_adjustment_without_event_bus_succeeds(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        """When event_bus is None, admin_adjust still succeeds (no publish)."""
+        account_id = uuid4()
+        account = _make_account(account_id=account_id, account_type="personal")
+        account.user_id = uuid4()
+        account.organization_id = None
+        txn = _make_transaction(account_id=account_id, amount=50)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=100)
+            repo.create_transaction = AsyncMock(return_value=txn)
+
+            result = await billing_service.admin_adjust(
+                account_id,
+                50,
+                uuid4(),
+                description="no-bus test",
+                session=mock_session,
+                product_id="vex",
+            )
+
+        assert result == txn
+
+    async def test_enterprise_adjustment_no_members_no_publish(
+        self, mock_session: AsyncMock
+    ) -> None:
+        """Enterprise account with no members still adjusts correctly, just no SSE publish."""
+        account_id = uuid4()
+        org_id = uuid4()
+        account = _make_account(account_id=account_id, account_type="enterprise")
+        account.user_id = None
+        account.organization_id = org_id
+        txn = _make_transaction(account_id=account_id, amount=100)
+
+        mock_event_bus = AsyncMock()
+        service = BillingService(event_bus=mock_event_bus)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=0)
+            repo.create_transaction = AsyncMock(return_value=txn)
+            repo.get_member_user_ids = AsyncMock(return_value=[])
+
+            await service.admin_adjust(
+                account_id,
+                100,
+                uuid4(),
+                description="empty org",
+                session=mock_session,
+                product_id="synthara",
+            )
+
+        mock_event_bus.publish.assert_not_awaited()

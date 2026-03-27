@@ -521,6 +521,32 @@ async def test_list_members(billing_repo: BillingRepository, make_user, make_org
     assert len(members) >= 3
 
 
+async def test_get_member_user_ids(billing_repo: BillingRepository, make_user, make_org) -> None:
+    """get_member_user_ids returns user_id scalars for all org members."""
+    org = await make_org()
+    user_ids = []
+    for i in range(3):
+        user = await make_user(email=f"memberuid{i}-{uuid4().hex[:6]}@example.com")
+        await billing_repo.create_membership(
+            id=uuid4(),
+            organization_id=org.id,
+            user_id=user.id,
+            role="member",
+            product_id="vex",
+        )
+        user_ids.append(user.id)
+
+    result = await billing_repo.get_member_user_ids(org.id)
+    assert set(result) == set(user_ids)
+
+
+async def test_get_member_user_ids_empty_org(billing_repo: BillingRepository, make_org) -> None:
+    """get_member_user_ids returns empty list for an org with no members."""
+    org = await make_org()
+    result = await billing_repo.get_member_user_ids(org.id)
+    assert result == []
+
+
 # ---------------------------------------------------------------------------
 # get_active_membership
 # ---------------------------------------------------------------------------

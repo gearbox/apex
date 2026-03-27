@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -22,8 +23,6 @@ from src.db.repositories.billing import BillingRepository
 from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.event_bus import EventBus
@@ -41,24 +40,28 @@ class BillingService:
     async def _publish_balance_update(
         self,
         *,
-        user_id: UUID | None,
+        user_ids: Sequence[UUID],
         account_id: UUID,
         balance: int,
         delta: int,
         transaction_type: str,
     ) -> None:
-        if self._event_bus is None or user_id is None:
+        if self._event_bus is None or not user_ids:
             return
-        await self._event_bus.publish(
-            user_id=user_id,
-            event_type=EventType.BALANCE_UPDATED,
-            payload=BalanceUpdatedPayload(
-                account_id=account_id,
-                balance=balance,
-                delta=delta,
-                transaction_type=transaction_type,
-            ),
+
+        payload = BalanceUpdatedPayload(
+            account_id=account_id,
+            balance=balance,
+            delta=delta,
+            transaction_type=transaction_type,
         )
+
+        for uid in user_ids:
+            await self._event_bus.publish(
+                user_id=uid,
+                event_type=EventType.BALANCE_UPDATED,
+                payload=payload,
+            )
 
     async def get_or_create_personal_account(
         self, user_id: UUID, *, session: AsyncSession, product_id: str
@@ -248,7 +251,7 @@ class BillingService:
         )
 
         await self._publish_balance_update(
-            user_id=user_id,
+            user_ids=[user_id] if user_id is not None else [],
             account_id=account_id,
             balance=new_balance,
             delta=-token_cost,
@@ -312,7 +315,7 @@ class BillingService:
         )
 
         await self._publish_balance_update(
-            user_id=user_id,
+            user_ids=[user_id] if user_id is not None else [],
             account_id=debit.account_id,
             balance=new_balance,
             delta=refund_amount,
@@ -364,7 +367,7 @@ class BillingService:
         )
 
         await self._publish_balance_update(
-            user_id=user_id,
+            user_ids=[user_id] if user_id is not None else [],
             account_id=account_id,
             balance=new_balance,
             delta=amount,
@@ -382,11 +385,15 @@ class BillingService:
         description: str,
         session: AsyncSession,
         product_id: str,
-        user_id: UUID | None = None,
     ) -> TokenTransaction:
         """Admin adjustment: positive = credit, negative = debit.
 
         For negative adjustments, checks that result >= 0.
+
+        Resolves the owning user(s) from the locked account row and publishes
+        a ``balance.updated`` SSE event to each:
+        - Personal account → ``account.user_id``
+        - Enterprise account → all organisation members
         """
         repo = BillingRepository(session)
 
@@ -420,8 +427,17 @@ class BillingService:
             description=description,
         )
 
+        # Resolve SSE target user(s) from the account we already hold
+        target_user_ids: list[UUID] = []
+        if account.user_id is not None:
+            # Personal account — single owner
+            target_user_ids = [account.user_id]
+        elif account.organization_id is not None:
+            # Enterprise account — notify all org members
+            target_user_ids = await repo.get_member_user_ids(account.organization_id)
+
         await self._publish_balance_update(
-            user_id=user_id,
+            user_ids=target_user_ids,
             account_id=account_id,
             balance=new_balance,
             delta=amount,

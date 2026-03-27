@@ -525,3 +525,12 @@ class BillingRepository:
             select(OrganizationMember).where(OrganizationMember.organization_id == org_id)
         )
         return result.scalars().all()
+
+    async def get_member_user_ids(self, organization_id: UUID) -> list[UUID]:
+        """Return user_ids of all members of the given organisation."""
+        result = await self._session.execute(
+            select(OrganizationMember.user_id).where(
+                OrganizationMember.organization_id == organization_id,
+            )
+        )
+        return list(result.scalars().all())
