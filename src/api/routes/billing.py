@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 import msgspec
@@ -11,11 +11,11 @@ import structlog
 from litestar import Controller, Request, Response, get, post
 from litestar.di import Provide
 from litestar.exceptions import PermissionDeniedException
+from litestar.params import Parameter
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
-from src.api.dependencies.idempotency import get_idempotency_key
 from src.api.schemas.billing import (
     BalanceResponse,
     BillingAccountResponse,
@@ -67,7 +67,6 @@ class BillingController(Controller):
     guards = [auth_guard]
     dependencies = {
         "current_user_id": Provide(get_current_user_id),
-        "idempotency_key_header": Provide(get_idempotency_key, sync_to_thread=False),
     }
 
     @get("/balance")
@@ -234,7 +233,14 @@ class BillingController(Controller):
         payment_service: PaymentService,
         product_id: str,
         idempotency_service: IdempotencyService,
-        idempotency_key_header: str,
+        idempotency_key_header: Annotated[
+            str,
+            Parameter(
+                header="Idempotency-Key",
+                max_length=64,
+                description="Unique key for request deduplication (max 64 chars). Repeated requests with the same key return the cached response.",
+            ),
+        ],
     ) -> Response[StripeCheckoutResponse]:
         """Create a Stripe checkout session for token purchase (idempotent via Idempotency-Key)."""
         request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
@@ -295,7 +301,14 @@ class BillingController(Controller):
         payment_service: PaymentService,
         product_id: str,
         idempotency_service: IdempotencyService,
-        idempotency_key_header: str,
+        idempotency_key_header: Annotated[
+            str,
+            Parameter(
+                header="Idempotency-Key",
+                max_length=64,
+                description="Unique key for request deduplication (max 64 chars). Repeated requests with the same key return the cached response.",
+            ),
+        ],
     ) -> Response[NowPaymentsInvoiceResponse]:
         """Create a NowPayments invoice for token purchase (idempotent via Idempotency-Key)."""
         request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))

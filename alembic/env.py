@@ -64,7 +64,11 @@ def _filter_ops(ops_list: list[MigrateOperation]) -> list[MigrateOperation]:
     filtered: list[MigrateOperation] = []
     for op in ops_list:
         if isinstance(op, ModifyTableOps):
-            op.ops = [t for t in op.ops if not (isinstance(t, AlterColumnOp) and _is_comment_only_alter(t))]
+            op.ops = [
+                t
+                for t in op.ops
+                if not (isinstance(t, AlterColumnOp) and _is_comment_only_alter(t))
+            ]
             if op.ops:
                 filtered.append(op)
         else:

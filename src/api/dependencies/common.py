@@ -311,13 +311,6 @@ def get_billing_service() -> BillingService:
     return BillingService(event_bus=_services.event_bus)
 
 
-def get_idempotency_key_dep(request: Request) -> str:  # type: ignore[type-arg]
-    """Extract Idempotency-Key header from request."""
-    from src.api.dependencies.idempotency import get_idempotency_key
-
-    return get_idempotency_key(request)
-
-
 def get_idempotency_service() -> IdempotencyService:
     """Provide IdempotencyService instance."""
     settings = get_settings()
@@ -648,5 +641,4 @@ dependencies = {
     "gallery_service": Provide(get_gallery_service, sync_to_thread=False),
     # Idempotency
     "idempotency_service": Provide(get_idempotency_service, sync_to_thread=False),
-    "idempotency_key_header": Provide(get_idempotency_key_dep, sync_to_thread=False),
 }

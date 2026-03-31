@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 import msgspec
@@ -11,11 +11,11 @@ import structlog
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
 from litestar.exceptions import NotFoundException, PermissionDeniedException, ValidationException
+from litestar.params import Parameter
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_admin_user
-from src.api.dependencies.idempotency import get_idempotency_key
 from src.api.routes.billing import _txn_to_response
 from src.api.schemas.admin import (
     AdminOrgResponse,
@@ -62,7 +62,6 @@ class AdminController(Controller):
     guards = [auth_guard]
     dependencies = {
         "admin_user": Provide(get_current_admin_user),
-        "idempotency_key_header": Provide(get_idempotency_key, sync_to_thread=False),
     }
 
     # -------------------------------------------------------------------------
@@ -342,7 +341,14 @@ class AdminController(Controller):
         billing_service: BillingService,
         product_id: str,
         idempotency_service: IdempotencyService,
-        idempotency_key_header: str,
+        idempotency_key_header: Annotated[
+            str,
+            Parameter(
+                header="Idempotency-Key",
+                max_length=64,
+                description="Unique key for request deduplication (max 64 chars). Repeated requests with the same key return the cached response.",
+            ),
+        ],
     ) -> Response[AdminAdjustResponse]:
         """Admin balance adjustment (idempotent via Idempotency-Key). Positive = credit, negative = debit."""
         logger.info(

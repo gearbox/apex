@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Annotated
 from uuid import UUID
 
 import msgspec
 import structlog
 from litestar import Controller, Response, post
 from litestar.di import Provide
+from litestar.params import Parameter
 from litestar.status_codes import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
@@ -19,7 +21,6 @@ from litestar.status_codes import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
-from src.api.dependencies.idempotency import get_idempotency_key
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
@@ -46,7 +47,6 @@ class UnifiedGenerationController(Controller):
     guards = [auth_guard]
     dependencies = {
         "current_user_id": Provide(get_current_user_id),
-        "idempotency_key_header": Provide(get_idempotency_key, sync_to_thread=False),
     }
 
     @post("/")
@@ -59,7 +59,14 @@ class UnifiedGenerationController(Controller):
         product_config: ProductConfig,
         product_id: str,
         idempotency_service: IdempotencyService,
-        idempotency_key_header: str,
+        idempotency_key_header: Annotated[
+            str,
+            Parameter(
+                header="Idempotency-Key",
+                max_length=64,
+                description="Unique key for request deduplication (max 64 chars). Repeated requests with the same key return the cached response.",
+            ),
+        ],
     ) -> Response[JobCreatedResponse | ErrorEnvelope]:
         """Submit a generation request (idempotent via Idempotency-Key header).
 
