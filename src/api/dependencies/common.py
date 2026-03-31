@@ -25,6 +25,7 @@ from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
+from src.api.services.health.service import HealthService
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
@@ -71,6 +72,7 @@ class ServiceContainer:
     generation_service: GenerationService | None = None
     event_bus: EventBus | None = None
     sse_ticket_service: SSETicketService | None = None
+    health_service: HealthService | None = None
 
 
 _services = ServiceContainer()
@@ -340,6 +342,13 @@ def get_payment_service() -> PaymentService:
 # -----------------------------------------------------------------------------
 
 
+def get_health_service() -> HealthService:
+    """Provide HealthService singleton."""
+    if _services.health_service is None:
+        raise RuntimeError("HealthService not initialized")
+    return _services.health_service
+
+
 def get_content_proxy(
     r2_storage: R2StorageService,
     settings: Settings,
@@ -566,6 +575,28 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     )
     await _services.token_cleanup_worker.start()
 
+    # Initialize health check registry and service
+    from src.api.services.health.checkers.infrastructure import (
+        PostgresChecker,
+        R2Checker,
+        RedisChecker,
+    )
+    from src.api.services.health.registry import HealthCheckRegistry
+
+    health_registry = HealthCheckRegistry()
+    health_registry.register(PostgresChecker(session_factory=_services.db_manager.session_factory))
+    if settings.redis_url:
+        from src.core.redis import get_redis_client
+
+        health_registry.register(RedisChecker(redis=get_redis_client()))
+    if _services.r2_storage is not None:
+        health_registry.register(R2Checker(r2_storage=_services.r2_storage))
+    _services.health_service = HealthService(
+        registry=health_registry,
+        timeout_seconds=settings.health_check_timeout_seconds,
+    )
+    logger.info("health_service.initialized")
+
     return _services.jwt_service  # Return for storing in app.state
 
 
@@ -641,4 +672,6 @@ dependencies = {
     "gallery_service": Provide(get_gallery_service, sync_to_thread=False),
     # Idempotency
     "idempotency_service": Provide(get_idempotency_service, sync_to_thread=False),
+    # Health
+    "health_service": Provide(get_health_service, sync_to_thread=False),
 }

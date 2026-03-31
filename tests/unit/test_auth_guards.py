@@ -405,16 +405,12 @@ class TestGenerationControllersAuth:
     """Verify auth guards on generation controllers."""
 
     def _create_gen_app(self, jwt_service: JWTService) -> Litestar:
-        from unittest.mock import AsyncMock
+        from src.api.routes.generation import ImageController
+        from src.api.routes.health import HealthController
+        from src.api.services.health.registry import HealthCheckRegistry
+        from src.api.services.health.service import HealthService
 
-        from src.api.routes.generation import (
-            HealthController,
-            ImageController,
-        )
-        from src.api.services.comfyui_client import ComfyUIClient
-
-        mock_comfyui = AsyncMock(spec=ComfyUIClient)
-        mock_comfyui.health_check = AsyncMock(return_value=True)
+        health_service = HealthService(registry=HealthCheckRegistry())
 
         app = Litestar(
             route_handlers=[
@@ -422,17 +418,17 @@ class TestGenerationControllersAuth:
                 ImageController,
             ],
             dependencies={
-                "comfyui_client": Provide(lambda: mock_comfyui, sync_to_thread=False),
+                "health_service": Provide(lambda: health_service, sync_to_thread=False),
             },
         )
         app.state["jwt_service"] = jwt_service
         return app
 
-    def test_health_check_is_public(self, jwt_service: JWTService) -> None:
-        """HealthController should NOT require auth."""
+    def test_health_live_is_public(self, jwt_service: JWTService) -> None:
+        """HealthController /live should NOT require auth."""
         app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
-            resp = client.get("/health/")
+            resp = client.get("/health/live")
             assert resp.status_code == HTTP_200_OK
 
     def test_image_upload_requires_auth(self, jwt_service: JWTService) -> None:
@@ -491,7 +487,7 @@ class TestControllerGuardDeclarations:
         assert auth_guard in guards
 
     def test_health_controller_has_no_guard(self) -> None:
-        from src.api.routes.generation import HealthController
+        from src.api.routes.health import HealthController
 
         guards = HealthController.__dict__.get("guards")
         assert guards is None or (isinstance(guards, list) and auth_guard not in guards)

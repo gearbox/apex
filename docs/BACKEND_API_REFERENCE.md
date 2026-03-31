@@ -1539,12 +1539,56 @@ Rate limit headers are **not currently exposed** in responses. The frontend shou
 
 ## 19. Health Check
 
-#### `GET /health/`
+Three-tier health monitoring system. Use the appropriate endpoint for each consumer:
+
+| Consumer | Endpoint | Auth |
+|----------|----------|------|
+| Docker HEALTHCHECK, load balancers | `GET /health/live` | None |
+| CI readiness waits, traffic routing | `GET /health/ready` | None |
+| Admin dashboards, monitoring | `GET /v1/admin/health/` | Admin JWT |
+
+#### `GET /health/live`
+
+Always returns 200 if the process is serving HTTP. Used by Docker HEALTHCHECK.
 
 ```
-Response: { status: "healthy" | "unhealthy", comfyui_connected: bool, version: string }
-Note:     Public endpoint, no auth needed
+Response: { status: "alive" }
+Note:     Always 200 — use this for Docker/container restart decisions only.
 ```
+
+#### `GET /health/ready`
+
+Checks PostgreSQL and Redis connectivity. Returns 200 if ready, 503 if not.
+
+```
+Response: { status: "ready" | "not_ready", checks: { postgres: string, redis?: string, r2?: string } }
+Status:   200 if ready, 503 if not ready
+Note:     R2 is checked but excluded from the ready/not_ready determination (slow HeadBucket).
+          Use this for CI readiness waits and traffic-routing decisions.
+```
+
+#### `GET /v1/admin/health/`
+
+Full system health across all categories. Requires admin authentication.
+
+```
+Request:  Authorization: Bearer <admin_token>
+Response: {
+  status: "healthy" | "degraded" | "unhealthy" | "unknown",
+  checked_at: string,         // ISO 8601
+  infrastructure: {
+    status: string,
+    components: [{ name, status, latency_ms, message?, metadata? }]
+  },
+  platform_apis: { status, components },
+  cloud_providers: { [product_id]: { status, components } },
+  gpu_sessions: { status, total, healthy, stale, message? }
+}
+Status:   200
+Errors:   401 (unauthorized), 403 (not admin)
+```
+
+Component `status` values: `healthy`, `degraded`, `unhealthy`, `unknown`, `inactive`.
 
 ---
 

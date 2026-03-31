@@ -296,6 +296,25 @@ class UserRole(StrEnum):
     USER = "user"
 
 
+class ComponentStatus(StrEnum):
+    """Health status of a single component."""
+
+    healthy = "healthy"
+    degraded = "degraded"
+    unhealthy = "unhealthy"
+    unknown = "unknown"
+    inactive = "inactive"
+
+
+class ComponentCategory(StrEnum):
+    """Taxonomy bucket for a health component."""
+
+    infrastructure = "infrastructure"
+    cloud_provider = "cloud_provider"
+    platform_api = "platform_api"
+    gpu_session = "gpu_session"
+
+
 class SupportedLocale(StrEnum):
     """Supported UI/email locales.
 

@@ -65,6 +65,11 @@ class DatabaseManager:
         """Get the database engine."""
         return self._engine
 
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """Get the async session factory."""
+        return self._session_factory
+
     @asynccontextmanager
     async def session(self) -> AsyncGenerator[AsyncSession]:
         """Get a database session with automatic cleanup.
