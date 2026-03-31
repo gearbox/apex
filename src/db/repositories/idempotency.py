@@ -1,0 +1,115 @@
+"""Repository for idempotency key operations."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
+
+import structlog
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.db.models.idempotency import IdempotencyKey
+
+logger = structlog.get_logger(__name__)
+
+
+class IdempotencyRepository:
+    """Data access for idempotency key deduplication."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def try_acquire(
+        self,
+        *,
+        id: UUID,
+        user_id: UUID,
+        product_id: str,
+        idempotency_key: str,
+        operation: str,
+        request_hash: str,
+        expires_at: datetime,
+    ) -> IdempotencyKey | None:
+        """Attempt to insert a new idempotency record.
+
+        Uses INSERT ... ON CONFLICT DO NOTHING. Returns the inserted row
+        if successful, or None if the key already exists (conflict).
+        """
+        stmt = (
+            pg_insert(IdempotencyKey)
+            .values(
+                id=id,
+                user_id=user_id,
+                product_id=product_id,
+                idempotency_key=idempotency_key,
+                operation=operation,
+                status="processing",
+                request_hash=request_hash,
+                expires_at=expires_at,
+            )
+            .on_conflict_do_nothing(constraint="uq_idempotency_user_product_key")
+            .returning(IdempotencyKey)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is not None:
+            await self._session.flush()
+        return row
+
+    async def get_existing(
+        self,
+        user_id: UUID,
+        product_id: str,
+        idempotency_key: str,
+    ) -> IdempotencyKey | None:
+        """Look up an existing idempotency record (non-expired)."""
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            select(IdempotencyKey).where(
+                IdempotencyKey.user_id == user_id,
+                IdempotencyKey.product_id == product_id,
+                IdempotencyKey.idempotency_key == idempotency_key,
+                IdempotencyKey.expires_at > now,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def mark_completed(
+        self,
+        record_id: UUID,
+        *,
+        resource_id: UUID | None = None,
+        response_status_code: int,
+        response_body: dict[str, Any],
+    ) -> None:
+        """Mark an idempotency record as completed with cached response."""
+        record = await self._session.get(IdempotencyKey, record_id)
+        if record is None:
+            return
+        record.status = "completed"
+        record.resource_id = resource_id
+        record.response_status_code = response_status_code
+        record.response_body = response_body
+        record.completed_at = datetime.now(UTC)
+        await self._session.flush()
+
+    async def mark_failed(self, record_id: UUID) -> None:
+        """Mark an idempotency record as failed (allows retry with same key)."""
+        record = await self._session.get(IdempotencyKey, record_id)
+        if record is None:
+            return
+        record.status = "failed"
+        record.completed_at = datetime.now(UTC)
+        await self._session.flush()
+
+    async def cleanup_expired(self) -> int:
+        """Delete expired idempotency records. Returns count deleted."""
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            delete(IdempotencyKey).where(IdempotencyKey.expires_at < now)
+        )
+        rowcount: int = result.rowcount  # type: ignore[attr-defined]
+        return rowcount

@@ -187,6 +187,14 @@ class Settings(BaseSettings):
         description="Seconds between expired token cleanup runs.",
     )
 
+    # Idempotency settings
+    idempotency_key_ttl_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description="TTL in hours for idempotency key records before cleanup",
+    )
+
     # Rate Limiting
     redis_url: str | None = Field(
         default=None,

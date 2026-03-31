@@ -69,6 +69,58 @@ def upgrade() -> None:
     op.create_index(op.f("ix_users_is_active"), "users", ["is_active"])
 
     # -------------------------------------------------------------------------
+    # idempotency_keys
+    # -------------------------------------------------------------------------
+    op.create_table(
+        "idempotency_keys",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column(
+            "user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("product_id", sa.String(32), nullable=False),
+        sa.Column("idempotency_key", sa.String(64), nullable=False),
+        sa.Column("operation", sa.String(30), nullable=False),
+        sa.Column(
+            "status",
+            sa.String(20),
+            nullable=False,
+            server_default=sa.text("'processing'"),
+        ),
+        sa.Column("resource_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("response_status_code", sa.SmallInteger(), nullable=True),
+        sa.Column("response_body", postgresql.JSONB(), nullable=True),
+        sa.Column("request_hash", sa.String(64), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "user_id",
+            "product_id",
+            "idempotency_key",
+            name="uq_idempotency_user_product_key",
+        ),
+    )
+    op.create_index(
+        "ix_idempotency_keys_expires_at",
+        "idempotency_keys",
+        ["expires_at"],
+    )
+    op.create_index(
+        "ix_idempotency_keys_product_id",
+        "idempotency_keys",
+        ["product_id"],
+    )
+
+    # -------------------------------------------------------------------------
     # refresh_tokens
     # -------------------------------------------------------------------------
     op.create_table(
@@ -483,6 +535,9 @@ def upgrade() -> None:
         ),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("source_job_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("source_output_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("input_image_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
@@ -603,6 +658,43 @@ def upgrade() -> None:
     )
     op.create_index(op.f("ix_generation_outputs_product_id"), "generation_outputs", ["product_id"])
 
+    # Lineage FKs on generation_jobs (added here because user_images and
+    # generation_outputs must exist first)
+    op.create_foreign_key(
+        "fk_generation_jobs_source_job",
+        "generation_jobs",
+        "generation_jobs",
+        ["source_job_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_foreign_key(
+        "fk_generation_jobs_source_output",
+        "generation_jobs",
+        "generation_outputs",
+        ["source_output_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_foreign_key(
+        "fk_generation_jobs_input_image",
+        "generation_jobs",
+        "user_images",
+        ["input_image_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_index(
+        "ix_generation_jobs_source_job_id",
+        "generation_jobs",
+        ["source_job_id"],
+    )
+    op.create_index(
+        "ix_generation_jobs_gallery",
+        "generation_jobs",
+        ["user_id", "product_id", "status", "created_at"],
+    )
+
     # -------------------------------------------------------------------------
     # pricing_catalog
     # -------------------------------------------------------------------------
@@ -698,4 +790,5 @@ def downgrade() -> None:
     op.drop_table("password_reset_tokens")
     op.drop_table("email_verification_tokens")
     op.drop_table("refresh_tokens")
+    op.drop_table("idempotency_keys")
     op.drop_table("users")

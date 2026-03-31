@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
+import msgspec
 import structlog
 from litestar import Controller, Request, Response, get, post
 from litestar.di import Provide
@@ -14,6 +15,7 @@ from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
+from src.api.dependencies.idempotency import get_idempotency_key
 from src.api.schemas.billing import (
     BalanceResponse,
     BillingAccountResponse,
@@ -30,6 +32,7 @@ from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import OrganizationPermissionError
+from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
 from src.core.config import TOKEN_PACKAGES
@@ -62,7 +65,10 @@ class BillingController(Controller):
     path = "/v1/billing"
     tags: Sequence[str] | None = ["Billing"]
     guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    dependencies = {
+        "current_user_id": Provide(get_current_user_id),
+        "idempotency_key_header": Provide(get_idempotency_key, sync_to_thread=False),
+    }
 
     @get("/balance")
     async def get_balance(
@@ -227,25 +233,57 @@ class BillingController(Controller):
         billing_service: BillingService,
         payment_service: PaymentService,
         product_id: str,
+        idempotency_service: IdempotencyService,
+        idempotency_key_header: str,
     ) -> Response[StripeCheckoutResponse]:
-        """Create a Stripe checkout session for token purchase."""
-        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
-        result = await payment_service.create_stripe_checkout(
-            account.id,
-            data.package_id,
-            current_user_id,
-            session=session,
+        """Create a Stripe checkout session for token purchase (idempotent via Idempotency-Key)."""
+        request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
+
+        check_result = await idempotency_service.check(
+            user_id=current_user_id,
             product_id=product_id,
+            idempotency_key=idempotency_key_header,
+            operation="payment",
+            request_hash=request_hash,
+            session=session,
         )
-        await session.commit()
-        return Response(
-            content=StripeCheckoutResponse(
+        if isinstance(check_result, IdempotencyReplayResult):
+            return Response(
+                content=check_result.body,  # type: ignore[arg-type]
+                status_code=check_result.status_code,
+            )
+
+        record_id = check_result
+        try:
+            account = await billing_service.resolve_account_for_user(
+                current_user_id, session=session
+            )
+            result = await payment_service.create_stripe_checkout(
+                account.id,
+                data.package_id,
+                current_user_id,
+                session=session,
+                product_id=product_id,
+            )
+            response = StripeCheckoutResponse(
                 checkout_url=result.checkout_url,
                 session_id=result.session_id,
                 payment_id=result.payment_id,
-            ),
-            status_code=HTTP_201_CREATED,
-        )
+            )
+            response_body = msgspec.to_builtins(response)
+            await idempotency_service.complete(
+                record_id,
+                resource_id=result.payment_id,
+                response_status_code=HTTP_201_CREATED,
+                response_body=response_body,
+                session=session,
+            )
+            await session.commit()
+            return Response(content=response, status_code=HTTP_201_CREATED)
+
+        except Exception:
+            await idempotency_service.fail(record_id, session=session)
+            raise
 
     @post("/topup/nowpayments")
     async def topup_nowpayments(
@@ -256,25 +294,57 @@ class BillingController(Controller):
         billing_service: BillingService,
         payment_service: PaymentService,
         product_id: str,
+        idempotency_service: IdempotencyService,
+        idempotency_key_header: str,
     ) -> Response[NowPaymentsInvoiceResponse]:
-        """Create a NowPayments invoice for token purchase."""
-        account = await billing_service.resolve_account_for_user(current_user_id, session=session)
-        result = await payment_service.create_nowpayments_invoice(
-            account.id,
-            data.package_id,
-            data.pay_currency,
-            current_user_id,
-            session=session,
+        """Create a NowPayments invoice for token purchase (idempotent via Idempotency-Key)."""
+        request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
+
+        check_result = await idempotency_service.check(
+            user_id=current_user_id,
             product_id=product_id,
+            idempotency_key=idempotency_key_header,
+            operation="payment",
+            request_hash=request_hash,
+            session=session,
         )
-        await session.commit()
-        return Response(
-            content=NowPaymentsInvoiceResponse(
+        if isinstance(check_result, IdempotencyReplayResult):
+            return Response(
+                content=check_result.body,  # type: ignore[arg-type]
+                status_code=check_result.status_code,
+            )
+
+        record_id = check_result
+        try:
+            account = await billing_service.resolve_account_for_user(
+                current_user_id, session=session
+            )
+            result = await payment_service.create_nowpayments_invoice(
+                account.id,
+                data.package_id,
+                data.pay_currency,
+                current_user_id,
+                session=session,
+                product_id=product_id,
+            )
+            response = NowPaymentsInvoiceResponse(
                 invoice_url=result.invoice_url,
                 payment_id=result.payment_id,
-            ),
-            status_code=HTTP_201_CREATED,
-        )
+            )
+            response_body = msgspec.to_builtins(response)
+            await idempotency_service.complete(
+                record_id,
+                resource_id=result.payment_id,
+                response_status_code=HTTP_201_CREATED,
+                response_body=response_body,
+                session=session,
+            )
+            await session.commit()
+            return Response(content=response, status_code=HTTP_201_CREATED)
+
+        except Exception:
+            await idempotency_service.fail(record_id, session=session)
+            raise
 
 
 class BillingWebhookController(Controller):

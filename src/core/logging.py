@@ -16,8 +16,7 @@ def configure_logging(settings: Settings) -> None:
     """Configure structlog and stdlib logging bridge.
 
     Sets up shared processors, output format (JSON or console), and bridges
-    stdlib logging (SQLAlchemy, uvicorn, httpx) into structlog so all logs
-    appear in a unified format.
+    stdlib logging into structlog so all logs appear in a unified format.
 
     Args:
         settings: Application settings containing LOG_LEVEL and LOG_FORMAT.

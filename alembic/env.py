@@ -4,6 +4,7 @@ import asyncio
 import os
 from logging.config import fileConfig
 
+from alembic.operations.ops import AlterColumnOp, MigrateOperation, MigrationScript, ModifyTableOps
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -47,9 +48,55 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _is_comment_only_alter(op: AlterColumnOp) -> bool:
+    """Return True if an AlterColumnOp changes nothing except the comment."""
+    return (
+        op.modify_comment is not False
+        and op.modify_nullable is None
+        and op.modify_server_default is False
+        and op.modify_name is None
+        and op.modify_type is None
+    )
+
+
+def _filter_ops(ops_list: list[MigrateOperation]) -> list[MigrateOperation]:
+    """Strip comment-only AlterColumnOps; drop empty ModifyTableOps."""
+    filtered: list[MigrateOperation] = []
+    for op in ops_list:
+        if isinstance(op, ModifyTableOps):
+            op.ops = [t for t in op.ops if not (isinstance(t, AlterColumnOp) and _is_comment_only_alter(t))]
+            if op.ops:
+                filtered.append(op)
+        else:
+            filtered.append(op)
+    return filtered
+
+
+def _drop_comment_only_ops(
+    context: object,
+    revision: object,
+    directives: list[MigrationScript],
+) -> None:
+    """Remove AlterColumnOp entries that only change column comments.
+
+    Column comments in migrations are documentation aids and are not
+    reflected in SQLAlchemy models, so they would always show up as
+    false-positive drift. This hook suppresses them from autogenerate.
+    """
+    for script in directives:
+        for upgrade_ops in script.upgrade_ops_list:
+            upgrade_ops.ops = _filter_ops(upgrade_ops.ops)
+        for downgrade_ops in script.downgrade_ops_list:
+            downgrade_ops.ops = _filter_ops(downgrade_ops.ops)
+
+
 def do_run_migrations(connection: Connection) -> None:
     """Run migrations with the given connection."""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        process_revision_directives=_drop_comment_only_ops,
+    )
 
     with context.begin_transaction():
         context.run_migrations()

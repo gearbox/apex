@@ -54,6 +54,7 @@ from src.api.services.billing_errors import (
     PriceNotFoundError,
     RefundNotEligibleError,
 )
+from src.api.services.idempotency import IdempotencyConflictError
 from src.core.config import get_settings
 from src.core.logging import configure_logging
 
@@ -167,6 +168,21 @@ def organization_balance_handler(
         str(exc),
         HTTP_409_CONFLICT,
         {"balance": exc.balance},
+    )
+
+
+def idempotency_conflict_handler(
+    request: Request[Any, Any, Any],  # noqa: ARG001
+    exc: IdempotencyConflictError,
+) -> Response[Any]:
+    return Response(
+        content=ErrorEnvelope(
+            error="idempotency_conflict",
+            message=str(exc),
+            status_code=HTTP_409_CONFLICT,
+        ),
+        status_code=HTTP_409_CONFLICT,
+        headers={"Retry-After": "1"},
     )
 
 
@@ -291,6 +307,7 @@ def create_app() -> Litestar:
             PaymentVerificationError: payment_verification_handler,
             OrganizationPermissionError: organization_permission_handler,
             OrganizationBalanceError: organization_balance_handler,
+            IdempotencyConflictError: idempotency_conflict_handler,
         },
         dependencies=dependencies,
         lifespan=[lifespan],
@@ -311,5 +328,5 @@ def create_app() -> Litestar:
     return app
 
 
-# Application instance for uvicorn
+# Application instance
 app = create_app()

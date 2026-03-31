@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
+import msgspec
 import structlog
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
@@ -14,6 +15,7 @@ from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_admin_user
+from src.api.dependencies.idempotency import get_idempotency_key
 from src.api.routes.billing import _txn_to_response
 from src.api.schemas.admin import (
     AdminOrgResponse,
@@ -41,6 +43,7 @@ from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import AccountNotFoundError
 from src.api.services.event_bus import EventBus
+from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.api.services.pricing import PricingService
 from src.core.enums import UserRole
 from src.db.models import User
@@ -59,6 +62,7 @@ class AdminController(Controller):
     guards = [auth_guard]
     dependencies = {
         "admin_user": Provide(get_current_admin_user),
+        "idempotency_key_header": Provide(get_idempotency_key, sync_to_thread=False),
     }
 
     # -------------------------------------------------------------------------
@@ -337,28 +341,61 @@ class AdminController(Controller):
         session: AsyncSession,
         billing_service: BillingService,
         product_id: str,
-    ) -> AdminAdjustResponse:
-        """Admin balance adjustment. Positive = credit, negative = debit."""
+        idempotency_service: IdempotencyService,
+        idempotency_key_header: str,
+    ) -> Response[AdminAdjustResponse]:
+        """Admin balance adjustment (idempotent via Idempotency-Key). Positive = credit, negative = debit."""
         logger.info(
             "admin.adjusting_account",
             admin_id=str(admin_user.id),
             account_id=str(account_id),
             amount=data.amount,
         )
-        txn = await billing_service.admin_adjust(
-            account_id,
-            data.amount,
-            admin_user.id,
-            description=data.description,
-            session=session,
+        request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
+
+        check_result = await idempotency_service.check(
+            user_id=admin_user.id,
             product_id=product_id,
+            idempotency_key=idempotency_key_header,
+            operation="admin_adjustment",
+            request_hash=request_hash,
+            session=session,
         )
-        await session.commit()
-        new_balance = await billing_service.get_balance(account_id, session=session)
-        return AdminAdjustResponse(
-            transaction=_txn_to_response(txn),
-            new_balance=new_balance,
-        )
+        if isinstance(check_result, IdempotencyReplayResult):
+            return Response(
+                content=check_result.body,  # type: ignore[arg-type]
+                status_code=check_result.status_code,
+            )
+
+        record_id = check_result
+        try:
+            txn = await billing_service.admin_adjust(
+                account_id,
+                data.amount,
+                admin_user.id,
+                description=data.description,
+                session=session,
+                product_id=product_id,
+            )
+            new_balance = await billing_service.get_balance(account_id, session=session)
+            result = AdminAdjustResponse(
+                transaction=_txn_to_response(txn),
+                new_balance=new_balance,
+            )
+            response_body = msgspec.to_builtins(result)
+            await idempotency_service.complete(
+                record_id,
+                resource_id=txn.id,
+                response_status_code=HTTP_200_OK,
+                response_body=response_body,
+                session=session,
+            )
+            await session.commit()
+            return Response(content=result, status_code=HTTP_200_OK)
+
+        except Exception:
+            await idempotency_service.fail(record_id, session=session)
+            raise
 
     # -------------------------------------------------------------------------
     # Pricing management

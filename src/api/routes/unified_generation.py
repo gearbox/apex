@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
+import msgspec
 import structlog
 from litestar import Controller, Response, post
 from litestar.di import Provide
@@ -18,6 +19,7 @@ from litestar.status_codes import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
+from src.api.dependencies.idempotency import get_idempotency_key
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
@@ -30,6 +32,7 @@ from src.api.services.generation.service import (
     ModelNotAllowedError,
     ProviderUnavailableError,
 )
+from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.core.product import ProductConfig
 
 logger = structlog.get_logger(__name__)
@@ -41,7 +44,10 @@ class UnifiedGenerationController(Controller):
     path = "/v1/generate"
     tags: Sequence[str] | None = ["Generation"]
     guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    dependencies = {
+        "current_user_id": Provide(get_current_user_id),
+        "idempotency_key_header": Provide(get_idempotency_key, sync_to_thread=False),
+    }
 
     @post("/")
     async def generate(
@@ -51,14 +57,34 @@ class UnifiedGenerationController(Controller):
         session: AsyncSession,
         generation_service: GenerationService,
         product_config: ProductConfig,
+        product_id: str,
+        idempotency_service: IdempotencyService,
+        idempotency_key_header: str,
     ) -> Response[JobCreatedResponse | ErrorEnvelope]:
-        """Submit a generation request.
+        """Submit a generation request (idempotent via Idempotency-Key header).
 
         The backend resolves the correct provider from ``model``, validates
         the request, handles billing, and delegates to the provider.
 
         Returns a JobCreatedResponse with the job_id for polling via GET /v1/jobs/{job_id}.
         """
+        request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
+
+        check_result = await idempotency_service.check(
+            user_id=current_user_id,
+            product_id=product_id,
+            idempotency_key=idempotency_key_header,
+            operation="generation",
+            request_hash=request_hash,
+            session=session,
+        )
+        if isinstance(check_result, IdempotencyReplayResult):
+            return Response(
+                content=check_result.body,  # type: ignore[arg-type]
+                status_code=check_result.status_code,
+            )
+
+        record_id = check_result
         try:
             result = await generation_service.generate(
                 data,
@@ -66,9 +92,20 @@ class UnifiedGenerationController(Controller):
                 session=session,
                 product_config=product_config,
             )
+
+            response_body = msgspec.to_builtins(result)
+            await idempotency_service.complete(
+                record_id,
+                resource_id=result.job_id,
+                response_status_code=HTTP_201_CREATED,
+                response_body=response_body,
+                session=session,
+            )
+            await session.commit()
             return Response(content=result, status_code=HTTP_201_CREATED)
 
         except RateLimitExceededError as exc:
+            await idempotency_service.fail(record_id, session=session)
             logger.warning(
                 "generation.rate_limited",
                 model=data.model.value,
@@ -86,6 +123,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ProviderUnavailableError as exc:
+            await idempotency_service.fail(record_id, session=session)
             logger.warning("generation.provider_unavailable", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -97,6 +135,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ModelNotAllowedError as exc:
+            await idempotency_service.fail(record_id, session=session)
             logger.info("generation.model_not_allowed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -108,6 +147,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ModelDisabledError as exc:
+            await idempotency_service.fail(record_id, session=session)
             logger.info("generation.model_disabled", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -119,6 +159,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ValueError as exc:
+            await idempotency_service.fail(record_id, session=session)
             logger.info("generation.validation_failed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -130,6 +171,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except GenerationError as exc:
+            await idempotency_service.fail(record_id, session=session)
             logger.error("generation.failed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -139,3 +181,7 @@ class UnifiedGenerationController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
+
+        except Exception:
+            await idempotency_service.fail(record_id, session=session)
+            raise

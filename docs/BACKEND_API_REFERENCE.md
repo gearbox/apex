@@ -3,9 +3,35 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-03-25
+> **Last synced:** 2026-03-31
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
+
+---
+
+## Idempotency
+
+Three mutation endpoints require an `Idempotency-Key` header to prevent duplicate operations on network retries:
+
+- `POST /v1/generate/`
+- `POST /v1/billing/topup/stripe`
+- `POST /v1/billing/topup/nowpayments`
+- `POST /v1/admin/accounts/{account_id}/adjust`
+
+### How it works
+
+1. The client generates a unique key (UUIDv4 recommended, max 64 characters) and sends it as `Idempotency-Key: <key>`.
+2. On the **first** request, the server processes the operation and caches the response.
+3. On **retry** with the same key, the server returns the **original cached response** without re-executing the operation.
+4. Keys are scoped to `(user_id, product_id)` — the same key from different users or products does not collide.
+5. Keys expire after 24 hours (configurable via `IDEMPOTENCY_KEY_TTL_HOURS`).
+
+### Error responses
+
+| Status | Error code | Meaning |
+|--------|------------|---------|
+| `400` | `validation_error` | `Idempotency-Key` header missing or exceeds 64 characters |
+| `409` | `idempotency_conflict` | Same key is currently being processed (concurrent request in-flight) or was reused with a different request body. Retry after 1 second (`Retry-After: 1` header included). |
 
 ---
 
@@ -270,9 +296,11 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 model_not_allowed (model unavailable on this product), 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 model_not_allowed (model unavailable on this product), 409 idempotency_conflict, 429 rate_limited, 503 service_unavailable
+Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from gallery" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
+          Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
 ```
 
 ### JobCreatedResponse Schema
@@ -777,7 +805,10 @@ Note:     Sets preferred billing account (personal vs enterprise)
 Request:  { package_id: string }
 Response: { checkout_url: string, session_id: string, payment_id: UUID }
 Status:   201 Created
-Note:     Redirect user to checkout_url for Stripe Checkout
+Headers:  Idempotency-Key: <string> (required, max 64 chars)
+Errors:   409 idempotency_conflict
+Note:     Redirect user to checkout_url for Stripe Checkout.
+          Supply a fresh UUIDv4 Idempotency-Key per checkout attempt to prevent duplicate payments.
 ```
 
 #### `POST /v1/billing/topup/nowpayments`
@@ -786,6 +817,8 @@ Note:     Redirect user to checkout_url for Stripe Checkout
 Request:  { package_id: string, pay_currency: string }
 Response: { invoice_url: string, payment_id: UUID }
 Status:   201 Created
+Headers:  Idempotency-Key: <string> (required, max 64 chars)
+Errors:   409 idempotency_conflict
 ```
 
 ### Billing — Public (no auth)
@@ -1000,6 +1033,9 @@ Response: CursorPage<TransactionResponse>
 Request:  { amount: int, description: string }
           // positive amount = credit, negative = debit
 Response: { transaction: TransactionResponse, new_balance: int }
+Headers:  Idempotency-Key: <string> (required, max 64 chars)
+Errors:   409 idempotency_conflict
+Note:     Idempotency is scoped to the admin's user_id — prevents duplicate adjustments on retry.
 ```
 
 #### `GET /v1/admin/users/{user_id}/account`

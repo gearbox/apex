@@ -8,7 +8,7 @@ from src.core.logging import configure_logging
 
 
 def main() -> None:
-    """Run the API server with uvicorn."""
+    """Run the API server"""
     settings = get_settings()
     configure_logging(settings)
 

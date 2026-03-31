@@ -25,6 +25,7 @@ from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
+from src.api.services.idempotency import IdempotencyService
 from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
@@ -308,6 +309,19 @@ def get_sse_ticket_service() -> SSETicketService:
 def get_billing_service() -> BillingService:
     """Provide BillingService singleton."""
     return BillingService(event_bus=_services.event_bus)
+
+
+def get_idempotency_key_dep(request: Request) -> str:  # type: ignore[type-arg]
+    """Extract Idempotency-Key header from request."""
+    from src.api.dependencies.idempotency import get_idempotency_key
+
+    return get_idempotency_key(request)
+
+
+def get_idempotency_service() -> IdempotencyService:
+    """Provide IdempotencyService instance."""
+    settings = get_settings()
+    return IdempotencyService(ttl_hours=settings.idempotency_key_ttl_hours)
 
 
 def get_pricing_service() -> PricingService:
@@ -632,4 +646,7 @@ dependencies = {
     "content_proxy": Provide(get_content_proxy, sync_to_thread=False),
     # Gallery
     "gallery_service": Provide(get_gallery_service, sync_to_thread=False),
+    # Idempotency
+    "idempotency_service": Provide(get_idempotency_service, sync_to_thread=False),
+    "idempotency_key_header": Provide(get_idempotency_key_dep, sync_to_thread=False),
 }
