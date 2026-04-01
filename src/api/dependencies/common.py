@@ -579,6 +579,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
 
     # Initialize health check registry and service
     from src.api.services.health.checkers.cloud_provider import GrokChecker
+    from src.api.services.health.checkers.gpu_session import GpuSessionReconciler
     from src.api.services.health.checkers.infrastructure import (
         PostgresChecker,
         R2Checker,
@@ -620,6 +621,14 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         VastAIChecker(
             http_client=health_http_client,
             api_key=settings.vastai_api_key if settings.vastai_configured else None,
+        )
+    )
+
+    # GPU session reconciler (global — reconciles across all products)
+    health_registry.register(
+        GpuSessionReconciler(
+            session_factory=_services.db_manager.session_factory,
+            http_client=health_http_client,
         )
     )
 

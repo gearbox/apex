@@ -203,10 +203,13 @@ class Settings(BaseSettings):
 
     # Health check
     health_check_timeout_seconds: float = Field(
-        default=5.0,
+        default=15.0,
         ge=1.0,
         le=30.0,
-        description="Per-component timeout in seconds for health checks",
+        description=(
+            "Per-component timeout in seconds for health checks. "
+            "Must be > GPU probe timeout (10s) to avoid false timeouts on reconciler."
+        ),
     )
 
     # Rate Limiting

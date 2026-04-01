@@ -10,6 +10,7 @@ from .billing import (
     TokenTransaction,
 )
 from .generation_model import GenerationModel
+from .gpu_session import GpuSession
 from .idempotency import IdempotencyKey
 from .storage import GenerationJob, GenerationOutput, UserImage
 from .user import RefreshToken, User
@@ -19,6 +20,7 @@ __all__ = [
     "GenerationJob",
     "GenerationModel",
     "GenerationOutput",
+    "GpuSession",
     "IdempotencyKey",
     "Organization",
     "OrganizationMember",

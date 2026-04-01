@@ -159,7 +159,9 @@ class TestDetailedWithProviders:
         """A degraded provider (auth failure) should degrade overall status."""
         svc = _build_service(
             _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
-            _make_checker("grok", ComponentCategory.cloud_provider, ComponentStatus.degraded, "vex"),
+            _make_checker(
+                "grok", ComponentCategory.cloud_provider, ComponentStatus.degraded, "vex"
+            ),
         )
         result = await svc.detailed()
         assert result["status"] == "degraded"

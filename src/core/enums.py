@@ -315,6 +315,18 @@ class ComponentCategory(StrEnum):
     gpu_session = "gpu_session"
 
 
+class GpuSessionStatus(StrEnum):
+    """GPU session lifecycle states."""
+
+    pending = "pending"  # session requested, node not yet provisioned
+    provisioning = "provisioning"  # Vast.ai node is starting up
+    active = "active"  # node is up, ComfyUI is reachable
+    stale = "stale"  # node was active but is now unreachable
+    stopping = "stopping"  # user requested stop, teardown in progress
+    stopped = "stopped"  # session ended normally
+    failed = "failed"  # provisioning or runtime failure
+
+
 class SupportedLocale(StrEnum):
     """Supported UI/email locales.
 
