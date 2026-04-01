@@ -35,8 +35,7 @@ Every checkable component implements a single async `check()` interface. Compone
 | `grok`      | xAI status/health endpoint       | `GET /v1/models` (auth)  | vex, synthara |
 | `veo3`      | (future) Google API status       | List models              | synthara      |
 | `sora`      | (future) OpenAI status           | List models              | vex, synthara |
-| `nano`      | (future) Provider status         | Auth check               | TBD           |
-| `banana`    | (future) Provider status         | Auth check               | TBD           |
+| `nano banana`      | (future) Provider status         | Auth check               | TBD           |
 
 Strategy: prefer a dedicated status/health endpoint; fall back to a lightweight authenticated endpoint (e.g. list-models) if none exists. Each provider checker declares both.
 

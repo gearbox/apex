@@ -3,7 +3,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-03-31
+> **Last synced:** 2026-04-01
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -1579,16 +1579,62 @@ Response: {
   infrastructure: {
     status: string,
     components: [{ name, status, latency_ms, message?, metadata? }]
+    // Registered: postgres, redis (if configured), r2 (if configured)
   },
-  platform_apis: { status, components },
-  cloud_providers: { [product_id]: { status, components } },
-  gpu_sessions: { status, total, healthy, stale, message? }
+  platform_apis: {
+    status: string,
+    components: [{ name, status, latency_ms, message?, metadata? }]
+    // Registered: vastai_api (inactive if VASTAI_API_KEY not set)
+  },
+  cloud_providers: {
+    [product_id]: {
+      status: string,
+      components: [{ name, status, latency_ms, message?, metadata? }]
+    }
+    // Registered per product that uses Grok: { vex: { grok }, synthara: { grok } }
+    // Only populated when XAI_API_KEY is configured.
+    // Uses REST GET /v1/models probe (not gRPC) for lightweight health check.
+  },
+  gpu_sessions: {
+    status: "healthy" | "degraded" | "unhealthy" | "inactive",
+    total: number,    // active + stale sessions probed
+    healthy: number,  // sessions with reachable ComfyUI endpoint
+    stale: number,    // sessions that failed the /object_info probe
+    message: string
+  }
+  // Phase 3: GpuSessionReconciler probes all active/stale sessions concurrently.
+  // Returns "inactive" when no sessions exist; "degraded" when some are unreachable;
+  // "unhealthy" when all are unreachable; "healthy" when all are reachable.
 }
 Status:   200
 Errors:   401 (unauthorized), 403 (not admin)
 ```
 
 Component `status` values: `healthy`, `degraded`, `unhealthy`, `unknown`, `inactive`.
+
+**Status semantics for cloud providers / platform APIs:**
+
+| HTTP response | Status | Meaning |
+|---|---|---|
+| 2xx, 3xx | `healthy` | API up, key valid |
+| 401, 403 | `degraded` | API reachable, authentication failed — check API key |
+| 429 | `healthy` | Rate-limited = API alive, transient condition |
+| other 4xx | `degraded` | API reachable but returning unexpected client errors |
+| 5xx | `unhealthy` | Server-side failure |
+| Connection error | `unhealthy` | API unreachable |
+| Key not set / whitespace-only | `inactive` | Not configured (VASTAI_API_KEY or XAI_API_KEY not set) |
+
+Note: 401/403 returns immediately without trying fallback probes — if auth is wrong, all probes will fail the same way.
+
+**GPU session reconciler behaviour:**
+
+The `gpu_sessions` section is populated by `GpuSessionReconciler`. On each health check cycle it:
+1. Queries all `gpu_sessions` rows with `status IN ('active', 'stale')`.
+2. Probes each node's `GET /object_info` endpoint (10 s timeout) concurrently.
+3. Unreachable sessions → marked `stale` in DB (`stale_detected_at` set, `status = 'stale'`). Already-stale sessions are not re-marked (idempotent).
+4. Previously-stale sessions that become reachable → cleared (`stale_detected_at = null`, `status = 'active'`) to self-heal transient network blips.
+
+The registry timeout for this checker is 15 s (increased from the 5 s default for infrastructure checks) to accommodate concurrent 10 s probes.
 
 ---
 
