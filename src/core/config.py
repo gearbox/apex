@@ -195,6 +195,14 @@ class Settings(BaseSettings):
         description="TTL in hours for idempotency key records before cleanup",
     )
 
+    # Health check
+    health_check_timeout_seconds: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=30.0,
+        description="Per-component timeout in seconds for health checks",
+    )
+
     # Rate Limiting
     redis_url: str | None = Field(
         default=None,

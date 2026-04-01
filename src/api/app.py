@@ -31,10 +31,8 @@ from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.content import ContentProxyController
 from src.api.routes.gallery import GalleryController
-from src.api.routes.generation import (
-    HealthController,
-    ImageController,
-)
+from src.api.routes.generation import ImageController
+from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.providers import ProvidersController
@@ -270,6 +268,7 @@ def create_app() -> Litestar:
     app = Litestar(
         route_handlers=[
             HealthController,
+            AdminHealthController,
             # Authentication (public)
             AuthController,
             # User management (authenticated)
