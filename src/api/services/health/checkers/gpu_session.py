@@ -30,6 +30,11 @@ logger = structlog.get_logger()
 _COMFYUI_PROBE_PATH = "/object_info"
 _PROBE_TIMEOUT_SECONDS = 10.0
 
+# Max sessions to probe per reconciliation cycle.
+# In practice active+stale session count should be low (tens, not thousands),
+# but this prevents runaway memory/concurrency if something goes wrong.
+_MAX_PROBE_SESSIONS = 200
+
 
 class GpuSessionReconciler:
     """Reconcile DB-claimed active GPU sessions against actual node reachability.
@@ -92,32 +97,29 @@ class GpuSessionReconciler:
                 metadata={"total": 0, "healthy": 0, "stale": 0},
             )
 
-        # Probe all active/stale sessions concurrently
+        # Probe all sessions concurrently.
+        # _probe_node catches all exceptions and returns bool — no need for
+        # return_exceptions=True, so probe_results is cleanly list[bool].
         probe_tasks = [self._probe_node(s.node_host, s.node_port) for s in active_sessions]
-        probe_results = await asyncio.gather(*probe_tasks, return_exceptions=True)
+        probe_results: list[bool] = await asyncio.gather(*probe_tasks)
 
+        # Classify results — collect IDs for batch DB writes
         healthy_count = 0
         stale_count = 0
         newly_stale_ids: list[UUID] = []
+        recovered_ids: list[UUID] = []
 
-        for session, result in zip(active_sessions, probe_results, strict=True):
-            if result is True:
+        for session, reachable in zip(active_sessions, probe_results, strict=True):
+            if reachable:
                 healthy_count += 1
-                # If previously marked stale but now reachable, clear staleness
                 if session.stale_detected_at is not None:
-                    await self._clear_stale(session.id)
-                    logger.info(
-                        "health.gpu_session.recovered",
-                        session_id=str(session.id),
-                        node_host=session.node_host,
-                    )
+                    recovered_ids.append(session.id)
             else:
                 stale_count += 1
-                # Only mark if not already stale
                 if session.stale_detected_at is None:
                     newly_stale_ids.append(session.id)
 
-        # Batch-mark newly stale sessions
+        # Batch DB writes — one UPDATE each, not per-session
         if newly_stale_ids:
             await self._mark_stale(newly_stale_ids)
             logger.warning(
@@ -126,14 +128,22 @@ class GpuSessionReconciler:
                 session_ids=[str(sid) for sid in newly_stale_ids],
             )
 
+        if recovered_ids:
+            await self._clear_stale_batch(recovered_ids)
+            logger.info(
+                "health.gpu_sessions.recovered",
+                count=len(recovered_ids),
+                session_ids=[str(sid) for sid in recovered_ids],
+            )
+
+        # Aggregate status — explicit if/elif for clarity
         total = len(active_sessions)
-        status = (
-            ComponentStatus.healthy
-            if stale_count == 0
-            else ComponentStatus.degraded
-            if healthy_count > 0
-            else ComponentStatus.unhealthy
-        )
+        if stale_count == 0:
+            status = ComponentStatus.healthy
+        elif healthy_count > 0:
+            status = ComponentStatus.degraded
+        else:
+            status = ComponentStatus.unhealthy
 
         return ComponentHealth(
             name=self.name,
@@ -149,20 +159,25 @@ class GpuSessionReconciler:
         )
 
     async def _get_active_sessions(self) -> list[GpuSession]:
-        """Query all sessions that should be probed for reachability.
+        """Query sessions that should be probed for reachability.
 
-        Includes both 'active' and 'stale' sessions:
-        - active: normal health check
-        - stale: check if node has recovered (self-healing)
+        Includes both 'active' and 'stale' sessions (stale for self-healing).
+        Capped at _MAX_PROBE_SESSIONS to bound probe concurrency and memory.
+        Ordered by created_at DESC so newest sessions are probed first.
         """
         async with self._session_factory() as session:
-            stmt = select(GpuSession).where(
-                GpuSession.status.in_(
-                    [
-                        GpuSessionStatus.active.value,
-                        GpuSessionStatus.stale.value,
-                    ]
+            stmt = (
+                select(GpuSession)
+                .where(
+                    GpuSession.status.in_(
+                        [
+                            GpuSessionStatus.active.value,
+                            GpuSessionStatus.stale.value,
+                        ]
+                    )
                 )
+                .order_by(GpuSession.created_at.desc())
+                .limit(_MAX_PROBE_SESSIONS)
             )
             result = await session.execute(stmt)
             return list(result.scalars().all())
@@ -219,17 +234,19 @@ class GpuSessionReconciler:
             await session.execute(stmt)
             await session.commit()
 
-    async def _clear_stale(self, session_id: UUID) -> None:
-        """Clear staleness for a session that has recovered.
+    async def _clear_stale_batch(self, session_ids: list[UUID]) -> None:
+        """Batch-clear staleness for sessions that have recovered.
 
-        Transitions status back to 'active' and resets stale_detected_at.
-        This handles transient network blips — if the node comes back,
-        we don't want it stuck in 'stale' forever.
+        Transitions status back to 'active' and resets stale tracking.
+        Handles transient network blips — if nodes come back, they
+        don't stay stuck in 'stale'.
         """
+        if not session_ids:
+            return
         async with self._session_factory() as session:
             stmt = (
                 update(GpuSession)
-                .where(GpuSession.id == session_id)
+                .where(GpuSession.id.in_(session_ids))
                 .values(
                     stale_detected_at=None,
                     stale_notified=False,

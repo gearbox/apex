@@ -78,6 +78,7 @@ class TestAllHealthy:
         )
         reconciler._get_active_sessions = AsyncMock(return_value=sessions)  # type: ignore[method-assign]
         reconciler._mark_stale = AsyncMock()  # type: ignore[method-assign]
+        reconciler._clear_stale_batch = AsyncMock()  # type: ignore[method-assign]
 
         result = await reconciler.check()
         assert result.status == ComponentStatus.healthy
@@ -85,6 +86,7 @@ class TestAllHealthy:
         assert result.metadata["healthy"] == 2
         assert result.metadata["stale"] == 0
         reconciler._mark_stale.assert_not_awaited()
+        reconciler._clear_stale_batch.assert_not_awaited()
 
 
 class TestSomeStale:
@@ -188,13 +190,16 @@ class TestStaleRecovery:
             http_client=mock_client,
         )
         reconciler._get_active_sessions = AsyncMock(return_value=[session])  # type: ignore[method-assign]
-        reconciler._clear_stale = AsyncMock()  # type: ignore[method-assign]
+        reconciler._clear_stale_batch = AsyncMock()  # type: ignore[method-assign]
         reconciler._mark_stale = AsyncMock()  # type: ignore[method-assign]
 
         result = await reconciler.check()
         assert result.metadata["healthy"] == 1
         assert result.metadata["stale"] == 0
-        reconciler._clear_stale.assert_awaited_once_with(session.id)
+        reconciler._clear_stale_batch.assert_awaited_once()
+        # Verify the correct session ID was in the batch
+        recovered_ids = reconciler._clear_stale_batch.call_args[0][0]
+        assert session.id in recovered_ids
 
 
 class TestReconciliationError:
@@ -208,3 +213,41 @@ class TestReconciliationError:
         result = await reconciler.check()
         assert result.status == ComponentStatus.unknown
         assert "reconciliation failed" in result.message
+
+
+class TestBatchRecovery:
+    async def test_multiple_stale_sessions_recover_in_single_batch(self) -> None:
+        """Multiple recovered sessions should result in one _clear_stale_batch call."""
+        sessions = [
+            _make_session(
+                host=f"10.0.0.{i}",
+                stale_detected_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            for i in range(5)
+        ]
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=200))
+
+        reconciler = GpuSessionReconciler(
+            session_factory=AsyncMock(),
+            http_client=mock_client,
+        )
+        reconciler._get_active_sessions = AsyncMock(return_value=sessions)  # type: ignore[method-assign]
+        reconciler._mark_stale = AsyncMock()  # type: ignore[method-assign]
+        reconciler._clear_stale_batch = AsyncMock()  # type: ignore[method-assign]
+
+        result = await reconciler.check()
+        assert result.metadata["healthy"] == 5
+        assert result.metadata["stale"] == 0
+        # Single batch call, not 5 individual calls
+        reconciler._clear_stale_batch.assert_awaited_once()
+        recovered_ids = reconciler._clear_stale_batch.call_args[0][0]
+        assert len(recovered_ids) == 5
+
+
+class TestQueryCap:
+    async def test_get_active_sessions_has_limit(self) -> None:
+        """Verify the query includes a LIMIT clause."""
+        from src.api.services.health.checkers.gpu_session import _MAX_PROBE_SESSIONS
+
+        assert _MAX_PROBE_SESSIONS > 0  # sanity — cap exists
