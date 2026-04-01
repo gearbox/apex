@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 import structlog
 from litestar import Request
 from litestar.di import Provide
@@ -73,6 +74,7 @@ class ServiceContainer:
     event_bus: EventBus | None = None
     sse_ticket_service: SSETicketService | None = None
     health_service: HealthService | None = None
+    health_http_client: httpx.AsyncClient | None = None
 
 
 _services = ServiceContainer()
@@ -576,12 +578,21 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     await _services.token_cleanup_worker.start()
 
     # Initialize health check registry and service
+    from src.api.services.health.checkers.cloud_provider import GrokChecker
     from src.api.services.health.checkers.infrastructure import (
         PostgresChecker,
         R2Checker,
         RedisChecker,
     )
+    from src.api.services.health.checkers.platform_api import VastAIChecker
     from src.api.services.health.registry import HealthCheckRegistry
+
+    # Shared HTTP client for health check probes (cloud providers, platform APIs)
+    health_http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(10.0, connect=5.0),
+        follow_redirects=True,
+    )
+    _services.health_http_client = health_http_client
 
     health_registry = HealthCheckRegistry()
     health_registry.register(PostgresChecker(session_factory=_services.db_manager.session_factory))
@@ -591,6 +602,27 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         health_registry.register(RedisChecker(redis=get_redis_client()))
     if _services.r2_storage is not None:
         health_registry.register(R2Checker(r2_storage=_services.r2_storage))
+
+    # Cloud provider checkers (per-product)
+    if settings.grok_configured:
+        for product_slug in ["vex", "synthara"]:
+            health_registry.register(
+                GrokChecker(
+                    http_client=health_http_client,
+                    api_base_url=settings.xai_api_base_url,
+                    api_key=settings.xai_api_key,
+                    product_id=product_slug,
+                )
+            )
+
+    # Platform API checkers (global)
+    health_registry.register(
+        VastAIChecker(
+            http_client=health_http_client,
+            api_key=settings.vastai_api_key if settings.vastai_configured else None,
+        )
+    )
+
     _services.health_service = HealthService(
         registry=health_registry,
         timeout_seconds=settings.health_check_timeout_seconds,
@@ -625,6 +657,10 @@ async def shutdown_services() -> None:
 
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
+
+    if _services.health_http_client is not None:
+        await _services.health_http_client.aclose()
+        logger.info("health_http_client.closed")
 
     from src.core.redis import close_redis_pool
 

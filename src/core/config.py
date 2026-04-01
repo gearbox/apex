@@ -92,6 +92,12 @@ class Settings(BaseSettings):
         description="xAI API timeout in seconds",
     )
 
+    # Vast.ai API settings
+    vastai_api_key: str = Field(
+        default="",
+        description="Vast.ai API key for GPU node management. Required for Aisha on-demand sessions.",
+    )
+
     # Grok video polling settings
     grok_video_poll_interval: int = Field(
         default=5,
@@ -487,6 +493,11 @@ class Settings(BaseSettings):
     def grok_configured(self) -> bool:
         """Check if Grok API is configured."""
         return bool(self.xai_api_key)
+
+    @property
+    def vastai_configured(self) -> bool:
+        """Check if Vast.ai API is configured."""
+        return bool(self.vastai_api_key)
 
     @property
     def grok_billing(self) -> GrokBillingConfig:
