@@ -109,3 +109,48 @@ class TestDetailed:
         result = await svc.detailed()
         assert "vex" in result["cloud_providers"]  # type: ignore[operator]
         assert "synthara" in result["cloud_providers"]  # type: ignore[operator]
+
+
+class TestDetailedWithProviders:
+    """Test detailed response with cloud provider and platform API data populated."""
+
+    async def test_cloud_providers_appear_per_product(self) -> None:
+        svc = _build_service(
+            _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
+            _make_checker("grok", ComponentCategory.cloud_provider, ComponentStatus.healthy, "vex"),
+            _make_checker(
+                "grok", ComponentCategory.cloud_provider, ComponentStatus.healthy, "synthara"
+            ),
+        )
+        result = await svc.detailed()
+        assert "vex" in result["cloud_providers"]  # type: ignore[operator]
+        assert "synthara" in result["cloud_providers"]  # type: ignore[operator]
+        assert result["cloud_providers"]["vex"]["status"] == "healthy"  # type: ignore[index]
+
+    async def test_platform_api_appears(self) -> None:
+        svc = _build_service(
+            _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
+            _make_checker("vastai_api", ComponentCategory.platform_api, ComponentStatus.healthy),
+        )
+        result = await svc.detailed()
+        assert result["platform_apis"]["status"] == "healthy"  # type: ignore[index]
+        assert len(result["platform_apis"]["components"]) == 1  # type: ignore[index]
+        assert result["platform_apis"]["components"][0]["name"] == "vastai_api"  # type: ignore[index]
+
+    async def test_inactive_platform_api_shows_inactive(self) -> None:
+        svc = _build_service(
+            _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
+            _make_checker("vastai_api", ComponentCategory.platform_api, ComponentStatus.inactive),
+        )
+        result = await svc.detailed()
+        assert result["platform_apis"]["status"] == "inactive"  # type: ignore[index]
+
+    async def test_unhealthy_provider_degrades_overall(self) -> None:
+        svc = _build_service(
+            _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
+            _make_checker(
+                "grok", ComponentCategory.cloud_provider, ComponentStatus.unhealthy, "vex"
+            ),
+        )
+        result = await svc.detailed()
+        assert result["status"] == "unhealthy"
