@@ -45,7 +45,7 @@ class VastAIChecker:
         self._api_key = api_key
 
     async def check(self) -> ComponentHealth:
-        if not self._api_key:
+        if not self._api_key or not self._api_key.strip():
             return ComponentHealth(
                 name=self.name,
                 category=self.category,
@@ -60,7 +60,7 @@ class VastAIChecker:
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 timeout=10.0,
             )
-            if resp.status_code < 500:
+            if resp.status_code < 400 or resp.status_code == 429:
                 return ComponentHealth(
                     name=self.name,
                     category=self.category,
@@ -68,14 +68,50 @@ class VastAIChecker:
                     latency_ms=0.0,
                     metadata={"status_code": resp.status_code},
                 )
+            if resp.status_code in (401, 403):
+                logger.warning(
+                    "health.vastai.auth_failed",
+                    status_code=resp.status_code,
+                )
+                return ComponentHealth(
+                    name=self.name,
+                    category=self.category,
+                    status=ComponentStatus.degraded,
+                    latency_ms=0.0,
+                    message=f"authentication failed (HTTP {resp.status_code}) — check API key",
+                    metadata={"status_code": resp.status_code},
+                )
+            if resp.status_code < 500:
+                logger.warning(
+                    "health.vastai.client_error",
+                    status_code=resp.status_code,
+                )
+                return ComponentHealth(
+                    name=self.name,
+                    category=self.category,
+                    status=ComponentStatus.degraded,
+                    latency_ms=0.0,
+                    message=f"unexpected client error (HTTP {resp.status_code})",
+                    metadata={"status_code": resp.status_code},
+                )
+            logger.warning(
+                "health.vastai.server_error",
+                status_code=resp.status_code,
+            )
             return ComponentHealth(
                 name=self.name,
                 category=self.category,
                 status=ComponentStatus.unhealthy,
                 latency_ms=0.0,
                 message=f"vast.ai API returned HTTP {resp.status_code}",
+                metadata={"status_code": resp.status_code},
             )
         except Exception as exc:
+            logger.warning(
+                "health.vastai.probe_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             return ComponentHealth(
                 name=self.name,
                 category=self.category,

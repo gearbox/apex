@@ -80,23 +80,62 @@ class TestCloudProviderCheckerBase:
         assert result.status == ComponentStatus.healthy
         assert mock_client.get.call_count == 2
 
-    async def test_4xx_treated_as_healthy(self) -> None:
-        """4xx = API is reachable. Auth issues are config problems, not health problems."""
+    async def test_2xx_is_healthy(self) -> None:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.get = AsyncMock(return_value=MagicMock(status_code=401))
-
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=200))
         checker = _StubChecker(mock_client, probes=[("https://api.example.com/x", {})])
         result = await checker.check()
         assert result.status == ComponentStatus.healthy
 
-    async def test_429_treated_as_healthy(self) -> None:
-        """Rate-limited = API is alive."""
+    async def test_429_is_healthy(self) -> None:
+        """Rate-limited = API is alive, transient condition."""
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(return_value=MagicMock(status_code=429))
-
         checker = _StubChecker(mock_client, probes=[("https://api.example.com/x", {})])
         result = await checker.check()
         assert result.status == ComponentStatus.healthy
+
+    async def test_401_is_degraded(self) -> None:
+        """Auth failure = reachable but unusable."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=401))
+        checker = _StubChecker(mock_client, probes=[("https://api.example.com/x", {})])
+        result = await checker.check()
+        assert result.status == ComponentStatus.degraded
+        assert result.message is not None
+        assert "authentication failed" in result.message
+
+    async def test_403_is_degraded(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=403))
+        checker = _StubChecker(mock_client, probes=[("https://api.example.com/x", {})])
+        result = await checker.check()
+        assert result.status == ComponentStatus.degraded
+
+    async def test_401_does_not_fallthrough_to_next_probe(self) -> None:
+        """Auth failure returns immediately — no point trying other probes."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=401))
+        checker = _StubChecker(
+            mock_client,
+            probes=[
+                ("https://api.example.com/status", {}),
+                ("https://api.example.com/models", {}),
+            ],
+        )
+        result = await checker.check()
+        assert result.status == ComponentStatus.degraded
+        assert mock_client.get.call_count == 1  # did NOT try second probe
+
+    async def test_other_4xx_is_degraded(self) -> None:
+        """Non-auth 4xx (e.g. 404, 422) = reachable but unexpected response."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=404))
+        checker = _StubChecker(mock_client, probes=[("https://api.example.com/x", {})])
+        result = await checker.check()
+        assert result.status == ComponentStatus.degraded
+        assert result.message is not None
+        assert "unexpected client error" in result.message
 
     async def test_all_probes_fail_returns_unhealthy(self) -> None:
         mock_client = AsyncMock(spec=httpx.AsyncClient)

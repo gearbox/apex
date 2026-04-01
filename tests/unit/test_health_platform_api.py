@@ -37,13 +37,28 @@ class TestVastAIChecker:
         assert result.status == ComponentStatus.healthy
         assert result.metadata["status_code"] == 200
 
-    async def test_healthy_on_401(self) -> None:
-        """401 = API is reachable. Key may be wrong but that's config, not health."""
+    async def test_401_is_degraded(self) -> None:
+        """Auth failure = API reachable but key is wrong."""
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(return_value=MagicMock(status_code=401))
         checker = VastAIChecker(http_client=mock_client, api_key="bad-key")
         result = await checker.check()
-        assert result.status == ComponentStatus.healthy
+        assert result.status == ComponentStatus.degraded
+        assert result.message is not None
+        assert "authentication failed" in result.message
+
+    async def test_403_is_degraded(self) -> None:
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=403))
+        checker = VastAIChecker(http_client=mock_client, api_key="key")
+        result = await checker.check()
+        assert result.status == ComponentStatus.degraded
+
+    async def test_inactive_when_whitespace_api_key(self) -> None:
+        """Whitespace-only key from env misconfiguration should be treated as unconfigured."""
+        checker = VastAIChecker(http_client=AsyncMock(), api_key="   ")
+        result = await checker.check()
+        assert result.status == ComponentStatus.inactive
 
     async def test_unhealthy_on_5xx(self) -> None:
         mock_client = AsyncMock(spec=httpx.AsyncClient)

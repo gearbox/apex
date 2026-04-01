@@ -35,7 +35,7 @@ class CloudProviderChecker(abc.ABC):
 
     The base handles:
     - Iterating through the probe chain with short timeouts
-    - Status classification (healthy if any probe returns < 500)
+    - Status classification (healthy: 2xx/3xx/429; degraded: 4xx auth/client errors; unhealthy: 5xx/connection failures)
     - Error logging and fallback
     """
 
@@ -72,12 +72,34 @@ class CloudProviderChecker(abc.ABC):
         for url, headers in probes:
             try:
                 resp = await self._client.get(url, headers=headers, timeout=5.0)
-                if resp.status_code < 500:
+                if resp.status_code < 400 or resp.status_code == 429:
                     return ComponentHealth(
                         name=self.name,
                         category=self.category,
                         status=ComponentStatus.healthy,
                         latency_ms=0.0,
+                        product_id=self.product_id,
+                        metadata={"probe_url": url, "status_code": resp.status_code},
+                    )
+                if resp.status_code in (401, 403):
+                    return ComponentHealth(
+                        name=self.name,
+                        category=self.category,
+                        status=ComponentStatus.degraded,
+                        latency_ms=0.0,
+                        message=f"authentication failed (HTTP {resp.status_code}) — check API key",
+                        product_id=self.product_id,
+                        metadata={"probe_url": url, "status_code": resp.status_code},
+                    )
+                # 4xx other than 401/403/429 — API is reachable but returning client errors.
+                # Treat as degraded rather than falling through to next probe.
+                if resp.status_code < 500:
+                    return ComponentHealth(
+                        name=self.name,
+                        category=self.category,
+                        status=ComponentStatus.degraded,
+                        latency_ms=0.0,
+                        message=f"unexpected client error (HTTP {resp.status_code})",
                         product_id=self.product_id,
                         metadata={"probe_url": url, "status_code": resp.status_code},
                     )
