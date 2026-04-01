@@ -9,9 +9,38 @@ from src.core.product import PaymentProvider
 from src.core.product_registry import (
     SYNTHARA_CONFIG,
     VEX_CONFIG,
+    extract_apex_domain,
     resolve_product_by_domain,
     resolve_product_by_slug,
 )
+
+
+class TestExtractApexDomain:
+    """Tests for extract_apex_domain()."""
+
+    def test_plain_apex(self) -> None:
+        assert extract_apex_domain("vex.pics") == "vex.pics"
+
+    def test_www_subdomain(self) -> None:
+        assert extract_apex_domain("www.vex.pics") == "vex.pics"
+
+    def test_staging_subdomain(self) -> None:
+        assert extract_apex_domain("staging.vex.pics") == "vex.pics"
+
+    def test_deep_subdomain(self) -> None:
+        assert extract_apex_domain("feature-xyz.staging.synthara.app") == "synthara.app"
+
+    def test_multi_part_tld(self) -> None:
+        assert extract_apex_domain("www.example.co.uk") == "example.co.uk"
+
+    def test_localhost_returns_none(self) -> None:
+        assert extract_apex_domain("localhost") is None
+
+    def test_ipv4_returns_none(self) -> None:
+        assert extract_apex_domain("127.0.0.1") is None
+
+    def test_empty_returns_none(self) -> None:
+        assert extract_apex_domain("") is None
 
 
 class TestProductConfigIsModelAllowed:
@@ -84,7 +113,7 @@ class TestResolveProductByDomain:
 
     @pytest.mark.parametrize(
         "domain",
-        ["vex.pics", "www.vex.pics", "app.vex.pics"],
+        ["vex.pics", "www.vex.pics", "app.vex.pics", "staging.vex.pics", "preview.vex.pics"],
     )
     def test_vex_domains(self, domain: str) -> None:
         cfg = resolve_product_by_domain(domain)
@@ -93,7 +122,13 @@ class TestResolveProductByDomain:
 
     @pytest.mark.parametrize(
         "domain",
-        ["synthara.app", "www.synthara.app", "app.synthara.app"],
+        [
+            "synthara.app",
+            "www.synthara.app",
+            "app.synthara.app",
+            "staging.synthara.app",
+            "preview.synthara.app",
+        ],
     )
     def test_synthara_domains(self, domain: str) -> None:
         cfg = resolve_product_by_domain(domain)

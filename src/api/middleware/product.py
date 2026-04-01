@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import structlog
 from litestar.middleware.base import AbstractMiddleware
 from litestar.types import Receive, Scope, Send
@@ -38,15 +40,16 @@ class ProductMiddleware(AbstractMiddleware):
         # 1. Try Origin header
         origin = headers.get(b"origin", b"").decode("utf-8", errors="ignore")
         if origin:
-            # Strip protocol
-            domain = origin.removeprefix("https://").removeprefix("http://")
-            product_config = resolve_product_by_domain(domain)
+            hostname = urlparse(origin).hostname or ""
+            if hostname:
+                product_config = resolve_product_by_domain(hostname)
 
         # 2. Try Host header
         if product_config is None:
             host = headers.get(b"host", b"").decode("utf-8", errors="ignore")
             if host:
-                product_config = resolve_product_by_domain(host)
+                hostname = host.split(":")[0].lower()
+                product_config = resolve_product_by_domain(hostname)
 
         # 3. Try X-Product-Id header
         if product_config is None:

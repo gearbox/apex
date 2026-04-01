@@ -5,6 +5,8 @@ Import PRODUCT_REGISTRY or use get_product_config() / resolve_product().
 
 from __future__ import annotations
 
+import tldextract as _tldextract
+
 from src.core.enums import ModelType, Product
 from src.core.product import (
     AgeGatePolicy,
@@ -137,11 +139,25 @@ PRODUCT_REGISTRY: dict[Product, ProductConfig] = {
     Product.SYNTHARA: SYNTHARA_CONFIG,
 }
 
-# Domain → ProductConfig lookup (built once at import time)
-_DOMAIN_MAP: dict[str, ProductConfig] = {}
-for _cfg in PRODUCT_REGISTRY.values():
-    for _domain in _cfg.domains:
-        _DOMAIN_MAP[_domain.lower()] = _cfg
+_ALL_PRODUCTS: tuple[ProductConfig, ...] = tuple(PRODUCT_REGISTRY.values())
+
+
+def extract_apex_domain(hostname: str) -> str | None:
+    """Return the eTLD+1 for *hostname*, or ``None`` if the hostname is invalid/IP.
+
+    Examples::
+
+        extract_apex_domain("staging.vex.pics")   -> "vex.pics"
+        extract_apex_domain("app.synthara.app")    -> "synthara.app"
+        extract_apex_domain("vex.pics")            -> "vex.pics"
+        extract_apex_domain("localhost")           -> None
+        extract_apex_domain("127.0.0.1")           -> None
+
+    ``tldextract`` uses the Mozilla Public Suffix List, so multi-part TLDs
+    (e.g. ``.co.uk``) are handled correctly without bespoke string splitting.
+    """
+    ext = _tldextract.extract(hostname)
+    return f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else None
 
 
 def get_product_config(product: Product) -> ProductConfig:
@@ -149,9 +165,16 @@ def get_product_config(product: Product) -> ProductConfig:
     return PRODUCT_REGISTRY[product]
 
 
-def resolve_product_by_domain(domain: str) -> ProductConfig | None:
-    """Resolve product config from a domain string. Returns None if no match."""
-    return _DOMAIN_MAP.get(domain.lower().split(":")[0])  # Strip port
+def resolve_product_by_domain(hostname: str) -> ProductConfig | None:
+    """Resolve product config from a raw hostname (may include subdomain).
+
+    Matching is performed on the eTLD+1 so that ``staging.vex.pics``,
+    ``app.vex.pics`` and ``vex.pics`` all resolve to the same product.
+    """
+    apex = extract_apex_domain(hostname.lower().split(":")[0])
+    if apex is None:
+        return None
+    return next((config for config in _ALL_PRODUCTS if apex in config.domains), None)
 
 
 def resolve_product_by_slug(slug: str) -> ProductConfig | None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from litestar import Litestar, get
 from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
@@ -101,3 +102,34 @@ class TestProductMiddlewareResolution:
             resp = client.get("/test", headers={"Origin": "https://synthara.app"})
         assert resp.status_code == HTTP_200_OK
         assert "x-product-id" in resp.headers
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "https://staging.vex.pics",
+            "https://preview.vex.pics",
+            "https://feature-xyz.vex.pics",
+        ],
+    )
+    def test_subdomain_origin_resolves_to_vex(self, origin: str) -> None:
+        """Any subdomain of vex.pics in Origin should resolve to the vex product."""
+        app = build_test_app()
+        with TestClient(app=app) as client:
+            resp = client.get("/test", headers={"Origin": origin})
+        assert resp.status_code == HTTP_200_OK
+        assert resp.headers.get("x-product-id") == "vex"
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "https://staging.synthara.app",
+            "https://preview.synthara.app",
+        ],
+    )
+    def test_subdomain_origin_resolves_to_synthara(self, origin: str) -> None:
+        """Any subdomain of synthara.app in Origin should resolve to the synthara product."""
+        app = build_test_app()
+        with TestClient(app=app) as client:
+            resp = client.get("/test", headers={"Origin": origin})
+        assert resp.status_code == HTTP_200_OK
+        assert resp.headers.get("x-product-id") == "synthara"
