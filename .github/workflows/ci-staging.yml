@@ -278,30 +278,22 @@ jobs:
       - name: Trigger Portainer stack redeploy
         run: |
           echo "Triggering Portainer redeploy for staging stack..."
-          
-          # Portainer webhook is synchronous — it pulls the image and restarts
-          # the stack before returning. Allow up to 5 minutes for image pull + boot.
-          HTTP_STATUS=$(curl \
+
+          # Fire-and-forget: we verify success via the health check below,
+          # not via the webhook response code.
+          curl \
             -H "CF-Access-Client-Id: ${{ secrets.CF_CLIENT_ID }}" \
             -H "CF-Access-Client-Secret: ${{ secrets.CF_CLIENT_SECRET }}" \
             --silent \
             --output /dev/null \
-            --write-out "%{http_code}" \
-            --max-time 600 \
+            --max-time 300 \
             --retry 3 \
             --retry-delay 10 \
             --retry-all-errors \
             --request POST \
-            "${{ secrets.PORTAINER_WEBHOOK_URL }}")
+            "${{ secrets.PORTAINER_WEBHOOK_URL }}" || true
 
-          echo "Portainer response: HTTP $HTTP_STATUS"
-
-          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "204" ]; then
-            echo "ERROR: Portainer webhook returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-          echo "Portainer redeploy triggered successfully."
+          echo "Portainer redeploy triggered (response code not checked — health check validates deployment)."
 
       - name: Wait for staging to be healthy
         run: |
