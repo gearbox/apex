@@ -250,7 +250,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          dockerfile: Dockerfile
+          file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -272,7 +272,7 @@ jobs:
     needs: [build-and-push]
     environment:
       name: staging
-      url: https://apex.staging.cloudin.space   # Update to your actual domain
+      url: ${{ vars.STAGING_URL }}   # Update to your actual domain
 
     steps:
       - name: Trigger Portainer stack redeploy
@@ -300,7 +300,7 @@ jobs:
       - name: Wait for staging to be healthy
         run: |
           echo "Waiting for staging API to become healthy..."
-          STAGING_URL="https://apex.staging.cloudin.space/health/ready"
+          STAGING_URL="${{ vars.STAGING_URL }}/health/ready"
           MAX_ATTEMPTS=24    # 24 x 10s = 4 minutes max wait
           ATTEMPT=0
 
@@ -322,11 +322,12 @@ jobs:
           echo "Staging deployment complete!"
           echo "SHA: ${{ github.sha }}"
           echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
-          echo "URL: https://apex.staging.cloudin.space"
+          echo "URL: ${{ vars.STAGING_URL }}"
 
       - name: Notify deployment failure
         if: failure()
         run: |
           echo "Staging deployment FAILED for SHA ${{ github.sha }}"
+          echo "URL: ${{ vars.STAGING_URL }}"
           # Optional: add Slack/Discord/email notification here
           exit 1
