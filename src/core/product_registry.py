@@ -31,8 +31,6 @@ VEX_CONFIG = ProductConfig(
     domains=frozenset(
         {
             "vex.pics",
-            "www.vex.pics",
-            "app.vex.pics",
         }
     ),
     age_gate=AgeGatePolicy.CHECKBOX,
@@ -82,8 +80,6 @@ SYNTHARA_CONFIG = ProductConfig(
     domains=frozenset(
         {
             "synthara.app",
-            "www.synthara.app",
-            "app.synthara.app",
         }
     ),
     age_gate=AgeGatePolicy.NONE,
