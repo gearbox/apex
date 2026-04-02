@@ -952,7 +952,15 @@ MemberResponse: {
 
 ---
 
-## 12. Admin *(authenticated — admin only)*
+## 12. Admin *(authenticated — ADMIN or SUPERADMIN role)*
+
+### Role Hierarchy
+
+| Role | Access | Billing Adjust | Role Management |
+|------|--------|----------------|-----------------|
+| `superadmin` | All admin endpoints | Inherent | Can grant/revoke ADMIN and SUPERADMIN |
+| `admin` | All admin endpoints | Only with explicit `billing_adjust` permission | None |
+| `user` | No admin endpoints | — | — |
 
 ### User Management
 
@@ -981,15 +989,19 @@ AdminUserResponse: {
 
 ```
 Request:  {
-  role?: UserRole,
+  role?: UserRole,            // "admin" or "user" only — not "superadmin"
   subscription_tier?: SubscriptionTier,
   is_active?: bool,
   locale?: SupportedLocale
 }
           // All fields optional — only provided fields are updated
 Response: AdminUserResponse
-Errors:   400 (role=system), 403 (patching own account), 404 (user not found)
-Note:     Admins cannot modify their own account via this endpoint.
+Errors:   400 (role=system or role=superadmin),
+          403 (patching own account, or target user is a superadmin),
+          404 (user not found)
+Notes:    - Admins cannot modify their own account via this endpoint.
+          - Cannot set role to "superadmin" via this endpoint — use POST /v1/admin/manage/roles/{user_id}/grant.
+          - Cannot patch superadmin users via this endpoint — use /v1/admin/manage/ endpoints.
 ```
 
 ### Organization Management
@@ -1034,8 +1046,9 @@ Request:  { amount: int, description: string }
           // positive amount = credit, negative = debit
 Response: { transaction: TransactionResponse, new_balance: int }
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
-Errors:   409 idempotency_conflict
-Note:     Idempotency is scoped to the admin's user_id — prevents duplicate adjustments on retry.
+Errors:   401 (admin without billing_adjust permission), 409 idempotency_conflict
+Notes:    - Requires SUPERADMIN role OR ADMIN role with explicit "billing_adjust" permission grant.
+          - Idempotency is scoped to the admin's user_id — prevents duplicate adjustments on retry.
 ```
 
 #### `GET /v1/admin/users/{user_id}/account`
@@ -1140,7 +1153,98 @@ Errors:   404
 
 ---
 
-## 13. Real-Time Events (SSE + Pub/Sub)
+## 13. Admin Management *(authenticated — SUPERADMIN only)*
+
+All endpoints under `/v1/admin/manage` require **SUPERADMIN** role. An ADMIN attempting to call these endpoints receives `401 Unauthorized`.
+
+### Shared types
+
+```typescript
+AdminRoleResponse: {
+  id: UUID,
+  email: string,
+  display_name: string | null,
+  role: string,           // "superadmin" | "admin"
+  permissions: string[],  // e.g. ["billing_adjust"]
+  is_active: bool,
+  created_at: datetime,
+  updated_at: datetime
+}
+
+AuditLogEntry: {
+  id: UUID,
+  actor_id: UUID,
+  target_user_id: UUID,
+  action: string,   // "role.grant" | "role.revoke" | "permission.grant" | "permission.revoke"
+  detail: string,   // human-readable, e.g. "Role changed from 'user' to 'admin'"
+  source: string,   // "api" | "cli"
+  created_at: datetime
+}
+```
+
+### Endpoints
+
+#### `GET /v1/admin/manage/admins`
+
+```
+Response: AdminRoleResponse[]
+Note:     Returns all SUPERADMIN users first, then all ADMIN users, for the current product.
+          Each entry includes the user's current permission grants.
+```
+
+#### `POST /v1/admin/manage/roles/{user_id}/grant`
+
+```
+Request:  { role: "admin" | "superadmin" }
+Response: { message: string }
+Errors:   403 (self-modification),
+          400 (invalid role — must be "admin" or "superadmin"),
+          404 (user not found in current product)
+Note:     Writes an audit entry with source="api".
+```
+
+#### `POST /v1/admin/manage/roles/{user_id}/revoke`
+
+```
+Response: { message: string }
+Errors:   403 (self-modification),
+          400 (last superadmin — cannot leave product with zero superadmins, or user has no admin role),
+          404 (user not found in current product)
+Notes:    - Demotes the target user back to role "user".
+          - Automatically revokes all permission grants for that user in the current product.
+          - Writes an audit entry.
+```
+
+#### `POST /v1/admin/manage/permissions/{user_id}/grant`
+
+```
+Request:  { permission: "billing_adjust" }
+Response: { message: string }
+Errors:   400 (user is not an admin, or user not found)
+Note:     Idempotent — granting an already-held permission is a no-op (returns 200, no duplicate entry).
+          Writes an audit entry only on first grant.
+```
+
+#### `POST /v1/admin/manage/permissions/{user_id}/revoke`
+
+```
+Request:  { permission: "billing_adjust" }
+Response: { message: string }
+Note:     Idempotent — revoking a permission the user doesn't hold is a no-op (returns 200).
+          Writes an audit entry only when a row was actually deleted.
+```
+
+#### `GET /v1/admin/manage/audit`
+
+```
+Query:    target_user_id? (UUID), limit? (default 50)
+Response: AuditLogEntry[]
+Note:     Entries are returned newest-first. Optionally filter to a specific target user.
+```
+
+---
+
+## 14. Real-Time Events (SSE + Pub/Sub)
 
 The backend supports real-time event streaming via **Server-Sent Events (SSE)** backed by Redis Pub/Sub. Because `EventSource` cannot send custom headers, authentication uses a short-lived **one-time ticket** pattern.
 
@@ -1319,7 +1423,7 @@ async function openEventStream(apiFetch: Fetcher) {
 
 ---
 
-## 14. Product Reference
+## 15. Product Reference
 
 ### Products
 
@@ -1338,7 +1442,7 @@ Values: `"sfw"`, `"permissive"`
 
 ---
 
-## 15. Enums Reference
+## 16. Enums Reference
 
 ### ModelType
 
@@ -1399,9 +1503,17 @@ Values: `"free"`, `"basic"`, `"pro"`, `"enterprise"`
 
 ### UserRole
 
-Values: `"admin"`, `"user"`
+Values: `"superadmin"`, `"admin"`, `"user"`
 
 > `"system"` is an internal sentinel role — never returned by any API endpoint.
+>
+> `"superadmin"` has all admin capabilities plus the ability to manage roles and permissions. See [§13 Admin Management](#13-admin-management-authenticated--superadmin-only).
+
+### AdminPermission
+
+Values: `"billing_adjust"`
+
+> Granular permissions that a superadmin can grant to ADMIN-role users. Currently only `billing_adjust` exists (enables `POST /v1/admin/accounts/{id}/adjust` for that admin).
 
 ### OrgRole
 
@@ -1437,7 +1549,7 @@ Used in `GalleryLineage.source_type` to indicate whether the input came from a d
 
 ---
 
-## 16. Error Response Format
+## 17. Error Response Format
 
 All non-2xx responses use a single unified envelope:
 
@@ -1495,7 +1607,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 17. Content URLs
+## 18. Content URLs
 
 ### Content Proxy URLs (preferred for Gallery / persistent UI)
 
@@ -1523,7 +1635,7 @@ These URLs:
 
 ---
 
-## 18. Rate Limits
+## 19. Rate Limits
 
 | Endpoint | Limit |
 |----------|-------|
@@ -1537,7 +1649,7 @@ Rate limit headers are **not currently exposed** in responses. The frontend shou
 
 ---
 
-## 19. Health Check
+## 20. Health Check
 
 Three-tier health monitoring system. Use the appropriate endpoint for each consumer:
 
@@ -1684,7 +1796,7 @@ The registry timeout for this checker is 15 s (increased from the 5 s default fo
 
 ---
 
-## 20. OpenAPI Documentation Endpoints
+## 21. OpenAPI Documentation Endpoints
 
 The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
 
