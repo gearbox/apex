@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import structlog
 
+from src.api.services.health import HEALTH_STREAM_CHANNEL
 from src.db.repositories.health import HealthSnapshotRepository
 
 if TYPE_CHECKING:
@@ -110,7 +111,7 @@ class HealthSnapshotWorker:
 
         # Persist to DB
         try:
-            await self._health_service.persist_snapshot(detailed)
+            await self._persist_snapshot(detailed)
         except Exception:
             logger.exception("health.snapshot_worker.persist_error")
 
@@ -127,6 +128,19 @@ class HealthSnapshotWorker:
             duration_ms=duration_ms,
         )
 
+    async def _persist_snapshot(self, detailed: dict[str, Any]) -> None:
+        """Write health snapshot to the database."""
+        from datetime import datetime
+
+        async with self._db_manager.session() as session:
+            repo = HealthSnapshotRepository(session)
+            await repo.insert(
+                checked_at=datetime.fromisoformat(detailed["checked_at"]),
+                overall_status=detailed["status"],
+                snapshot_data=detailed,
+            )
+            await session.commit()
+
     async def _publish_to_redis(self, detailed: dict[str, Any]) -> None:
         """Publish snapshot to Redis Pub/Sub for SSE stream consumers.
 
@@ -140,7 +154,7 @@ class HealthSnapshotWorker:
 
         client = get_redis_client()
         data = _encoder.encode(detailed).decode()
-        await client.publish("health:stream", data)
+        await client.publish(HEALTH_STREAM_CHANNEL, data)
 
     # ------------------------------------------------------------------
     # Leader lock (Granian multi-worker safety)
@@ -183,13 +197,16 @@ class HealthSnapshotWorker:
     # ------------------------------------------------------------------
 
     async def _cleanup_loop(self) -> None:
-        """Daily cleanup of old health snapshots."""
+        """Daily cleanup of old health snapshots. Only runs on the leader."""
         # Wait until after initial startup + first snapshot cycle
         await asyncio.sleep(60)
 
         while self._running:
             try:
-                await self._cleanup_once()
+                if await self._try_acquire_leader_lock():
+                    await self._cleanup_once()
+                else:
+                    logger.debug("health.snapshot_worker.cleanup_skipped_not_leader")
             except Exception:
                 logger.exception("health.snapshot_worker.cleanup_error")
 

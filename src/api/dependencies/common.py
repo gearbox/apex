@@ -638,7 +638,6 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     _services.health_service = HealthService(
         registry=health_registry,
         timeout_seconds=settings.health_check_timeout_seconds,
-        db_manager=_services.db_manager,
     )
     logger.info("health_service.initialized")
 

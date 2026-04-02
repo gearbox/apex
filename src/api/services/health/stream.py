@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import msgspec
 import structlog
 
+from src.api.services.health import HEALTH_STREAM_CHANNEL
 from src.api.services.health.service import HealthService
 from src.core.redis import get_redis_client
 
@@ -51,16 +52,16 @@ async def _redis_stream() -> AsyncGenerator[dict[str, str]]:
     client = get_redis_client()
     pubsub = client.pubsub()
     try:
-        await pubsub.subscribe("health:stream")
+        await pubsub.subscribe(HEALTH_STREAM_CHANNEL)
 
         while True:
             try:
+                # Single timeout via asyncio.wait_for — no nested timeout
+                # on get_message. Let get_message block; wait_for enforces
+                # the heartbeat deadline.
                 message = await asyncio.wait_for(
-                    pubsub.get_message(
-                        ignore_subscribe_messages=True,
-                        timeout=float(_HEARTBEAT_INTERVAL_SECONDS),
-                    ),
-                    timeout=float(_HEARTBEAT_INTERVAL_SECONDS) + 1,
+                    pubsub.get_message(ignore_subscribe_messages=True),
+                    timeout=float(_HEARTBEAT_INTERVAL_SECONDS),
                 )
                 if message is not None and message["type"] == "message":
                     data = message["data"]
@@ -70,12 +71,12 @@ async def _redis_stream() -> AsyncGenerator[dict[str, str]]:
                     }
                 else:
                     yield {"comment": "keepalive"}
-            except TimeoutError:
+            except asyncio.TimeoutError:  # noqa: UP041 - timeout from asyncio.wait_for will return as asyncio.TimeoutError
                 yield {"comment": "keepalive"}
     except asyncio.CancelledError:
         logger.debug("health.sse.client_disconnected")
     finally:
-        await pubsub.unsubscribe("health:stream")
+        await pubsub.unsubscribe(HEALTH_STREAM_CHANNEL)
         await pubsub.aclose()  # type: ignore[no-untyped-call]
 
 

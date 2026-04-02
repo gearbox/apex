@@ -52,22 +52,26 @@ class TestRunOnce:
         mock_service.check_all_and_build = AsyncMock(
             return_value={"status": "healthy", "checked_at": "2026-01-01T00:00:00Z"}
         )
-        mock_service.persist_snapshot = AsyncMock()
 
         worker = _make_worker(health_service=mock_service)
+        worker._persist_snapshot = AsyncMock()
+        worker._publish_to_redis = AsyncMock()
+
         await worker._run_once()
 
         mock_service.check_all_and_build.assert_awaited_once()
-        mock_service.persist_snapshot.assert_awaited_once()
+        worker._persist_snapshot.assert_awaited_once()
+        worker._publish_to_redis.assert_awaited_once()
 
     async def test_persist_error_does_not_crash(self) -> None:
         mock_service = AsyncMock()
         mock_service.check_all_and_build = AsyncMock(
             return_value={"status": "healthy", "checked_at": "x"}
         )
-        mock_service.persist_snapshot = AsyncMock(side_effect=ConnectionError("db gone"))
 
         worker = _make_worker(health_service=mock_service)
+        worker._persist_snapshot = AsyncMock(side_effect=ConnectionError("db gone"))
+
         # Should not raise
         await worker._run_once()
 
@@ -78,9 +82,8 @@ class TestRunOnce:
         detailed = {"status": "healthy", "checked_at": "2026-01-01T00:00:00Z"}
         mock_service = AsyncMock()
         mock_service.check_all_and_build = AsyncMock(return_value=detailed)
-        mock_service.persist_snapshot = AsyncMock()
-
         worker = _make_worker(health_service=mock_service, redis_url="redis://localhost")
+        worker._persist_snapshot = AsyncMock()
 
         with patch("src.core.redis.get_redis_client") as mock_get_redis:
             mock_client = AsyncMock()
@@ -102,9 +105,9 @@ class TestRunOnce:
         mock_service.check_all_and_build = AsyncMock(
             return_value={"status": "healthy", "checked_at": "x"}
         )
-        mock_service.persist_snapshot = AsyncMock()
 
         worker = _make_worker(health_service=mock_service, redis_url="redis://localhost")
+        worker._persist_snapshot = AsyncMock()
         with patch("src.core.redis.get_redis_client") as mock_redis:
             mock_redis.return_value.publish = AsyncMock(side_effect=ConnectionError("no redis"))
             await worker._run_once()

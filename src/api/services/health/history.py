@@ -40,6 +40,12 @@ def parse_history_params(
     """
     parsed_after = _parse_datetime_param(after, "after")
     parsed_before = _parse_datetime_param(before, "before")
+
+    if parsed_after is not None and parsed_before is not None and parsed_after > parsed_before:
+        raise ValidationException(
+            f"Invalid time range: 'after' ({after}) is later than 'before' ({before})."
+        )
+
     clamped_limit = min(max(limit, 1), _MAX_LIMIT)
     return HistoryQuery(after=parsed_after, before=parsed_before, limit=clamped_limit)
 

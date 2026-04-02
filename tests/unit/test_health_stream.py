@@ -7,6 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 from src.api.services.health.stream import health_sse_generator
 
 
+def test_health_stream_channel_constant_exists() -> None:
+    from src.api.services.health import HEALTH_STREAM_CHANNEL
+
+    assert HEALTH_STREAM_CHANNEL == "health:stream"
+
+
 class TestPollingFallback:
     async def test_yields_snapshot_event(self) -> None:
         mock_service = AsyncMock()

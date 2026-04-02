@@ -46,3 +46,20 @@ class TestParseHistoryParams:
     def test_limit_clamped_max(self) -> None:
         q = parse_history_params(after=None, before=None, limit=9999)
         assert q.limit == 1440
+
+    def test_after_greater_than_before_raises(self) -> None:
+        with pytest.raises(ValidationException, match="Invalid time range"):
+            parse_history_params(
+                after="2026-04-01T00:00:00Z",
+                before="2026-03-01T00:00:00Z",
+                limit=10,
+            )
+
+    def test_equal_after_before_allowed(self) -> None:
+        """Same timestamp for both is valid — returns snapshots at exactly that time."""
+        q = parse_history_params(
+            after="2026-03-15T12:00:00Z",
+            before="2026-03-15T12:00:00Z",
+            limit=10,
+        )
+        assert q.after == q.before
