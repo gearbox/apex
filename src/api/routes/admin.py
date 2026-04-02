@@ -54,6 +54,28 @@ from src.db.repositories.user import UserRepository
 logger = structlog.get_logger(__name__)
 
 
+async def _require_billing_adjust(user: User, session: AsyncSession, product_id: str) -> None:
+    """Raise NotAuthorizedException if user cannot perform billing adjustments.
+
+    SUPERADMIN has inherent permission; ADMIN requires explicit billing_adjust grant.
+    """
+    from litestar.exceptions import NotAuthorizedException
+
+    from src.core.enums import UserRole
+    from src.db.repositories.admin import AdminRepository
+
+    role = user.role if isinstance(user.role, str) else user.role.value
+    if role == UserRole.SUPERADMIN.value:
+        return
+
+    admin_repo = AdminRepository(session)
+    has_perm = await admin_repo.has_permission(user.id, "billing_adjust", product_id)
+    if not has_perm:
+        raise NotAuthorizedException(
+            detail="Billing adjustment permission required. Contact a superadmin."
+        )
+
+
 class AdminController(Controller):
     """Admin endpoints for billing management."""
 
@@ -158,6 +180,20 @@ class AdminController(Controller):
             )
         if data.role == UserRole.SYSTEM:
             raise ValidationException(detail="Cannot set user role to system")
+        if data.role == UserRole.SUPERADMIN:
+            raise ValidationException(
+                detail="Cannot set superadmin role via this endpoint. "
+                "Use /v1/admin/manage/roles/grant"
+            )
+
+        repo = UserRepository(session)
+        target = await repo.get_active_user(user_id)
+        if target is not None:
+            target_role = target.role if isinstance(target.role, str) else target.role.value
+            if target_role == UserRole.SUPERADMIN.value:
+                raise PermissionDeniedException(
+                    detail="Cannot modify superadmin users via this endpoint. Use /v1/admin/manage/"
+                )
 
         logger.info(
             "admin.patching_user",
@@ -168,7 +204,6 @@ class AdminController(Controller):
             is_active=data.is_active,
             locale=data.locale,
         )
-        repo = UserRepository(session)
         user = await repo.update_user_admin(
             user_id,
             role=data.role.value if data.role is not None else None,
@@ -350,7 +385,11 @@ class AdminController(Controller):
             ),
         ],
     ) -> Response[AdminAdjustResponse]:
-        """Admin balance adjustment (idempotent via Idempotency-Key). Positive = credit, negative = debit."""
+        """Admin balance adjustment (idempotent via Idempotency-Key). Positive = credit, negative = debit.
+
+        Requires SUPERADMIN role or ADMIN role with billing_adjust permission.
+        """
+        await _require_billing_adjust(admin_user, session, product_id)
         logger.info(
             "admin.adjusting_account",
             admin_id=str(admin_user.id),

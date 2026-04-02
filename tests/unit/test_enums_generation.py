@@ -36,8 +36,16 @@ class TestModelTypeSupportsGenerationType:
             # V2V / FLF2V: video models only
             (ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, True),
             (ModelType.AISHA_IMAGE, GenerationType.V2V, False),
-            (ModelType.AISHA_VIDEO, GenerationType.V2V, False),  # AISHA_VIDEO supports FLF2V but not V2V
-            (ModelType.GROK_IMAGINE_VIDEO, GenerationType.FLF2V, False),  # Grok video model doesn't support FLF2V
+            (
+                ModelType.AISHA_VIDEO,
+                GenerationType.V2V,
+                False,
+            ),  # AISHA_VIDEO supports FLF2V but not V2V
+            (
+                ModelType.GROK_IMAGINE_VIDEO,
+                GenerationType.FLF2V,
+                False,
+            ),  # Grok video model doesn't support FLF2V
             (ModelType.GROK_IMAGINE_IMAGE, GenerationType.FLF2V, False),
         ],
     )

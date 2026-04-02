@@ -463,6 +463,21 @@ class UserRepository:
         )
         return result.scalars().all()
 
+    async def count_by_roles(
+        self,
+        product_id: str,
+        roles: Sequence[str],
+    ) -> int:
+        """Count active users with any of the given roles in a product."""
+        result = await self._session.execute(
+            select(func.count(User.id)).where(
+                User.product_id == product_id,
+                User.role.in_(roles),
+                User.is_active == True,  # noqa: E712
+            )
+        )
+        return result.scalar_one()
+
     async def update_user_admin(
         self,
         user_id: UUID,

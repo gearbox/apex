@@ -1,5 +1,6 @@
 """Database models module."""
 
+from .admin import AdminAuditLog, AdminPermissionGrant
 from .base import Base
 from .billing import (
     Organization,
@@ -17,6 +18,8 @@ from .storage import GenerationJob, GenerationOutput, UserImage
 from .user import RefreshToken, User
 
 __all__ = [
+    "AdminAuditLog",
+    "AdminPermissionGrant",
     "Base",
     "GenerationJob",
     "GenerationModel",

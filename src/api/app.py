@@ -27,6 +27,7 @@ from src.api.middleware.logging import RequestLoggingMiddleware
 from src.api.middleware.product import ProductMiddleware
 from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_config
 from src.api.routes.admin import AdminController
+from src.api.routes.admin_management import AdminManagementController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.content import ContentProxyController
@@ -281,6 +282,7 @@ def create_app() -> Litestar:
             OrganizationController,
             # Admin
             AdminController,
+            AdminManagementController,
             # Generation (unified)
             UnifiedGenerationController,  # POST /v1/generate
             ProvidersController,  # GET /v1/providers
