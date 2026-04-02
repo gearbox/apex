@@ -25,9 +25,8 @@ logger = structlog.get_logger()
 
 _encoder = msgspec.json.Encoder()
 
-# Redis leader lock key and TTL
+# Redis leader lock key
 _LEADER_LOCK_KEY = "health:snapshot_worker:lock"
-_LEADER_LOCK_TTL_SECONDS = 90  # must be > snapshot interval
 
 
 class HealthSnapshotWorker:
@@ -152,9 +151,16 @@ class HealthSnapshotWorker:
 
         Returns True if this process should run the snapshot loop.
         Without Redis, always returns True (single-process assumption).
+
+        Lock TTL is derived from the snapshot interval with headroom
+        to prevent expiry during a slow check cycle.
         """
         if self._redis_url is None:
             return True
+
+        # TTL = 2x interval, minimum 90s — ensures the lock survives
+        # one full cycle even if checks are slow
+        lock_ttl = max(self._interval * 2, 90)
 
         try:
             from src.core.redis import get_redis_client
@@ -164,7 +170,7 @@ class HealthSnapshotWorker:
                 _LEADER_LOCK_KEY,
                 "1",
                 nx=True,
-                ex=_LEADER_LOCK_TTL_SECONDS,
+                ex=lock_ttl,
             )
             return bool(acquired)
         except Exception:

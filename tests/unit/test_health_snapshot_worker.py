@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.api.services.health.worker import (
     _LEADER_LOCK_KEY,
-    _LEADER_LOCK_TTL_SECONDS,
     HealthSnapshotWorker,
 )
 
@@ -72,6 +71,32 @@ class TestRunOnce:
         # Should not raise
         await worker._run_once()
 
+    async def test_publishes_to_redis_on_success(self) -> None:
+        """Verify snapshot is published to health:stream Redis channel."""
+        import msgspec
+
+        detailed = {"status": "healthy", "checked_at": "2026-01-01T00:00:00Z"}
+        mock_service = AsyncMock()
+        mock_service.check_all_and_build = AsyncMock(return_value=detailed)
+        mock_service.persist_snapshot = AsyncMock()
+
+        worker = _make_worker(health_service=mock_service, redis_url="redis://localhost")
+
+        with patch("src.core.redis.get_redis_client") as mock_get_redis:
+            mock_client = AsyncMock()
+            mock_client.publish = AsyncMock()
+            mock_get_redis.return_value = mock_client
+
+            await worker._run_once()
+
+            mock_client.publish.assert_awaited_once()
+            channel = mock_client.publish.call_args[0][0]
+            payload = mock_client.publish.call_args[0][1]
+            assert channel == "health:stream"
+            # Verify payload is valid JSON encoding of the detailed dict
+            decoded = msgspec.json.decode(payload)
+            assert decoded == detailed
+
     async def test_publish_error_does_not_crash(self) -> None:
         mock_service = AsyncMock()
         mock_service.check_all_and_build = AsyncMock(
@@ -90,8 +115,8 @@ class TestLeaderLock:
         worker = _make_worker(redis_url=None)
         assert await worker._try_acquire_leader_lock() is True
 
-    async def test_acquires_lock_when_free(self) -> None:
-        worker = _make_worker(redis_url="redis://localhost")
+    async def test_acquires_lock_with_dynamic_ttl(self) -> None:
+        worker = _make_worker(redis_url="redis://localhost", interval_seconds=300)
         with patch("src.core.redis.get_redis_client") as mock_redis:
             mock_client = AsyncMock()
             mock_client.set = AsyncMock(return_value=True)
@@ -102,8 +127,19 @@ class TestLeaderLock:
                 _LEADER_LOCK_KEY,
                 "1",
                 nx=True,
-                ex=_LEADER_LOCK_TTL_SECONDS,
+                ex=600,  # max(300 * 2, 90) = 600
             )
+
+    async def test_lock_ttl_minimum_90s(self) -> None:
+        worker = _make_worker(redis_url="redis://localhost", interval_seconds=10)
+        with patch("src.core.redis.get_redis_client") as mock_redis:
+            mock_client = AsyncMock()
+            mock_client.set = AsyncMock(return_value=True)
+            mock_redis.return_value = mock_client
+
+            await worker._try_acquire_leader_lock()
+            call_kwargs = mock_client.set.call_args
+            assert call_kwargs.kwargs["ex"] == 90  # max(10 * 2, 90) = 90
 
     async def test_skips_when_lock_held(self) -> None:
         worker = _make_worker(redis_url="redis://localhost")
