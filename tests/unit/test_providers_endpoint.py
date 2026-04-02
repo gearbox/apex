@@ -167,7 +167,7 @@ class TestCapabilitiesDerivation:
     def test_grok_imagine_video_capabilities(self) -> None:
         mt = ModelType.GROK_IMAGINE_VIDEO
         caps = [gt.value for gt in GenerationType if mt.supports_generation_type(gt)]
-        assert caps == ["t2v", "i2v", "v2v", "flf2v"]
+        assert caps == ["t2v", "i2v", "v2v"]
 
     def test_aisha_image_capabilities(self) -> None:
         mt = ModelType.AISHA_IMAGE
@@ -177,7 +177,7 @@ class TestCapabilitiesDerivation:
     def test_aisha_video_capabilities(self) -> None:
         mt = ModelType.AISHA_VIDEO
         caps = [gt.value for gt in GenerationType if mt.supports_generation_type(gt)]
-        assert caps == ["t2v", "i2v", "v2v", "flf2v"]
+        assert caps == ["t2v", "i2v", "flf2v"]
 
     def test_aspect_ratios_are_valid_enum_members(self) -> None:
         """Every model's aspect_ratios must be valid AspectRatio enum values."""
