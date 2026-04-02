@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -11,6 +11,9 @@ from src.core.enums import ComponentCategory, ComponentStatus
 
 from .base import ComponentHealth
 from .registry import HealthCheckRegistry
+
+if TYPE_CHECKING:
+    from src.db.session import DatabaseManager
 
 logger = structlog.get_logger()
 
@@ -28,15 +31,18 @@ class HealthService:
     Args:
         registry: The populated HealthCheckRegistry.
         timeout_seconds: Per-check timeout (from Settings).
+        db_manager: Optional DatabaseManager for snapshot persistence.
     """
 
     def __init__(
         self,
         registry: HealthCheckRegistry,
         timeout_seconds: float = 5.0,
+        db_manager: DatabaseManager | None = None,
     ) -> None:
         self._registry = registry
         self._timeout_seconds = timeout_seconds
+        self._db_manager = db_manager
 
     async def readiness(self) -> tuple[bool, dict[str, str]]:
         """Run infrastructure-only checks for the readiness probe.
@@ -63,6 +69,38 @@ class HealthService:
         """
         results = await self._registry.check_all(timeout_seconds=self._timeout_seconds)
         return self._build_detailed_response(results)
+
+    async def check_all_and_build(self) -> dict[str, Any]:
+        """Run all checks and return the detailed response dict.
+
+        Used by the snapshot worker to get the full result for both
+        persistence and SSE publishing in a single check cycle.
+
+        Returns:
+            Dict structure matching DetailedHealthResponse schema.
+        """
+        results = await self._registry.check_all(timeout_seconds=self._timeout_seconds)
+        return self._build_detailed_response(results)
+
+    async def persist_snapshot(self, detailed: dict[str, Any]) -> None:
+        """Write a health snapshot to the database.
+
+        Args:
+            detailed: The dict from check_all_and_build().
+        """
+        if self._db_manager is None:
+            return
+
+        from src.db.repositories.health import HealthSnapshotRepository
+
+        async with self._db_manager.session() as session:
+            repo = HealthSnapshotRepository(session)
+            await repo.insert(
+                checked_at=datetime.fromisoformat(detailed["checked_at"]),
+                overall_status=detailed["status"],
+                snapshot_data=detailed,
+            )
+            await session.commit()
 
     def _build_detailed_response(self, results: list[ComponentHealth]) -> dict[str, Any]:
         """Build the structured response from raw check results.

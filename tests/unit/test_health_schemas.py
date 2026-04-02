@@ -7,6 +7,7 @@ from src.api.schemas.health import (
     ComponentHealthResponse,
     DetailedHealthResponse,
     GpuSessionHealthResponse,
+    HealthSnapshotResponse,
     LivenessResponse,
     ReadinessResponse,
 )
@@ -51,3 +52,15 @@ class TestDetailedHealthResponse:
         decoded = msgspec.json.decode(encoded, type=DetailedHealthResponse)
         assert decoded.status == "healthy"
         assert decoded.infrastructure.components[0].name == "postgres"
+
+
+class TestHealthSnapshotResponse:
+    def test_serialize(self) -> None:
+        r = HealthSnapshotResponse(
+            checked_at="2026-03-31T14:00:00+00:00",
+            overall_status="healthy",
+            snapshot_data={"status": "healthy"},
+        )
+        data = msgspec.json.decode(msgspec.json.encode(r))
+        assert data["overall_status"] == "healthy"
+        assert data["snapshot_data"]["status"] == "healthy"
