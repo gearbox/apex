@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.core.enums import AspectRatio, ModelType, Provider, VideoResolution
+from src.core.enums import AspectRatio, GenerationType, ModelType, Provider, VideoResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +22,9 @@ class ImageMeta:
     the *effective* output resolutions so the frontend can display them.
     For Aisha, the user controls height directly (256-2048).
     """
+
+    supported_types: frozenset[GenerationType]
+    """Supported video generation types, e.g. frozenset({GenerationType.T2V, GenerationType.I2V})"""
 
     min_height: int | None = None
     """Minimum height in pixels the user can request. None = not user-controllable."""
@@ -36,9 +39,6 @@ class ImageMeta:
     """Advertised output resolutions (informational, e.g. ("1024x1024", "2048x2048")).
     None means the backend determines the size automatically."""
 
-    supports_editing: bool = True
-    """Whether the model supports image-to-image editing (I2I). True for most image models."""
-
 
 @dataclass(frozen=True, slots=True)
 class VideoMeta:
@@ -49,6 +49,9 @@ class VideoMeta:
 
     resolutions: tuple[VideoResolution, ...]
     """Supported video resolutions."""
+
+    supported_types: frozenset[GenerationType]
+    """Supported video generation types, e.g. frozenset({GenerationType.T2V, GenerationType.I2V})"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,10 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=10,
         image=ImageMeta(
+            supported_types=frozenset({
+                GenerationType.T2I,
+                GenerationType.I2I,
+            }),
             # Grok does not expose a user-controllable resolution parameter.
             # Output is determined server-side based on aspect ratio.
             output_resolutions=("1024x1024", "2048x2048"),
@@ -122,8 +129,10 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=10,
         image=ImageMeta(
+            supported_types=frozenset({
+                GenerationType.T2I,
+            }),
             output_resolutions=("1024x1024",),
-            supports_editing=False,  # T2I only; no image editing support
         ),
         rate_limit=None,
     ),
@@ -136,6 +145,12 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         video=VideoMeta(
             max_duration=15,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
+            supported_types=frozenset({
+                GenerationType.T2V,
+                GenerationType.I2V,
+                GenerationType.V2V,
+                # no FLF2V — Grok doesn't support it
+            }),
         ),
         rate_limit=RateLimitMeta(max_requests=10, window_seconds=60),
     ),
@@ -146,6 +161,10 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         aspect_ratios=ALL_ASPECT_RATIOS,
         max_concurrent_outputs=4,
         image=ImageMeta(
+            supported_types=frozenset({
+                GenerationType.T2I,
+                GenerationType.I2I,
+            }),
             min_height=256,
             max_height=2048,
             default_height=1024,
@@ -165,6 +184,12 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         video=VideoMeta(
             max_duration=10,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
+                supported_types=frozenset({
+                GenerationType.T2V,
+                GenerationType.I2V,
+                GenerationType.FLF2V,
+                # no V2V for aisha yet
+            }),
         ),
         rate_limit=None,
     ),

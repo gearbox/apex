@@ -59,15 +59,9 @@ class ModelType(StrEnum):
 
         meta = get_model_meta(self)
 
-        if gen_type == GenerationType.T2I:
-            return meta.image is not None
-        if gen_type == GenerationType.I2I:
-            return meta.image is not None and meta.video is None and meta.image.supports_editing
-        if gen_type in (GenerationType.T2V, GenerationType.V2V, GenerationType.FLF2V):
-            return meta.video is not None
-        if gen_type == GenerationType.I2V:
-            return meta.video is not None
-        return False
+        if not gen_type.is_video:
+            return meta.image is not None and gen_type in meta.image.supported_types
+        return meta.video is not None and gen_type in meta.video.supported_types
 
     @property
     def max_concurrent_outputs(self) -> int:
