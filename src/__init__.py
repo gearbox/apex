@@ -1,1 +1,1 @@
-"""ComfyUI API Service source package."""
+"""API Service source package."""

@@ -1,7 +1,7 @@
 """Unified jobs API — cross-provider job history, detail, and deletion.
 
 Replaces the legacy in-memory ``JobController`` in ``generation.py``.
-All providers (Grok, ComfyUI) surface through this single controller.
+All providers (Grok, Aisha) surface through this single controller.
 
 Endpoints:
   GET  /v1/jobs           — paginated job list (filterable)

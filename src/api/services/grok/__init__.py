@@ -476,6 +476,8 @@ class GrokClient:
                         raise GrokAPIError("Deferred request completed but no response returned")
                     video_url = response.response.video.url
                     if not video_url:
+                        # respect_moderation=True means the content passed review.
+                        # When False the video was flagged and the URL is withheld.
                         if not response.response.video.respect_moderation:
                             raise GrokModerationError(
                                 "Video flagged by moderation; URL not available"
@@ -504,9 +506,11 @@ class GrokClient:
                     )
                     return None  # Treat unknown as pending
 
-        except (GrokAPIError, GrokModerationError):
-            raise
         except Exception as e:
+            # Let all Grok-domain exceptions propagate untouched.
+            # Only convert truly unexpected errors (gRPC transport, protobuf decode).
+            if isinstance(e, GrokClientError):
+                raise
             raise self._convert_exception(e) from e
 
     # -------------------------------------------------------------------------

@@ -698,9 +698,11 @@ async def shutdown_services() -> None:
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
 
-    from src.api.services.grok.video_worker import GrokVideoWorkerManager
+    settings = get_settings()
+    if settings.grok_configured and settings.grok_video_worker_in_process:
+        from src.api.services.grok.video_worker import GrokVideoWorkerManager
 
-    await GrokVideoWorkerManager.stop()
+        await GrokVideoWorkerManager.stop()
 
     if _services.health_snapshot_worker is not None:
         await _services.health_snapshot_worker.stop()
