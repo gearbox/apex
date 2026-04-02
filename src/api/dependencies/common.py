@@ -499,6 +499,24 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     else:
         logger.warning("grok.not_configured")
 
+    # Start Grok video polling worker
+    if settings.grok_configured and _services.grok_job_service is not None:
+        if settings.grok_video_worker_in_process:
+            from src.api.services.grok.video_worker import GrokVideoWorkerManager
+
+            await GrokVideoWorkerManager.start(
+                db_manager=_services.db_manager,
+                job_service=_services.grok_job_service,
+                settings=settings,
+                event_bus=_services.event_bus,
+            )
+            logger.info("grok.video_worker_in_process_started")
+        else:
+            logger.info(
+                "grok.video_worker_external_required",
+                hint="Run 'python -m src.workers.grok_video' as a separate process",
+            )
+
     # Initialize authentication services
     jwt_config = JWTConfig(
         secret_key=settings.jwt_secret_key,
@@ -679,6 +697,10 @@ async def shutdown_services() -> None:
 
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
+
+    from src.api.services.grok.video_worker import GrokVideoWorkerManager
+
+    await GrokVideoWorkerManager.stop()
 
     if _services.health_snapshot_worker is not None:
         await _services.health_snapshot_worker.stop()

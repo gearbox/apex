@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from xai_sdk.aio.image import ImageResponse
     from xai_sdk.aio.video import VideoResponse
     from xai_sdk.proto.v6.deferred_pb2 import StartDeferredResponse
-    from xai_sdk.proto.v6.video_pb2 import GetDeferredVideoResponse
 
 logger = structlog.get_logger(__name__)
 
@@ -58,6 +57,12 @@ class GrokAPIError(GrokClientError):
     ) -> None:
         super().__init__(message)
         self.grpc_code = grpc_code
+
+
+class GrokModerationError(GrokAPIError):
+    """Raised when content is rejected by moderation."""
+
+    pass
 
 
 class GrokRateLimitError(GrokAPIError):
@@ -456,26 +461,52 @@ class GrokClient:
             GrokVideoResult if complete, None if still processing.
 
         Raises:
-            GrokAPIError: If the generation failed.
+            GrokAPIError: If the generation failed or expired.
+            GrokModerationError: If the video was blocked by moderation.
         """
         try:
-            response: GetDeferredVideoResponse = await self.client.video.get(request_id)
+            from xai_sdk.proto.v6 import deferred_pb2
+            from xai_sdk.proto.v6 import video_pb2 as _video_pb2
 
-            # Check if the response has a URL (indicates completion)
-            if hasattr(response, "url") and response.response.video.url:
-                return GrokVideoResult(url=response.response.video.url)
+            response: _video_pb2.GetDeferredVideoResponse = await self.client.video.get(request_id)
 
-            # Still processing
-            return None
+            match response.status:
+                case deferred_pb2.DeferredStatus.DONE:
+                    if not response.HasField("response"):
+                        raise GrokAPIError("Deferred request completed but no response returned")
+                    video_url = response.response.video.url
+                    if not video_url:
+                        if not response.response.video.respect_moderation:
+                            raise GrokModerationError(
+                                "Video flagged by moderation; URL not available"
+                            )
+                        raise GrokAPIError("Video URL missing from completed response")
+                    return GrokVideoResult(url=video_url)
 
+                case deferred_pb2.DeferredStatus.PENDING:
+                    return None  # Still processing
+
+                case deferred_pb2.DeferredStatus.FAILED:
+                    error_msg = "Video generation failed"
+                    if response.HasField("response") and response.response.HasField("error"):
+                        error = response.response.error
+                        error_msg = f"Video generation failed: [{error.code}] {error.message}"
+                    raise GrokAPIError(error_msg)
+
+                case deferred_pb2.DeferredStatus.EXPIRED:
+                    raise GrokAPIError("Deferred video request expired before completion")
+
+                case _:
+                    logger.warning(
+                        "grok.unknown_deferred_status",
+                        request_id=request_id,
+                        status=response.status,
+                    )
+                    return None  # Treat unknown as pending
+
+        except (GrokAPIError, GrokModerationError):
+            raise
         except Exception as e:
-            # Check if it's a "not ready yet" type error
-            error_msg = str(e).lower()
-            if any(
-                phrase in error_msg
-                for phrase in ("processing", "pending", "not ready", "in progress")
-            ):
-                return None
             raise self._convert_exception(e) from e
 
     # -------------------------------------------------------------------------
@@ -597,6 +628,7 @@ __all__ = [
     "GrokClientError",
     "GrokConnectionError",
     "GrokAPIError",
+    "GrokModerationError",
     "GrokRateLimitError",
     "GrokInvalidRequestError",
     "GrokTimeoutError",

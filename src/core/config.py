@@ -111,6 +111,14 @@ class Settings(BaseSettings):
         le=1800,
         description="Maximum seconds to poll for video completion",
     )
+    grok_video_worker_in_process: bool = Field(
+        default=False,
+        description=(
+            "Start Grok video polling worker in-process. "
+            "Set to True for single-worker deployments. "
+            "For multi-worker Granian, use the standalone worker instead."
+        ),
+    )
 
     # Generation defaults
     default_steps: int = Field(default=12, description="Default generation steps")
