@@ -334,7 +334,6 @@ class StorageRepository:
         job_id: UUID,
         status: JobStatus,
         *,
-        comfyui_prompt_id: str | None = None,
         external_request_id: str | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
@@ -344,7 +343,6 @@ class StorageRepository:
         Args:
             job_id: Job ID to update.
             status: New status.
-            comfyui_prompt_id: ComfyUI prompt ID (optional).
             external_request_id: External provider request ID.
             started_at: Job start time (optional).
             completed_at: Job completion time (optional).
@@ -358,9 +356,7 @@ class StorageRepository:
 
         job.status = status
 
-        # TODO: deprecate comfyui_prompt_id
-        # Handle both legacy and new parameter names
-        request_id = external_request_id or comfyui_prompt_id
+        request_id = external_request_id
         if request_id is not None:
             job.external_request_id = request_id
         if started_at is not None:

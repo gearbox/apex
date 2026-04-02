@@ -197,21 +197,8 @@ class GenerationJob(Base):
     )
 
     # External provider tracking
-    # For ComfyUI: stores prompt_id
     # For Grok: stores request_id (for video polling)
     external_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-
-    # ComfyUI tracking
-    # Legacy alias for backwards compatibility
-    @property
-    def comfyui_prompt_id(self) -> str | None:
-        """Alias for external_request_id (backwards compatibility)."""
-        return self.external_request_id
-
-    @comfyui_prompt_id.setter
-    def comfyui_prompt_id(self, value: str | None) -> None:
-        """Set external_request_id via legacy alias."""
-        self.external_request_id = value
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

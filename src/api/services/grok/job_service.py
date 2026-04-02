@@ -502,11 +502,11 @@ class GrokJobService:
                 video_url=input_video_url,
             )
 
-            # Store xAI request ID for polling (reusing comfyui_prompt_id field)
+            # Store xAI request ID for polling
             job = await repo.update_job_status(
                 job_id,
                 JobStatus.QUEUED,
-                comfyui_prompt_id=started.request_id,
+                external_request_id=started.request_id,
                 started_at=datetime.now(UTC),
             )
 
@@ -600,7 +600,7 @@ class GrokJobService:
             return job
 
         # Get xAI request ID
-        request_id = job.comfyui_prompt_id
+        request_id = job.external_request_id
         if not request_id:
             raise GrokJobError(f"Job {job_id} has no xAI request ID")
 
