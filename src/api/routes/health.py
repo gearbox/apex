@@ -7,6 +7,8 @@ from typing import Any
 
 from litestar import Controller, Response, get
 from litestar.di import Provide
+from litestar.response import ServerSentEvent
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_admin_user
 from src.api.schemas.health import (
@@ -14,12 +16,17 @@ from src.api.schemas.health import (
     ComponentHealthResponse,
     DetailedHealthResponse,
     GpuSessionHealthResponse,
+    HealthSnapshotResponse,
     LivenessResponse,
     ReadinessResponse,
 )
 from src.api.security import auth_guard
+from src.api.services.health.history import parse_history_params
 from src.api.services.health.service import HealthService
+from src.api.services.health.stream import health_sse_generator
+from src.core.config import get_settings
 from src.db.models import User
+from src.db.repositories.health import HealthSnapshotRepository
 
 
 class HealthController(Controller):
@@ -83,6 +90,61 @@ class AdminHealthController(Controller):
             },
             gpu_sessions=_to_gpu_sessions(data["gpu_sessions"]),
         )
+
+    @get("/stream")
+    async def stream(
+        self,
+        health_service: HealthService,
+        admin_user: User,  # noqa: ARG002  — triggers admin authorization check
+    ) -> ServerSentEvent:
+        """SSE stream of real-time health snapshots for the admin panel."""
+        settings = get_settings()
+        return ServerSentEvent(
+            content=health_sse_generator(
+                health_service=health_service,
+                settings=settings,
+            )
+        )
+
+    @get("/history")
+    async def history(
+        self,
+        session: AsyncSession,
+        admin_user: User,  # noqa: ARG002  — triggers admin authorization check
+        after: str | None = None,
+        before: str | None = None,
+        limit: int = 60,
+    ) -> list[HealthSnapshotResponse]:
+        """Paginated historical snapshots for dashboard charts.
+
+        Args:
+            session: Request-scoped DB session.
+            admin_user: Admin user (authorization check).
+            after: ISO 8601 datetime — only snapshots after this time.
+            before: ISO 8601 datetime — only snapshots before this time.
+            limit: Maximum results (default 60, max 1440).
+
+        Returns:
+            List of snapshots ordered by checked_at DESC.
+
+        Raises:
+            ValidationException: If after/before are not valid ISO 8601 datetimes (400).
+        """
+        query = parse_history_params(after=after, before=before, limit=limit)
+        repo = HealthSnapshotRepository(session)
+        snapshots = await repo.list_range(
+            after=query.after,
+            before=query.before,
+            limit=query.limit,
+        )
+        return [
+            HealthSnapshotResponse(
+                checked_at=s.checked_at.isoformat(),
+                overall_status=s.overall_status,
+                snapshot_data=s.snapshot_data,
+            )
+            for s in snapshots
+        ]
 
 
 def _to_category(cat: dict[str, Any]) -> CategoryHealthResponse:

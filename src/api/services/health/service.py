@@ -56,7 +56,16 @@ class HealthService:
         return is_ready, checks
 
     async def detailed(self) -> dict[str, Any]:
-        """Run all checks and build the detailed admin response.
+        """Full system check — all categories. Admin-only."""
+        return await self.check_all_and_build()
+
+    async def check_all_and_build(self) -> dict[str, Any]:
+        """Run all checks and build the detailed response dict.
+
+        Used by:
+        - AdminHealthController.detailed() for the admin endpoint
+        - HealthSnapshotWorker for periodic persistence + SSE publish
+        - SSE polling fallback when Redis is unavailable
 
         Returns:
             Dict structure matching DetailedHealthResponse schema.

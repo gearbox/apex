@@ -211,6 +211,21 @@ class Settings(BaseSettings):
             "Must be > GPU probe timeout (10s) to avoid false timeouts on reconciler."
         ),
     )
+    health_snapshot_interval_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=600,
+        description=(
+            "Interval in seconds between health snapshot persistence cycles. "
+            "Each cycle: run all checks → write to DB → publish via Redis."
+        ),
+    )
+    health_snapshot_retention_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Days to retain health snapshots before cleanup.",
+    )
 
     # Rate Limiting
     redis_url: str | None = Field(

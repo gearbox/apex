@@ -52,3 +52,11 @@ class ReadinessResponse(msgspec.Struct, kw_only=True):
 
     status: str
     checks: dict[str, str]
+
+
+class HealthSnapshotResponse(msgspec.Struct, kw_only=True):
+    """Historical snapshot for dashboard charts — GET /v1/admin/health/history."""
+
+    checked_at: str  # ISO 8601
+    overall_status: str  # healthy | degraded | unhealthy
+    snapshot_data: dict  # type: ignore[type-arg]  # Full DetailedHealthResponse

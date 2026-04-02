@@ -27,6 +27,7 @@ from src.api.services.generation.service import GenerationService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.health.service import HealthService
+from src.api.services.health.worker import HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
@@ -74,6 +75,7 @@ class ServiceContainer:
     event_bus: EventBus | None = None
     sse_ticket_service: SSETicketService | None = None
     health_service: HealthService | None = None
+    health_snapshot_worker: HealthSnapshotWorker | None = None
     health_http_client: httpx.AsyncClient | None = None
 
 
@@ -576,6 +578,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         interval=settings.token_cleanup_interval_seconds,
     )
     await _services.token_cleanup_worker.start()
+    logger.info("token_cleanup_worker.started")
 
     # Initialize health check registry and service
     from src.api.services.health.checkers.cloud_provider import GrokChecker
@@ -638,6 +641,16 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     )
     logger.info("health_service.initialized")
 
+    # Initialize and start health snapshot worker
+    _services.health_snapshot_worker = HealthSnapshotWorker(
+        health_service=_services.health_service,
+        db_manager=_services.db_manager,
+        interval_seconds=settings.health_snapshot_interval_seconds,
+        retention_days=settings.health_snapshot_retention_days,
+        redis_url=settings.redis_url,
+    )
+    await _services.health_snapshot_worker.start()
+
     return _services.jwt_service  # Return for storing in app.state
 
 
@@ -666,6 +679,9 @@ async def shutdown_services() -> None:
 
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
+
+    if _services.health_snapshot_worker is not None:
+        await _services.health_snapshot_worker.stop()
 
     if _services.health_http_client is not None:
         await _services.health_http_client.aclose()
