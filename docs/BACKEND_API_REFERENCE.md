@@ -1546,6 +1546,8 @@ Three-tier health monitoring system. Use the appropriate endpoint for each consu
 | Docker HEALTHCHECK, load balancers | `GET /health/live` | None |
 | CI readiness waits, traffic routing | `GET /health/ready` | None |
 | Admin dashboards, monitoring | `GET /v1/admin/health/` | Admin JWT |
+| Admin real-time stream | `GET /v1/admin/health/stream` | Admin JWT |
+| Admin historical charts | `GET /v1/admin/health/history` | Admin JWT |
 
 #### `GET /health/live`
 
@@ -1625,6 +1627,50 @@ Component `status` values: `healthy`, `degraded`, `unhealthy`, `unknown`, `inact
 | Key not set / whitespace-only | `inactive` | Not configured (VASTAI_API_KEY or XAI_API_KEY not set) |
 
 Note: 401/403 returns immediately without trying fallback probes — if auth is wrong, all probes will fail the same way.
+
+#### `GET /v1/admin/health/stream`
+
+SSE stream of real-time health snapshots. Emits a `health.snapshot` event at each snapshot interval (default 60s), with `: keepalive` comments between events.
+
+```
+Request:  Authorization: Bearer <admin_token>
+          (Use fetch() with ReadableStream — EventSource cannot send headers)
+Response: Content-Type: text/event-stream
+
+event: health.snapshot
+data: { ...same structure as GET /v1/admin/health/ ... }
+
+: keepalive          <- sent every 15s when no snapshot arrives
+
+Status:   200 (streaming)
+Errors:   401 (unauthorized), 403 (not admin)
+Note:     Subscribes to Redis channel "health:stream". Falls back to direct polling
+          when Redis is not configured.
+```
+
+#### `GET /v1/admin/health/history`
+
+Historical health snapshots for dashboard charts. Stored by `HealthSnapshotWorker` each interval.
+
+```
+Request:  Authorization: Bearer <admin_token>
+Params:   after  — ISO 8601 datetime, only snapshots after this time (optional)
+          before — ISO 8601 datetime, only snapshots before this time (optional)
+          limit  — max results, default 60, clamped to [1, 1440] (optional)
+Response: [
+  {
+    checked_at: string,       // ISO 8601
+    overall_status: string,   // healthy | degraded | unhealthy
+    snapshot_data: object     // full DetailedHealthResponse dict
+  },
+  ...
+]
+Status:   200
+Errors:   400 (malformed after/before datetime), 401 (unauthorized), 403 (not admin)
+Note:     Results ordered by checked_at DESC. Default limit 60 = 1 hour at 1/min interval.
+          Snapshots are retained for HEALTH_SNAPSHOT_RETENTION_DAYS (default 30 days).
+          Trailing Z suffix is accepted (e.g. 2026-03-31T14:00:00Z).
+```
 
 **GPU session reconciler behaviour:**
 
