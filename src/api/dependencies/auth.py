@@ -6,6 +6,7 @@ context from request state (set by auth_guard).
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 from uuid import UUID
 
@@ -16,6 +17,75 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.enums import UserRole
 from src.db.models import User
 from src.db.repositories import UserRepository
+
+
+async def _get_current_active_user(
+    request: Request[Any, Any, Any],
+    session: AsyncSession,
+) -> User:
+    """Load the authenticated active user from request state.
+
+    Shared by all admin-level auth dependencies.
+
+    Raises:
+        NotAuthorizedException: If not authenticated or user not found/inactive.
+    """
+    user_id = request.state.get("user_id")
+    if user_id is None:
+        raise NotAuthorizedException(detail="Not authenticated")
+
+    repo = UserRepository(session)
+    user = await repo.get_active_user(user_id)
+    if user is None:
+        raise NotAuthorizedException(detail="Not authenticated")
+
+    return user
+
+
+def _require_role(
+    user: User,
+    allowed_roles: Collection[UserRole],
+    detail: str,
+) -> User:
+    """Assert the user's role is in the allowed set.
+
+    Raises:
+        NotAuthorizedException: If role not in allowed_roles.
+    """
+    if user.role not in allowed_roles:
+        raise NotAuthorizedException(detail=detail)
+    return user
+
+
+async def ensure_billing_adjust_permission(
+    user: User,
+    session: AsyncSession,
+    product_id: str,
+) -> None:
+    """Verify the user can perform billing adjustments.
+
+    SUPERADMIN: inherent access (no permission grant needed).
+    ADMIN: requires explicit 'billing_adjust' permission grant.
+
+    This is the single source of truth for billing-adjust authorization.
+    Called by get_billing_adjust_admin (DI) and can be called directly
+    by handlers that already have the admin_user injected.
+
+    Raises:
+        NotAuthorizedException: If user lacks permission.
+    """
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    if role_value == UserRole.SUPERADMIN.value:
+        return
+
+    from src.db.repositories.admin import AdminRepository
+
+    admin_repo = AdminRepository(session)
+    has_perm = await admin_repo.has_permission(user.id, "billing_adjust", product_id)
+    if not has_perm:
+        raise NotAuthorizedException(
+            detail="Billing adjustment permission required. Contact a superadmin."
+        )
 
 
 async def get_current_user_id(request: Request[Any, Any, Any]) -> UUID:
@@ -40,101 +110,40 @@ async def get_current_user_id(request: Request[Any, Any, Any]) -> UUID:
 
 
 async def get_current_admin_user(request: Request[Any, Any, Any], session: AsyncSession) -> User:
-    """Load and verify the current user has admin-level access (ADMIN or SUPERADMIN).
-
-    Args:
-        request: Litestar request.
-        session: Request-scoped database session.
-
-    Returns:
-        Verified admin User model.
-
-    Raises:
-        NotAuthorizedException: If not authenticated or not admin.
-    """
-    user_id = request.state.get("user_id")
-    if user_id is None:
-        raise NotAuthorizedException(detail="Not authenticated")
-
-    repo = UserRepository(session)
-    user = await repo.get_active_user(user_id)
-
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.SUPERADMIN):
-        raise NotAuthorizedException(detail="Admin access required")
-
-    return user
+    """Load and verify the current user has admin-level access (ADMIN or SUPERADMIN)."""
+    user = await _get_current_active_user(request, session)
+    return _require_role(
+        user,
+        allowed_roles=(UserRole.ADMIN, UserRole.SUPERADMIN),
+        detail="Admin access required",
+    )
 
 
 async def get_current_superadmin_user(
     request: Request[Any, Any, Any], session: AsyncSession
 ) -> User:
-    """Load and verify the current user is a SUPERADMIN.
-
-    Used for role management and permission grant endpoints.
-
-    Args:
-        request: Litestar request.
-        session: Request-scoped database session.
-
-    Returns:
-        Verified superadmin User model.
-
-    Raises:
-        NotAuthorizedException: If not authenticated or not superadmin.
-    """
-    user_id = request.state.get("user_id")
-    if user_id is None:
-        raise NotAuthorizedException(detail="Not authenticated")
-
-    repo = UserRepository(session)
-    user = await repo.get_active_user(user_id)
-
-    if user is None or user.role != UserRole.SUPERADMIN:
-        raise NotAuthorizedException(detail="Superadmin access required")
-
-    return user
+    """Load and verify the current user is a SUPERADMIN."""
+    user = await _get_current_active_user(request, session)
+    return _require_role(
+        user,
+        allowed_roles=(UserRole.SUPERADMIN,),
+        detail="Superadmin access required",
+    )
 
 
 async def get_billing_adjust_admin(request: Request[Any, Any, Any], session: AsyncSession) -> User:
-    """Load and verify the current user can perform billing adjustments.
+    """Load and verify the user can perform billing adjustments.
 
-    Allowed: SUPERADMIN (inherent) or ADMIN with 'billing_adjust' permission.
-
-    Args:
-        request: Litestar request.
-        session: Request-scoped database session.
-
-    Returns:
-        Verified User model with billing adjust access.
-
-    Raises:
-        NotAuthorizedException: If not authenticated or lacking permission.
+    SUPERADMIN inherent; ADMIN requires billing_adjust permission grant.
     """
-    user_id = request.state.get("user_id")
-    if user_id is None:
-        raise NotAuthorizedException(detail="Not authenticated")
-
-    repo = UserRepository(session)
-    user = await repo.get_active_user(user_id)
-
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.SUPERADMIN):
-        raise NotAuthorizedException(detail="Admin access required")
-
-    # Superadmins have inherent billing adjust permission
-    if user.role == UserRole.SUPERADMIN:
-        return user
-
-    # Admins need explicit permission grant
-    from src.db.repositories.admin import AdminRepository
-
-    admin_repo = AdminRepository(session)
+    user = await _get_current_active_user(request, session)
+    _require_role(
+        user,
+        allowed_roles=(UserRole.ADMIN, UserRole.SUPERADMIN),
+        detail="Admin access required",
+    )
     product_id: str = request.state.get("product_id") or user.product_id
-    has_perm = await admin_repo.has_permission(user.id, "billing_adjust", product_id)
-    if not has_perm:
-        raise NotAuthorizedException(
-            detail="Billing adjustment permission required. Contact a superadmin."
-        )
-
+    await ensure_billing_adjust_permission(user, session, product_id)
     return user
 
 

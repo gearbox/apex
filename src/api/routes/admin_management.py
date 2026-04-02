@@ -55,23 +55,22 @@ class AdminManagementController(Controller):
     ) -> list[AdminRoleResponse]:
         """List all admin and superadmin users for the current product."""
         logger.info("admin_mgmt.listing_admins", superadmin_id=str(superadmin.id))
-        users = await admin_mgmt.list_admins(product_id, session=session)
-        result = []
-        for u in users:
-            perms = await admin_mgmt.get_user_permissions(u.id, product_id, session=session)
-            result.append(
-                AdminRoleResponse(
-                    id=u.id,
-                    email=u.email,
-                    display_name=u.display_name,
-                    role=u.role.value if hasattr(u.role, "value") else u.role,
-                    permissions=perms,
-                    is_active=u.is_active,
-                    created_at=u.created_at,
-                    updated_at=u.updated_at,
-                )
+        admins_with_perms = await admin_mgmt.list_admins_with_permissions(
+            product_id, session=session
+        )
+        return [
+            AdminRoleResponse(
+                id=u.id,
+                email=u.email,
+                display_name=u.display_name,
+                role=u.role.value if hasattr(u.role, "value") else u.role,
+                permissions=perms,
+                is_active=u.is_active,
+                created_at=u.created_at,
+                updated_at=u.updated_at,
             )
-        return result
+            for u, perms in admins_with_perms
+        ]
 
     @post("/roles/{user_id:uuid}/grant")
     async def grant_role(

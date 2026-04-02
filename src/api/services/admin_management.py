@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from uuid import UUID
 
 import structlog
@@ -48,20 +47,35 @@ class AdminManagementService:
         product_id: str,
         *,
         session: AsyncSession,
-    ) -> Sequence[User]:
-        """List all users with admin or superadmin role for a product."""
+    ) -> list[User]:
+        """List all users with admin or superadmin role for a product.
+
+        Single query with role IN filter, ordered superadmins first.
+        """
         repo = UserRepository(session)
-        superadmins = await repo.list_users(
+        users = await repo.list_users_by_roles(
             product_id=product_id,
-            role=UserRole.SUPERADMIN.value,
+            roles=[UserRole.SUPERADMIN.value, UserRole.ADMIN.value],
             limit=500,
         )
-        admins = await repo.list_users(
-            product_id=product_id,
-            role=UserRole.ADMIN.value,
-            limit=500,
-        )
-        return [*superadmins, *admins]
+        return list(users)
+
+    async def list_admins_with_permissions(
+        self,
+        product_id: str,
+        *,
+        session: AsyncSession,
+    ) -> list[tuple[User, list[str]]]:
+        """List admins with their permissions. Two queries total (users + permissions batch)."""
+        users = await self.list_admins(product_id, session=session)
+        if not users:
+            return []
+
+        admin_repo = AdminRepository(session)
+        user_ids = [u.id for u in users]
+        permissions_map = await admin_repo.get_permissions_batch(user_ids, product_id)
+
+        return [(u, permissions_map.get(u.id, [])) for u in users]
 
     async def grant_role(
         self,

@@ -17,12 +17,20 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID
+import functools
+import inspect
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import structlog
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.db.models import User
+from src.db.session import DatabaseManager
 
 logger = structlog.get_logger(__name__)
 console = Console()
@@ -33,479 +41,418 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+PRODUCT_OPTION = typer.Option(..., "--product", "-p", help="Product slug (vex, synthara)")
 
-async def _get_session() -> tuple[object, object]:
+
+async def _get_session() -> tuple[DatabaseManager, AsyncSession]:
     """Create a database session from settings."""
     from src.core.config import Settings
-    from src.db.session import DatabaseManager
 
     settings = Settings()
     db = DatabaseManager(settings.database_url)
-    await db.init()
     session = db.session_factory()
     return db, session
 
 
-async def _resolve_user(session: object, email: str, product_id: str) -> object:
-    """Find an active user by email and product."""
-    from sqlalchemy import select
+def with_session(fn: Callable[..., Awaitable[None]]) -> Callable[..., None]:
+    """Decorator that wraps an async CLI command with DB session lifecycle.
 
-    from src.db.models import User
+    The decorated function receives `session` as its first argument.
+    Session cleanup and DB shutdown are handled automatically.
+    """
 
-    result = await session.execute(  # type: ignore[union-attr]
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> None:
+        async def _run() -> None:
+            db, session = await _get_session()
+            try:
+                await fn(session, *args, **kwargs)
+            finally:
+                await session.close()
+                await db.close()
+
+        asyncio.run(_run())
+
+    # Remove 'session' from the typer-visible signature so it isn't treated as a CLI arg
+    sig = inspect.signature(fn)
+    params = [p for name, p in sig.parameters.items() if name != "session"]
+    wrapper.__signature__ = sig.replace(parameters=params)  # type: ignore[attr-defined]
+    return wrapper
+
+
+async def _resolve_user_or_exit(session: AsyncSession, email: str, product_id: str) -> User:
+    """Find an active user by email and product, or exit with error."""
+    result = await session.execute(
         select(User).where(
             User.email == email,
             User.product_id == product_id,
             User.is_active == True,  # noqa: E712
         )
     )
-    return result.scalar_one_or_none()
-
-
-async def _write_audit(
-    session: object,
-    *,
-    actor_id: UUID,
-    target_user_id: UUID,
-    product_id: str,
-    action: str,
-    detail: str,
-) -> None:
-    """Write a CLI audit entry."""
-    from src.core.uid import new_id
-    from src.db.models.admin import AdminAuditLog
-
-    entry = AdminAuditLog(
-        id=new_id(),
-        actor_id=actor_id,
-        target_user_id=target_user_id,
-        product_id=product_id,
-        action=action,
-        detail=detail,
-        source="cli",
-    )
-    session.add(entry)  # type: ignore[union-attr]
-
-
-PRODUCT_OPTION = typer.Option(..., "--product", "-p", help="Product slug (vex, synthara)")
+    user = result.scalar_one_or_none()
+    if user is None:
+        console.print(f"[red]User '{email}' not found in product '{product_id}'[/red]")
+        raise typer.Exit(1)
+    return user
 
 
 @app.command("grant-superadmin")
-def grant_superadmin(
+@with_session
+async def grant_superadmin(
+    session: AsyncSession,
     email: str = typer.Argument(..., help="User email"),
     product: str = PRODUCT_OPTION,
 ) -> None:
-    """Grant SUPERADMIN role to a user. Primary bootstrap command."""
+    """Grant SUPERADMIN role to a user. This is the primary bootstrap command."""
+    from src.api.services.admin_management import AdminManagementService
+    from src.core.constants import SYSTEM_USER_ID
+    from src.core.enums import UserRole
 
-    async def _run() -> None:
-        from src.core.constants import SYSTEM_USER_ID
+    user = await _resolve_user_or_exit(session, email, product)
+    service = AdminManagementService()
 
-        db, session = await _get_session()
-        try:
-            user = await _resolve_user(session, email, product)
-            if user is None:
-                console.print(f"[red]User '{email}' not found in product '{product}'[/red]")
-                raise typer.Exit(1)
-
-            old_role = user.role if isinstance(user.role, str) else user.role.value  # type: ignore[union-attr]
-            user.role = "superadmin"  # type: ignore[union-attr]
-            await _write_audit(
-                session,
-                actor_id=SYSTEM_USER_ID,
-                target_user_id=user.id,  # type: ignore[union-attr]
-                product_id=product,
-                action="role.grant",
-                detail=f"CLI: role changed from '{old_role}' to 'superadmin'",
-            )
-            await session.commit()  # type: ignore[union-attr]
-            console.print(
-                f"[green]✓[/green] Granted SUPERADMIN to {email} "
-                f"(product: {product}, user_id: {user.id})"  # type: ignore[union-attr]
-            )
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
-
-    asyncio.run(_run())
+    try:
+        await service.grant_role(
+            actor_id=SYSTEM_USER_ID,
+            target_user_id=user.id,
+            new_role=UserRole.SUPERADMIN,
+            product_id=product,
+            source="cli",
+            session=session,
+        )
+        await session.commit()
+        console.print(
+            f"[green]✓[/green] Granted SUPERADMIN to {email} "
+            f"(product: {product}, user_id: {user.id})"
+        )
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command("revoke-superadmin")
-def revoke_superadmin(
+@with_session
+async def revoke_superadmin(
+    session: AsyncSession,
     email: str = typer.Argument(..., help="User email"),
     product: str = PRODUCT_OPTION,
     force: bool = typer.Option(False, "--force", "-f", help="Bypass last-superadmin check"),
 ) -> None:
     """Revoke SUPERADMIN role, demoting to USER. Blocked if last superadmin (unless --force)."""
+    from src.api.services.admin_management import AdminManagementService, LastSuperadminError
+    from src.core.constants import SYSTEM_USER_ID
 
-    async def _run() -> None:
-        from src.core.constants import SYSTEM_USER_ID
+    user = await _resolve_user_or_exit(session, email, product)
+    service = AdminManagementService()
 
-        db, session = await _get_session()
-        try:
-            user = await _resolve_user(session, email, product)
-            if user is None:
-                console.print(f"[red]User '{email}' not found in product '{product}'[/red]")
-                raise typer.Exit(1)
+    try:
+        await service.revoke_role(
+            actor_id=SYSTEM_USER_ID,
+            target_user_id=user.id,
+            product_id=product,
+            source="cli",
+            session=session,
+        )
+        await session.commit()
+        console.print(f"[green]✓[/green] Revoked SUPERADMIN from {email} (product: {product})")
+    except LastSuperadminError as exc:
+        if force:
+            from sqlalchemy import delete as sa_delete
 
-            current_role = user.role if isinstance(user.role, str) else user.role.value  # type: ignore[union-attr]
-            if current_role != "superadmin":
-                console.print(
-                    f"[yellow]User '{email}' is not a superadmin (role: {current_role})[/yellow]"
-                )
-                raise typer.Exit(1)
+            from src.core.enums import UserRole
+            from src.core.uid import new_id
+            from src.db.models.admin import AdminAuditLog, AdminPermissionGrant
 
-            if not force:
-                from sqlalchemy import func, select
-
-                from src.db.models import User as UserModel
-
-                count_result = await session.execute(  # type: ignore[union-attr]
-                    select(func.count(UserModel.id)).where(
-                        UserModel.product_id == product,
-                        UserModel.role == "superadmin",
-                        UserModel.is_active == True,  # noqa: E712
-                    )
-                )
-                if count_result.scalar_one() <= 1:
-                    console.print(
-                        "[red]Cannot revoke the last superadmin. Use --force to override.[/red]"
-                    )
-                    raise typer.Exit(1)
-
-            user.role = "user"  # type: ignore[union-attr]
-
-            from sqlalchemy import delete
-
-            from src.db.models.admin import AdminPermissionGrant
-
-            await session.execute(  # type: ignore[union-attr]
-                delete(AdminPermissionGrant).where(
-                    AdminPermissionGrant.user_id == user.id,  # type: ignore[union-attr]
+            user.role = UserRole.USER
+            await session.execute(
+                sa_delete(AdminPermissionGrant).where(
+                    AdminPermissionGrant.user_id == user.id,
                     AdminPermissionGrant.product_id == product,
                 )
             )
-
-            await _write_audit(
-                session,
-                actor_id=SYSTEM_USER_ID,
-                target_user_id=user.id,  # type: ignore[union-attr]
-                product_id=product,
-                action="role.revoke",
-                detail="CLI: role changed from 'superadmin' to 'user'",
+            session.add(
+                AdminAuditLog(
+                    id=new_id(),
+                    actor_id=SYSTEM_USER_ID,
+                    target_user_id=user.id,
+                    product_id=product,
+                    action="role.revoke",
+                    detail="CLI --force: revoked last superadmin",
+                    source="cli",
+                )
             )
-            await session.commit()  # type: ignore[union-attr]
-            console.print(f"[green]✓[/green] Revoked SUPERADMIN from {email} (product: {product})")
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
-
-    asyncio.run(_run())
+            await session.commit()
+            console.print(
+                f"[yellow]⚠[/yellow] Force-revoked last SUPERADMIN from {email} "
+                f"(product: {product})"
+            )
+        else:
+            console.print(f"[red]{exc}[/red]")
+            console.print("[dim]Use --force to override.[/dim]")
+            raise typer.Exit(1) from exc
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command("grant-admin")
-def grant_admin(
+@with_session
+async def grant_admin(
+    session: AsyncSession,
     email: str = typer.Argument(..., help="User email"),
     product: str = PRODUCT_OPTION,
 ) -> None:
     """Grant ADMIN role to a user."""
+    from src.api.services.admin_management import AdminManagementService
+    from src.core.constants import SYSTEM_USER_ID
+    from src.core.enums import UserRole
 
-    async def _run() -> None:
-        from src.core.constants import SYSTEM_USER_ID
+    user = await _resolve_user_or_exit(session, email, product)
+    service = AdminManagementService()
 
-        db, session = await _get_session()
-        try:
-            user = await _resolve_user(session, email, product)
-            if user is None:
-                console.print(f"[red]User '{email}' not found in product '{product}'[/red]")
-                raise typer.Exit(1)
-
-            old_role = user.role if isinstance(user.role, str) else user.role.value  # type: ignore[union-attr]
-            user.role = "admin"  # type: ignore[union-attr]
-            await _write_audit(
-                session,
-                actor_id=SYSTEM_USER_ID,
-                target_user_id=user.id,  # type: ignore[union-attr]
-                product_id=product,
-                action="role.grant",
-                detail=f"CLI: role changed from '{old_role}' to 'admin'",
-            )
-            await session.commit()  # type: ignore[union-attr]
-            console.print(f"[green]✓[/green] Granted ADMIN to {email} (product: {product})")
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
-
-    asyncio.run(_run())
+    try:
+        await service.grant_role(
+            actor_id=SYSTEM_USER_ID,
+            target_user_id=user.id,
+            new_role=UserRole.ADMIN,
+            product_id=product,
+            source="cli",
+            session=session,
+        )
+        await session.commit()
+        console.print(f"[green]✓[/green] Granted ADMIN to {email} (product: {product})")
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command("revoke-admin")
-def revoke_admin(
+@with_session
+async def revoke_admin(
+    session: AsyncSession,
     email: str = typer.Argument(..., help="User email"),
     product: str = PRODUCT_OPTION,
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Bypass last-superadmin check (if target is superadmin)",
+    ),
 ) -> None:
-    """Revoke ADMIN role, demoting to USER. Also revokes all permissions."""
+    """Revoke admin role, demoting to USER. Also revokes all permissions.
 
-    async def _run() -> None:
-        from sqlalchemy import delete
+    If the target is a superadmin, the same last-superadmin guard applies.
+    Use --force to bypass.
+    """
+    from src.api.services.admin_management import AdminManagementService, LastSuperadminError
+    from src.core.constants import SYSTEM_USER_ID
 
-        from src.core.constants import SYSTEM_USER_ID
-        from src.db.models.admin import AdminPermissionGrant
+    user = await _resolve_user_or_exit(session, email, product)
+    service = AdminManagementService()
 
-        db, session = await _get_session()
-        try:
-            user = await _resolve_user(session, email, product)
-            if user is None:
-                console.print(f"[red]User '{email}' not found in product '{product}'[/red]")
-                raise typer.Exit(1)
+    try:
+        await service.revoke_role(
+            actor_id=SYSTEM_USER_ID,
+            target_user_id=user.id,
+            product_id=product,
+            source="cli",
+            session=session,
+        )
+        await session.commit()
+        console.print(f"[green]✓[/green] Revoked admin from {email} (product: {product})")
+    except LastSuperadminError as exc:
+        if force:
+            from sqlalchemy import delete as sa_delete
 
-            current_role = user.role if isinstance(user.role, str) else user.role.value  # type: ignore[union-attr]
-            if current_role not in ("admin", "superadmin"):
-                console.print(
-                    f"[yellow]User '{email}' is not an admin (role: {current_role})[/yellow]"
-                )
-                raise typer.Exit(1)
+            from src.core.enums import UserRole
+            from src.core.uid import new_id
+            from src.db.models.admin import AdminAuditLog, AdminPermissionGrant
 
-            user.role = "user"  # type: ignore[union-attr]
-            await session.execute(  # type: ignore[union-attr]
-                delete(AdminPermissionGrant).where(
-                    AdminPermissionGrant.user_id == user.id,  # type: ignore[union-attr]
+            user.role = UserRole.USER
+            await session.execute(
+                sa_delete(AdminPermissionGrant).where(
+                    AdminPermissionGrant.user_id == user.id,
                     AdminPermissionGrant.product_id == product,
                 )
             )
-            await _write_audit(
-                session,
-                actor_id=SYSTEM_USER_ID,
-                target_user_id=user.id,  # type: ignore[union-attr]
-                product_id=product,
-                action="role.revoke",
-                detail=f"CLI: role changed from '{current_role}' to 'user'",
-            )
-            await session.commit()  # type: ignore[union-attr]
-            console.print(f"[green]✓[/green] Revoked admin from {email} (product: {product})")
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
-
-    asyncio.run(_run())
-
-
-@app.command("list-admins")
-def list_admins(
-    product: str = PRODUCT_OPTION,
-) -> None:
-    """List all admin and superadmin users for a product."""
-
-    async def _run() -> None:
-        from sqlalchemy import select
-
-        from src.db.models import User as UserModel
-        from src.db.models.admin import AdminPermissionGrant
-
-        db, session = await _get_session()
-        try:
-            result = await session.execute(  # type: ignore[union-attr]
-                select(UserModel).where(
-                    UserModel.product_id == product,
-                    UserModel.role.in_(["admin", "superadmin"]),
-                    UserModel.is_active == True,  # noqa: E712
+            session.add(
+                AdminAuditLog(
+                    id=new_id(),
+                    actor_id=SYSTEM_USER_ID,
+                    target_user_id=user.id,
+                    product_id=product,
+                    action="role.revoke",
+                    detail="CLI --force: revoked last superadmin via revoke-admin",
+                    source="cli",
                 )
             )
-            users = result.scalars().all()
-
-            if not users:
-                console.print(f"[yellow]No admins found for product '{product}'[/yellow]")
-                return
-
-            table = Table(title=f"Admins — {product}")
-            table.add_column("Email", style="cyan")
-            table.add_column("Role", style="bold")
-            table.add_column("Permissions", style="green")
-            table.add_column("User ID", style="dim")
-
-            for u in users:
-                perm_result = await session.execute(  # type: ignore[union-attr]
-                    select(AdminPermissionGrant.permission).where(
-                        AdminPermissionGrant.user_id == u.id,
-                        AdminPermissionGrant.product_id == product,
-                    )
-                )
-                perms = [p for (p,) in perm_result.all()]
-                role_str = u.role if isinstance(u.role, str) else u.role.value
-                table.add_row(
-                    u.email,
-                    role_str.upper(),
-                    ", ".join(perms) if perms else "—",
-                    str(u.id),
-                )
-
-            console.print(table)
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
-
-    asyncio.run(_run())
+            await session.commit()
+            console.print(f"[yellow]⚠[/yellow] Force-revoked from {email} (product: {product})")
+        else:
+            console.print(f"[red]{exc}[/red]")
+            console.print("[dim]Use --force to override.[/dim]")
+            raise typer.Exit(1) from exc
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command("grant-permission")
-def grant_permission(
+@with_session
+async def grant_permission(
+    session: AsyncSession,
     email: str = typer.Argument(..., help="User email"),
     permission: str = typer.Argument(..., help="Permission key (e.g. billing_adjust)"),
     product: str = PRODUCT_OPTION,
 ) -> None:
     """Grant a permission to an admin user."""
+    from src.api.services.admin_management import AdminManagementService
+    from src.core.constants import SYSTEM_USER_ID
+    from src.core.enums import AdminPermission
 
-    async def _run() -> None:
-        from src.core.enums import AdminPermission
+    try:
+        perm = AdminPermission(permission)
+    except ValueError:
+        valid = ", ".join(p.value for p in AdminPermission)
+        console.print(f"[red]Invalid permission '{permission}'. Valid: {valid}[/red]")
+        raise typer.Exit(1) from None
 
-        try:
-            perm = AdminPermission(permission)
-        except ValueError:
-            valid = ", ".join(p.value for p in AdminPermission)
-            console.print(f"[red]Invalid permission '{permission}'. Valid: {valid}[/red]")
-            raise typer.Exit(1) from None
+    user = await _resolve_user_or_exit(session, email, product)
+    service = AdminManagementService()
 
-        from src.core.constants import SYSTEM_USER_ID
-        from src.core.uid import new_id
-        from src.db.models.admin import AdminPermissionGrant
-        from src.db.repositories.admin import AdminRepository
-
-        db, session = await _get_session()
-        try:
-            user = await _resolve_user(session, email, product)
-            if user is None:
-                console.print(f"[red]User '{email}' not found in product '{product}'[/red]")
-                raise typer.Exit(1)
-
-            admin_repo = AdminRepository(session)  # type: ignore[arg-type]
-            already = await admin_repo.has_permission(user.id, perm.value, product)  # type: ignore[union-attr]
-            if already:
-                console.print(f"[yellow]User already has '{perm.value}' permission[/yellow]")
-                return
-
-            session.add(  # type: ignore[union-attr]
-                AdminPermissionGrant(
-                    id=new_id(),
-                    user_id=user.id,  # type: ignore[union-attr]
-                    permission=perm.value,
-                    product_id=product,
-                    granted_by=SYSTEM_USER_ID,
-                )
-            )
-            await _write_audit(
-                session,
-                actor_id=SYSTEM_USER_ID,
-                target_user_id=user.id,  # type: ignore[union-attr]
-                product_id=product,
-                action="permission.grant",
-                detail=f"CLI: granted permission '{perm.value}'",
-            )
-            await session.commit()  # type: ignore[union-attr]
-            console.print(
-                f"[green]✓[/green] Granted '{perm.value}' to {email} (product: {product})"
-            )
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
-
-    asyncio.run(_run())
+    try:
+        await service.grant_permission(
+            actor_id=SYSTEM_USER_ID,
+            target_user_id=user.id,
+            permission=perm,
+            product_id=product,
+            source="cli",
+            session=session,
+        )
+        await session.commit()
+        console.print(f"[green]✓[/green] Granted '{perm.value}' to {email} (product: {product})")
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command("revoke-permission")
-def revoke_permission(
+@with_session
+async def revoke_permission(
+    session: AsyncSession,
     email: str = typer.Argument(..., help="User email"),
     permission: str = typer.Argument(..., help="Permission key (e.g. billing_adjust)"),
     product: str = PRODUCT_OPTION,
 ) -> None:
     """Revoke a permission from a user."""
+    from src.api.services.admin_management import AdminManagementService
+    from src.core.constants import SYSTEM_USER_ID
+    from src.core.enums import AdminPermission
 
-    async def _run() -> None:
-        from src.core.enums import AdminPermission
+    try:
+        perm = AdminPermission(permission)
+    except ValueError:
+        valid = ", ".join(p.value for p in AdminPermission)
+        console.print(f"[red]Invalid permission '{permission}'. Valid: {valid}[/red]")
+        raise typer.Exit(1) from None
 
-        try:
-            perm = AdminPermission(permission)
-        except ValueError:
-            valid = ", ".join(p.value for p in AdminPermission)
-            console.print(f"[red]Invalid permission '{permission}'. Valid: {valid}[/red]")
-            raise typer.Exit(1) from None
+    user = await _resolve_user_or_exit(session, email, product)
+    service = AdminManagementService()
 
-        from src.core.constants import SYSTEM_USER_ID
-        from src.db.repositories.admin import AdminRepository
+    try:
+        await service.revoke_permission(
+            actor_id=SYSTEM_USER_ID,
+            target_user_id=user.id,
+            permission=perm,
+            product_id=product,
+            source="cli",
+            session=session,
+        )
+        await session.commit()
+        console.print(f"[green]✓[/green] Revoked '{perm.value}' from {email} (product: {product})")
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
-        db, session = await _get_session()
-        try:
-            user = await _resolve_user(session, email, product)
-            if user is None:
-                console.print(f"[red]User '{email}' not found in product '{product}'[/red]")
-                raise typer.Exit(1)
 
-            admin_repo = AdminRepository(session)  # type: ignore[arg-type]
-            deleted = await admin_repo.revoke_permission(user.id, perm.value, product)  # type: ignore[union-attr]
-            if not deleted:
-                console.print(f"[yellow]User doesn't have '{perm.value}' permission[/yellow]")
-                return
+@app.command("list-admins")
+@with_session
+async def list_admins(
+    session: AsyncSession,
+    product: str = PRODUCT_OPTION,
+) -> None:
+    """List all admin and superadmin users for a product."""
+    from src.db.repositories.admin import AdminRepository
+    from src.db.repositories.user import UserRepository
 
-            await _write_audit(
-                session,
-                actor_id=SYSTEM_USER_ID,
-                target_user_id=user.id,  # type: ignore[union-attr]
-                product_id=product,
-                action="permission.revoke",
-                detail=f"CLI: revoked permission '{perm.value}'",
-            )
-            await session.commit()  # type: ignore[union-attr]
-            console.print(
-                f"[green]✓[/green] Revoked '{perm.value}' from {email} (product: {product})"
-            )
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
+    user_repo = UserRepository(session)
+    users = await user_repo.list_users_by_roles(
+        product_id=product,
+        roles=["admin", "superadmin"],
+    )
 
-    asyncio.run(_run())
+    if not users:
+        console.print(f"[yellow]No admins found for product '{product}'[/yellow]")
+        return
+
+    admin_repo = AdminRepository(session)
+    permissions_map = await admin_repo.get_permissions_batch([u.id for u in users], product)
+
+    table = Table(title=f"Admins — {product}")
+    table.add_column("Email", style="cyan")
+    table.add_column("Role", style="bold")
+    table.add_column("Permissions", style="green")
+    table.add_column("User ID", style="dim")
+
+    for u in users:
+        perms = permissions_map.get(u.id, [])
+        role_str = u.role if isinstance(u.role, str) else u.role.value
+        table.add_row(
+            u.email,
+            role_str.upper(),
+            ", ".join(perms) if perms else "—",
+            str(u.id),
+        )
+
+    console.print(table)
 
 
 @app.command("audit-log")
-def audit_log(
+@with_session
+async def audit_log(
+    session: AsyncSession,
     product: str = PRODUCT_OPTION,
     limit: int = typer.Option(20, "--limit", "-n", help="Number of entries"),
 ) -> None:
     """Show recent audit log entries."""
+    from src.db.repositories.admin import AdminRepository
 
-    async def _run() -> None:
-        from src.db.repositories.admin import AdminRepository
+    admin_repo = AdminRepository(session)
+    entries = await admin_repo.get_audit_log(product, limit=limit)
 
-        db, session = await _get_session()
-        try:
-            admin_repo = AdminRepository(session)  # type: ignore[arg-type]
-            entries = await admin_repo.get_audit_log(product, limit=limit)
+    if not entries:
+        console.print(f"[yellow]No audit entries for product '{product}'[/yellow]")
+        return
 
-            if not entries:
-                console.print(f"[yellow]No audit entries for product '{product}'[/yellow]")
-                return
+    table = Table(title=f"Admin Audit Log — {product}")
+    table.add_column("Time", style="dim")
+    table.add_column("Action", style="bold")
+    table.add_column("Actor", style="cyan")
+    table.add_column("Target", style="yellow")
+    table.add_column("Detail")
+    table.add_column("Source", style="dim")
 
-            table = Table(title=f"Admin Audit Log — {product}")
-            table.add_column("Time", style="dim")
-            table.add_column("Action", style="bold")
-            table.add_column("Actor", style="cyan")
-            table.add_column("Target", style="yellow")
-            table.add_column("Detail")
-            table.add_column("Source", style="dim")
+    for e in entries:
+        table.add_row(
+            str(e.created_at)[:19],
+            e.action,
+            str(e.actor_id)[:8] + "…",
+            str(e.target_user_id)[:8] + "…",
+            e.detail,
+            e.source,
+        )
 
-            for e in entries:
-                table.add_row(
-                    str(e.created_at)[:19],
-                    e.action,
-                    str(e.actor_id)[:8] + "…",
-                    str(e.target_user_id)[:8] + "…",
-                    e.detail,
-                    e.source,
-                )
-
-            console.print(table)
-        finally:
-            await session.close()  # type: ignore[union-attr]
-            await db.shutdown()  # type: ignore[union-attr]
-
-    asyncio.run(_run())
+    console.print(table)
 
 
 if __name__ == "__main__":

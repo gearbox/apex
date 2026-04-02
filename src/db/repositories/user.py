@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, delete, func, literal, select, tuple_, update
+from sqlalchemy import CursorResult, case, delete, func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import JobStatus, SubscriptionTier, UserRole
@@ -460,6 +460,36 @@ class UserRepository:
 
         result = await self._session.execute(
             base.order_by(User.created_at.desc(), User.id.desc()).limit(limit + 1)
+        )
+        return result.scalars().all()
+
+    async def list_users_by_roles(
+        self,
+        product_id: str,
+        roles: Sequence[str],
+        limit: int = 500,
+    ) -> Sequence[User]:
+        """List active users matching any of the given roles in a product.
+
+        Excludes SYSTEM role. Ordered: superadmin first, then admin, by created_at desc.
+        """
+        result = await self._session.execute(
+            select(User)
+            .where(
+                User.product_id == product_id,
+                User.role.in_(roles),
+                User.role != UserRole.SYSTEM.value,
+                User.is_active == True,  # noqa: E712
+            )
+            .order_by(
+                case(
+                    (User.role == UserRole.SUPERADMIN.value, 0),
+                    (User.role == UserRole.ADMIN.value, 1),
+                    else_=2,
+                ),
+                User.created_at.desc(),
+            )
+            .limit(limit)
         )
         return result.scalars().all()
 

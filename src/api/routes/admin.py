@@ -15,7 +15,7 @@ from litestar.params import Parameter
 from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies.auth import get_current_admin_user
+from src.api.dependencies.auth import get_billing_adjust_admin, get_current_admin_user
 from src.api.routes.billing import _txn_to_response
 from src.api.schemas.admin import (
     AdminOrgResponse,
@@ -52,28 +52,6 @@ from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 
 logger = structlog.get_logger(__name__)
-
-
-async def _require_billing_adjust(user: User, session: AsyncSession, product_id: str) -> None:
-    """Raise NotAuthorizedException if user cannot perform billing adjustments.
-
-    SUPERADMIN has inherent permission; ADMIN requires explicit billing_adjust grant.
-    """
-    from litestar.exceptions import NotAuthorizedException
-
-    from src.core.enums import UserRole
-    from src.db.repositories.admin import AdminRepository
-
-    role = user.role if isinstance(user.role, str) else user.role.value
-    if role == UserRole.SUPERADMIN.value:
-        return
-
-    admin_repo = AdminRepository(session)
-    has_perm = await admin_repo.has_permission(user.id, "billing_adjust", product_id)
-    if not has_perm:
-        raise NotAuthorizedException(
-            detail="Billing adjustment permission required. Contact a superadmin."
-        )
 
 
 class AdminController(Controller):
@@ -366,7 +344,10 @@ class AdminController(Controller):
             next_cursor=next_cursor,
         )
 
-    @post("/accounts/{account_id:uuid}/adjust")
+    @post(
+        "/accounts/{account_id:uuid}/adjust",
+        dependencies={"admin_user": Provide(get_billing_adjust_admin)},
+    )
     async def adjust_account(
         self,
         admin_user: User,
@@ -388,8 +369,8 @@ class AdminController(Controller):
         """Admin balance adjustment (idempotent via Idempotency-Key). Positive = credit, negative = debit.
 
         Requires SUPERADMIN role or ADMIN role with billing_adjust permission.
+        Authorization is enforced by the get_billing_adjust_admin dependency.
         """
-        await _require_billing_adjust(admin_user, session, product_id)
         logger.info(
             "admin.adjusting_account",
             admin_id=str(admin_user.id),

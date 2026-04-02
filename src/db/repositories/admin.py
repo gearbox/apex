@@ -55,6 +55,37 @@ class AdminRepository:
         )
         return result.scalars().all()
 
+    async def get_permissions_batch(
+        self,
+        user_ids: Sequence[UUID],
+        product_id: str,
+    ) -> dict[UUID, list[str]]:
+        """Get permissions for multiple users in a single query.
+
+        Returns:
+            Mapping of user_id → list of permission strings.
+            Users with no permissions are included with empty lists.
+        """
+        if not user_ids:
+            return {}
+
+        result = await self._session.execute(
+            select(
+                AdminPermissionGrant.user_id,
+                AdminPermissionGrant.permission,
+            ).where(
+                AdminPermissionGrant.user_id.in_(user_ids),
+                AdminPermissionGrant.product_id == product_id,
+            )
+        )
+        rows = result.all()
+
+        permissions: dict[UUID, list[str]] = {uid: [] for uid in user_ids}
+        for user_id, permission in rows:
+            permissions[user_id].append(permission)
+
+        return permissions
+
     async def has_permission(self, user_id: UUID, permission: str, product_id: str) -> bool:
         """Check if a user has a specific permission."""
         result = await self._session.execute(
