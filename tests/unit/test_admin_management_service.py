@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.api.services.admin_management import (
     AdminManagementError,
@@ -38,7 +39,11 @@ def service() -> AdminManagementService:
 
 @pytest.fixture
 def mock_session() -> AsyncMock:
-    return AsyncMock()
+    session = AsyncMock()
+    session.begin_nested = MagicMock(
+        return_value=AsyncMock(__aenter__=AsyncMock(), __aexit__=AsyncMock(return_value=False))
+    )
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -473,9 +478,14 @@ class TestGrantPermission:
         self, service: AdminManagementService, mock_session: AsyncMock
     ) -> None:
         """Concurrent grant that hits unique constraint is treated as idempotent no-op."""
-        from sqlalchemy.exc import IntegrityError
-
         target = _make_user(role="admin", product_id="vex")
+
+        # Mock begin_nested as an async context manager whose __aexit__
+        # propagates the IntegrityError (simulating SAVEPOINT rollback).
+        nested_ctx = MagicMock()
+        nested_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        nested_ctx.__aexit__ = AsyncMock(return_value=False)  # propagate exception
+        mock_session.begin_nested = MagicMock(return_value=nested_ctx)
 
         with (
             patch("src.api.services.admin_management.UserRepository") as MockUserRepo,
@@ -499,8 +509,8 @@ class TestGrantPermission:
 
         # No audit entry for the race loser
         admin_repo.write_audit.assert_not_awaited()
-        # Session was rolled back
-        mock_session.rollback.assert_awaited_once()
+        # Session.rollback should NOT be called — SAVEPOINT handles it
+        mock_session.rollback.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -50,12 +50,16 @@ def _require_role(
     """Assert the user's role is in the allowed set.
 
     Normalizes user.role to a UserRole enum before comparison to handle
-    cases where the ORM returns a plain string.
+    cases where the ORM returns a plain string. An unrecognized role value
+    is treated as an authorization failure rather than raising ValueError.
 
     Raises:
-        NotAuthorizedException: If role not in allowed_roles.
+        NotAuthorizedException: If role not in allowed_roles or unrecognized.
     """
-    role = user.role if isinstance(user.role, UserRole) else UserRole(user.role)
+    try:
+        role = user.role if isinstance(user.role, UserRole) else UserRole(user.role)
+    except ValueError as exc:
+        raise NotAuthorizedException(detail=detail) from exc
     if role not in allowed_roles:
         raise NotAuthorizedException(detail=detail)
     return user

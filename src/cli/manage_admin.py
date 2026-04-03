@@ -26,7 +26,13 @@ from rich.table import Table
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.services.admin_management import AdminManagementService, LastSuperadminError
+from src.core.config import Settings
+from src.core.constants import SYSTEM_USER_ID
+from src.core.enums import AdminPermission, UserRole
 from src.db.models import User
+from src.db.repositories.admin import AdminRepository
+from src.db.repositories.user import UserRepository
 from src.db.session import DatabaseManager
 
 logger = structlog.get_logger(__name__)
@@ -48,8 +54,6 @@ PRODUCT_OPTION = typer.Option(..., "--product", "-p", help="Product slug (vex, s
 
 async def _get_session() -> tuple[DatabaseManager, AsyncSession]:
     """Create a database session from settings."""
-    from src.core.config import Settings
-
     settings = Settings()
     db = DatabaseManager(settings.database_url)
     session = db.session_factory()
@@ -115,8 +119,6 @@ async def _with_user_and_service(
     success_message: str,
 ) -> None:
     """Resolve user, create service, call fn(service, user), commit, print."""
-    from src.api.services.admin_management import AdminManagementService
-
     user = await _resolve_user_or_exit(session, email, product)
     service = AdminManagementService()
     await _run_or_exit(session, fn(service, user), success_message)
@@ -132,9 +134,6 @@ async def _revoke_with_force_handling(
     force_msg: str,
 ) -> None:
     """Revoke an admin/superadmin role with shared LastSuperadminError handling."""
-    from src.api.services.admin_management import AdminManagementService, LastSuperadminError
-    from src.core.constants import SYSTEM_USER_ID
-
     user = await _resolve_user_or_exit(session, email, product)
     service = AdminManagementService()
 
@@ -174,29 +173,24 @@ async def _revoke_with_force_handling(
 
 
 async def _grant_superadmin_impl(session: AsyncSession, email: str, product: str) -> None:
-    from src.core.constants import SYSTEM_USER_ID
-    from src.core.enums import UserRole
-
-    user = await _resolve_user_or_exit(session, email, product)
-
-    async def op(service: object, _user: User) -> None:
-        from src.api.services.admin_management import AdminManagementService
-
+    async def op(service: object, user: User) -> None:
         assert isinstance(service, AdminManagementService)
         await service.grant_role(
             actor_id=SYSTEM_USER_ID,
-            target_user_id=_user.id,
+            target_user_id=user.id,
             new_role=UserRole.SUPERADMIN,
             product_id=product,
             source="cli",
             session=session,
         )
 
-    await _with_user_and_service(
+    # Resolve once via _with_user_and_service; include user_id in message
+    # by deferring message construction.
+    user = await _resolve_user_or_exit(session, email, product)
+    service = AdminManagementService()
+    await _run_or_exit(
         session,
-        email,
-        product,
-        op,
+        op(service, user),
         f"[green]✓[/green] Granted SUPERADMIN to {email} (product: {product}, user_id: {user.id})",
     )
 
@@ -211,12 +205,7 @@ def grant_superadmin(
 
 
 async def _grant_admin_impl(session: AsyncSession, email: str, product: str) -> None:
-    from src.core.constants import SYSTEM_USER_ID
-    from src.core.enums import UserRole
-
     async def op(service: object, user: User) -> None:
-        from src.api.services.admin_management import AdminManagementService
-
         assert isinstance(service, AdminManagementService)
         await service.grant_role(
             actor_id=SYSTEM_USER_ID,
@@ -294,9 +283,6 @@ def revoke_admin(
 async def _grant_permission_impl(
     session: AsyncSession, email: str, permission: str, product: str
 ) -> None:
-    from src.core.constants import SYSTEM_USER_ID
-    from src.core.enums import AdminPermission
-
     try:
         perm = AdminPermission(permission)
     except ValueError:
@@ -305,8 +291,6 @@ async def _grant_permission_impl(
         raise typer.Exit(1) from None
 
     async def op(service: object, user: User) -> None:
-        from src.api.services.admin_management import AdminManagementService
-
         assert isinstance(service, AdminManagementService)
         await service.grant_permission(
             actor_id=SYSTEM_USER_ID,
@@ -339,9 +323,6 @@ def grant_permission(
 async def _revoke_permission_impl(
     session: AsyncSession, email: str, permission: str, product: str
 ) -> None:
-    from src.core.constants import SYSTEM_USER_ID
-    from src.core.enums import AdminPermission
-
     try:
         perm = AdminPermission(permission)
     except ValueError:
@@ -350,8 +331,6 @@ async def _revoke_permission_impl(
         raise typer.Exit(1) from None
 
     async def op(service: object, user: User) -> None:
-        from src.api.services.admin_management import AdminManagementService
-
         assert isinstance(service, AdminManagementService)
         await service.revoke_permission(
             actor_id=SYSTEM_USER_ID,
@@ -382,9 +361,6 @@ def revoke_permission(
 
 
 async def _list_admins_impl(session: AsyncSession, product: str) -> None:
-    from src.db.repositories.admin import AdminRepository
-    from src.db.repositories.user import UserRepository
-
     user_repo = UserRepository(session)
     users = await user_repo.list_users_by_roles(
         product_id=product,
@@ -424,8 +400,6 @@ def list_admins(product: str = PRODUCT_OPTION) -> None:
 
 
 async def _audit_log_impl(session: AsyncSession, product: str, limit: int) -> None:
-    from src.db.repositories.admin import AdminRepository
-
     admin_repo = AdminRepository(session)
     entries = await admin_repo.get_audit_log(product, limit=limit)
 

@@ -318,19 +318,19 @@ class AdminManagementService:
             return  # idempotent — fast path
 
         try:
-            await admin_repo.grant_permission(
-                AdminPermissionGrant(
-                    id=new_id(),
-                    user_id=target_user_id,
-                    permission=permission.value,
-                    product_id=product_id,
-                    granted_by=actor_id,
+            async with session.begin_nested():
+                await admin_repo.grant_permission(
+                    AdminPermissionGrant(
+                        id=new_id(),
+                        user_id=target_user_id,
+                        permission=permission.value,
+                        product_id=product_id,
+                        granted_by=actor_id,
+                    )
                 )
-            )
         except IntegrityError:
-            # Concurrent grant won the race — treat as idempotent success.
-            # Expunge the failed object and continue without audit write.
-            await session.rollback()
+            # Concurrent grant won the race — the SAVEPOINT was rolled back,
+            # but the outer transaction remains valid. Treat as idempotent success.
             logger.info(
                 "admin.permission.grant_race",
                 target_user_id=str(target_user_id),

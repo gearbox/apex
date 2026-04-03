@@ -114,6 +114,19 @@ class TestGetCurrentAdminUser:
 
         assert result is user
 
+    async def test_rejects_unknown_role_as_unauthorized(self) -> None:
+        """An unrecognized role value should raise NotAuthorizedException, not ValueError."""
+        user = _make_user("bogus_role_value")
+        request = _make_request(user_id=user.id)
+        session = AsyncMock()
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "src.api.dependencies.auth.UserRepository"
+        ) as MockRepo:
+            MockRepo.return_value.get_active_user = AsyncMock(return_value=user)
+            with pytest.raises(NotAuthorizedException):
+                await get_current_admin_user(request, session)
+
 
 # ---------------------------------------------------------------------------
 # get_current_superadmin_user
