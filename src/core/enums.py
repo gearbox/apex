@@ -280,14 +280,25 @@ class OrgRole(StrEnum):
 class UserRole(StrEnum):
     """User account roles.
 
-    SYSTEM — internal sentinel user (seeded by migration, cannot authenticate).
-    ADMIN  — full administrative access to the platform.
-    USER   — standard authenticated user (default for all registrations).
+    SYSTEM     — internal sentinel user (seeded by migration, cannot authenticate).
+    SUPERADMIN — full administrative access including role management.
+    ADMIN      — administrative access to the platform (no role escalation).
+    USER       — standard authenticated user (default for all registrations).
     """
 
     SYSTEM = "system"
+    SUPERADMIN = "superadmin"
     ADMIN = "admin"
     USER = "user"
+
+
+class AdminPermission(StrEnum):
+    """Granular permissions grantable to admin-role users by superadmins.
+
+    BILLING_ADJUST — allows use of POST /v1/admin/accounts/{id}/adjust.
+    """
+
+    BILLING_ADJUST = "billing_adjust"
 
 
 class ComponentStatus(StrEnum):

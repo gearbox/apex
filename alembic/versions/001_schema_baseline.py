@@ -766,6 +766,72 @@ def upgrade() -> None:
     op.create_index("ix_generation_models_provider", "generation_models", ["provider"])
     op.create_index("ix_generation_models_is_enabled", "generation_models", ["is_enabled"])
 
+    # -------------------------------------------------------------------------
+    # admin_permissions
+    # -------------------------------------------------------------------------
+    op.create_table(
+        "admin_permissions",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column(
+            "user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("permission", sa.String(50), nullable=False),
+        sa.Column("product_id", sa.String(32), nullable=False),
+        sa.Column(
+            "granted_by",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id"),
+            nullable=False,
+        ),
+        sa.Column(
+            "granted_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "user_id", "permission", "product_id", name="uq_admin_perm_user_perm_product"
+        ),
+    )
+    op.create_index("ix_admin_perm_user_product", "admin_permissions", ["user_id", "product_id"])
+
+    # -------------------------------------------------------------------------
+    # admin_audit_log
+    # -------------------------------------------------------------------------
+    op.create_table(
+        "admin_audit_log",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column(
+            "actor_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id"),
+            nullable=False,
+        ),
+        sa.Column(
+            "target_user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id"),
+            nullable=False,
+        ),
+        sa.Column("product_id", sa.String(32), nullable=False),
+        sa.Column("action", sa.String(50), nullable=False),
+        sa.Column("detail", sa.Text(), nullable=False),
+        sa.Column("source", sa.String(10), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("ix_audit_target_product", "admin_audit_log", ["target_user_id", "product_id"])
+    op.create_index("ix_audit_created", "admin_audit_log", ["created_at"])
+
 
 def downgrade() -> None:
     """Drop all tables in reverse dependency order."""
@@ -775,6 +841,11 @@ def downgrade() -> None:
     )
     op.drop_constraint("token_transactions_job_id_fkey", "token_transactions", type_="foreignkey")
 
+    op.drop_index("ix_audit_created", table_name="admin_audit_log")
+    op.drop_index("ix_audit_target_product", table_name="admin_audit_log")
+    op.drop_table("admin_audit_log")
+    op.drop_index("ix_admin_perm_user_product", table_name="admin_permissions")
+    op.drop_table("admin_permissions")
     op.drop_table("generation_models")
     op.drop_table("pricing_catalog")
     op.drop_table("generation_outputs")

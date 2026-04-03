@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, delete, func, literal, select, tuple_, update
+from sqlalchemy import CursorResult, case, delete, func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import JobStatus, SubscriptionTier, UserRole
@@ -462,6 +462,92 @@ class UserRepository:
             base.order_by(User.created_at.desc(), User.id.desc()).limit(limit + 1)
         )
         return result.scalars().all()
+
+    async def list_users_by_roles(
+        self,
+        product_id: str,
+        roles: Sequence[str],
+        limit: int = 500,
+    ) -> Sequence[User]:
+        """List active users matching any of the given roles in a product.
+
+        Excludes SYSTEM role. Ordered: superadmin first, then admin, by created_at desc.
+        """
+        result = await self._session.execute(
+            select(User)
+            .where(
+                User.product_id == product_id,
+                User.role.in_(roles),
+                User.role != UserRole.SYSTEM.value,
+                User.is_active == True,  # noqa: E712
+            )
+            .order_by(
+                case(
+                    (User.role == UserRole.SUPERADMIN.value, 0),
+                    (User.role == UserRole.ADMIN.value, 1),
+                    else_=2,
+                ),
+                User.created_at.desc(),
+            )
+            .limit(limit)
+        )
+        return result.scalars().all()
+
+    async def count_by_roles(
+        self,
+        product_id: str,
+        roles: Sequence[str],
+    ) -> int:
+        """Count active users with any of the given roles in a product."""
+        result = await self._session.execute(
+            select(func.count(User.id)).where(
+                User.product_id == product_id,
+                User.role.in_(roles),
+                User.is_active == True,  # noqa: E712
+            )
+        )
+        return result.scalar_one()
+
+    async def revoke_superadmin_if_not_last(
+        self,
+        user_id: UUID,
+        product_id: str,
+    ) -> bool:
+        """Atomically demote a superadmin to user, only if they are NOT the last one.
+
+        Uses SELECT FOR UPDATE on all active superadmins for this product to
+        serialize concurrent revoke attempts. If only one superadmin row is locked,
+        the revoke is aborted and returns False.
+
+        Args:
+            user_id: The superadmin to demote.
+            product_id: Product scope.
+
+        Returns:
+            True if the role was changed, False if this was the last superadmin.
+        """
+        # Lock all active superadmin rows for this product
+        result = await self._session.execute(
+            select(User.id)
+            .where(
+                User.product_id == product_id,
+                User.role == UserRole.SUPERADMIN.value,
+                User.is_active == True,  # noqa: E712
+            )
+            .with_for_update()
+        )
+        locked_ids = [row[0] for row in result.all()]
+
+        if len(locked_ids) <= 1:
+            return False  # This is the last (or only) superadmin — abort
+
+        # Safe to demote: update role
+        await self._session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(role=UserRole.USER.value, updated_at=datetime.now(UTC))
+        )
+        return True
 
     async def update_user_admin(
         self,
