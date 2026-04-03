@@ -125,7 +125,9 @@ class AdminManagementController(Controller):
             raise PermissionDeniedException(detail=str(exc)) from exc
         except LastSuperadminError as exc:
             raise ValidationException(detail=str(exc)) from exc
-        except (InvalidRoleTransitionError, AdminManagementError) as exc:
+        except InvalidRoleTransitionError as exc:
+            raise ValidationException(detail=str(exc)) from exc
+        except AdminManagementError as exc:
             raise NotFoundException(detail=str(exc)) from exc
 
     @post("/permissions/{user_id:uuid}/grant")
@@ -150,8 +152,10 @@ class AdminManagementController(Controller):
             )
             await session.commit()
             return {"message": f"Permission '{data.permission.value}' granted to user {user_id}"}
-        except (InvalidRoleTransitionError, AdminManagementError) as exc:
+        except InvalidRoleTransitionError as exc:
             raise ValidationException(detail=str(exc)) from exc
+        except AdminManagementError as exc:
+            raise NotFoundException(detail=str(exc)) from exc
 
     @post("/permissions/{user_id:uuid}/revoke")
     async def revoke_permission(

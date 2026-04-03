@@ -1155,7 +1155,7 @@ Errors:   404
 
 ## 13. Admin Management *(authenticated — SUPERADMIN only)*
 
-All endpoints under `/v1/admin/manage` require **SUPERADMIN** role. An ADMIN attempting to call these endpoints receives `401 Unauthorized`.
+All endpoints under `/v1/admin/manage` require the **SUPERADMIN** role. An ADMIN attempting to call these endpoints receives `401 Unauthorized`.
 
 ### Shared types
 
@@ -1208,7 +1208,7 @@ Note:     Writes an audit entry with source="api".
 ```
 Response: { message: string }
 Errors:   403 (self-modification),
-          400 (last superadmin — cannot leave product with zero superadmins, or user has no admin role),
+          400 (last superadmin — cannot leave the product with zero superadmins, or the user has no admin role),
           404 (user not found in current product)
 Notes:    - Demotes the target user back to role "user".
           - Automatically revokes all permission grants for that user in the current product.

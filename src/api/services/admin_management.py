@@ -165,18 +165,17 @@ class AdminManagementService:
                 f"User {target_user_id} does not have an admin role (current: {old_role})"
             )
 
-        # Lockout guard: if revoking a superadmin, ensure at least one remains
+        # Lockout guard + role update (atomic for superadmins)
         if old_role == UserRole.SUPERADMIN.value:
-            superadmin_count = await user_repo.count_by_roles(
-                product_id, [UserRole.SUPERADMIN.value]
-            )
-            if superadmin_count <= 1:
+            demoted = await user_repo.revoke_superadmin_if_not_last(target_user_id, product_id)
+            if not demoted:
                 raise LastSuperadminError(
                     f"Cannot revoke the last superadmin for product '{product_id}'. "
                     "Grant superadmin to another user first."
                 )
-
-        await user_repo.update_user_admin(target_user_id, role=UserRole.USER.value)
+        else:
+            # Non-superadmin admin — no lockout concern, just demote
+            await user_repo.update_user_admin(target_user_id, role=UserRole.USER.value)
 
         admin_repo = AdminRepository(session)
         revoked_count = await admin_repo.delete_all_permissions(target_user_id, product_id)
@@ -198,6 +197,63 @@ class AdminManagementService:
 
         logger.info(
             "admin.role.revoked",
+            actor_id=str(actor_id),
+            target_user_id=str(target_user_id),
+            old_role=old_role,
+            product_id=product_id,
+            permissions_revoked=revoked_count,
+            source=source,
+        )
+
+    async def force_revoke_role(
+        self,
+        *,
+        actor_id: UUID,
+        target_user_id: UUID,
+        product_id: str,
+        source: str = "cli",
+        session: AsyncSession,
+    ) -> None:
+        """Force-revoke an admin/superadmin role, bypassing the last-superadmin guard.
+
+        This is the break-glass escape hatch — intended for CLI recovery only.
+        Demotes to USER and revokes all permissions unconditionally.
+        """
+        user_repo = UserRepository(session)
+        target = await user_repo.get_active_user(target_user_id)
+        if target is None or target.product_id != product_id:
+            raise AdminManagementError(f"User {target_user_id} not found in product {product_id}")
+
+        old_role = target.role if isinstance(target.role, str) else target.role.value
+
+        if old_role not in self.ADMIN_ROLES:
+            raise InvalidRoleTransitionError(
+                f"User {target_user_id} does not have an admin role (current: {old_role})"
+            )
+
+        # Direct update — no lockout guard
+        await user_repo.update_user_admin(target_user_id, role=UserRole.USER.value)
+
+        admin_repo = AdminRepository(session)
+        revoked_count = await admin_repo.delete_all_permissions(target_user_id, product_id)
+
+        await admin_repo.write_audit(
+            AdminAuditLog(
+                id=new_id(),
+                actor_id=actor_id,
+                target_user_id=target_user_id,
+                product_id=product_id,
+                action="role.revoke",
+                detail=(
+                    f"FORCED: Role changed from '{old_role}' to 'user'. "
+                    f"{revoked_count} permission(s) revoked."
+                ),
+                source=source,
+            )
+        )
+
+        logger.warning(
+            "admin.role.force_revoked",
             actor_id=str(actor_id),
             target_user_id=str(target_user_id),
             old_role=old_role,

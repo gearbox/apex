@@ -273,7 +273,7 @@ class TestRevokeRole:
         with patch("src.api.services.admin_management.UserRepository") as MockUserRepo:
             user_repo = MockUserRepo.return_value
             user_repo.get_active_user = AsyncMock(return_value=target)
-            user_repo.count_by_roles = AsyncMock(return_value=1)  # only one superadmin
+            user_repo.revoke_superadmin_if_not_last = AsyncMock(return_value=False)
 
             with pytest.raises(LastSuperadminError):
                 await service.revoke_role(
@@ -282,6 +282,35 @@ class TestRevokeRole:
                     product_id="vex",
                     session=mock_session,
                 )
+
+    async def test_revoke_superadmin_role_success(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        actor_id = uuid4()
+        target = _make_user(role="superadmin", product_id="vex")
+
+        with (
+            patch("src.api.services.admin_management.UserRepository") as MockUserRepo,
+            patch("src.api.services.admin_management.AdminRepository") as MockAdminRepo,
+            patch("src.api.services.admin_management.new_id", return_value=uuid4()),
+        ):
+            user_repo = MockUserRepo.return_value
+            user_repo.get_active_user = AsyncMock(return_value=target)
+            user_repo.revoke_superadmin_if_not_last = AsyncMock(return_value=True)
+
+            admin_repo = MockAdminRepo.return_value
+            admin_repo.delete_all_permissions = AsyncMock(return_value=0)
+            admin_repo.write_audit = AsyncMock()
+
+            await service.revoke_role(
+                actor_id=actor_id,
+                target_user_id=target.id,
+                product_id="vex",
+                session=mock_session,
+            )
+
+        user_repo.revoke_superadmin_if_not_last.assert_awaited_once_with(target.id, "vex")
+        admin_repo.delete_all_permissions.assert_awaited_once()
 
     async def test_revoke_role_also_revokes_permissions(
         self, service: AdminManagementService, mock_session: AsyncMock
@@ -514,3 +543,69 @@ class TestRevokePermission:
         audit_entry = admin_repo.write_audit.call_args[0][0]
         assert audit_entry.action == "permission.revoke"
         assert audit_entry.actor_id == actor_id
+
+
+# ---------------------------------------------------------------------------
+# force_revoke_role
+# ---------------------------------------------------------------------------
+
+
+class TestForceRevokeRole:
+    async def test_force_revoke_bypasses_last_superadmin_guard(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        """force_revoke_role demotes even the last superadmin."""
+        actor_id = uuid4()
+        target = _make_user(role="superadmin", product_id="vex")
+
+        with (
+            patch("src.api.services.admin_management.UserRepository") as MockUserRepo,
+            patch("src.api.services.admin_management.AdminRepository") as MockAdminRepo,
+            patch("src.api.services.admin_management.new_id", return_value=uuid4()),
+        ):
+            user_repo = MockUserRepo.return_value
+            user_repo.get_active_user = AsyncMock(return_value=target)
+            user_repo.update_user_admin = AsyncMock(return_value=target)
+
+            admin_repo = MockAdminRepo.return_value
+            admin_repo.delete_all_permissions = AsyncMock(return_value=1)
+            admin_repo.write_audit = AsyncMock()
+
+            await service.force_revoke_role(
+                actor_id=actor_id,
+                target_user_id=target.id,
+                product_id="vex",
+                session=mock_session,
+            )
+
+        user_repo.update_user_admin.assert_awaited_once_with(target.id, role="user")
+        admin_repo.delete_all_permissions.assert_awaited_once()
+        audit_entry = admin_repo.write_audit.call_args[0][0]
+        assert "FORCED" in audit_entry.detail
+
+    async def test_force_revoke_rejects_non_admin_target(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        target = _make_user(role="user", product_id="vex")
+        with patch("src.api.services.admin_management.UserRepository") as MockUserRepo:
+            MockUserRepo.return_value.get_active_user = AsyncMock(return_value=target)
+            with pytest.raises(InvalidRoleTransitionError):
+                await service.force_revoke_role(
+                    actor_id=uuid4(),
+                    target_user_id=target.id,
+                    product_id="vex",
+                    session=mock_session,
+                )
+
+    async def test_force_revoke_target_not_found(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        with patch("src.api.services.admin_management.UserRepository") as MockUserRepo:
+            MockUserRepo.return_value.get_active_user = AsyncMock(return_value=None)
+            with pytest.raises(AdminManagementError):
+                await service.force_revoke_role(
+                    actor_id=uuid4(),
+                    target_user_id=uuid4(),
+                    product_id="vex",
+                    session=mock_session,
+                )
