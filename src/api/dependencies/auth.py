@@ -14,7 +14,7 @@ from litestar import Request
 from litestar.exceptions import NotAuthorizedException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.enums import UserRole
+from src.core.enums import AdminPermission, UserRole
 from src.db.models import User
 from src.db.repositories import UserRepository
 
@@ -49,10 +49,14 @@ def _require_role(
 ) -> User:
     """Assert the user's role is in the allowed set.
 
+    Normalizes user.role to a UserRole enum before comparison to handle
+    cases where the ORM returns a plain string.
+
     Raises:
         NotAuthorizedException: If role not in allowed_roles.
     """
-    if user.role not in allowed_roles:
+    role = user.role if isinstance(user.role, UserRole) else UserRole(user.role)
+    if role not in allowed_roles:
         raise NotAuthorizedException(detail=detail)
     return user
 
@@ -81,7 +85,9 @@ async def ensure_billing_adjust_permission(
     from src.db.repositories.admin import AdminRepository
 
     admin_repo = AdminRepository(session)
-    has_perm = await admin_repo.has_permission(user.id, "billing_adjust", product_id)
+    has_perm = await admin_repo.has_permission(
+        user.id, AdminPermission.BILLING_ADJUST.value, product_id
+    )
     if not has_perm:
         raise NotAuthorizedException(
             detail="Billing adjustment permission required. Contact a superadmin."

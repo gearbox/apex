@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import AdminPermission, UserRole
@@ -41,6 +42,76 @@ class AdminManagementService:
 
     # Roles that can be granted/revoked via the admin management API
     GRANTABLE_ROLES: frozenset[str] = frozenset({UserRole.ADMIN.value, UserRole.SUPERADMIN.value})
+
+    @staticmethod
+    def _role_value(user: User) -> str:
+        """Normalize user.role to a plain string regardless of ORM return type."""
+        role = user.role
+        return role if isinstance(role, str) else role.value
+
+    async def _get_target_user(
+        self,
+        user_id: UUID,
+        product_id: str,
+        *,
+        session: AsyncSession,
+    ) -> User:
+        """Load an active user and verify product membership.
+
+        Raises:
+            AdminManagementError: If user not found or wrong product.
+        """
+        user_repo = UserRepository(session)
+        user = await user_repo.get_active_user(user_id)
+        if user is None or user.product_id != product_id:
+            raise AdminManagementError(f"User {user_id} not found in product {product_id}")
+        return user
+
+    async def _demote_admin_to_user(
+        self,
+        *,
+        target: User,
+        product_id: str,
+        session: AsyncSession,
+        enforce_last_superadmin_guard: bool,
+    ) -> tuple[str, int]:
+        """Demote an admin/superadmin to USER and revoke all permissions.
+
+        Args:
+            target: The user to demote (must have admin/superadmin role).
+            product_id: Product scope.
+            session: Database session.
+            enforce_last_superadmin_guard: If True and target is the last superadmin,
+                raises LastSuperadminError instead of demoting.
+
+        Returns:
+            Tuple of (old_role_value, permissions_revoked_count).
+
+        Raises:
+            InvalidRoleTransitionError: If target has no admin role.
+            LastSuperadminError: If guard is enforced and target is last superadmin.
+        """
+        old_role = self._role_value(target)
+        user_repo = UserRepository(session)
+
+        if old_role not in self.ADMIN_ROLES:
+            raise InvalidRoleTransitionError(
+                f"User {target.id} does not have an admin role (current: {old_role})"
+            )
+
+        if enforce_last_superadmin_guard and old_role == UserRole.SUPERADMIN.value:
+            demoted = await user_repo.revoke_superadmin_if_not_last(target.id, product_id)
+            if not demoted:
+                raise LastSuperadminError(
+                    f"Cannot revoke the last superadmin for product '{product_id}'. "
+                    "Grant superadmin to another user first."
+                )
+        else:
+            await user_repo.update_user_admin(target.id, role=UserRole.USER.value)
+
+        admin_repo = AdminRepository(session)
+        revoked_count = await admin_repo.delete_all_permissions(target.id, product_id)
+        return old_role, revoked_count
 
     async def list_admins(
         self,
@@ -87,13 +158,7 @@ class AdminManagementService:
         source: str = "api",
         session: AsyncSession,
     ) -> None:
-        """Grant an admin or superadmin role to a user.
-
-        Invariants:
-        - actor cannot modify own role
-        - new_role must be ADMIN or SUPERADMIN (never SYSTEM or USER)
-        - target user must exist, be active, and belong to the same product
-        """
+        """Grant an admin or superadmin role to a user."""
         if actor_id == target_user_id:
             raise SelfModificationError("Cannot modify your own role")
 
@@ -102,13 +167,10 @@ class AdminManagementService:
                 f"Cannot grant role '{new_role.value}' via admin management"
             )
 
+        target = await self._get_target_user(target_user_id, product_id, session=session)
+        old_role = self._role_value(target)
+
         user_repo = UserRepository(session)
-        target = await user_repo.get_active_user(target_user_id)
-        if target is None or target.product_id != product_id:
-            raise AdminManagementError(f"User {target_user_id} not found in product {product_id}")
-
-        old_role = target.role if isinstance(target.role, str) else target.role.value
-
         await user_repo.update_user_admin(target_user_id, role=new_role.value)
 
         admin_repo = AdminRepository(session)
@@ -143,43 +205,19 @@ class AdminManagementService:
         source: str = "api",
         session: AsyncSession,
     ) -> None:
-        """Revoke admin/superadmin role, demoting user back to USER.
-
-        Invariants:
-        - actor cannot revoke own role
-        - cannot revoke the last superadmin for a product
-        - also revokes all permissions for the user in this product
-        """
+        """Revoke admin/superadmin role, demoting user back to USER."""
         if actor_id == target_user_id:
             raise SelfModificationError("Cannot revoke your own role")
 
-        user_repo = UserRepository(session)
-        target = await user_repo.get_active_user(target_user_id)
-        if target is None or target.product_id != product_id:
-            raise AdminManagementError(f"User {target_user_id} not found in product {product_id}")
-
-        old_role = target.role if isinstance(target.role, str) else target.role.value
-
-        if old_role not in self.ADMIN_ROLES:
-            raise InvalidRoleTransitionError(
-                f"User {target_user_id} does not have an admin role (current: {old_role})"
-            )
-
-        # Lockout guard + role update (atomic for superadmins)
-        if old_role == UserRole.SUPERADMIN.value:
-            demoted = await user_repo.revoke_superadmin_if_not_last(target_user_id, product_id)
-            if not demoted:
-                raise LastSuperadminError(
-                    f"Cannot revoke the last superadmin for product '{product_id}'. "
-                    "Grant superadmin to another user first."
-                )
-        else:
-            # Non-superadmin admin — no lockout concern, just demote
-            await user_repo.update_user_admin(target_user_id, role=UserRole.USER.value)
+        target = await self._get_target_user(target_user_id, product_id, session=session)
+        old_role, revoked_count = await self._demote_admin_to_user(
+            target=target,
+            product_id=product_id,
+            session=session,
+            enforce_last_superadmin_guard=True,
+        )
 
         admin_repo = AdminRepository(session)
-        revoked_count = await admin_repo.delete_all_permissions(target_user_id, product_id)
-
         await admin_repo.write_audit(
             AdminAuditLog(
                 id=new_id(),
@@ -219,24 +257,15 @@ class AdminManagementService:
         This is the break-glass escape hatch — intended for CLI recovery only.
         Demotes to USER and revokes all permissions unconditionally.
         """
-        user_repo = UserRepository(session)
-        target = await user_repo.get_active_user(target_user_id)
-        if target is None or target.product_id != product_id:
-            raise AdminManagementError(f"User {target_user_id} not found in product {product_id}")
-
-        old_role = target.role if isinstance(target.role, str) else target.role.value
-
-        if old_role not in self.ADMIN_ROLES:
-            raise InvalidRoleTransitionError(
-                f"User {target_user_id} does not have an admin role (current: {old_role})"
-            )
-
-        # Direct update — no lockout guard
-        await user_repo.update_user_admin(target_user_id, role=UserRole.USER.value)
+        target = await self._get_target_user(target_user_id, product_id, session=session)
+        old_role, revoked_count = await self._demote_admin_to_user(
+            target=target,
+            product_id=product_id,
+            session=session,
+            enforce_last_superadmin_guard=False,
+        )
 
         admin_repo = AdminRepository(session)
-        revoked_count = await admin_repo.delete_all_permissions(target_user_id, product_id)
-
         await admin_repo.write_audit(
             AdminAuditLog(
                 id=new_id(),
@@ -276,12 +305,8 @@ class AdminManagementService:
 
         Target must have ADMIN or SUPERADMIN role.
         """
-        user_repo = UserRepository(session)
-        target = await user_repo.get_active_user(target_user_id)
-        if target is None or target.product_id != product_id:
-            raise AdminManagementError(f"User {target_user_id} not found in product {product_id}")
-
-        target_role = target.role if isinstance(target.role, str) else target.role.value
+        target = await self._get_target_user(target_user_id, product_id, session=session)
+        target_role = self._role_value(target)
         if target_role not in self.ADMIN_ROLES:
             raise InvalidRoleTransitionError(
                 f"Cannot grant permission to non-admin user (role: {target_role})"
@@ -290,17 +315,29 @@ class AdminManagementService:
         admin_repo = AdminRepository(session)
         already = await admin_repo.has_permission(target_user_id, permission.value, product_id)
         if already:
-            return  # idempotent
+            return  # idempotent — fast path
 
-        await admin_repo.grant_permission(
-            AdminPermissionGrant(
-                id=new_id(),
-                user_id=target_user_id,
+        try:
+            await admin_repo.grant_permission(
+                AdminPermissionGrant(
+                    id=new_id(),
+                    user_id=target_user_id,
+                    permission=permission.value,
+                    product_id=product_id,
+                    granted_by=actor_id,
+                )
+            )
+        except IntegrityError:
+            # Concurrent grant won the race — treat as idempotent success.
+            # Expunge the failed object and continue without audit write.
+            await session.rollback()
+            logger.info(
+                "admin.permission.grant_race",
+                target_user_id=str(target_user_id),
                 permission=permission.value,
                 product_id=product_id,
-                granted_by=actor_id,
             )
-        )
+            return
 
         await admin_repo.write_audit(
             AdminAuditLog(

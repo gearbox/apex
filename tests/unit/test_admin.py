@@ -8,6 +8,8 @@ from uuid import uuid4
 import pytest
 from litestar.exceptions import NotFoundException, PermissionDeniedException, ValidationException
 
+from src.api.routes.admin import validate_and_patch_user
+from src.api.schemas.admin import AdminPatchUserRequest
 from src.api.services.billing import BillingService
 from src.core.enums import UserRole
 from src.db.repositories.billing import BillingRepository
@@ -279,72 +281,92 @@ class TestListUsers:
 
 
 class TestPatchUser:
-    async def test_updates_role_successfully(self) -> None:
-        """update_user_admin returns the updated user; handler maps it to AdminUserResponse."""
-        target = _make_user(role="admin")  # after promotion
+    async def test_updates_role_successfully(self, mock_session: AsyncMock) -> None:
+        admin_id = uuid4()
+        target_id = uuid4()
+        target = _make_user(user_id=target_id, role="admin")
+        data = AdminPatchUserRequest(role=UserRole.ADMIN)
 
         with patch("src.api.routes.admin.UserRepository") as MockRepo:
             repo = MockRepo.return_value
+            repo.get_active_user = AsyncMock(return_value=target)
             repo.update_user_admin = AsyncMock(return_value=target)
 
-            updated = await repo.update_user_admin(
-                target.id, role="admin", subscription_tier=None, is_active=None
+            result = await validate_and_patch_user(
+                admin_user_id=admin_id,
+                user_id=target_id,
+                data=data,
+                session=mock_session,
             )
 
-        assert updated is not None
-        assert updated.role.value == "admin"
+        assert result is target
+        repo.update_user_admin.assert_awaited_once()
 
-    async def test_returns_404_when_user_not_found(self) -> None:
-        """When update_user_admin returns None, handler raises NotFoundException."""
+    async def test_returns_404_when_user_not_found(self, mock_session: AsyncMock) -> None:
+        data = AdminPatchUserRequest(is_active=False)
+
         with patch("src.api.routes.admin.UserRepository") as MockRepo:
             repo = MockRepo.return_value
+            repo.get_active_user = AsyncMock(return_value=None)
             repo.update_user_admin = AsyncMock(return_value=None)
 
-            result = await repo.update_user_admin(
-                uuid4(), role=None, subscription_tier=None, is_active=None
-            )
-            assert result is None
-
-        # Simulate the handler guard
-        with pytest.raises(NotFoundException):
-            if result is None:
-                raise NotFoundException(detail="User not found")
-
-    async def test_cannot_modify_own_account(self) -> None:
-        """Handler raises PermissionDeniedException when user_id == admin_user.id."""
-        admin_id = uuid4()
-        user_id = admin_id  # same ID — self-modification attempt
-
-        with pytest.raises(PermissionDeniedException):
-            if user_id == admin_id:
-                raise PermissionDeniedException(
-                    detail="Admins cannot modify their own account via this endpoint"
+            with pytest.raises(NotFoundException):
+                await validate_and_patch_user(
+                    admin_user_id=uuid4(),
+                    user_id=uuid4(),
+                    data=data,
+                    session=mock_session,
                 )
 
-    async def test_cannot_set_role_system(self) -> None:
-        """Handler raises ValidationException when data.role == UserRole.SYSTEM."""
-        requested_role = UserRole.SYSTEM
+    async def test_cannot_modify_own_account(self, mock_session: AsyncMock) -> None:
+        user_id = uuid4()
+        data = AdminPatchUserRequest(role=UserRole.ADMIN)
+
+        with pytest.raises(PermissionDeniedException):
+            await validate_and_patch_user(
+                admin_user_id=user_id,
+                user_id=user_id,
+                data=data,
+                session=mock_session,
+            )
+
+    async def test_cannot_set_role_system(self, mock_session: AsyncMock) -> None:
+        data = AdminPatchUserRequest(role=UserRole.SYSTEM)
 
         with pytest.raises(ValidationException):
-            if requested_role == UserRole.SYSTEM:
-                raise ValidationException(detail="Cannot set user role to system")
+            await validate_and_patch_user(
+                admin_user_id=uuid4(),
+                user_id=uuid4(),
+                data=data,
+                session=mock_session,
+            )
 
-    async def test_commits_session_on_success(self, mock_session: AsyncMock) -> None:
-        """Handler calls session.commit() after a successful update."""
-        target = _make_user(role="user")
+    async def test_cannot_set_role_superadmin(self, mock_session: AsyncMock) -> None:
+        data = AdminPatchUserRequest(role=UserRole.SUPERADMIN)
+
+        with pytest.raises(ValidationException, match="superadmin"):
+            await validate_and_patch_user(
+                admin_user_id=uuid4(),
+                user_id=uuid4(),
+                data=data,
+                session=mock_session,
+            )
+
+    async def test_cannot_modify_superadmin_user(self, mock_session: AsyncMock) -> None:
+        target = _make_user(role="superadmin")
+        data = AdminPatchUserRequest(is_active=False)
 
         with patch("src.api.routes.admin.UserRepository") as MockRepo:
             repo = MockRepo.return_value
-            repo.update_user_admin = AsyncMock(return_value=target)
+            repo.get_active_user = AsyncMock(return_value=target)
 
-            updated = await repo.update_user_admin(
-                target.id, role=None, subscription_tier=None, is_active=None
-            )
-            assert updated is not None
-
-            # Simulate commit (the handler always awaits session.commit after repo call)
-            await mock_session.commit()
-            mock_session.commit.assert_awaited_once()
+            with pytest.raises(PermissionDeniedException, match="superadmin"):
+                await validate_and_patch_user(
+                    admin_user_id=uuid4(),
+                    user_id=target.id,
+                    data=data,
+                    session=mock_session,
+                )
 
 
 # ---------------------------------------------------------------------------

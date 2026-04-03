@@ -467,7 +467,40 @@ class TestGrantPermission:
 
         audit_entry = admin_repo.write_audit.call_args[0][0]
         assert audit_entry.action == "permission.grant"
-        assert "billing_adjust" in audit_entry.detail
+        assert AdminPermission.BILLING_ADJUST.value in audit_entry.detail
+
+    async def test_grant_permission_handles_concurrent_race(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        """Concurrent grant that hits unique constraint is treated as idempotent no-op."""
+        from sqlalchemy.exc import IntegrityError
+
+        target = _make_user(role="admin", product_id="vex")
+
+        with (
+            patch("src.api.services.admin_management.UserRepository") as MockUserRepo,
+            patch("src.api.services.admin_management.AdminRepository") as MockAdminRepo,
+            patch("src.api.services.admin_management.new_id", return_value=uuid4()),
+        ):
+            MockUserRepo.return_value.get_active_user = AsyncMock(return_value=target)
+            admin_repo = MockAdminRepo.return_value
+            admin_repo.has_permission = AsyncMock(return_value=False)  # pre-check passes
+            admin_repo.grant_permission = AsyncMock(side_effect=IntegrityError("", {}, Exception()))
+            admin_repo.write_audit = AsyncMock()
+
+            # Should NOT raise — treated as idempotent success
+            await service.grant_permission(
+                actor_id=uuid4(),
+                target_user_id=target.id,
+                permission=AdminPermission.BILLING_ADJUST,
+                product_id="vex",
+                session=mock_session,
+            )
+
+        # No audit entry for the race loser
+        admin_repo.write_audit.assert_not_awaited()
+        # Session was rolled back
+        mock_session.rollback.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

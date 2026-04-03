@@ -13,6 +13,7 @@ from src.api.dependencies.auth import (
     get_current_admin_user,
     get_current_superadmin_user,
 )
+from src.core.enums import UserRole
 
 
 def _make_request(user_id=None, product_id: str = "vex") -> MagicMock:
@@ -95,6 +96,23 @@ class TestGetCurrentAdminUser:
         session = AsyncMock()
         with pytest.raises(NotAuthorizedException):
             await get_current_admin_user(request, session)
+
+    async def test_accepts_admin_as_plain_string(self) -> None:
+        """Ensure _require_role handles user.role as a plain string (ORM edge case)."""
+        user = _make_user("admin")  # sets user.role = "admin" (str, not UserRole)
+        assert isinstance(user.role, str)
+        assert not isinstance(user.role, UserRole)
+
+        request = _make_request(user_id=user.id)
+        session = AsyncMock()
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "src.api.dependencies.auth.UserRepository"
+        ) as MockRepo:
+            MockRepo.return_value.get_active_user = AsyncMock(return_value=user)
+            result = await get_current_admin_user(request, session)
+
+        assert result is user
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,56 @@ from src.db.repositories.user import UserRepository
 logger = structlog.get_logger(__name__)
 
 
+async def validate_and_patch_user(
+    *,
+    admin_user_id: UUID,
+    user_id: UUID,
+    data: AdminPatchUserRequest,
+    session: AsyncSession,
+) -> User:
+    """Validate admin patch constraints and perform the update.
+
+    Extracted from AdminController.patch_user for direct testability.
+
+    Raises:
+        PermissionDeniedException: Self-modification or target is superadmin.
+        ValidationException: Invalid role value (system, superadmin).
+        NotFoundException: User not found.
+    """
+    if user_id == admin_user_id:
+        raise PermissionDeniedException(
+            detail="Admins cannot modify their own account via this endpoint"
+        )
+    if data.role == UserRole.SYSTEM:
+        raise ValidationException(detail="Cannot set user role to system")
+    if data.role == UserRole.SUPERADMIN:
+        raise ValidationException(
+            detail="Cannot set superadmin role via this endpoint. Use /v1/admin/manage/roles/grant"
+        )
+
+    repo = UserRepository(session)
+    target = await repo.get_active_user(user_id)
+    if target is not None:
+        target_role = target.role if isinstance(target.role, str) else target.role.value
+        if target_role == UserRole.SUPERADMIN.value:
+            raise PermissionDeniedException(
+                detail="Cannot modify superadmin users via this endpoint. Use /v1/admin/manage/"
+            )
+
+    user = await repo.update_user_admin(
+        user_id,
+        role=data.role.value if data.role is not None else None,
+        subscription_tier=(
+            data.subscription_tier.value if data.subscription_tier is not None else None
+        ),
+        is_active=data.is_active,
+        locale=data.locale.value if data.locale is not None else None,
+    )
+    if user is None:
+        raise NotFoundException(detail=f"User {user_id} not found")
+    return user
+
+
 class AdminController(Controller):
     """Admin endpoints for billing management."""
 
@@ -152,27 +202,6 @@ class AdminController(Controller):
         session: AsyncSession,
     ) -> AdminUserResponse:
         """Update a user's role, subscription tier, or active status."""
-        if user_id == admin_user.id:
-            raise PermissionDeniedException(
-                detail="Admins cannot modify their own account via this endpoint"
-            )
-        if data.role == UserRole.SYSTEM:
-            raise ValidationException(detail="Cannot set user role to system")
-        if data.role == UserRole.SUPERADMIN:
-            raise ValidationException(
-                detail="Cannot set superadmin role via this endpoint. "
-                "Use /v1/admin/manage/roles/grant"
-            )
-
-        repo = UserRepository(session)
-        target = await repo.get_active_user(user_id)
-        if target is not None:
-            target_role = target.role if isinstance(target.role, str) else target.role.value
-            if target_role == UserRole.SUPERADMIN.value:
-                raise PermissionDeniedException(
-                    detail="Cannot modify superadmin users via this endpoint. Use /v1/admin/manage/"
-                )
-
         logger.info(
             "admin.patching_user",
             admin_id=str(admin_user.id),
@@ -182,17 +211,12 @@ class AdminController(Controller):
             is_active=data.is_active,
             locale=data.locale,
         )
-        user = await repo.update_user_admin(
-            user_id,
-            role=data.role.value if data.role is not None else None,
-            subscription_tier=(
-                data.subscription_tier.value if data.subscription_tier is not None else None
-            ),
-            is_active=data.is_active,
-            locale=data.locale.value if data.locale is not None else None,
+        user = await validate_and_patch_user(
+            admin_user_id=admin_user.id,
+            user_id=user_id,
+            data=data,
+            session=session,
         )
-        if user is None:
-            raise NotFoundException(detail=f"User {user_id} not found")
         await session.commit()
         return AdminUserResponse(
             id=user.id,
