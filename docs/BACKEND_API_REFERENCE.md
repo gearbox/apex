@@ -512,12 +512,6 @@ Response: Raw bytes (with appropriate Content-Type header)
 Errors:   404 not_found
 ```
 
-#### `DELETE /v1/storage/uploads/{image_id}`
-
-```
-Response: 204 No Content
-```
-
 ### Outputs
 
 #### `GET /v1/storage/outputs`
@@ -607,6 +601,17 @@ Response: 200 Raw bytes (chunked streaming, appropriate Content-Type)
 Errors:   404 not_found (ownership check failed or wrong product),
           502 upstream_error (R2 fetch failed)
 Note:     Only returns uploads owned by the authenticated user and matching the current product.
+```
+
+#### `DELETE /v1/content/{content_id}`
+
+```
+Path:     content_id (UUID) — can be a generation output ID or upload ID
+Response: 204 No Content
+Errors:   404 not_found (content does not exist, not owned, or wrong product)
+Note:     Permanently deletes the file from R2 and removes the DB record.
+          Checks generation_outputs first, then user_images.
+          Lineage references (source_output_id, input_image_id) are SET NULL automatically.
 ```
 
 ---

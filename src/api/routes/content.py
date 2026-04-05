@@ -15,10 +15,11 @@ from collections.abc import AsyncIterator, Sequence
 from uuid import UUID
 
 import structlog
-from litestar import Controller, Response, get
+from litestar import Controller, Response, delete, get
 from litestar.di import Provide
+from litestar.exceptions import NotFoundException
 from litestar.response import Stream
-from litestar.status_codes import HTTP_404_NOT_FOUND, HTTP_502_BAD_GATEWAY
+from litestar.status_codes import HTTP_204_NO_CONTENT, HTTP_404_NOT_FOUND, HTTP_502_BAD_GATEWAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
@@ -98,6 +99,37 @@ class ContentProxyController(Controller):
             )
 
         return await self._stream_from_r2(r2_storage, storage_key, etag, content_proxy.ttl)
+
+    @delete("/{content_id:uuid}", status_code=HTTP_204_NO_CONTENT)
+    async def delete_content(
+        self,
+        current_user_id: UUID,
+        product_id: str,
+        content_id: UUID,
+        session: AsyncSession,
+        content_proxy: ContentProxyService,
+    ) -> None:
+        """Delete a content item (output or upload).
+
+        Permanently removes the file from R2 storage and deletes
+        the database record. This action cannot be undone.
+
+        The endpoint accepts any content ID — it checks generation
+        outputs first, then user uploads. Ownership and product
+        scoping are enforced.
+
+        Returns 404 if the content does not exist, is not owned
+        by the caller, or belongs to a different product.
+        """
+        try:
+            await content_proxy.delete_content(
+                content_id,
+                user_id=current_user_id,
+                product_id=product_id,
+                session=session,
+            )
+        except ContentNotFoundError as exc:
+            raise NotFoundException(detail="Content not found") from exc
 
     @staticmethod
     async def _stream_from_r2(
