@@ -132,6 +132,7 @@ class ContentProxyService:
                 content_id=str(content_id),
                 content_type="output",
                 user_id=str(user_id),
+                product_id=product_id,
             )
             return True
 
@@ -145,6 +146,7 @@ class ContentProxyService:
                 content_id=str(content_id),
                 content_type="upload",
                 user_id=str(user_id),
+                product_id=product_id,
             )
             return True
 
