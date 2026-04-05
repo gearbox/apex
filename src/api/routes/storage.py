@@ -12,16 +12,14 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from litestar import Controller, Response, delete, get, post
+from litestar import Controller, Response, get, post
 from litestar.datastructures import UploadFile
 from litestar.di import Provide
 from litestar.enums import RequestEncodingType
-from litestar.exceptions import NotFoundException
 from litestar.params import Body, Parameter
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_201_CREATED,
-    HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
 )
@@ -262,23 +260,6 @@ class StorageController(Controller):
                 ),
                 status_code=HTTP_404_NOT_FOUND,
             )
-
-    @delete("/uploads/{image_id:uuid}", status_code=HTTP_204_NO_CONTENT)
-    async def delete_upload(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        image_id: UUID,
-    ) -> None:
-        """Delete an uploaded image.
-
-        Removes the image from storage immediately.
-        This action cannot be undone.
-        """
-        deleted = await user_content.delete_upload(image_id, user_id=current_user_id)
-
-        if not deleted:
-            raise NotFoundException(detail="Image not found")
 
     @get("/uploads")
     async def list_uploads(

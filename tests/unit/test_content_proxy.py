@@ -163,6 +163,194 @@ class TestResolveUpload:
             )
 
 
+class TestDeleteContent:
+    """Tests for ContentProxyService.delete_content."""
+
+    async def test_delete_output_success(self) -> None:
+        """Deleting a generation output removes R2 object and DB row."""
+        content_id = uuid4()
+        user_id = uuid4()
+        product_id = "vex"
+
+        mock_output = MagicMock()
+        mock_output.id = content_id
+        mock_output.storage_key = "users/x/outputs/job/file.png"
+        mock_output.product_id = product_id
+
+        mock_repo = AsyncMock()
+        mock_repo.get_output.return_value = mock_output
+        mock_repo.delete_output.return_value = True
+
+        service = _make_service()
+        service._storage.delete = AsyncMock(return_value=True)
+        session = AsyncMock()
+
+        with patch(
+            "src.api.services.content_proxy.StorageRepository",
+            return_value=mock_repo,
+        ):
+            result = await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id=product_id,
+                session=session,
+            )
+
+        assert result is True
+        service._storage.delete.assert_awaited_once_with("users/x/outputs/job/file.png")
+        mock_repo.delete_output.assert_awaited_once_with(content_id, user_id=user_id)
+
+    async def test_delete_upload_success(self) -> None:
+        """Deleting a user upload removes R2 object and DB row."""
+        content_id = uuid4()
+        user_id = uuid4()
+        product_id = "vex"
+
+        mock_upload = MagicMock()
+        mock_upload.id = content_id
+        mock_upload.storage_key = "users/x/uploads/file.png"
+        mock_upload.product_id = product_id
+
+        mock_repo = AsyncMock()
+        mock_repo.get_output.return_value = None  # not an output
+        mock_repo.get_user_image.return_value = mock_upload
+        mock_repo.delete_user_image.return_value = True
+
+        service = _make_service()
+        service._storage.delete = AsyncMock(return_value=True)
+        session = AsyncMock()
+
+        with patch(
+            "src.api.services.content_proxy.StorageRepository",
+            return_value=mock_repo,
+        ):
+            result = await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id=product_id,
+                session=session,
+            )
+
+        assert result is True
+        service._storage.delete.assert_awaited_once_with("users/x/uploads/file.png")
+        mock_repo.delete_user_image.assert_awaited_once_with(content_id, user_id=user_id)
+
+    async def test_delete_not_found_raises(self) -> None:
+        """Deleting unknown content raises ContentNotFoundError."""
+        mock_repo = AsyncMock()
+        mock_repo.get_output.return_value = None
+        mock_repo.get_user_image.return_value = None
+
+        service = _make_service()
+        session = AsyncMock()
+
+        with (
+            patch(
+                "src.api.services.content_proxy.StorageRepository",
+                return_value=mock_repo,
+            ),
+            pytest.raises(ContentNotFoundError),
+        ):
+            await service.delete_content(
+                uuid4(),
+                user_id=uuid4(),
+                product_id="vex",
+                session=session,
+            )
+
+    async def test_delete_wrong_product_raises(self) -> None:
+        """Content owned by user but wrong product raises ContentNotFoundError."""
+        content_id = uuid4()
+        user_id = uuid4()
+
+        mock_output = MagicMock()
+        mock_output.id = content_id
+        mock_output.storage_key = "users/x/outputs/job/file.png"
+        mock_output.product_id = "synthara"  # different product
+
+        mock_repo = AsyncMock()
+        mock_repo.get_output.return_value = mock_output
+        mock_repo.get_user_image.return_value = None
+
+        service = _make_service()
+        session = AsyncMock()
+
+        with (
+            patch(
+                "src.api.services.content_proxy.StorageRepository",
+                return_value=mock_repo,
+            ),
+            pytest.raises(ContentNotFoundError),
+        ):
+            await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id="vex",  # requesting as vex
+                session=session,
+            )
+
+    async def test_delete_wrong_user_raises(self) -> None:
+        """Content not owned by requesting user raises ContentNotFoundError."""
+        mock_repo = AsyncMock()
+        mock_repo.get_output.return_value = None  # user_id filter rejects
+        mock_repo.get_user_image.return_value = None
+
+        service = _make_service()
+        session = AsyncMock()
+
+        with (
+            patch(
+                "src.api.services.content_proxy.StorageRepository",
+                return_value=mock_repo,
+            ),
+            pytest.raises(ContentNotFoundError),
+        ):
+            await service.delete_content(
+                uuid4(),
+                user_id=uuid4(),
+                product_id="vex",
+                session=session,
+            )
+
+    async def test_delete_output_fallthrough_to_upload(self) -> None:
+        """When ID matches an upload but not an output, upload is deleted."""
+        content_id = uuid4()
+        user_id = uuid4()
+        product_id = "vex"
+
+        # Output lookup returns record but wrong product
+        mock_output = MagicMock()
+        mock_output.product_id = "synthara"
+        mock_repo = AsyncMock()
+        mock_repo.get_output.return_value = mock_output
+
+        # Upload lookup succeeds
+        mock_upload = MagicMock()
+        mock_upload.id = content_id
+        mock_upload.storage_key = "users/x/uploads/file.png"
+        mock_upload.product_id = product_id
+        mock_repo.get_user_image.return_value = mock_upload
+        mock_repo.delete_user_image.return_value = True
+
+        service = _make_service()
+        service._storage.delete = AsyncMock(return_value=True)
+        session = AsyncMock()
+
+        with patch(
+            "src.api.services.content_proxy.StorageRepository",
+            return_value=mock_repo,
+        ):
+            result = await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id=product_id,
+                session=session,
+            )
+
+        assert result is True
+        mock_repo.delete_user_image.assert_awaited_once()
+
+
 class TestSettingsContentUrlTtl:
     def test_default_ttl(self) -> None:
         """content_url_ttl defaults to 10800 in Settings."""
