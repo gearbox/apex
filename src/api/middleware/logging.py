@@ -74,9 +74,17 @@ class RequestLoggingMiddleware(AbstractMiddleware):
                 message = {**message, "headers": headers_list}
             await send(message)  # type: ignore[arg-type]
 
+        completed = False
         try:
             await self.app(scope, receive, send_with_request_id)  # type: ignore[arg-type]
+            completed = True
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
             logger.info("request.finished", duration_ms=duration_ms)
-            clear_contextvars()
+            if completed:
+                # Success path only: clear context so it doesn't leak to the next request.
+                # On exception we intentionally preserve context — Litestar's
+                # ExceptionHandlerMiddleware runs after this block, so exception handler
+                # logs will still carry request_id, method, path, client_ip.
+                # The next request's clear_contextvars() call (top of __call__) handles cleanup.
+                clear_contextvars()

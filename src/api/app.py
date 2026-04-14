@@ -20,6 +20,7 @@ from litestar.status_codes import (
     HTTP_404_NOT_FOUND,
     HTTP_409_CONFLICT,
     HTTP_422_UNPROCESSABLE_ENTITY,
+    HTTP_500_INTERNAL_SERVER_ERROR,
 )
 
 from src.api.dependencies.common import dependencies, init_services, shutdown_services
@@ -86,16 +87,52 @@ def _error(
     )
 
 
-def http_exception_handler(request: Request[Any, Any, Any], exc: HTTPException) -> Response[Any]:  # noqa: ARG001
+def _log_handler_event(
+    event: str,
+    request: Request[Any, Any, Any],
+    status_code: int,
+    level: str = "warning",
+    exc_info: BaseException | None = None,
+    **extra: Any,
+) -> None:
+    """Emit a structured log event with the consistent field set for all exception handlers.
+
+    Every handler call includes path, method, and status_code. Extra domain-specific
+    fields (e.g. balance, provider) are forwarded via **extra.
+    """
+    getattr(logger, level)(
+        event,
+        path=request.url.path,
+        method=request.method,
+        status_code=status_code,
+        exc_info=exc_info,
+        **extra,
+    )
+
+
+def http_exception_handler(request: Request[Any, Any, Any], exc: HTTPException) -> Response[Any]:
     error_code = _STATUS_TO_ERROR_CODE.get(exc.status_code, "error")
     message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    if exc.status_code >= 500:
+        _log_handler_event(
+            "http.error", request, exc.status_code, level="error", exc_info=exc, error=error_code
+        )
+    else:
+        _log_handler_event("http.error", request, exc.status_code, error=error_code)
     return _error(error_code, message, exc.status_code)
 
 
 def insufficient_balance_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: InsufficientBalanceError,
 ) -> Response[Any]:
+    _log_handler_event(
+        "billing.insufficient_balance",
+        request,
+        HTTP_402_PAYMENT_REQUIRED,
+        balance=exc.balance,
+        required=exc.required,
+    )
     return _error(
         "insufficient_balance",
         str(exc),
@@ -105,37 +142,48 @@ def insufficient_balance_handler(
 
 
 def account_not_found_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: AccountNotFoundError,
 ) -> Response[Any]:
+    _log_handler_event("billing.account_not_found", request, HTTP_404_NOT_FOUND)
     return _error("account_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
 def account_inactive_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: AccountInactiveError,
 ) -> Response[Any]:
+    _log_handler_event("billing.account_inactive", request, HTTP_403_FORBIDDEN)
     return _error("account_inactive", str(exc), HTTP_403_FORBIDDEN)
 
 
 def refund_not_eligible_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: RefundNotEligibleError,
 ) -> Response[Any]:
+    _log_handler_event("billing.refund_not_eligible", request, HTTP_409_CONFLICT)
     return _error("refund_not_eligible", str(exc), HTTP_409_CONFLICT)
 
 
 def price_not_found_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: PriceNotFoundError,
 ) -> Response[Any]:
+    _log_handler_event("billing.price_not_found", request, HTTP_404_NOT_FOUND)
     return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
 def moderation_error_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: ModerationError,
 ) -> Response[Any]:
+    _log_handler_event(
+        "moderation.rejected",
+        request,
+        HTTP_422_UNPROCESSABLE_ENTITY,
+        provider=exc.provider,
+        policy=exc.policy,
+    )
     return _error(
         "moderation",
         str(exc),
@@ -145,23 +193,31 @@ def moderation_error_handler(
 
 
 def payment_verification_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: PaymentVerificationError,
 ) -> Response[Any]:
+    _log_handler_event("payment.verification_failed", request, HTTP_400_BAD_REQUEST)
     return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
 
 
 def organization_permission_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: OrganizationPermissionError,
 ) -> Response[Any]:
+    _log_handler_event("organization.permission_denied", request, HTTP_403_FORBIDDEN)
     return _error("permission_denied", str(exc), HTTP_403_FORBIDDEN)
 
 
 def organization_balance_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: OrganizationBalanceError,
 ) -> Response[Any]:
+    _log_handler_event(
+        "organization.balance_nonzero",
+        request,
+        HTTP_409_CONFLICT,
+        balance=exc.balance,
+    )
     return _error(
         "organization_balance_nonzero",
         str(exc),
@@ -171,9 +227,10 @@ def organization_balance_handler(
 
 
 def idempotency_conflict_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
 ) -> Response[Any]:
+    _log_handler_event("idempotency.conflict", request, HTTP_409_CONFLICT, level="info")
     return Response(
         content=ErrorEnvelope(
             error="idempotency_conflict",
@@ -182,6 +239,30 @@ def idempotency_conflict_handler(
         ),
         status_code=HTTP_409_CONFLICT,
         headers={"Retry-After": "1"},
+    )
+
+
+def global_exception_handler(request: Request[Any, Any, Any], exc: Exception) -> Response[Any]:
+    """Catch-all for any unhandled exception.
+
+    Returns a generic ErrorEnvelope and logs the full traceback at error level.
+    Never leaks internal details (exception class name, message, stack) to the client.
+
+    Note: asyncio.CancelledError, KeyboardInterrupt, and SystemExit inherit from
+    BaseException (not Exception) since Python 3.9 and cannot reach this handler.
+    """
+    _log_handler_event(
+        "unhandled_exception",
+        request,
+        HTTP_500_INTERNAL_SERVER_ERROR,
+        level="error",
+        exc_info=exc,
+        exc_type=type(exc).__qualname__,
+    )
+    return _error(
+        "internal_error",
+        "An unexpected error occurred.",
+        HTTP_500_INTERNAL_SERVER_ERROR,
     )
 
 
@@ -309,6 +390,7 @@ def create_app() -> Litestar:
             OrganizationPermissionError: organization_permission_handler,
             OrganizationBalanceError: organization_balance_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
+            Exception: global_exception_handler,
         },
         dependencies=dependencies,
         lifespan=[lifespan],
@@ -324,6 +406,7 @@ def create_app() -> Litestar:
         openapi_config=openapi_config,
         debug=settings.debug,
         signature_types=[UploadFile],
+        request_max_body_size=settings.max_upload_size_bytes,
     )
 
     return app

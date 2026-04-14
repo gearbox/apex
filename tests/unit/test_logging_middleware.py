@@ -149,7 +149,14 @@ class TestRequestLoggingMiddleware:
         assert "request_id" not in cap[0]
 
     @pytest.mark.anyio
-    async def test_context_cleared_even_on_downstream_exception(self) -> None:
+    async def test_context_preserved_on_downstream_exception(self) -> None:
+        """On exception, contextvars are preserved for exception handler logging.
+
+        Litestar's ExceptionHandlerMiddleware runs AFTER our middleware's
+        except block, so the exception handler needs request_id in context.
+        Cleanup happens at the start of the next request (clear_contextvars
+        at the top of __call__).
+        """
         app_mock = AsyncMock(side_effect=RuntimeError("boom"))
         mw = RequestLoggingMiddleware(app=app_mock)  # type: ignore[arg-type]
         scope = _make_scope()
@@ -157,11 +164,11 @@ class TestRequestLoggingMiddleware:
         with pytest.raises(RuntimeError, match="boom"), capture_logs():
             await mw(scope, _noop_receive, _noop_send)
 
-        # Context must be cleared despite the exception
-        with capture_logs() as cap:
+        # Context is intentionally preserved for exception handlers
+        with capture_logs(processors=[merge_contextvars]) as cap:
             structlog.get_logger().info("after.exception")
 
-        assert "request_id" not in cap[0]
+        assert "request_id" in cap[0]
 
     @pytest.mark.anyio
     async def test_response_contains_x_request_id_header_when_generated(self) -> None:
@@ -169,7 +176,7 @@ class TestRequestLoggingMiddleware:
         scope = _make_scope()
         capture = _CaptureSend()
 
-        async def fake_app(scope: Any, receive: Any, send: Any) -> None:
+        async def fake_app(_scope: Any, _receive: Any, send: Any) -> None:
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": b""})
 
@@ -191,7 +198,7 @@ class TestRequestLoggingMiddleware:
         scope = _make_scope(headers=[(b"x-request-id", rid.encode())])
         capture = _CaptureSend()
 
-        async def fake_app(scope: Any, receive: Any, send: Any) -> None:
+        async def fake_app(_scope: Any, _receive: Any, send: Any) -> None:
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": b""})
 
@@ -210,7 +217,7 @@ class TestRequestLoggingMiddleware:
         scope = _make_scope()
         captured_state: dict[str, Any] = {}
 
-        async def state_capturing_app(scope: Any, receive: Any, send: Any) -> None:
+        async def state_capturing_app(scope: Any, _receive: Any, _send: Any) -> None:
             captured_state.update(scope.get("state", {}))
 
         mw = RequestLoggingMiddleware(app=state_capturing_app)  # type: ignore[arg-type]
@@ -229,7 +236,7 @@ class TestRequestLoggingMiddleware:
         scope = _make_scope(headers=[(b"x-request-id", rid.encode())])
         captured_state: dict[str, Any] = {}
 
-        async def state_capturing_app(scope: Any, receive: Any, send: Any) -> None:
+        async def state_capturing_app(scope: Any, _receive: Any, _send: Any) -> None:
             captured_state.update(scope.get("state", {}))
 
         mw = RequestLoggingMiddleware(app=state_capturing_app)  # type: ignore[arg-type]
@@ -245,12 +252,14 @@ class TestRequestLoggingMiddleware:
         scope = _make_scope()
         capture = _CaptureSend()
 
-        async def fake_app(scope: Any, receive: Any, send: Any) -> None:
-            await send({
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-type", b"application/json")],
-            })
+        async def fake_app(_scope: Any, _receive: Any, send: Any) -> None:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
             await send({"type": "http.response.body", "body": b"{}"})
 
         mw = RequestLoggingMiddleware(app=fake_app)  # type: ignore[arg-type]
