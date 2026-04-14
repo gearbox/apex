@@ -76,7 +76,17 @@ class RequestLoggingMiddleware(AbstractMiddleware):
 
         try:
             await self.app(scope, receive, send_with_request_id)  # type: ignore[arg-type]
-        finally:
+        except BaseException:
+            # Do NOT clear contextvars on exception. Litestar's
+            # ExceptionHandlerMiddleware sits outside user middleware, so
+            # exception handlers run AFTER this block. Preserving context
+            # lets handler logs include request_id, method, path, client_ip.
+            # Cleanup happens via clear_contextvars() at the top of the
+            # next request.
+            duration_ms = round((time.perf_counter() - start) * 1000, 2)
+            logger.info("request.finished", duration_ms=duration_ms)
+            raise
+        else:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
             logger.info("request.finished", duration_ms=duration_ms)
             clear_contextvars()

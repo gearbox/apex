@@ -87,28 +87,38 @@ def _error(
     )
 
 
+def _log_handler_event(
+    event: str,
+    request: Request[Any, Any, Any],
+    status_code: int,
+    level: str = "warning",
+    exc_info: BaseException | None = None,
+    **extra: Any,
+) -> None:
+    """Emit a structured log event with the consistent field set for all exception handlers.
+
+    Every handler call includes path, method, and status_code. Extra domain-specific
+    fields (e.g. balance, provider) are forwarded via **extra.
+    """
+    getattr(logger, level)(
+        event,
+        path=request.url.path,
+        method=request.method,
+        status_code=status_code,
+        exc_info=exc_info,
+        **extra,
+    )
+
+
 def http_exception_handler(request: Request[Any, Any, Any], exc: HTTPException) -> Response[Any]:
     error_code = _STATUS_TO_ERROR_CODE.get(exc.status_code, "error")
     message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-
     if exc.status_code >= 500:
-        logger.error(
-            "http.error",
-            error=error_code,
-            status_code=exc.status_code,
-            path=request.url.path,
-            method=request.method,
-            exc_info=exc,
+        _log_handler_event(
+            "http.error", request, exc.status_code, level="error", exc_info=exc, error=error_code
         )
     else:
-        logger.warning(
-            "http.error",
-            error=error_code,
-            status_code=exc.status_code,
-            path=request.url.path,
-            method=request.method,
-        )
-
+        _log_handler_event("http.error", request, exc.status_code, error=error_code)
     return _error(error_code, message, exc.status_code)
 
 
@@ -116,11 +126,12 @@ def insufficient_balance_handler(
     request: Request[Any, Any, Any],
     exc: InsufficientBalanceError,
 ) -> Response[Any]:
-    logger.warning(
+    _log_handler_event(
         "billing.insufficient_balance",
+        request,
+        HTTP_402_PAYMENT_REQUIRED,
         balance=exc.balance,
         required=exc.required,
-        path=request.url.path,
     )
     return _error(
         "insufficient_balance",
@@ -134,7 +145,7 @@ def account_not_found_handler(
     request: Request[Any, Any, Any],
     exc: AccountNotFoundError,
 ) -> Response[Any]:
-    logger.warning("billing.account_not_found", path=request.url.path)
+    _log_handler_event("billing.account_not_found", request, HTTP_404_NOT_FOUND)
     return _error("account_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
@@ -142,7 +153,7 @@ def account_inactive_handler(
     request: Request[Any, Any, Any],
     exc: AccountInactiveError,
 ) -> Response[Any]:
-    logger.warning("billing.account_inactive", path=request.url.path)
+    _log_handler_event("billing.account_inactive", request, HTTP_403_FORBIDDEN)
     return _error("account_inactive", str(exc), HTTP_403_FORBIDDEN)
 
 
@@ -150,7 +161,7 @@ def refund_not_eligible_handler(
     request: Request[Any, Any, Any],
     exc: RefundNotEligibleError,
 ) -> Response[Any]:
-    logger.warning("billing.refund_not_eligible", path=request.url.path)
+    _log_handler_event("billing.refund_not_eligible", request, HTTP_409_CONFLICT)
     return _error("refund_not_eligible", str(exc), HTTP_409_CONFLICT)
 
 
@@ -158,7 +169,7 @@ def price_not_found_handler(
     request: Request[Any, Any, Any],
     exc: PriceNotFoundError,
 ) -> Response[Any]:
-    logger.warning("billing.price_not_found", path=request.url.path)
+    _log_handler_event("billing.price_not_found", request, HTTP_404_NOT_FOUND)
     return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
@@ -166,11 +177,12 @@ def moderation_error_handler(
     request: Request[Any, Any, Any],
     exc: ModerationError,
 ) -> Response[Any]:
-    logger.warning(
+    _log_handler_event(
         "moderation.rejected",
+        request,
+        HTTP_422_UNPROCESSABLE_ENTITY,
         provider=exc.provider,
         policy=exc.policy,
-        path=request.url.path,
     )
     return _error(
         "moderation",
@@ -184,7 +196,7 @@ def payment_verification_handler(
     request: Request[Any, Any, Any],
     exc: PaymentVerificationError,
 ) -> Response[Any]:
-    logger.warning("payment.verification_failed", path=request.url.path)
+    _log_handler_event("payment.verification_failed", request, HTTP_400_BAD_REQUEST)
     return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
 
 
@@ -192,7 +204,7 @@ def organization_permission_handler(
     request: Request[Any, Any, Any],
     exc: OrganizationPermissionError,
 ) -> Response[Any]:
-    logger.warning("organization.permission_denied", path=request.url.path)
+    _log_handler_event("organization.permission_denied", request, HTTP_403_FORBIDDEN)
     return _error("permission_denied", str(exc), HTTP_403_FORBIDDEN)
 
 
@@ -200,10 +212,11 @@ def organization_balance_handler(
     request: Request[Any, Any, Any],
     exc: OrganizationBalanceError,
 ) -> Response[Any]:
-    logger.warning(
+    _log_handler_event(
         "organization.balance_nonzero",
+        request,
+        HTTP_409_CONFLICT,
         balance=exc.balance,
-        path=request.url.path,
     )
     return _error(
         "organization_balance_nonzero",
@@ -217,7 +230,7 @@ def idempotency_conflict_handler(
     request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
 ) -> Response[Any]:
-    logger.info("idempotency.conflict", path=request.url.path)
+    _log_handler_event("idempotency.conflict", request, HTTP_409_CONFLICT, level="info")
     return Response(
         content=ErrorEnvelope(
             error="idempotency_conflict",
@@ -234,13 +247,17 @@ def global_exception_handler(request: Request[Any, Any, Any], exc: Exception) ->
 
     Returns a generic ErrorEnvelope and logs the full traceback at error level.
     Never leaks internal details (exception class name, message, stack) to the client.
+
+    Note: asyncio.CancelledError, KeyboardInterrupt, and SystemExit inherit from
+    BaseException (not Exception) since Python 3.9 and cannot reach this handler.
     """
-    logger.error(
+    _log_handler_event(
         "unhandled_exception",
-        exc_type=type(exc).__qualname__,
-        path=request.url.path,
-        method=request.method,
+        request,
+        HTTP_500_INTERNAL_SERVER_ERROR,
+        level="error",
         exc_info=exc,
+        exc_type=type(exc).__qualname__,
     )
     return _error(
         "internal_error",

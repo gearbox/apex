@@ -88,7 +88,25 @@ class TestHttpExceptionHandler:
         assert resp.content.error == "error"  # type: ignore[union-attr]
         assert resp.status_code == 418
 
-    def _call_handler_with_exception(self, detail, status_code):
+    def test_non_string_detail_is_stringified(self) -> None:
+        """Non-string detail (e.g. dict) must be stringified in the response message."""
+        req = _mock_request()
+        detail: Any = {"reason": "bad"}
+        exc = HTTPException(status_code=400)
+        exc.detail = detail  # type: ignore[assignment]  — intentionally non-string to test stringification
+
+        with capture_logs() as cap:
+            resp = http_exception_handler(req, exc)
+
+        assert resp.status_code == 400
+        assert resp.content.error == "bad_request"  # type: ignore[union-attr]
+        assert resp.content.message == str(detail)  # type: ignore[union-attr]
+
+        log = next(r for r in cap if r["event"] == "http.error")
+        assert log["error"] == "bad_request"
+        assert log["status_code"] == 400
+
+    def _call_handler_with_exception(self, detail: Any, status_code: int) -> Any:
         req = _mock_request()
         exc = HTTPException(detail=detail, status_code=status_code)
         with capture_logs():
@@ -113,6 +131,8 @@ class TestBusinessExceptionHandlers:
         log = next(r for r in cap if r["event"] == "billing.insufficient_balance")
         assert log["balance"] == 10
         assert log["required"] == 100
+        assert log["method"] == "POST"
+        assert log["status_code"] == 402
 
     def test_account_not_found_logs_and_returns_404(self) -> None:
         req = _mock_request()
@@ -122,7 +142,9 @@ class TestBusinessExceptionHandlers:
             resp = account_not_found_handler(req, exc)
 
         assert resp.status_code == 404
-        assert any(r["event"] == "billing.account_not_found" for r in cap)
+        log = next(r for r in cap if r["event"] == "billing.account_not_found")
+        assert log["status_code"] == 404
+        assert log["method"] == "POST"
 
     def test_account_inactive_logs_and_returns_403(self) -> None:
         req = _mock_request()
@@ -132,7 +154,9 @@ class TestBusinessExceptionHandlers:
             resp = account_inactive_handler(req, exc)
 
         assert resp.status_code == 403
-        assert any(r["event"] == "billing.account_inactive" for r in cap)
+        log = next(r for r in cap if r["event"] == "billing.account_inactive")
+        assert log["status_code"] == 403
+        assert log["method"] == "POST"
 
     def test_refund_not_eligible_logs_and_returns_409(self) -> None:
         req = _mock_request()
@@ -142,7 +166,9 @@ class TestBusinessExceptionHandlers:
             resp = refund_not_eligible_handler(req, exc)
 
         assert resp.status_code == 409
-        assert any(r["event"] == "billing.refund_not_eligible" for r in cap)
+        log = next(r for r in cap if r["event"] == "billing.refund_not_eligible")
+        assert log["status_code"] == 409
+        assert log["method"] == "POST"
 
     def test_price_not_found_logs_and_returns_404(self) -> None:
         req = _mock_request()
@@ -152,7 +178,9 @@ class TestBusinessExceptionHandlers:
             resp = price_not_found_handler(req, exc)
 
         assert resp.status_code == 404
-        assert any(r["event"] == "billing.price_not_found" for r in cap)
+        log = next(r for r in cap if r["event"] == "billing.price_not_found")
+        assert log["status_code"] == 404
+        assert log["method"] == "POST"
 
     def test_moderation_error_logs_with_provider_and_policy(self) -> None:
         req = _mock_request()
@@ -165,6 +193,8 @@ class TestBusinessExceptionHandlers:
         log = next(r for r in cap if r["event"] == "moderation.rejected")
         assert log["provider"] == "grok"
         assert log["policy"] == "safety"
+        assert log["status_code"] == 422
+        assert log["method"] == "POST"
 
     def test_payment_verification_logs_and_returns_400(self) -> None:
         req = _mock_request()
@@ -174,7 +204,9 @@ class TestBusinessExceptionHandlers:
             resp = payment_verification_handler(req, exc)
 
         assert resp.status_code == 400
-        assert any(r["event"] == "payment.verification_failed" for r in cap)
+        log = next(r for r in cap if r["event"] == "payment.verification_failed")
+        assert log["status_code"] == 400
+        assert log["method"] == "POST"
 
     def test_organization_permission_logs_and_returns_403(self) -> None:
         req = _mock_request()
@@ -184,7 +216,9 @@ class TestBusinessExceptionHandlers:
             resp = organization_permission_handler(req, exc)
 
         assert resp.status_code == 403
-        assert any(r["event"] == "organization.permission_denied" for r in cap)
+        log = next(r for r in cap if r["event"] == "organization.permission_denied")
+        assert log["status_code"] == 403
+        assert log["method"] == "POST"
 
     def test_organization_balance_logs_with_balance(self) -> None:
         req = _mock_request()
@@ -196,6 +230,8 @@ class TestBusinessExceptionHandlers:
         assert resp.status_code == 409
         log = next(r for r in cap if r["event"] == "organization.balance_nonzero")
         assert log["balance"] == 500
+        assert log["status_code"] == 409
+        assert log["method"] == "POST"
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +259,8 @@ class TestIdempotencyConflictHandler:
 
         log = next(r for r in cap if r["event"] == "idempotency.conflict")
         assert log["log_level"] == "info"
+        assert log["status_code"] == 409
+        assert log["method"] == "POST"
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +298,7 @@ class TestGlobalExceptionHandler:
         assert log["exc_type"] == "ValueError"
         assert log["path"] == "/v1/test"
         assert log["method"] == "POST"
+        assert log["status_code"] == 500
 
     def test_handles_nested_exception_class(self) -> None:
         """Verify qualname works for nested/inner exception classes."""
