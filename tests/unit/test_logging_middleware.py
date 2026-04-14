@@ -246,11 +246,13 @@ class TestRequestLoggingMiddleware:
         capture = _CaptureSend()
 
         async def fake_app(scope: Any, receive: Any, send: Any) -> None:
-            await send({
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-type", b"application/json")],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
             await send({"type": "http.response.body", "body": b"{}"})
 
         mw = RequestLoggingMiddleware(app=fake_app)  # type: ignore[arg-type]

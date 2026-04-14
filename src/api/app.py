@@ -20,6 +20,7 @@ from litestar.status_codes import (
     HTTP_404_NOT_FOUND,
     HTTP_409_CONFLICT,
     HTTP_422_UNPROCESSABLE_ENTITY,
+    HTTP_500_INTERNAL_SERVER_ERROR,
 )
 
 from src.api.dependencies.common import dependencies, init_services, shutdown_services
@@ -86,16 +87,41 @@ def _error(
     )
 
 
-def http_exception_handler(request: Request[Any, Any, Any], exc: HTTPException) -> Response[Any]:  # noqa: ARG001
+def http_exception_handler(request: Request[Any, Any, Any], exc: HTTPException) -> Response[Any]:
     error_code = _STATUS_TO_ERROR_CODE.get(exc.status_code, "error")
     message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+
+    if exc.status_code >= 500:
+        logger.error(
+            "http.error",
+            error=error_code,
+            status_code=exc.status_code,
+            path=request.url.path,
+            method=request.method,
+            exc_info=exc,
+        )
+    else:
+        logger.warning(
+            "http.error",
+            error=error_code,
+            status_code=exc.status_code,
+            path=request.url.path,
+            method=request.method,
+        )
+
     return _error(error_code, message, exc.status_code)
 
 
 def insufficient_balance_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: InsufficientBalanceError,
 ) -> Response[Any]:
+    logger.warning(
+        "billing.insufficient_balance",
+        balance=exc.balance,
+        required=exc.required,
+        path=request.url.path,
+    )
     return _error(
         "insufficient_balance",
         str(exc),
@@ -105,37 +131,47 @@ def insufficient_balance_handler(
 
 
 def account_not_found_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: AccountNotFoundError,
 ) -> Response[Any]:
+    logger.warning("billing.account_not_found", path=request.url.path)
     return _error("account_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
 def account_inactive_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: AccountInactiveError,
 ) -> Response[Any]:
+    logger.warning("billing.account_inactive", path=request.url.path)
     return _error("account_inactive", str(exc), HTTP_403_FORBIDDEN)
 
 
 def refund_not_eligible_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: RefundNotEligibleError,
 ) -> Response[Any]:
+    logger.warning("billing.refund_not_eligible", path=request.url.path)
     return _error("refund_not_eligible", str(exc), HTTP_409_CONFLICT)
 
 
 def price_not_found_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: PriceNotFoundError,
 ) -> Response[Any]:
+    logger.warning("billing.price_not_found", path=request.url.path)
     return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
 
 
 def moderation_error_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: ModerationError,
 ) -> Response[Any]:
+    logger.warning(
+        "moderation.rejected",
+        provider=exc.provider,
+        policy=exc.policy,
+        path=request.url.path,
+    )
     return _error(
         "moderation",
         str(exc),
@@ -145,23 +181,30 @@ def moderation_error_handler(
 
 
 def payment_verification_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: PaymentVerificationError,
 ) -> Response[Any]:
+    logger.warning("payment.verification_failed", path=request.url.path)
     return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
 
 
 def organization_permission_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: OrganizationPermissionError,
 ) -> Response[Any]:
+    logger.warning("organization.permission_denied", path=request.url.path)
     return _error("permission_denied", str(exc), HTTP_403_FORBIDDEN)
 
 
 def organization_balance_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: OrganizationBalanceError,
 ) -> Response[Any]:
+    logger.warning(
+        "organization.balance_nonzero",
+        balance=exc.balance,
+        path=request.url.path,
+    )
     return _error(
         "organization_balance_nonzero",
         str(exc),
@@ -171,9 +214,10 @@ def organization_balance_handler(
 
 
 def idempotency_conflict_handler(
-    request: Request[Any, Any, Any],  # noqa: ARG001
+    request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
 ) -> Response[Any]:
+    logger.info("idempotency.conflict", path=request.url.path)
     return Response(
         content=ErrorEnvelope(
             error="idempotency_conflict",
@@ -182,6 +226,26 @@ def idempotency_conflict_handler(
         ),
         status_code=HTTP_409_CONFLICT,
         headers={"Retry-After": "1"},
+    )
+
+
+def global_exception_handler(request: Request[Any, Any, Any], exc: Exception) -> Response[Any]:
+    """Catch-all for any unhandled exception.
+
+    Returns a generic ErrorEnvelope and logs the full traceback at error level.
+    Never leaks internal details (exception class name, message, stack) to the client.
+    """
+    logger.error(
+        "unhandled_exception",
+        exc_type=type(exc).__qualname__,
+        path=request.url.path,
+        method=request.method,
+        exc_info=exc,
+    )
+    return _error(
+        "internal_error",
+        "An unexpected error occurred.",
+        HTTP_500_INTERNAL_SERVER_ERROR,
     )
 
 
@@ -309,6 +373,7 @@ def create_app() -> Litestar:
             OrganizationPermissionError: organization_permission_handler,
             OrganizationBalanceError: organization_balance_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
+            Exception: global_exception_handler,
         },
         dependencies=dependencies,
         lifespan=[lifespan],
@@ -324,6 +389,7 @@ def create_app() -> Litestar:
         openapi_config=openapi_config,
         debug=settings.debug,
         signature_types=[UploadFile],
+        request_max_body_size=settings.max_upload_size_bytes,
     )
 
     return app
