@@ -664,43 +664,6 @@ class UserRepository:
 
         return {"total": total, "completed": completed, "failed": failed}
 
-    async def _get_user_job_count_(self, user_id: UUID) -> dict[str, int]:
-        """Get job counts by status for a user.
-
-        Args:
-            user_id: User ID.
-
-        Returns:
-            Dict with total, completed, failed counts.
-        """
-        # TODO: doublecheck if this method is needed
-        total_result = await self._session.execute(
-            select(func.count()).select_from(GenerationJob).where(GenerationJob.user_id == user_id)
-        )
-        total = int(total_result.scalar() or 0)
-
-        completed_result = await self._session.execute(
-            select(func.count())
-            .select_from(GenerationJob)
-            .where(
-                GenerationJob.user_id == user_id,
-                GenerationJob.status == JobStatus.COMPLETED.value,
-            )
-        )
-        completed = int(completed_result.scalar() or 0)
-
-        failed_result = await self._session.execute(
-            select(func.count())
-            .select_from(GenerationJob)
-            .where(
-                GenerationJob.user_id == user_id,
-                GenerationJob.status == JobStatus.FAILED.value,
-            )
-        )
-        failed = int(failed_result.scalar() or 0)
-
-        return {"total": total, "completed": completed, "failed": failed}
-
     async def get_user_output_count(self, user_id: UUID) -> int:
         """Get total output count for a user.
 

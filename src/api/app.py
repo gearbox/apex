@@ -213,8 +213,7 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
         logger.warning("app.bundles_not_found")
         base_path = possible_paths[0]  # Use current directory as fallback
 
-    # TODO: Do we still need to log comfyui_base_url here?
-    logger.info("app.startup", comfyui_url=settings.comfyui_base_url)
+    logger.info("app.startup")
 
     jwt_service = await init_services(settings, base_path=base_path)
 

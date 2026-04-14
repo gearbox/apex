@@ -105,15 +105,7 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
 
     if request_product_id is not None:
         token_product_id = token_payload.product_id
-        if token_product_id is None:
-            # Backward compat: missing claim → assume "vex" and log warning
-            # TODO: remove this fallback once all existing tokens have expired
-            logger.warning(
-                "auth.token_missing_product_id",
-                user_id=str(user_id),
-                request_product=request_product_id,
-            )
-        elif token_product_id != request_product_id:
+        if token_product_id != request_product_id:
             raise NotAuthorizedException(detail="Token was issued for a different product")
 
     # Store user_id in connection state for dependency injection
