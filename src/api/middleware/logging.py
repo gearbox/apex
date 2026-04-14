@@ -46,6 +46,11 @@ class RequestLoggingMiddleware(AbstractMiddleware):
         rid_bytes = headers.get(b"x-request-id")
         request_id = rid_bytes.decode() if rid_bytes else str(new_id())
 
+        # Store in scope state for downstream access (guards, dependencies, services)
+        if "state" not in scope:
+            scope["state"] = {}
+        scope["state"]["request_id"] = request_id
+
         client = scope.get("client")
         client_ip = client[0] if client else "unknown"
 
@@ -57,10 +62,20 @@ class RequestLoggingMiddleware(AbstractMiddleware):
         )
 
         start = time.perf_counter()
-        logger.info("request.started", request_id=request_id)
+        logger.info("request.started")
+
+        # Wrap send to inject X-Request-Id into the response
+        rid_header_value = request_id.encode()
+
+        async def send_with_request_id(message: dict) -> None:  # type: ignore[type-arg]
+            if message["type"] == "http.response.start":
+                headers_list = list(message.get("headers", []))
+                headers_list.append((b"x-request-id", rid_header_value))
+                message = {**message, "headers": headers_list}
+            await send(message)  # type: ignore[arg-type]
 
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, send_with_request_id)  # type: ignore[arg-type]
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
             logger.info("request.finished", duration_ms=duration_ms)
