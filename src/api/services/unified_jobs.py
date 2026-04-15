@@ -13,6 +13,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
@@ -21,7 +22,7 @@ from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus, Provider
-from src.db.models.storage import GenerationJob
+from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 
@@ -184,6 +185,29 @@ class UnifiedJobService:
     # Internal helpers
     # -------------------------------------------------------------------------
 
+    async def _get_job_outputs(
+        self,
+        job: GenerationJob,
+        session: AsyncSession,
+    ) -> list[GenerationOutput]:
+        """Resolve outputs for a job, preferring the eagerly-loaded relationship.
+
+        When the ``outputs`` relationship was populated by ``selectinload``
+        (list path), returns them sorted by ``output_index`` with no extra query.
+        Otherwise falls back to a repository query (single-job path).
+
+        Args:
+            job: GenerationJob instance.
+            session: DB session for the fallback query.
+
+        Returns:
+            Outputs sorted by ``output_index``.
+        """
+        if "outputs" in inspect(job).dict:
+            return sorted(job.outputs, key=lambda o: o.output_index)
+        output_repo = OutputRepository(session)
+        return list(await output_repo.list_by_job(job.id))
+
     async def _build_response(
         self,
         job: GenerationJob,
@@ -192,17 +216,10 @@ class UnifiedJobService:
     ) -> UnifiedJobResponse:
         """Build a full ``UnifiedJobResponse`` for a DB job record.
 
-        Uses eagerly-loaded ``job.outputs`` when available (list path),
-        falls back to a repo query for the single-job path where
-        outputs aren't preloaded.
+        Uses eagerly-loaded ``job.outputs`` when available, falls back
+        to a repo query when outputs aren't preloaded.
         """
-        if "outputs" in job.__dict__:
-            # Relationship already loaded (e.g. via selectinload in list_by_user).
-            # Sort by output_index since the relationship has no default ordering.
-            db_outputs = sorted(job.outputs, key=lambda o: o.output_index)
-        else:
-            output_repo = OutputRepository(session)
-            db_outputs = list(await output_repo.list_by_job(job.id))
+        db_outputs = await self._get_job_outputs(job, session)
 
         output_items: list[JobOutputItem] = []
         thumbnail_url: str | None = None
