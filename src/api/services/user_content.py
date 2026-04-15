@@ -562,10 +562,20 @@ class UserContentService:
     async def get_user_stats(self, user_id: UUID) -> dict[str, int]:
         """Get storage statistics for a user.
 
+        Aggregates upload and output counts from their respective
+        repositories.
+
         Args:
             user_id: User to get stats for.
 
         Returns:
             Dict with upload_count, output_count, total_bytes.
         """
-        return await self._image_repo.get_storage_stats(user_id)
+        upload_count, upload_bytes = await self._image_repo.count_and_sum_by_user(user_id)
+        output_count, output_bytes = await self._output_repo.count_and_sum_by_user(user_id)
+
+        return {
+            "upload_count": upload_count,
+            "output_count": output_count,
+            "total_bytes": upload_bytes + output_bytes,
+        }

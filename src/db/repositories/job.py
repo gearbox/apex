@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.core.enums import GenerationType, JobStatus, Provider
-from src.db.models import GenerationJob
+from src.db.models.storage import GenerationJob
+from src.db.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
+    from uuid import UUID
 
 
-class JobRepository:
+class JobRepository(BaseRepository[GenerationJob]):
     """Data access layer for GenerationJob records.
 
     Single-resource lookups accept an optional ``user_id`` kwarg.
@@ -26,8 +28,10 @@ class JobRepository:
     system operations such as background polling.
     """
 
+    _model = GenerationJob
+
     def __init__(self, session: AsyncSession) -> None:
-        self._session = session
+        super().__init__(session)
 
     async def create(
         self,
@@ -101,18 +105,7 @@ class JobRepository:
         Returns:
             GenerationJob if found, None otherwise.
         """
-        if user_id is None:
-            return cast(
-                GenerationJob | None,
-                await self._session.get(GenerationJob, job_id),
-            )
-        result = await self._session.execute(
-            select(GenerationJob).where(
-                GenerationJob.id == job_id,
-                GenerationJob.user_id == user_id,
-            )
-        )
-        return result.scalar_one_or_none()
+        return await self._get_with_optional_owner(job_id, user_id=user_id)
 
     async def update_status(
         self,
@@ -156,47 +149,79 @@ class JobRepository:
         *,
         status: JobStatus | None = None,
         provider: Provider | None = None,
-        limit: int = 50,
-        offset: int = 0,
+        generation_type: GenerationType | None = None,
+        limit: int = 20,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+        eager_load_outputs: bool = False,
     ) -> Sequence[GenerationJob]:
-        """List jobs for a user with optional filters.
+        """List jobs for a user with cursor-based pagination and optional filters.
+
+        Uses limit+1 fetch pattern. Caller checks ``len(result) > limit``
+        to determine ``has_more``.
 
         Args:
             user_id: User to list jobs for.
-            status: Filter by status (optional).
+            status: Filter by job status (optional).
             provider: Filter by provider (optional).
-            limit: Maximum results to return.
-            offset: Number of results to skip.
+            generation_type: Filter by generation type (optional).
+            limit: Page size (fetches limit+1 for has_more check).
+            cursor_ts: ``created_at`` of the last item on the previous page.
+            cursor_id: ``id`` of the last item on the previous page.
+            eager_load_outputs: When True, eagerly loads the ``outputs``
+                relationship via ``selectinload`` to avoid N+1 queries
+                when building response DTOs.
 
         Returns:
-            List of GenerationJob instances.
+            List of GenerationJob instances ordered by
+            ``(created_at DESC, id DESC)``.
         """
+        from sqlalchemy import literal, tuple_
+
         query = select(GenerationJob).where(GenerationJob.user_id == user_id)
 
         if status is not None:
             query = query.where(GenerationJob.status == status)
         if provider is not None:
             query = query.where(GenerationJob.provider == provider)
+        if generation_type is not None:
+            query = query.where(GenerationJob.generation_type == generation_type)
+
+        if eager_load_outputs:
+            query = query.options(selectinload(GenerationJob.outputs))
+
+        if cursor_ts is not None and cursor_id is not None:
+            query = query.where(
+                tuple_(GenerationJob.created_at, GenerationJob.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
 
         result = await self._session.execute(
-            query.order_by(GenerationJob.created_at.desc()).limit(limit).offset(offset)
+            query.order_by(
+                GenerationJob.created_at.desc(),
+                GenerationJob.id.desc(),
+            ).limit(limit + 1)
         )
         return result.scalars().all()
 
     async def list_pending_video_jobs(
         self,
-        provider: str = Provider.GROK.value,
+        provider: Provider = Provider.GROK,
     ) -> Sequence[GenerationJob]:
         """List pending video generation jobs for polling.
 
+        Returns jobs that are queued or running, have a video generation
+        type, and have an ``external_request_id`` set (indicating the
+        provider accepted the request).
+
         Args:
-            provider: Provider to filter by.
+            provider: Provider enum to filter by.
 
         Returns:
             List of GenerationJob instances needing polling.
         """
-        video_types = ["t2v", "i2v"]
-        pending_statuses = [JobStatus.QUEUED.value, JobStatus.RUNNING.value]
+        video_types = [GenerationType.T2V, GenerationType.I2V]
+        pending_statuses = [JobStatus.QUEUED, JobStatus.RUNNING]
 
         result = await self._session.execute(
             select(GenerationJob)

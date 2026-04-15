@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.repositories.job import JobRepository
 
 
@@ -78,6 +78,11 @@ async def test_update_job_status_with_completed_at(job_repo: JobRepository, make
     assert updated.completed_at is not None
 
 
+# -------------------------------------------------------------------------
+# list_by_user (cursor pagination)
+# -------------------------------------------------------------------------
+
+
 async def test_list_by_user_returns_owned_jobs(
     job_repo: JobRepository, make_user, make_job
 ) -> None:
@@ -99,8 +104,186 @@ async def test_list_by_user_filter_by_status(job_repo: JobRepository, make_user,
     assert all(j.status == "pending" for j in pending_jobs)
 
 
-async def test_list_by_user_offset_past_end(job_repo: JobRepository, make_user) -> None:
-    """list_by_user with offset beyond count returns empty list."""
-    user = await make_user(email=f"nojobsoff-{uuid4().hex[:6]}@example.com")
-    jobs = await job_repo.list_by_user(user.id, offset=1000)
+async def test_list_by_user_cursor_pagination(job_repo: JobRepository, make_user, make_job) -> None:
+    """list_by_user supports cursor-based pagination with limit+1 pattern."""
+    user = await make_user(email=f"cursorjobs-{uuid4().hex[:6]}@example.com")
+    # Create 5 jobs
+    for i in range(5):
+        await make_job(user=user, name=f"Job {i}")
+
+    # First page: limit=2 → expect 3 rows (limit+1 pattern)
+    page1 = await job_repo.list_by_user(user.id, limit=2)
+    assert len(page1) == 3  # limit+1
+
+    # Trim to page size and use last item as cursor
+    items = list(page1)[:2]
+    last = items[-1]
+
+    # Second page using cursor
+    page2 = await job_repo.list_by_user(
+        user.id,
+        limit=2,
+        cursor_ts=last.created_at,
+        cursor_id=last.id,
+    )
+    assert len(page2) >= 1
+
+    # Verify no overlap between pages
+    page1_ids = {j.id for j in items}
+    page2_ids = {j.id for j in page2}
+    assert page1_ids.isdisjoint(page2_ids)
+
+
+async def test_list_by_user_empty(job_repo: JobRepository, make_user) -> None:
+    """list_by_user returns empty list for user with no jobs."""
+    user = await make_user(email=f"nojobs-{uuid4().hex[:6]}@example.com")
+    jobs = await job_repo.list_by_user(user.id)
     assert not list(jobs)
+
+
+async def test_list_by_user_filter_by_generation_type(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """list_by_user filters by generation_type when provided."""
+    user = await make_user(email=f"gentypejobs-{uuid4().hex[:6]}@example.com")
+    await make_job(user=user, generation_type="t2i")
+    await make_job(user=user, generation_type="t2v")
+
+    t2i_jobs = await job_repo.list_by_user(user.id, generation_type=GenerationType.T2I)
+    assert all(j.generation_type == "t2i" for j in t2i_jobs)
+    assert len(list(t2i_jobs)) == 1
+
+
+# -------------------------------------------------------------------------
+# list_pending_video_jobs
+# -------------------------------------------------------------------------
+
+
+async def test_list_pending_video_jobs_returns_matching(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """list_pending_video_jobs returns queued/running video jobs with external_request_id."""
+    user = await make_user(email=f"vidpoll-{uuid4().hex[:6]}@example.com")
+
+    # Matching: queued t2v job with external_request_id
+    matching_t2v = await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-req-001",
+    )
+
+    # Matching: running i2v job
+    matching_i2v = await make_job(
+        user=user,
+        status="running",
+        generation_type="i2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-req-002",
+    )
+
+    # Non-matching: wrong provider
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.AISHA.value,
+        external_request_id="aisha-req-001",
+    )
+
+    # Non-matching: completed status
+    await make_job(
+        user=user,
+        status="completed",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-req-done",
+    )
+
+    # Non-matching: image generation type (t2i)
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2i",
+        provider=Provider.GROK.value,
+        external_request_id="grok-req-img",
+    )
+
+    # Non-matching: no external_request_id
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id=None,
+    )
+
+    jobs = await job_repo.list_pending_video_jobs()
+    job_ids = {j.id for j in jobs}
+
+    assert matching_t2v.id in job_ids
+    assert matching_i2v.id in job_ids
+    assert len(job_ids) == 2
+
+
+async def test_list_pending_video_jobs_empty_when_no_matches(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """list_pending_video_jobs returns empty when no jobs match criteria."""
+    user = await make_user(email=f"vidpoll-empty-{uuid4().hex[:6]}@example.com")
+
+    await make_job(
+        user=user,
+        status="completed",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-done",
+    )
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2i",
+        provider=Provider.GROK.value,
+        external_request_id="grok-img",
+    )
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id=None,
+    )
+
+    jobs = await job_repo.list_pending_video_jobs()
+    assert not list(jobs)
+
+
+async def test_list_pending_video_jobs_custom_provider(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """list_pending_video_jobs filters by the given provider enum."""
+    user = await make_user(email=f"vidpoll-prov-{uuid4().hex[:6]}@example.com")
+
+    aisha_job = await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.AISHA.value,
+        external_request_id="aisha-vid-001",
+    )
+
+    # Grok job — should not appear when filtering by AISHA
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-vid-001",
+    )
+
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.AISHA)
+    job_ids = {j.id for j in jobs}
+
+    assert aisha_job.id in job_ids
+    assert len(job_ids) == 1

@@ -161,41 +161,25 @@ async def test_get_expired(user_image_repo: UserImageRepository, make_user) -> N
     assert any(img.id == img_id for img in expired)
 
 
-async def test_get_storage_stats_empty(user_image_repo: UserImageRepository, make_user) -> None:
-    """get_storage_stats returns zeros for a user with no files."""
-    user = await make_user(email=f"statszero-{uuid4().hex[:6]}@example.com")
-    stats = await user_image_repo.get_storage_stats(user.id)
-    assert stats == {"upload_count": 0, "output_count": 0, "total_bytes": 0}
+async def test_count_and_sum_by_user_empty(user_image_repo: UserImageRepository, make_user) -> None:
+    """count_and_sum_by_user returns zeros for a user with no uploads."""
+    user = await make_user(email=f"statsempty-{uuid4().hex[:6]}@example.com")
+    count, total_bytes = await user_image_repo.count_and_sum_by_user(user.id)
+    assert count == 0
+    assert total_bytes == 0
 
 
-async def test_get_storage_stats_counts_files(
-    user_image_repo: UserImageRepository,
-    output_repo,
-    make_user,
-    make_user_image,
-    make_job,
+async def test_count_and_sum_by_user_with_data(
+    user_image_repo: UserImageRepository, make_user, make_user_image
 ) -> None:
-    """get_storage_stats reflects upload and output counts."""
-    user = await make_user(email=f"statsfull-{uuid4().hex[:6]}@example.com")
+    """count_and_sum_by_user returns correct count and byte total."""
+    user = await make_user(email=f"statsdata-{uuid4().hex[:6]}@example.com")
     await make_user_image(user=user, size_bytes=1000)
-    job = await make_job(user=user)
-    out_id = uuid4()
-    await output_repo.create(
-        id=out_id,
-        user_id=user.id,
-        job_id=job.id,
-        storage_key=f"users/{user.id}/outputs/{job.id}/{out_id}.png",
-        content_type="image/png",
-        size_bytes=2000,
-        format="png",
-        output_index=0,
-        expires_at=datetime.now(UTC) + timedelta(days=7),
-        product_id="vex",
-    )
-    stats = await user_image_repo.get_storage_stats(user.id)
-    assert stats["upload_count"] >= 1
-    assert stats["output_count"] >= 1
-    assert stats["total_bytes"] >= 3000
+    await make_user_image(user=user, size_bytes=2000)
+
+    count, total_bytes = await user_image_repo.count_and_sum_by_user(user.id)
+    assert count == 2
+    assert total_bytes == 3000
 
 
 async def test_expired_images_count_accuracy(

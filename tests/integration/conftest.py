@@ -287,6 +287,7 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
         model: str | None = None,
         job_id: UUID | None = None,
         product_id: str = "vex",
+        external_request_id: str | None = None,
     ) -> GenerationJob:
         if user is None:
             user = await make_user(email=f"jobuser-{uuid4().hex[:8]}@example.com")
@@ -300,6 +301,7 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
             provider=provider,
             model=model,
             product_id=product_id,
+            external_request_id=external_request_id,
         )
         db_session.add(job)
         await db_session.flush()

@@ -207,6 +207,54 @@ async def test_get_expired(output_repo: OutputRepository, make_user, make_job) -
     assert any(o.id == out_id for o in expired)
 
 
+async def test_count_and_sum_by_user_with_data(
+    output_repo: OutputRepository, make_user, make_job
+) -> None:
+    """count_and_sum_by_user returns correct count and byte total."""
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4 as _uuid4
+
+    user = await make_user(email=f"outstats-{_uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user)
+
+    await output_repo.create(
+        id=_uuid4(),
+        user_id=user.id,
+        job_id=job.id,
+        storage_key=f"users/{user.id}/outputs/{job.id}/{_uuid4()}.png",
+        content_type="image/png",
+        size_bytes=5000,
+        format="png",
+        output_index=0,
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
+    )
+    await output_repo.create(
+        id=_uuid4(),
+        user_id=user.id,
+        job_id=job.id,
+        storage_key=f"users/{user.id}/outputs/{job.id}/{_uuid4()}.png",
+        content_type="image/png",
+        size_bytes=3000,
+        format="png",
+        output_index=1,
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
+    )
+
+    count, total_bytes = await output_repo.count_and_sum_by_user(user.id)
+    assert count == 2
+    assert total_bytes == 8000
+
+
+async def test_count_and_sum_by_user_empty(output_repo: OutputRepository, make_user) -> None:
+    """count_and_sum_by_user returns zeros for a user with no outputs."""
+    user = await make_user(email=f"outstatsempty-{uuid4().hex[:6]}@example.com")
+    count, total_bytes = await output_repo.count_and_sum_by_user(user.id)
+    assert count == 0
+    assert total_bytes == 0
+
+
 async def test_cascade_delete_job_removes_outputs(
     output_repo: OutputRepository, make_user, make_job, db_session: AsyncSession
 ) -> None:

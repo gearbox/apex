@@ -3,23 +3,26 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
-from uuid import UUID
+from typing import TYPE_CHECKING
 
-from sqlalchemy import func, literal, select, tuple_
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import GenerationOutput, UserImage
+from src.db.models.storage import UserImage
+from src.db.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
 
 
-class UserImageRepository:
+class UserImageRepository(BaseRepository[UserImage]):
     """Data access layer for UserImage records."""
 
+    _model = UserImage
+
     def __init__(self, session: AsyncSession) -> None:
-        self._session = session
+        super().__init__(session)
 
     async def create(
         self,
@@ -81,18 +84,7 @@ class UserImageRepository:
         Returns:
             UserImage if found, None otherwise.
         """
-        if user_id is None:
-            return cast(
-                UserImage | None,
-                await self._session.get(UserImage, image_id),
-            )
-        result = await self._session.execute(
-            select(UserImage).where(
-                UserImage.id == image_id,
-                UserImage.user_id == user_id,
-            )
-        )
-        return result.scalar_one_or_none()
+        return await self._get_with_optional_owner(image_id, user_id=user_id)
 
     async def get_by_key(self, storage_key: str) -> UserImage | None:
         """Get a user image by storage key.
@@ -130,18 +122,9 @@ class UserImageRepository:
         Returns:
             List of UserImage instances ordered by ``created_at DESC, id DESC``.
         """
-        query = select(UserImage).where(UserImage.user_id == user_id)
-
-        if cursor_ts is not None and cursor_id is not None:
-            query = query.where(
-                tuple_(UserImage.created_at, UserImage.id)
-                < tuple_(literal(cursor_ts), literal(cursor_id))
-            )
-
-        result = await self._session.execute(
-            query.order_by(UserImage.created_at.desc(), UserImage.id.desc()).limit(limit + 1)
+        return await self._list_by_user_cursor(
+            user_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
         )
-        return result.scalars().all()
 
     async def delete(
         self,
@@ -190,33 +173,22 @@ class UserImageRepository:
         )
         return result.scalars().all()
 
-    async def get_storage_stats(self, user_id: UUID) -> dict[str, int]:
-        """Get storage statistics for a user.
+    async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
+        """Count uploads and sum their size for a user.
+
+        Used by storage stats aggregation.
 
         Args:
-            user_id: User to get stats for.
+            user_id: User to aggregate for.
 
         Returns:
-            Dict with upload_count, output_count, total_bytes.
+            Tuple of (count, total_bytes).
         """
-        upload_result = await self._session.execute(
+        result = await self._session.execute(
             select(
                 func.count(UserImage.id),
                 func.coalesce(func.sum(UserImage.size_bytes), 0),
             ).where(UserImage.user_id == user_id)
         )
-        upload_count, upload_bytes = upload_result.one()
-
-        output_result = await self._session.execute(
-            select(
-                func.count(GenerationOutput.id),
-                func.coalesce(func.sum(GenerationOutput.size_bytes), 0),
-            ).where(GenerationOutput.user_id == user_id)
-        )
-        output_count, output_bytes = output_result.one()
-
-        return {
-            "upload_count": upload_count,
-            "output_count": output_count,
-            "total_bytes": upload_bytes + output_bytes,
-        }
+        count, total_bytes = result.one()
+        return int(count), int(total_bytes)

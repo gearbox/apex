@@ -3,23 +3,26 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import GenerationOutput
+from src.db.models.storage import GenerationOutput
+from src.db.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
 
 
-class OutputRepository:
+class OutputRepository(BaseRepository[GenerationOutput]):
     """Data access layer for GenerationOutput records."""
 
+    _model = GenerationOutput
+
     def __init__(self, session: AsyncSession) -> None:
-        self._session = session
+        super().__init__(session)
 
     async def create(
         self,
@@ -89,18 +92,7 @@ class OutputRepository:
         Returns:
             GenerationOutput if found, None otherwise.
         """
-        if user_id is None:
-            return cast(
-                GenerationOutput | None,
-                await self._session.get(GenerationOutput, output_id),
-            )
-        result = await self._session.execute(
-            select(GenerationOutput).where(
-                GenerationOutput.id == output_id,
-                GenerationOutput.user_id == user_id,
-            )
-        )
-        return result.scalar_one_or_none()
+        return await self._get_with_optional_owner(output_id, user_id=user_id)
 
     async def list_by_job(self, job_id: UUID) -> Sequence[GenerationOutput]:
         """List outputs for a job, ordered by output_index.
@@ -140,22 +132,9 @@ class OutputRepository:
         Returns:
             List of GenerationOutput instances ordered by ``created_at DESC, id DESC``.
         """
-        from sqlalchemy import literal, tuple_
-
-        query = select(GenerationOutput).where(GenerationOutput.user_id == user_id)
-
-        if cursor_ts is not None and cursor_id is not None:
-            query = query.where(
-                tuple_(GenerationOutput.created_at, GenerationOutput.id)
-                < tuple_(literal(cursor_ts), literal(cursor_id))
-            )
-
-        result = await self._session.execute(
-            query.order_by(GenerationOutput.created_at.desc(), GenerationOutput.id.desc()).limit(
-                limit + 1
-            )
+        return await self._list_by_user_cursor(
+            user_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
         )
-        return result.scalars().all()
 
     async def get_expired(
         self,
@@ -205,7 +184,11 @@ class OutputRepository:
         return True
 
     async def delete_batch(self, output_ids: list[UUID]) -> int:
-        """Delete multiple output records.
+        """Delete multiple output records in a single round-trip.
+
+        Uses the DELETE statement's ``rowcount`` instead of a separate
+        COUNT query — avoids an extra DB round-trip and eliminates
+        drift under concurrent deletes.
 
         Args:
             output_ids: List of output IDs to delete.
@@ -216,12 +199,27 @@ class OutputRepository:
         if not output_ids:
             return 0
 
-        count_result = await self._session.execute(
-            select(func.count(GenerationOutput.id)).where(GenerationOutput.id.in_(output_ids))
-        )
-        (count,) = count_result.one()
-
-        await self._session.execute(
+        result = await self._session.execute(
             delete(GenerationOutput).where(GenerationOutput.id.in_(output_ids))
         )
-        return int(count)
+        return result.rowcount or 0  # type: ignore[attr-defined]
+
+    async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
+        """Count outputs and sum their size for a user.
+
+        Used by storage stats aggregation.
+
+        Args:
+            user_id: User to aggregate for.
+
+        Returns:
+            Tuple of (count, total_bytes).
+        """
+        result = await self._session.execute(
+            select(
+                func.count(GenerationOutput.id),
+                func.coalesce(func.sum(GenerationOutput.size_bytes), 0),
+            ).where(GenerationOutput.user_id == user_id)
+        )
+        count, total_bytes = result.one()
+        return int(count), int(total_bytes)
