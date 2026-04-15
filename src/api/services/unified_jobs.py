@@ -24,7 +24,8 @@ from src.api.services.grok.job_service import GrokJobService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.models.storage import GenerationJob
-from src.db.repositories.storage import StorageRepository
+from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -76,8 +77,8 @@ class UnifiedJobService:
         Returns:
             ``UnifiedJobResponse`` or ``None`` if not found / not owned.
         """
-        repo = StorageRepository(session)
-        job = await repo.get_job(job_id, user_id=user_id)
+        job_repo = JobRepository(session)
+        job = await job_repo.get(job_id, user_id=user_id)
         if job is None:
             return None
 
@@ -204,8 +205,8 @@ class UnifiedJobService:
 
         Fetches outputs and generates presigned URLs.
         """
-        repo = StorageRepository(session)
-        db_outputs = await repo.list_job_outputs(job.id)
+        output_repo = OutputRepository(session)
+        db_outputs = await output_repo.list_by_job(job.id)
 
         output_items: list[JobOutputItem] = []
         thumbnail_url: str | None = None

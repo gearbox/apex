@@ -12,7 +12,13 @@ from .models import (
     User,
     UserImage,
 )
-from .repositories import BillingRepository, StorageRepository, UserRepository
+from .repositories import (
+    BillingRepository,
+    JobRepository,
+    OutputRepository,
+    UserImageRepository,
+    UserRepository,
+)
 from .session import (
     DatabaseManager,
     close_db,
@@ -36,7 +42,9 @@ __all__ = [
     "UserImage",
     # Repositories
     "BillingRepository",
-    "StorageRepository",
+    "JobRepository",
+    "OutputRepository",
+    "UserImageRepository",
     "UserRepository",
     # Session management
     "DatabaseManager",

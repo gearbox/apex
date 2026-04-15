@@ -18,7 +18,8 @@ import structlog
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.storage import R2StorageService, StorageType
 from src.core.enums import JobStatus
-from src.db.repositories.storage import StorageRepository
+from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,8 +84,8 @@ class AishaJobService:
         Returns:
             Updated GenerationJob if the status changed, else ``None``.
         """
-        repo = StorageRepository(session)
-        job = await repo.get_job(job_id)
+        job_repo = JobRepository(session)
+        job = await job_repo.get(job_id)
 
         if job is None:
             return None
@@ -101,8 +102,9 @@ class AishaJobService:
             logger.warning("aisha_job.poll_history_failed", job_id=str(job_id))
             return None
 
+        output_repo = OutputRepository(session)
         if prompt_id in history:
-            return await self._handle_history_entry(session, repo, job, history[prompt_id])
+            return await self._handle_history_entry(session, output_repo, job, history[prompt_id])
 
         # Not yet in history — inspect the live queue
         try:
@@ -120,7 +122,7 @@ class AishaJobService:
     async def _handle_history_entry(
         self,
         session: AsyncSession,
-        repo: StorageRepository,
+        output_repo: OutputRepository,
         job: GenerationJob,
         prompt_history: dict[str, Any],
     ) -> GenerationJob | None:
@@ -132,7 +134,7 @@ class AishaJobService:
                 try:
                     await self._store_image(
                         session=session,
-                        repo=repo,
+                        output_repo=output_repo,
                         job=job,
                         img_info=img_info,
                         output_index=idx,
@@ -197,7 +199,7 @@ class AishaJobService:
         self,
         *,
         session: AsyncSession,  # noqa: ARG002
-        repo: StorageRepository,
+        output_repo: OutputRepository,
         job: GenerationJob,
         img_info: dict[str, Any],
         output_index: int,
@@ -227,7 +229,7 @@ class AishaJobService:
         )
 
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
-        await repo.create_output(
+        await output_repo.create(
             id=result.id,
             user_id=job.user_id,
             job_id=job.id,

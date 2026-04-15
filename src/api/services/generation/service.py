@@ -135,10 +135,11 @@ class GenerationService:
         source_job_id: UUID | None = None
         resolved_source_output_id: UUID | None = request.source_output_id
         if request.source_output_id is not None:
-            from src.db.repositories.storage import StorageRepository
+            from src.db.repositories.output import OutputRepository
 
-            repo = StorageRepository(session)
-            source_output = await repo.get_output(request.source_output_id, user_id=user_id)
+            source_output = await OutputRepository(session).get(
+                request.source_output_id, user_id=user_id
+            )
             if source_output is None:
                 raise ValueError("Source output not found")
             source_job_id = source_output.job_id

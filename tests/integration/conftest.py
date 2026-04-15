@@ -28,8 +28,10 @@ from src.db.models.user import User
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.generation_model import GenerationModelRepository
-from src.db.repositories.storage import StorageRepository
+from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
 from src.db.repositories.user import UserRepository
+from src.db.repositories.user_image import UserImageRepository
 
 # ---------------------------------------------------------------------------
 # Test database URL
@@ -139,9 +141,21 @@ async def billing_repo(db_session: AsyncSession) -> BillingRepository:
 
 
 @pytest_asyncio.fixture
-async def storage_repo(db_session: AsyncSession) -> StorageRepository:
-    """StorageRepository bound to the test session."""
-    return StorageRepository(db_session)
+async def job_repo(db_session: AsyncSession) -> JobRepository:
+    """JobRepository bound to the test session."""
+    return JobRepository(db_session)
+
+
+@pytest_asyncio.fixture
+async def output_repo(db_session: AsyncSession) -> OutputRepository:
+    """OutputRepository bound to the test session."""
+    return OutputRepository(db_session)
+
+
+@pytest_asyncio.fixture
+async def user_image_repo(db_session: AsyncSession) -> UserImageRepository:
+    """UserImageRepository bound to the test session."""
+    return UserImageRepository(db_session)
 
 
 @pytest_asyncio.fixture

@@ -1,0 +1,241 @@
+"""Integration tests for UserImageRepository against a real PostgreSQL database."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+from src.db.repositories.user_image import UserImageRepository
+
+
+async def test_create_user_image(user_image_repo: UserImageRepository, make_user) -> None:
+    """create persists and returns a UserImage."""
+    user = await make_user(email=f"imgcreate-{uuid4().hex[:6]}@example.com")
+    img_id = uuid4()
+    image = await user_image_repo.create(
+        id=img_id,
+        user_id=user.id,
+        storage_key=f"users/{user.id}/uploads/{img_id}.png",
+        original_filename="photo.png",
+        content_type="image/png",
+        size_bytes=2048,
+        format="png",
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
+    )
+    assert image.id == img_id
+    assert image.user_id == user.id
+    assert image.size_bytes == 2048
+
+
+async def test_create_user_image_duplicate_key_raises(
+    user_image_repo: UserImageRepository, make_user
+) -> None:
+    """Creating two UserImages with the same storage_key raises IntegrityError."""
+    user = await make_user(email=f"imgdup-{uuid4().hex[:6]}@example.com")
+    key = f"users/{user.id}/uploads/dup.png"
+    await user_image_repo.create(
+        id=uuid4(),
+        user_id=user.id,
+        storage_key=key,
+        original_filename="dup.png",
+        content_type="image/png",
+        size_bytes=100,
+        format="png",
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
+    )
+    with pytest.raises(IntegrityError):
+        await user_image_repo.create(
+            id=uuid4(),
+            user_id=user.id,
+            storage_key=key,
+            original_filename="dup.png",
+            content_type="image/png",
+            size_bytes=100,
+            format="png",
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+            product_id="vex",
+        )
+
+
+async def test_get_user_image_found(user_image_repo: UserImageRepository, make_user_image) -> None:
+    """get returns the image by PK."""
+    image = await make_user_image()
+    found = await user_image_repo.get(image.id)
+    assert found is not None
+    assert found.id == image.id
+
+
+async def test_get_user_image_not_found(user_image_repo: UserImageRepository) -> None:
+    """get returns None for an unknown UUID."""
+    assert await user_image_repo.get(uuid4()) is None
+
+
+async def test_get_user_image_ownership_enforced(
+    user_image_repo: UserImageRepository, make_user_image, make_user
+) -> None:
+    """get with wrong user_id returns None."""
+    image = await make_user_image()
+    other_user = await make_user(email=f"other-{uuid4().hex[:6]}@example.com")
+    found = await user_image_repo.get(image.id, user_id=other_user.id)
+    assert found is None
+
+
+async def test_get_by_key(user_image_repo: UserImageRepository, make_user) -> None:
+    """get_by_key returns image by storage key."""
+    user = await make_user(email=f"imgkey-{uuid4().hex[:6]}@example.com")
+    img_id = uuid4()
+    key = f"users/{user.id}/uploads/{img_id}.png"
+    await user_image_repo.create(
+        id=img_id,
+        user_id=user.id,
+        storage_key=key,
+        original_filename="x.png",
+        content_type="image/png",
+        size_bytes=512,
+        format="png",
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
+    )
+    found = await user_image_repo.get_by_key(key)
+    assert found is not None
+    assert found.storage_key == key
+
+
+async def test_list_by_user_paginated(
+    user_image_repo: UserImageRepository, make_user, make_user_image
+) -> None:
+    """list_by_user returns paginated results using limit+1 fetch pattern."""
+    user = await make_user(email=f"imglist-{uuid4().hex[:6]}@example.com")
+    for i in range(5):
+        await make_user_image(user=user, storage_key=f"users/{user.id}/uploads/{i}.png")
+    images = await user_image_repo.list_by_user(user.id, limit=3)
+    assert len(images) == 4  # 3+1 since 5 > 3, has_more=True
+
+
+async def test_list_by_user_empty_for_new_user(
+    user_image_repo: UserImageRepository, make_user
+) -> None:
+    """list_by_user returns empty list for a user with no uploads."""
+    user = await make_user(email=f"imglistoff-{uuid4().hex[:6]}@example.com")
+    images = await user_image_repo.list_by_user(user.id)
+    assert not list(images)
+
+
+async def test_delete_user_image(user_image_repo: UserImageRepository, make_user_image) -> None:
+    """delete removes the row and returns True."""
+    image = await make_user_image()
+    result = await user_image_repo.delete(image.id)
+    assert result is True
+    assert await user_image_repo.get(image.id) is None
+
+
+async def test_delete_user_image_not_found_returns_false(
+    user_image_repo: UserImageRepository,
+) -> None:
+    """delete returns False for an unknown image."""
+    assert await user_image_repo.delete(uuid4()) is False
+
+
+async def test_get_expired(user_image_repo: UserImageRepository, make_user) -> None:
+    """get_expired returns images past their expires_at."""
+    user = await make_user(email=f"expiredimg-{uuid4().hex[:6]}@example.com")
+    past = datetime.now(UTC) - timedelta(hours=1)
+    img_id = uuid4()
+    await user_image_repo.create(
+        id=img_id,
+        user_id=user.id,
+        storage_key=f"users/{user.id}/uploads/{img_id}.png",
+        original_filename="old.png",
+        content_type="image/png",
+        size_bytes=100,
+        format="png",
+        expires_at=past,
+        product_id="vex",
+    )
+    expired = await user_image_repo.get_expired()
+    assert any(img.id == img_id for img in expired)
+
+
+async def test_get_storage_stats_empty(user_image_repo: UserImageRepository, make_user) -> None:
+    """get_storage_stats returns zeros for a user with no files."""
+    user = await make_user(email=f"statszero-{uuid4().hex[:6]}@example.com")
+    stats = await user_image_repo.get_storage_stats(user.id)
+    assert stats == {"upload_count": 0, "output_count": 0, "total_bytes": 0}
+
+
+async def test_get_storage_stats_counts_files(
+    user_image_repo: UserImageRepository,
+    output_repo,
+    make_user,
+    make_user_image,
+    make_job,
+) -> None:
+    """get_storage_stats reflects upload and output counts."""
+    user = await make_user(email=f"statsfull-{uuid4().hex[:6]}@example.com")
+    await make_user_image(user=user, size_bytes=1000)
+    job = await make_job(user=user)
+    out_id = uuid4()
+    await output_repo.create(
+        id=out_id,
+        user_id=user.id,
+        job_id=job.id,
+        storage_key=f"users/{user.id}/outputs/{job.id}/{out_id}.png",
+        content_type="image/png",
+        size_bytes=2000,
+        format="png",
+        output_index=0,
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
+    )
+    stats = await user_image_repo.get_storage_stats(user.id)
+    assert stats["upload_count"] >= 1
+    assert stats["output_count"] >= 1
+    assert stats["total_bytes"] >= 3000
+
+
+async def test_expired_images_count_accuracy(
+    user_image_repo: UserImageRepository, make_user
+) -> None:
+    """Expired image query returns exactly N expired items regardless of non-expired ones."""
+    user = await make_user(email=f"expcount-{uuid4().hex[:6]}@example.com")
+    past = datetime.now(UTC) - timedelta(hours=2)
+    future = datetime.now(UTC) + timedelta(days=7)
+
+    expired_ids = set()
+    for i in range(3):
+        img_id = uuid4()
+        await user_image_repo.create(
+            id=img_id,
+            user_id=user.id,
+            storage_key=f"users/{user.id}/uploads/exp{i}.png",
+            original_filename=f"exp{i}.png",
+            content_type="image/png",
+            size_bytes=100,
+            format="png",
+            expires_at=past,
+            product_id="vex",
+        )
+        expired_ids.add(img_id)
+
+    for i in range(2):
+        img_id = uuid4()
+        await user_image_repo.create(
+            id=img_id,
+            user_id=user.id,
+            storage_key=f"users/{user.id}/uploads/fresh{i}.png",
+            original_filename=f"fresh{i}.png",
+            content_type="image/png",
+            size_bytes=100,
+            format="png",
+            expires_at=future,
+            product_id="vex",
+        )
+
+    expired = await user_image_repo.get_expired()
+    expired_from_this_user = {img.id for img in expired if img.user_id == user.id}
+    assert expired_from_this_user == expired_ids

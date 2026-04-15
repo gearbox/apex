@@ -77,8 +77,8 @@ def _filter_ops(ops_list: list[MigrateOperation]) -> list[MigrateOperation]:
 
 
 def _drop_comment_only_ops(
-    context: object,
-    revision: object,
+    context: object,  # noqa: ARG001
+    revision: object,  # noqa: ARG001
     directives: list[MigrationScript],
 ) -> None:
     """Remove AlterColumnOp entries that only change column comments.

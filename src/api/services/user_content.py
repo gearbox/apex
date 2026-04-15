@@ -25,7 +25,9 @@ from src.api.services.storage import (
     StorageType,
     StorageValidationError,
 )
-from src.db.repositories.storage import StorageRepository
+from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
+from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,7 +73,9 @@ class UserContentService:
             retention_days: Days to retain content before cleanup.
         """
         self._storage = storage
-        self._repo = StorageRepository(session)
+        self._job_repo = JobRepository(session)
+        self._output_repo = OutputRepository(session)
+        self._image_repo = UserImageRepository(session)
         self._product_id = product_id
         self._retention_days = retention_days
 
@@ -119,7 +123,7 @@ class UserContentService:
             expires_at = now + timedelta(days=self._retention_days)
 
             # Create database record
-            db_image = await self._repo.create_user_image(
+            db_image = await self._image_repo.create(
                 id=result.id,
                 user_id=user_id,
                 storage_key=result.storage_key,
@@ -162,7 +166,7 @@ class UserContentService:
         Returns:
             UserImage if found, None otherwise.
         """
-        return await self._repo.get_user_image(image_id, user_id=user_id)
+        return await self._image_repo.get(image_id, user_id=user_id)
 
     async def get_upload_by_key(self, storage_key: str) -> UserImage | None:
         """Get upload metadata by storage key.
@@ -173,7 +177,7 @@ class UserContentService:
         Returns:
             UserImage if found, None otherwise.
         """
-        return await self._repo.get_user_image_by_key(storage_key)
+        return await self._image_repo.get_by_key(storage_key)
 
     async def get_upload_access(
         self,
@@ -195,7 +199,7 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If image doesn't exist.
         """
-        image = await self._repo.get_user_image(image_id, user_id=user_id)
+        image = await self._image_repo.get(image_id, user_id=user_id)
         if image is None:
             raise UserContentNotFoundError(f"Image not found: {image_id}")
 
@@ -225,7 +229,7 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If image doesn't exist.
         """
-        image = await self._repo.get_user_image(image_id, user_id=user_id)
+        image = await self._image_repo.get(image_id, user_id=user_id)
         if image is None:
             raise UserContentNotFoundError(f"Image not found: {image_id}")
 
@@ -262,7 +266,7 @@ class UserContentService:
         Returns:
             List of UserImage instances.
         """
-        images = await self._repo.list_user_images(
+        images = await self._image_repo.list_by_user(
             user_id,
             limit=limit,
             cursor_ts=cursor_ts,
@@ -282,7 +286,7 @@ class UserContentService:
         Returns:
             True if deleted, False if not found.
         """
-        image = await self._repo.get_user_image(image_id, user_id=user_id)
+        image = await self._image_repo.get(image_id, user_id=user_id)
         if image is None:
             return False
 
@@ -290,7 +294,7 @@ class UserContentService:
         await self._storage.delete(image.storage_key)
 
         # Then delete DB record
-        await self._repo.delete_user_image(image_id, user_id=user_id)
+        await self._image_repo.delete(image_id, user_id=user_id)
 
         logger.info("user_content.deleted", image_id=str(image_id))
         return True
@@ -340,7 +344,7 @@ class UserContentService:
         expires_at = now + timedelta(days=self._retention_days)
 
         # Create database record
-        db_output = await self._repo.create_output(
+        db_output = await self._output_repo.create(
             id=result.id,
             user_id=user_id,
             job_id=job_id,
@@ -383,7 +387,7 @@ class UserContentService:
         Returns:
             GenerationOutput if found, None otherwise.
         """
-        return await self._repo.get_output(output_id, user_id=user_id)
+        return await self._output_repo.get(output_id, user_id=user_id)
 
     async def get_output_access(
         self,
@@ -405,7 +409,7 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If output doesn't exist.
         """
-        output = await self._repo.get_output(output_id, user_id=user_id)
+        output = await self._output_repo.get(output_id, user_id=user_id)
         if output is None:
             raise UserContentNotFoundError(f"Output not found: {output_id}")
 
@@ -434,7 +438,7 @@ class UserContentService:
         Raises:
             UserContentNotFoundError: If output doesn't exist or is not owned by the user.
         """
-        output = await self._repo.get_output(output_id, user_id=user_id)
+        output = await self._output_repo.get(output_id, user_id=user_id)
         if output is None:
             raise UserContentNotFoundError(f"Output not found: {output_id}")
 
@@ -464,11 +468,11 @@ class UserContentService:
             List of GenerationOutput metadata ordered by index.
         """
         # Verify job ownership
-        job = await self._repo.get_job(job_id, user_id=user_id)
+        job = await self._job_repo.get(job_id, user_id=user_id)
         if job is None:
             raise UserContentNotFoundError(f"Job not found: {job_id}")
 
-        outputs = await self._repo.list_job_outputs(job_id)
+        outputs = await self._output_repo.list_by_job(job_id)
         return list(outputs)
 
     async def list_user_outputs(
@@ -493,7 +497,7 @@ class UserContentService:
         Returns:
             List of GenerationOutput instances.
         """
-        outputs = await self._repo.list_user_outputs(
+        outputs = await self._output_repo.list_by_user(
             user_id,
             limit=limit,
             cursor_ts=cursor_ts,
@@ -564,4 +568,4 @@ class UserContentService:
         Returns:
             Dict with upload_count, output_count, total_bytes.
         """
-        return await self._repo.get_user_storage_stats(user_id)
+        return await self._image_repo.get_storage_stats(user_id)
