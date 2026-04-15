@@ -13,9 +13,8 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
-from sqlalchemy import literal, select, tuple_
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
@@ -23,8 +22,9 @@ from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus, Provider
-from src.db.models.storage import GenerationJob
-from src.db.repositories.storage import StorageRepository
+from src.db.models.storage import GenerationJob, GenerationOutput
+from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -76,8 +76,8 @@ class UnifiedJobService:
         Returns:
             ``UnifiedJobResponse`` or ``None`` if not found / not owned.
         """
-        repo = StorageRepository(session)
-        job = await repo.get_job(job_id, user_id=user_id)
+        job_repo = JobRepository(session)
+        job = await job_repo.get(job_id, user_id=user_id)
         if job is None:
             return None
 
@@ -117,12 +117,15 @@ class UnifiedJobService:
         *,
         session: AsyncSession,
         status: JobStatus | None = None,
-        provider: str | None = None,
+        provider: Provider | None = None,
         generation_type: GenerationType | None = None,
         limit: int = 20,
         cursor: str | None = None,
     ) -> CursorPage[UnifiedJobResponse]:
         """List jobs for a user with optional filters and cursor pagination.
+
+        Delegates filtering and cursor pagination to ``JobRepository.list_by_user``,
+        then assembles ``UnifiedJobResponse`` DTOs with presigned output URLs.
 
         Args:
             user_id: Owner.
@@ -144,31 +147,19 @@ class UnifiedJobService:
         if cursor is not None:
             cursor_ts, cursor_id = decode_cursor(cursor)
 
-        data_q = (
-            select(GenerationJob)
-            .where(GenerationJob.user_id == user_id)
-            .options(selectinload(GenerationJob.outputs))
-        )
-
-        if status is not None:
-            data_q = data_q.where(GenerationJob.status == status.value)
-        if provider is not None:
-            data_q = data_q.where(GenerationJob.provider == provider)
-        if generation_type is not None:
-            data_q = data_q.where(GenerationJob.generation_type == generation_type.value)
-
-        if cursor_ts is not None and cursor_id is not None:
-            data_q = data_q.where(
-                tuple_(GenerationJob.created_at, GenerationJob.id)
-                < tuple_(literal(cursor_ts), literal(cursor_id))
-            )
-
-        jobs_result = await session.execute(
-            data_q.order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc()).limit(
-                limit + 1
+        job_repo = JobRepository(session)
+        jobs = list(
+            await job_repo.list_by_user(
+                user_id,
+                status=status,
+                provider=provider,
+                generation_type=generation_type,
+                limit=limit,
+                cursor_ts=cursor_ts,
+                cursor_id=cursor_id,
+                eager_load_outputs=True,
             )
         )
-        jobs = list(jobs_result.scalars().all())
 
         has_more = len(jobs) > limit
         if has_more:
@@ -194,6 +185,29 @@ class UnifiedJobService:
     # Internal helpers
     # -------------------------------------------------------------------------
 
+    async def _get_job_outputs(
+        self,
+        job: GenerationJob,
+        session: AsyncSession,
+    ) -> list[GenerationOutput]:
+        """Resolve outputs for a job, preferring the eagerly-loaded relationship.
+
+        When the ``outputs`` relationship was populated by ``selectinload``
+        (list path), returns them sorted by ``output_index`` with no extra query.
+        Otherwise falls back to a repository query (single-job path).
+
+        Args:
+            job: GenerationJob instance.
+            session: DB session for the fallback query.
+
+        Returns:
+            Outputs sorted by ``output_index``.
+        """
+        if "outputs" in inspect(job).dict:
+            return sorted(job.outputs, key=lambda o: o.output_index)
+        output_repo = OutputRepository(session)
+        return list(await output_repo.list_by_job(job.id))
+
     async def _build_response(
         self,
         job: GenerationJob,
@@ -202,10 +216,10 @@ class UnifiedJobService:
     ) -> UnifiedJobResponse:
         """Build a full ``UnifiedJobResponse`` for a DB job record.
 
-        Fetches outputs and generates presigned URLs.
+        Uses eagerly-loaded ``job.outputs`` when available, falls back
+        to a repo query when outputs aren't preloaded.
         """
-        repo = StorageRepository(session)
-        db_outputs = await repo.list_job_outputs(job.id)
+        db_outputs = await self._get_job_outputs(job, session)
 
         output_items: list[JobOutputItem] = []
         thumbnail_url: str | None = None

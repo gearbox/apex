@@ -36,7 +36,8 @@ from src.core.enums import (
     VideoResolution,
 )
 from src.core.uid import new_id
-from src.db import StorageRepository
+from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
 
 from .enums import ResponseImageFormat
 
@@ -168,7 +169,8 @@ class GrokJobService:
         Raises:
             GrokJobError: If job creation or processing fails.
         """
-        repo = StorageRepository(session)
+        job_repo = JobRepository(session)
+        output_repo = OutputRepository(session)
 
         # Generate job name from prompt if not provided
         if name is None:
@@ -178,7 +180,7 @@ class GrokJobService:
 
         # Create job record
         job_id = new_id()
-        job: GenerationJob | None = await repo.create_job(
+        job: GenerationJob | None = await job_repo.create(
             id=job_id,
             user_id=user_id,
             name=name,
@@ -201,7 +203,7 @@ class GrokJobService:
 
         try:
             # Update status to running
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.RUNNING,
                 started_at=datetime.now(UTC),
@@ -254,7 +256,7 @@ class GrokJobService:
             for idx, image_result in enumerate(results):
                 await self._store_image_result(
                     session=session,
-                    repo=repo,
+                    output_repo=output_repo,
                     user_id=user_id,
                     job_id=job_id,
                     result=image_result,
@@ -264,7 +266,7 @@ class GrokJobService:
                 )
 
             # Mark job complete
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.COMPLETED,
                 completed_at=datetime.now(UTC),
@@ -275,7 +277,7 @@ class GrokJobService:
 
         except GrokAPIError as e:
             logger.error("grok.api_error", job_id=str(job_id), error=str(e))
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
@@ -302,7 +304,7 @@ class GrokJobService:
 
         except Exception as e:
             logger.exception("grok.unexpected_error", job_id=str(job_id))
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
@@ -331,7 +333,7 @@ class GrokJobService:
         self,
         *,
         session: AsyncSession,  # noqa: ARG002
-        repo: StorageRepository,
+        output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
         result: GrokImageResult,
@@ -380,7 +382,7 @@ class GrokJobService:
 
         # Create output record
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
-        await repo.create_output(
+        await output_repo.create(
             id=output_id,
             user_id=user_id,
             job_id=job_id,
@@ -447,7 +449,7 @@ class GrokJobService:
         Returns:
             Created GenerationJob with status QUEUED.
         """
-        repo = StorageRepository(session)
+        job_repo = JobRepository(session)
 
         # Generate job name
         if name is None:
@@ -457,7 +459,7 @@ class GrokJobService:
 
         # Create job record
         job_id = new_id()
-        job: GenerationJob | None = await repo.create_job(
+        job: GenerationJob | None = await job_repo.create(
             id=job_id,
             user_id=user_id,
             name=name,
@@ -503,7 +505,7 @@ class GrokJobService:
             )
 
             # Store xAI request ID for polling
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.QUEUED,
                 external_request_id=started.request_id,
@@ -517,7 +519,7 @@ class GrokJobService:
 
         except GrokAPIError as e:
             logger.error("grok.video_job_start_failed", job_id=str(job_id), error=str(e))
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
@@ -544,7 +546,7 @@ class GrokJobService:
 
         except Exception as e:
             logger.exception("grok.unexpected_error", job_id=str(job_id))
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
@@ -589,8 +591,9 @@ class GrokJobService:
             GrokJobNotFoundError: If job doesn't exist.
             GrokJobError: If job is not a video job or polling fails.
         """
-        repo = StorageRepository(session)
-        job = await repo.get_job(job_id)
+        job_repo = JobRepository(session)
+        output_repo = OutputRepository(session)
+        job = await job_repo.get(job_id)
 
         if job is None:
             raise GrokJobNotFoundError(f"Job {job_id} not found")
@@ -611,13 +614,13 @@ class GrokJobService:
             if result is None:
                 # Still processing, update to running if needed
                 if job.status == JobStatus.QUEUED.value:
-                    job = await repo.update_job_status(job_id, JobStatus.RUNNING)
+                    job = await job_repo.update_status(job_id, JobStatus.RUNNING)
                 return job
 
             # Video is ready, download and store
             await self._store_video_result(
                 session=session,
-                repo=repo,
+                output_repo=output_repo,
                 user_id=job.user_id,
                 job_id=job_id,
                 result=result,
@@ -625,7 +628,7 @@ class GrokJobService:
             )
 
             # Mark complete
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.COMPLETED,
                 completed_at=datetime.now(UTC),
@@ -636,7 +639,7 @@ class GrokJobService:
 
         except GrokAPIError as e:
             logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))
-            job = await repo.update_job_status(
+            job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
                 completed_at=datetime.now(UTC),
@@ -650,7 +653,7 @@ class GrokJobService:
         self,
         *,
         session: AsyncSession,  # noqa: ARG002
-        repo: StorageRepository,
+        output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
         result: GrokVideoResult,
@@ -683,7 +686,7 @@ class GrokJobService:
 
         # Create output record
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
-        await repo.create_output(
+        await output_repo.create(
             id=output_id,
             user_id=user_id,
             job_id=job_id,
@@ -718,7 +721,7 @@ class GrokJobService:
                     ContentType=MediaFormat.JPEG.content_type,
                 )
 
-            await repo.create_output(
+            await output_repo.create(
                 id=thumb_id,
                 user_id=user_id,
                 job_id=job_id,
@@ -754,8 +757,7 @@ class GrokJobService:
         Returns:
             GenerationJob if found, None otherwise.
         """
-        repo = StorageRepository(session)
-        return await repo.get_job(job_id)
+        return await JobRepository(session).get(job_id)
 
     async def get_job_outputs(
         self,
@@ -771,8 +773,7 @@ class GrokJobService:
         Returns:
             List of presigned URLs for accessing outputs.
         """
-        repo = StorageRepository(session)
-        outputs = await repo.list_job_outputs(job_id)
+        outputs = await OutputRepository(session).list_by_job(job_id)
 
         urls = []
         for output in outputs:

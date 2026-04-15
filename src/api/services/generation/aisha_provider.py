@@ -13,7 +13,7 @@ from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, Provider
 from src.core.uid import new_id
-from src.db import StorageRepository
+from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,8 +87,7 @@ class AishaGenerationProvider:
         )
 
         # Create DB job record
-        repo = StorageRepository(session)
-        db_job = await repo.create_job(
+        db_job = await JobRepository(session).create(
             id=job_id,
             user_id=user_id,
             name=legacy_request.name or "Untitled",

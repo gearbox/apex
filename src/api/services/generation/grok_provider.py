@@ -88,10 +88,9 @@ class GrokGenerationProvider:
     ) -> str | None:
         """Resolve input URL from either source_output_id or input_image_id."""
         if request.source_output_id is not None:
-            from src.db import StorageRepository
+            from src.db.repositories.output import OutputRepository
 
-            repo = StorageRepository(session)
-            output = await repo.get_output(request.source_output_id)
+            output = await OutputRepository(session).get(request.source_output_id)
             if output is None:
                 raise ValueError(f"Source output {request.source_output_id} not found")
             url_result = await self._r2.get_presigned_url(output.storage_key, expires_in=3600)
@@ -100,10 +99,9 @@ class GrokGenerationProvider:
         if request.input_image_id is None:
             return None
 
-        from src.db import StorageRepository
+        from src.db.repositories.user_image import UserImageRepository
 
-        repo = StorageRepository(session)
-        input_image = await repo.get_user_image(request.input_image_id)
+        input_image = await UserImageRepository(session).get(request.input_image_id)
         if input_image is None:
             raise ValueError(f"Input image {request.input_image_id} not found")
         url_result = await self._r2.get_presigned_url(

@@ -1,7 +1,7 @@
 """Integration tests for DELETE /v1/content/{content_id}.
 
-Tests StorageRepository deletion methods and FK SET NULL behaviour
-directly against a real PostgreSQL database (no R2 involved).
+Tests OutputRepository/UserImageRepository deletion methods and FK SET NULL
+behaviour directly against a real PostgreSQL database (no R2 involved).
 """
 
 from __future__ import annotations
@@ -11,15 +11,16 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.repositories.storage import StorageRepository
+from src.db.repositories.output import OutputRepository
+from src.db.repositories.user_image import UserImageRepository
 
 
 class TestDeleteContentIntegration:
-    """Integration tests for content deletion via StorageRepository."""
+    """Integration tests for content deletion."""
 
     async def test_delete_output_removes_db_record(
         self,
-        storage_repo: StorageRepository,
+        output_repo: OutputRepository,
         make_user: object,
         make_job: object,
     ) -> None:
@@ -27,7 +28,7 @@ class TestDeleteContentIntegration:
         user = await make_user(email=f"delout-{uuid4().hex[:6]}@example.com")  # type: ignore[operator]
         job = await make_job(user=user)  # type: ignore[operator]
         out_id = uuid4()
-        await storage_repo.create_output(
+        await output_repo.create(
             id=out_id,
             user_id=user.id,
             job_id=job.id,
@@ -40,12 +41,12 @@ class TestDeleteContentIntegration:
             product_id="vex",
         )
 
-        assert await storage_repo.delete_output(out_id, user_id=user.id) is True
-        assert await storage_repo.get_output(out_id) is None
+        assert await output_repo.delete(out_id, user_id=user.id) is True
+        assert await output_repo.get(out_id) is None
 
     async def test_delete_output_wrong_user_returns_false(
         self,
-        storage_repo: StorageRepository,
+        output_repo: OutputRepository,
         make_user: object,
         make_job: object,
     ) -> None:
@@ -54,7 +55,7 @@ class TestDeleteContentIntegration:
         other = await make_user(email=f"delout-other-{uuid4().hex[:6]}@example.com")  # type: ignore[operator]
         job = await make_job(user=user)  # type: ignore[operator]
         out_id = uuid4()
-        await storage_repo.create_output(
+        await output_repo.create(
             id=out_id,
             user_id=user.id,
             job_id=job.id,
@@ -67,13 +68,13 @@ class TestDeleteContentIntegration:
             product_id="vex",
         )
 
-        assert await storage_repo.delete_output(out_id, user_id=other.id) is False
+        assert await output_repo.delete(out_id, user_id=other.id) is False
         # Record still exists
-        assert await storage_repo.get_output(out_id) is not None
+        assert await output_repo.get(out_id) is not None
 
     async def test_delete_upload_removes_db_record(
         self,
-        storage_repo: StorageRepository,
+        user_image_repo: UserImageRepository,
         make_user: object,
         make_user_image: object,
     ) -> None:
@@ -81,12 +82,12 @@ class TestDeleteContentIntegration:
         user = await make_user(email=f"delup-{uuid4().hex[:6]}@example.com")  # type: ignore[operator]
         image = await make_user_image(user=user, size_bytes=500)  # type: ignore[operator]
 
-        assert await storage_repo.delete_user_image(image.id, user_id=user.id) is True
-        assert await storage_repo.get_user_image(image.id) is None
+        assert await user_image_repo.delete(image.id, user_id=user.id) is True
+        assert await user_image_repo.get(image.id) is None
 
     async def test_delete_output_nullifies_lineage_fk(
         self,
-        storage_repo: StorageRepository,
+        output_repo: OutputRepository,
         make_user: object,
         make_job: object,
         db_session: AsyncSession,
@@ -97,7 +98,7 @@ class TestDeleteContentIntegration:
         # Create source job + output
         source_job = await make_job(user=user)  # type: ignore[operator]
         out_id = uuid4()
-        await storage_repo.create_output(
+        await output_repo.create(
             id=out_id,
             user_id=user.id,
             job_id=source_job.id,
@@ -117,7 +118,7 @@ class TestDeleteContentIntegration:
         await db_session.flush()
 
         # Delete the source output (system-level, no user_id filter)
-        assert await storage_repo.delete_output(out_id) is True
+        assert await output_repo.delete(out_id) is True
         await db_session.flush()
 
         # Reload child job — source_output_id should be NULL

@@ -22,8 +22,10 @@ from src.db.models.billing import TokenAccount, TokenTransaction
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.models.user import User
 from src.db.repositories.billing import BillingRepository
-from src.db.repositories.storage import StorageRepository
+from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
 from src.db.repositories.user import UserRepository
+from src.db.repositories.user_image import UserImageRepository
 
 # ---------------------------------------------------------------------------
 # FK constraint: GenerationOutput with non-existent job_id
@@ -154,20 +156,18 @@ async def test_duplicate_org_slug_raises(billing_repo: BillingRepository, make_u
 # ---------------------------------------------------------------------------
 
 
-async def test_large_prompt_stored_without_truncation(
-    storage_repo: StorageRepository, make_user
-) -> None:
+async def test_large_prompt_stored_without_truncation(job_repo: JobRepository, make_user) -> None:
     """A very long prompt is stored and retrieved intact (Text column, no truncation)."""
     user = await make_user(email=f"bigprompt-{uuid4().hex[:6]}@example.com")
     long_prompt = "A" * 10_000
-    job = await storage_repo.create_job(
+    job = await job_repo.create(
         id=uuid4(),
         user_id=user.id,
         name="Big Prompt Job",
         prompt=long_prompt,
         product_id="vex",
     )
-    found = await storage_repo.get_job(job.id)
+    found = await job_repo.get(job.id)
     assert found is not None
     assert found.prompt == long_prompt
     assert len(found.prompt) == 10_000
@@ -207,12 +207,12 @@ async def test_refresh_token_expires_at_is_timezone_aware(
 
 
 async def test_user_image_timestamps_are_timezone_aware(
-    storage_repo: StorageRepository, make_user
+    user_image_repo: UserImageRepository, make_user
 ) -> None:
     """UserImage.created_at and .expires_at are timezone-aware."""
     user = await make_user(email=f"tzimg-{uuid4().hex[:6]}@example.com")
     img_id = uuid4()
-    image = await storage_repo.create_user_image(
+    image = await user_image_repo.create(
         id=img_id,
         user_id=user.id,
         storage_key=f"users/{user.id}/uploads/{img_id}.png",
@@ -223,20 +223,20 @@ async def test_user_image_timestamps_are_timezone_aware(
         expires_at=datetime.now(UTC) + timedelta(days=7),
         product_id="vex",
     )
-    found = await storage_repo.get_user_image(image.id)
+    found = await user_image_repo.get(image.id)
     assert found is not None
     assert found.created_at.tzinfo is not None
     assert found.expires_at.tzinfo is not None
 
 
 async def test_generation_output_timestamps_are_timezone_aware(
-    storage_repo: StorageRepository, make_user, make_job
+    output_repo: OutputRepository, make_user, make_job
 ) -> None:
     """GenerationOutput.created_at and .expires_at are timezone-aware."""
     user = await make_user(email=f"tzout-{uuid4().hex[:6]}@example.com")
     job = await make_job(user=user)
     out_id = uuid4()
-    output = await storage_repo.create_output(
+    output = await output_repo.create(
         id=out_id,
         user_id=user.id,
         job_id=job.id,
@@ -248,7 +248,7 @@ async def test_generation_output_timestamps_are_timezone_aware(
         expires_at=datetime.now(UTC) + timedelta(days=7),
         product_id="vex",
     )
-    found = await storage_repo.get_output(output.id)
+    found = await output_repo.get(output.id)
     assert found is not None
     assert found.created_at.tzinfo is not None
     assert found.expires_at.tzinfo is not None
@@ -313,14 +313,14 @@ async def test_duplicate_refresh_token_hash_raises(user_repo: UserRepository, ma
 
 
 async def test_duplicate_storage_key_for_output_raises(
-    storage_repo: StorageRepository, make_user, make_job
+    output_repo: OutputRepository, make_user, make_job
 ) -> None:
     """Two GenerationOutputs with the same storage_key raise IntegrityError."""
     user = await make_user(email=f"dupkey-{uuid4().hex[:6]}@example.com")
     job = await make_job(user=user)
     key = f"users/{user.id}/outputs/{job.id}/shared.png"
     out_id1 = uuid4()
-    await storage_repo.create_output(
+    await output_repo.create(
         id=out_id1,
         user_id=user.id,
         job_id=job.id,
@@ -333,7 +333,7 @@ async def test_duplicate_storage_key_for_output_raises(
         product_id="vex",
     )
     with pytest.raises(IntegrityError):
-        await storage_repo.create_output(
+        await output_repo.create(
             id=uuid4(),
             user_id=user.id,
             job_id=job.id,

@@ -13,7 +13,8 @@ from uuid import UUID
 
 import structlog
 
-from src.db.repositories.storage import StorageRepository
+from src.db.repositories.output import OutputRepository
+from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,8 +62,8 @@ class ContentProxyService:
         Raises:
             ContentNotFoundError: Output not found or not owned.
         """
-        repo = StorageRepository(session)
-        output = await repo.get_output(output_id, user_id=user_id)
+        output_repo = OutputRepository(session)
+        output = await output_repo.get(output_id, user_id=user_id)
         if output is None or output.product_id != product_id:
             raise ContentNotFoundError(f"Output not found: {output_id}")
         return output.storage_key, str(output.id)
@@ -89,8 +90,8 @@ class ContentProxyService:
         Raises:
             ContentNotFoundError: Upload not found or not owned.
         """
-        repo = StorageRepository(session)
-        image = await repo.get_user_image(image_id, user_id=user_id)
+        image_repo = UserImageRepository(session)
+        image = await image_repo.get(image_id, user_id=user_id)
         if image is None or image.product_id != product_id:
             raise ContentNotFoundError(f"Upload not found: {image_id}")
         return image.storage_key, str(image.id)
@@ -120,13 +121,14 @@ class ContentProxyService:
         Raises:
             ContentNotFoundError: Content not found or not owned.
         """
-        repo = StorageRepository(session)
+        output_repo = OutputRepository(session)
+        image_repo = UserImageRepository(session)
 
         # Try output first (more common deletion target)
-        output = await repo.get_output(content_id, user_id=user_id)
+        output = await output_repo.get(content_id, user_id=user_id)
         if output is not None and output.product_id == product_id:
             await self._storage.delete(output.storage_key)
-            await repo.delete_output(content_id, user_id=user_id)
+            await output_repo.delete(content_id, user_id=user_id)
             logger.info(
                 "content.deleted",
                 content_id=str(content_id),
@@ -137,10 +139,10 @@ class ContentProxyService:
             return True
 
         # Try upload
-        upload = await repo.get_user_image(content_id, user_id=user_id)
+        upload = await image_repo.get(content_id, user_id=user_id)
         if upload is not None and upload.product_id == product_id:
             await self._storage.delete(upload.storage_key)
-            await repo.delete_user_image(content_id, user_id=user_id)
+            await image_repo.delete(content_id, user_id=user_id)
             logger.info(
                 "content.deleted",
                 content_id=str(content_id),

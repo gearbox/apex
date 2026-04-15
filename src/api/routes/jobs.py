@@ -29,7 +29,7 @@ from src.api.schemas.jobs import UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage
 from src.api.security import auth_guard
 from src.api.services.unified_jobs import UnifiedJobService
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, Provider
 
 logger = structlog.get_logger(__name__)
 
@@ -57,7 +57,7 @@ class UnifiedJobController(Controller):
         session: AsyncSession,
         unified_job_service: UnifiedJobService,
         status: JobStatus | None = None,
-        provider: str | None = None,
+        provider: Provider | None = None,
         generation_type: GenerationType | None = None,
         limit: int = 20,
         cursor: str | None = None,
@@ -136,10 +136,9 @@ class UnifiedJobController(Controller):
         NOTE: Full hard-delete with R2 cleanup is a future enhancement.
               For MVP, the retention-based cleanup is sufficient.
         """
-        from src.db.repositories.storage import StorageRepository
+        from src.db.repositories.job import JobRepository
 
-        repo = StorageRepository(session)
-        job = await repo.get_job(job_id, user_id=current_user_id)
+        job = await JobRepository(session).get(job_id, user_id=current_user_id)
 
         if job is None:
             # Litestar 204 handler — raise NotFoundException for proper 404

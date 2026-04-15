@@ -41,12 +41,12 @@ class TestResolveOutput:
         mock_output.product_id = product_id
 
         mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = mock_output
+        mock_repo.get.return_value = mock_output
 
         service = _make_service()
         session = AsyncMock()
 
-        with patch("src.api.services.content_proxy.StorageRepository", return_value=mock_repo):
+        with patch("src.api.services.content_proxy.OutputRepository", return_value=mock_repo):
             storage_key, etag = await service.resolve_output(
                 output_id, user_id=user_id, product_id=product_id, session=session
             )
@@ -59,13 +59,13 @@ class TestResolveOutput:
         user_id = uuid4()
 
         mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = None  # not found for this user
+        mock_repo.get.return_value = None  # not found for this user
 
         service = _make_service()
         session = AsyncMock()
 
         with (
-            patch("src.api.services.content_proxy.StorageRepository", return_value=mock_repo),
+            patch("src.api.services.content_proxy.OutputRepository", return_value=mock_repo),
             pytest.raises(ContentNotFoundError),
         ):
             await service.resolve_output(
@@ -82,13 +82,13 @@ class TestResolveOutput:
         mock_output.product_id = "synthara"  # wrong product
 
         mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = mock_output
+        mock_repo.get.return_value = mock_output
 
         service = _make_service()
         session = AsyncMock()
 
         with (
-            patch("src.api.services.content_proxy.StorageRepository", return_value=mock_repo),
+            patch("src.api.services.content_proxy.OutputRepository", return_value=mock_repo),
             pytest.raises(ContentNotFoundError),
         ):
             await service.resolve_output(
@@ -108,12 +108,12 @@ class TestResolveUpload:
         mock_image.product_id = product_id
 
         mock_repo = AsyncMock()
-        mock_repo.get_user_image.return_value = mock_image
+        mock_repo.get.return_value = mock_image
 
         service = _make_service()
         session = AsyncMock()
 
-        with patch("src.api.services.content_proxy.StorageRepository", return_value=mock_repo):
+        with patch("src.api.services.content_proxy.UserImageRepository", return_value=mock_repo):
             storage_key, etag = await service.resolve_upload(
                 image_id, user_id=user_id, product_id=product_id, session=session
             )
@@ -126,13 +126,13 @@ class TestResolveUpload:
         user_id = uuid4()
 
         mock_repo = AsyncMock()
-        mock_repo.get_user_image.return_value = None
+        mock_repo.get.return_value = None
 
         service = _make_service()
         session = AsyncMock()
 
         with (
-            patch("src.api.services.content_proxy.StorageRepository", return_value=mock_repo),
+            patch("src.api.services.content_proxy.UserImageRepository", return_value=mock_repo),
             pytest.raises(ContentNotFoundError),
         ):
             await service.resolve_upload(
@@ -149,13 +149,13 @@ class TestResolveUpload:
         mock_image.product_id = "synthara"
 
         mock_repo = AsyncMock()
-        mock_repo.get_user_image.return_value = mock_image
+        mock_repo.get.return_value = mock_image
 
         service = _make_service()
         session = AsyncMock()
 
         with (
-            patch("src.api.services.content_proxy.StorageRepository", return_value=mock_repo),
+            patch("src.api.services.content_proxy.UserImageRepository", return_value=mock_repo),
             pytest.raises(ContentNotFoundError),
         ):
             await service.resolve_upload(
@@ -177,17 +177,25 @@ class TestDeleteContent:
         mock_output.storage_key = "users/x/outputs/job/file.png"
         mock_output.product_id = product_id
 
-        mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = mock_output
-        mock_repo.delete_output.return_value = True
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = mock_output
+        mock_output_repo.delete.return_value = True
+
+        mock_image_repo = AsyncMock()
 
         service = _make_service()
         service._storage.delete = AsyncMock(return_value=True)
         session = AsyncMock()
 
-        with patch(
-            "src.api.services.content_proxy.StorageRepository",
-            return_value=mock_repo,
+        with (
+            patch(
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
+            ),
         ):
             result = await service.delete_content(
                 content_id,
@@ -198,7 +206,7 @@ class TestDeleteContent:
 
         assert result is True
         service._storage.delete.assert_awaited_once_with("users/x/outputs/job/file.png")
-        mock_repo.delete_output.assert_awaited_once_with(content_id, user_id=user_id)
+        mock_output_repo.delete.assert_awaited_once_with(content_id, user_id=user_id)
 
     async def test_delete_upload_success(self) -> None:
         """Deleting a user upload removes R2 object and DB row."""
@@ -211,18 +219,26 @@ class TestDeleteContent:
         mock_upload.storage_key = "users/x/uploads/file.png"
         mock_upload.product_id = product_id
 
-        mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = None  # not an output
-        mock_repo.get_user_image.return_value = mock_upload
-        mock_repo.delete_user_image.return_value = True
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = None  # not an output
+
+        mock_image_repo = AsyncMock()
+        mock_image_repo.get.return_value = mock_upload
+        mock_image_repo.delete.return_value = True
 
         service = _make_service()
         service._storage.delete = AsyncMock(return_value=True)
         session = AsyncMock()
 
-        with patch(
-            "src.api.services.content_proxy.StorageRepository",
-            return_value=mock_repo,
+        with (
+            patch(
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
+            ),
         ):
             result = await service.delete_content(
                 content_id,
@@ -233,21 +249,26 @@ class TestDeleteContent:
 
         assert result is True
         service._storage.delete.assert_awaited_once_with("users/x/uploads/file.png")
-        mock_repo.delete_user_image.assert_awaited_once_with(content_id, user_id=user_id)
+        mock_image_repo.delete.assert_awaited_once_with(content_id, user_id=user_id)
 
     async def test_delete_not_found_raises(self) -> None:
         """Deleting unknown content raises ContentNotFoundError."""
-        mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = None
-        mock_repo.get_user_image.return_value = None
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = None
+        mock_image_repo = AsyncMock()
+        mock_image_repo.get.return_value = None
 
         service = _make_service()
         session = AsyncMock()
 
         with (
             patch(
-                "src.api.services.content_proxy.StorageRepository",
-                return_value=mock_repo,
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
             ),
             pytest.raises(ContentNotFoundError),
         ):
@@ -268,17 +289,22 @@ class TestDeleteContent:
         mock_output.storage_key = "users/x/outputs/job/file.png"
         mock_output.product_id = "synthara"  # different product
 
-        mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = mock_output
-        mock_repo.get_user_image.return_value = None
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = mock_output
+        mock_image_repo = AsyncMock()
+        mock_image_repo.get.return_value = None
 
         service = _make_service()
         session = AsyncMock()
 
         with (
             patch(
-                "src.api.services.content_proxy.StorageRepository",
-                return_value=mock_repo,
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
             ),
             pytest.raises(ContentNotFoundError),
         ):
@@ -291,17 +317,22 @@ class TestDeleteContent:
 
     async def test_delete_wrong_user_raises(self) -> None:
         """Content not owned by requesting user raises ContentNotFoundError."""
-        mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = None  # user_id filter rejects
-        mock_repo.get_user_image.return_value = None
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = None  # user_id filter rejects
+        mock_image_repo = AsyncMock()
+        mock_image_repo.get.return_value = None
 
         service = _make_service()
         session = AsyncMock()
 
         with (
             patch(
-                "src.api.services.content_proxy.StorageRepository",
-                return_value=mock_repo,
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
             ),
             pytest.raises(ContentNotFoundError),
         ):
@@ -321,24 +352,31 @@ class TestDeleteContent:
         # Output lookup returns record but wrong product
         mock_output = MagicMock()
         mock_output.product_id = "synthara"
-        mock_repo = AsyncMock()
-        mock_repo.get_output.return_value = mock_output
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = mock_output
 
         # Upload lookup succeeds
         mock_upload = MagicMock()
         mock_upload.id = content_id
         mock_upload.storage_key = "users/x/uploads/file.png"
         mock_upload.product_id = product_id
-        mock_repo.get_user_image.return_value = mock_upload
-        mock_repo.delete_user_image.return_value = True
+        mock_image_repo = AsyncMock()
+        mock_image_repo.get.return_value = mock_upload
+        mock_image_repo.delete.return_value = True
 
         service = _make_service()
         service._storage.delete = AsyncMock(return_value=True)
         session = AsyncMock()
 
-        with patch(
-            "src.api.services.content_proxy.StorageRepository",
-            return_value=mock_repo,
+        with (
+            patch(
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
+            ),
         ):
             result = await service.delete_content(
                 content_id,
@@ -348,7 +386,7 @@ class TestDeleteContent:
             )
 
         assert result is True
-        mock_repo.delete_user_image.assert_awaited_once()
+        mock_image_repo.delete.assert_awaited_once()
 
 
 class TestSettingsContentUrlTtl:
