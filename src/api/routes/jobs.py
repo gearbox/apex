@@ -126,7 +126,7 @@ class UnifiedJobController(Controller):
         job_id: UUID,
         session: AsyncSession,
     ) -> None:
-        """Soft-hide a job from the user's history.
+        """Soft-delete a job from the user's history.
 
         The job record and R2 outputs are retained until the normal retention
         policy cleans them up. The job simply stops appearing in list results.
@@ -138,19 +138,13 @@ class UnifiedJobController(Controller):
         """
         from src.db.repositories.job import JobRepository
 
-        job = await JobRepository(session).get(job_id, user_id=current_user_id)
+        job = await JobRepository(session).soft_delete(job_id, user_id=current_user_id)
 
         if job is None:
-            # Litestar 204 handler — raise NotFoundException for proper 404
             from litestar.exceptions import NotFoundException
 
             raise NotFoundException(detail=f"Job {job_id} not found")
 
-        # Soft-hide: mark as hidden by setting a sentinel status
-        # For MVP, we repurpose the error_message field as a hidden flag
-        # and filter it in list queries.  Migration 007 should add a proper
-        # ``is_hidden`` bool column.
-        job.error_message = "__hidden__"
         await session.commit()
 
-        logger.info("job.hidden", job_id=str(job_id), user_id=str(current_user_id))
+        logger.info("job.soft_deleted", job_id=str(job_id), user_id=str(current_user_id))

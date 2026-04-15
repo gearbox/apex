@@ -510,6 +510,7 @@ def upgrade() -> None:
         sa.Column("worker_id", sa.String(100), nullable=True),
         sa.Column("retry_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("error_message", sa.Text(), nullable=True),
+        sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("generation_type", sa.String(20), nullable=False),
         sa.Column("provider", sa.String(20), nullable=False, server_default=sa.text("'aisha'")),
         sa.Column("model", sa.String(50), nullable=True),
@@ -554,6 +555,12 @@ def upgrade() -> None:
     op.create_index("ix_generation_jobs_user_created", "generation_jobs", ["user_id", "created_at"])
     op.create_index("ix_generation_jobs_user_status", "generation_jobs", ["user_id", "status"])
     op.create_index(op.f("ix_generation_jobs_product_id"), "generation_jobs", ["product_id"])
+    op.create_index(
+        "ix_generation_jobs_deleted",
+        "generation_jobs",
+        ["user_id", "is_deleted"],
+        postgresql_where="is_deleted = TRUE",
+    )
 
     # Add cross-reference FKs now that both tables exist
     op.create_foreign_key(

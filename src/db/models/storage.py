@@ -152,6 +152,12 @@ class GenerationJob(Base):
     worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     generation_type: Mapped[GenerationType] = mapped_column(String(20), index=True, nullable=False)
 
     # Generation parameters
@@ -250,6 +256,12 @@ class GenerationJob(Base):
         Index("ix_generation_jobs_user_created", "user_id", "created_at"),
         Index("ix_generation_jobs_provider_status", "provider", "status"),
         Index("ix_generation_jobs_gallery", "user_id", "product_id", "status", "created_at"),
+        Index(
+            "ix_generation_jobs_deleted",
+            "user_id",
+            "is_deleted",
+            postgresql_where=text("is_deleted = TRUE"),
+        ),
     )
 
     def __repr__(self) -> str:

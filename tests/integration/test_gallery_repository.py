@@ -354,3 +354,48 @@ class TestBatchCoverData:
         cover = result[fake_id]
         assert cover.output_count == 0
         assert cover.cover_output_id is None
+
+
+# ---------------------------------------------------------------------------
+# soft-delete filtering in gallery queries
+# ---------------------------------------------------------------------------
+
+
+async def test_list_gallery_jobs_excludes_soft_deleted(
+    gallery_repo: GalleryRepository,
+    make_user: Callable[..., Coroutine[Any, Any, User]],
+    make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
+    db_session: AsyncSession,
+) -> None:
+    """list_gallery_jobs excludes soft-deleted completed jobs."""
+    from src.db.repositories.job import JobRepository
+
+    user = await make_user(email=f"galdel-{uuid4().hex[:6]}@example.com")
+    visible = await make_job(user=user, status="completed")
+    deleted = await make_job(user=user, status="completed")
+
+    await JobRepository(db_session).soft_delete(deleted.id, user_id=user.id)
+
+    jobs = await gallery_repo.list_gallery_jobs(user.id, "vex")
+    job_ids = {j.id for j in jobs}
+
+    assert visible.id in job_ids
+    assert deleted.id not in job_ids
+
+
+async def test_get_gallery_job_returns_none_for_soft_deleted(
+    gallery_repo: GalleryRepository,
+    make_user: Callable[..., Coroutine[Any, Any, User]],
+    make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
+    db_session: AsyncSession,
+) -> None:
+    """get_gallery_job returns None for a soft-deleted job."""
+    from src.db.repositories.job import JobRepository
+
+    user = await make_user(email=f"galdetaildel-{uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user, status="completed")
+
+    await JobRepository(db_session).soft_delete(job.id, user_id=user.id)
+
+    result = await gallery_repo.get_gallery_job(job.id, user.id, "vex")
+    assert result is None

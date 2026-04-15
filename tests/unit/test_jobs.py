@@ -43,6 +43,7 @@ def _make_job(
     negative_prompt: str | None = None,
     token_cost: int | None = 50,
     error_message: str | None = None,
+    is_deleted: bool = False,
     created_at: datetime | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
@@ -59,6 +60,7 @@ def _make_job(
     job.negative_prompt = negative_prompt
     job.token_cost = token_cost
     job.error_message = error_message
+    job.is_deleted = is_deleted
     job.created_at = created_at or datetime.now(UTC)
     job.started_at = started_at
     job.completed_at = completed_at
@@ -362,6 +364,28 @@ class TestGetJob:
 
         assert result is not None
         assert result.status == JobStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_response — soft-delete regression
+# ---------------------------------------------------------------------------
+
+
+class TestBuildResponse:
+    async def test_soft_deleted_job_error_field_not_leaked(self) -> None:
+        """A soft-deleted job should not expose '__hidden__' as its error.
+
+        This is a regression guard — the old sentinel pattern leaked
+        '__hidden__' through the error field.
+        """
+        user_id = uuid4()
+        job = _make_job(user_id=user_id, is_deleted=True, error_message=None)
+        session = _session_for_get(job)
+
+        result = await _service().get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert result.error is None
 
 
 # ---------------------------------------------------------------------------

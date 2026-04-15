@@ -259,6 +259,113 @@ async def test_list_pending_video_jobs_empty_when_no_matches(
     assert not list(jobs)
 
 
+# -------------------------------------------------------------------------
+# soft-delete (is_deleted) filtering
+# -------------------------------------------------------------------------
+
+
+async def test_list_by_user_excludes_soft_deleted_jobs(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """list_by_user excludes jobs with is_deleted=True."""
+    user = await make_user(email=f"deleted-{uuid4().hex[:6]}@example.com")
+    visible = await make_job(user=user)
+    deleted = await make_job(user=user)
+
+    await job_repo.soft_delete(deleted.id, user_id=user.id)
+
+    jobs = await job_repo.list_by_user(user.id)
+    job_ids = {j.id for j in jobs}
+
+    assert visible.id in job_ids
+    assert deleted.id not in job_ids
+
+
+async def test_get_with_user_id_excludes_soft_deleted_job(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """get() with user_id returns None for a soft-deleted job."""
+    user = await make_user(email=f"getdel-{uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user)
+
+    await job_repo.soft_delete(job.id, user_id=user.id)
+
+    result = await job_repo.get(job.id, user_id=user.id)
+    assert result is None
+
+
+async def test_get_without_user_id_includes_soft_deleted_job(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """get() without user_id (internal) returns soft-deleted jobs."""
+    user = await make_user(email=f"getdelint-{uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user)
+
+    await job_repo.soft_delete(job.id, user_id=user.id)
+
+    result = await job_repo.get(job.id)
+    assert result is not None
+    assert result.is_deleted is True
+
+
+async def test_soft_delete_sets_is_deleted(job_repo: JobRepository, make_user, make_job) -> None:
+    """soft_delete sets is_deleted=True on the job."""
+    user = await make_user(email=f"softdel-{uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user)
+
+    result = await job_repo.soft_delete(job.id, user_id=user.id)
+
+    assert result is not None
+    assert result.is_deleted is True
+
+
+async def test_soft_delete_preserves_error_message(
+    job_repo: JobRepository, make_user, make_job, db_session
+) -> None:
+    """soft_delete does not clobber an existing error_message."""
+    user = await make_user(email=f"softdelerr-{uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user, status="failed")
+    job.error_message = "GPU OOM"
+    await db_session.flush()
+
+    result = await job_repo.soft_delete(job.id, user_id=user.id)
+
+    assert result is not None
+    assert result.is_deleted is True
+    assert result.error_message == "GPU OOM"
+
+
+async def test_soft_delete_wrong_user_returns_none(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """soft_delete returns None when user doesn't own the job."""
+    user = await make_user(email=f"softdelowner-{uuid4().hex[:6]}@example.com")
+    other = await make_user(email=f"softdelother-{uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user)
+
+    result = await job_repo.soft_delete(job.id, user_id=other.id)
+
+    assert result is None
+
+
+async def test_soft_delete_unknown_returns_none(job_repo: JobRepository) -> None:
+    """soft_delete returns None for unknown job ID."""
+    assert await job_repo.soft_delete(uuid4(), user_id=uuid4()) is None
+
+
+async def test_soft_delete_idempotent(job_repo: JobRepository, make_user, make_job) -> None:
+    """soft_delete on already-deleted job succeeds (idempotent)."""
+    user = await make_user(email=f"softdelidem-{uuid4().hex[:6]}@example.com")
+    job = await make_job(user=user)
+
+    first = await job_repo.soft_delete(job.id, user_id=user.id)
+    second = await job_repo.soft_delete(job.id, user_id=user.id)
+
+    assert first is not None
+    assert second is not None
+    assert second.is_deleted is True
+
+
 async def test_list_pending_video_jobs_custom_provider(
     job_repo: JobRepository, make_user, make_job
 ) -> None:

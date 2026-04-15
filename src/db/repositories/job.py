@@ -97,15 +97,30 @@ class JobRepository(BaseRepository[GenerationJob]):
     ) -> GenerationJob | None:
         """Get a job by ID, optionally scoped to a user.
 
+        When ``user_id`` is provided, soft-deleted jobs are excluded
+        (user-facing). When ``user_id`` is ``None``, all jobs are
+        returned including soft-deleted (internal/system use).
+
         Args:
             job_id: Job ID to look up.
-            user_id: When provided, only returns if owned by this user.
-                ``None`` skips the ownership check (for internal use).
+            user_id: When provided, only returns if owned by this user
+                and not soft-deleted. ``None`` skips both checks
+                (for internal use).
 
         Returns:
             GenerationJob if found, None otherwise.
         """
-        return await self._get_with_optional_owner(job_id, user_id=user_id)
+        if user_id is None:
+            return await self._session.get(GenerationJob, job_id)
+
+        result = await self._session.execute(
+            select(GenerationJob).where(
+                GenerationJob.id == job_id,
+                GenerationJob.user_id == user_id,
+                GenerationJob.is_deleted.is_(False),
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def update_status(
         self,
@@ -180,6 +195,9 @@ class JobRepository(BaseRepository[GenerationJob]):
 
         query = select(GenerationJob).where(GenerationJob.user_id == user_id)
 
+        # Exclude soft-deleted jobs from user-facing listings
+        query = query.where(GenerationJob.is_deleted.is_(False))
+
         if status is not None:
             query = query.where(GenerationJob.status == status)
         if provider is not None:
@@ -203,6 +221,42 @@ class JobRepository(BaseRepository[GenerationJob]):
             ).limit(limit + 1)
         )
         return result.scalars().all()
+
+    async def soft_delete(
+        self,
+        job_id: UUID,
+        *,
+        user_id: UUID,
+    ) -> GenerationJob | None:
+        """Soft-delete a job — marks it as deleted without removing the record.
+
+        The job record and R2 outputs are retained until the retention
+        policy cleans them up. The job stops appearing in user-facing
+        list/get results.
+
+        Uses a direct query that bypasses the is_deleted filter so that
+        soft-deleting an already-deleted job is idempotent.
+
+        Args:
+            job_id: Job to soft-delete.
+            user_id: Owner check — only the owner can delete their own job.
+
+        Returns:
+            Updated GenerationJob if found and owned, None otherwise.
+        """
+        result = await self._session.execute(
+            select(GenerationJob).where(
+                GenerationJob.id == job_id,
+                GenerationJob.user_id == user_id,
+            )
+        )
+        job = result.scalar_one_or_none()
+        if job is None:
+            return None
+
+        job.is_deleted = True
+        await self._session.flush()
+        return job
 
     async def list_pending_video_jobs(
         self,

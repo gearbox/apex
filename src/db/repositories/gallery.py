@@ -71,6 +71,7 @@ class GalleryRepository:
             GenerationJob.user_id == user_id,
             GenerationJob.product_id == product_id,
             GenerationJob.status == JobStatus.COMPLETED,
+            GenerationJob.is_deleted.is_(False),
         )
 
         if media_type == OutputMediaType.VIDEO:
@@ -121,6 +122,7 @@ class GalleryRepository:
                 GenerationJob.user_id == user_id,
                 GenerationJob.product_id == product_id,
                 GenerationJob.status == JobStatus.COMPLETED,
+                GenerationJob.is_deleted.is_(False),
             )
             .options(
                 selectinload(GenerationJob.outputs),
