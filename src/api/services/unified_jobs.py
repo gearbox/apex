@@ -116,7 +116,7 @@ class UnifiedJobService:
         *,
         session: AsyncSession,
         status: JobStatus | None = None,
-        provider: str | None = None,
+        provider: Provider | None = None,
         generation_type: GenerationType | None = None,
         limit: int = 20,
         cursor: str | None = None,
@@ -146,13 +146,12 @@ class UnifiedJobService:
         if cursor is not None:
             cursor_ts, cursor_id = decode_cursor(cursor)
 
-        provider_enum = Provider(provider) if provider is not None else None
         job_repo = JobRepository(session)
         jobs = list(
             await job_repo.list_by_user(
                 user_id,
                 status=status,
-                provider=provider_enum,
+                provider=provider,
                 generation_type=generation_type,
                 limit=limit,
                 cursor_ts=cursor_ts,
@@ -193,10 +192,17 @@ class UnifiedJobService:
     ) -> UnifiedJobResponse:
         """Build a full ``UnifiedJobResponse`` for a DB job record.
 
-        Fetches outputs and generates presigned URLs.
+        Uses eagerly-loaded ``job.outputs`` when available (list path),
+        falls back to a repo query for the single-job path where
+        outputs aren't preloaded.
         """
-        output_repo = OutputRepository(session)
-        db_outputs = await output_repo.list_by_job(job.id)
+        if "outputs" in job.__dict__:
+            # Relationship already loaded (e.g. via selectinload in list_by_user).
+            # Sort by output_index since the relationship has no default ordering.
+            db_outputs = sorted(job.outputs, key=lambda o: o.output_index)
+        else:
+            output_repo = OutputRepository(session)
+            db_outputs = list(await output_repo.list_by_job(job.id))
 
         output_items: list[JobOutputItem] = []
         thumbnail_url: str | None = None

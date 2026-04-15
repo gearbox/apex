@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.12.1"
+version = "0.13.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -44,7 +44,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0.2",
+    "pytest>=9.0.3",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
     "pytest-xdist>=3.6.0",          # parallel execution with -n auto

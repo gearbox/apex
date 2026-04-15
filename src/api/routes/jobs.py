@@ -29,7 +29,7 @@ from src.api.schemas.jobs import UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage
 from src.api.security import auth_guard
 from src.api.services.unified_jobs import UnifiedJobService
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, Provider
 
 logger = structlog.get_logger(__name__)
 
@@ -57,7 +57,7 @@ class UnifiedJobController(Controller):
         session: AsyncSession,
         unified_job_service: UnifiedJobService,
         status: JobStatus | None = None,
-        provider: str | None = None,
+        provider: Provider | None = None,
         generation_type: GenerationType | None = None,
         limit: int = 20,
         cursor: str | None = None,
