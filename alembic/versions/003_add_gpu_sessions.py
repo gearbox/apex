@@ -42,6 +42,52 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("false"),
         ),
+        # Bundle identity columns
+        sa.Column(
+            "bundle_name",
+            sa.String(100),
+            nullable=False,
+            server_default="",
+            comment="ai-bundles bundle name (e.g. wan_2.2_i2v)",
+        ),
+        sa.Column(
+            "bundle_version",
+            sa.String(20),
+            nullable=True,
+            comment="Specific bundle version (e.g. 260105-01). None = 'current' symlink",
+        ),
+        sa.Column(
+            "model_type",
+            sa.String(50),
+            nullable=False,
+            server_default="",
+            comment="ModelType slug that triggered this session (e.g. aisha-image)",
+        ),
+        # Cloudflare tunnel columns
+        sa.Column("cf_tunnel_id", sa.String(64), nullable=True),
+        sa.Column("cf_dns_record_id", sa.String(64), nullable=True),
+        sa.Column("tunnel_hostname", sa.String(255), nullable=True),
+        # Vast.ai detail columns
+        sa.Column("vastai_offer_id", sa.Integer(), nullable=True),
+        sa.Column(
+            "vastai_cost_per_hour_micros",
+            sa.Integer(),
+            nullable=True,
+            comment="Vast.ai $/hr in microdollars (1_000_000 = $1.00) at instance creation time",
+        ),
+        sa.Column("vastai_gpu_name", sa.String(50), nullable=True),
+        # Provisioning tracking
+        sa.Column(
+            "provision_attempt",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("1"),
+        ),
+        # Pause/resume tracking
+        sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("resumed_at", sa.DateTime(timezone=True), nullable=True),
+        # Phase 2 callback token
+        sa.Column("callback_token", sa.String(128), nullable=True),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column(
             "created_at",
@@ -66,8 +112,21 @@ def upgrade() -> None:
         "ix_gpu_sessions_active_stale",
         "gpu_sessions",
         ["status", "stale_detected_at"],
-        postgresql_where=sa.text("status IN ('active', 'stale')"),
+        postgresql_where=sa.text("status IN ('active', 'stale', 'paused', 'resuming')"),
     )
+
+    # New partial unique index: one non-terminal session per (user, product, model_type)
+    op.create_index(
+        "ix_gpu_sessions_active_user_model",
+        "gpu_sessions",
+        ["user_id", "product_id", "model_type"],
+        unique=True,
+        postgresql_where=sa.text("status NOT IN ('stopped', 'failed')"),
+    )
+
+    # Remove server defaults used only for the NOT NULL migration
+    op.alter_column("gpu_sessions", "bundle_name", server_default=None)
+    op.alter_column("gpu_sessions", "model_type", server_default=None)
 
 
 def downgrade() -> None:

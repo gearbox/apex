@@ -327,6 +327,8 @@ class GpuSessionStatus(StrEnum):
     provisioning = "provisioning"  # Vast.ai node is starting up
     active = "active"  # node is up, ComfyUI is reachable
     stale = "stale"  # node was active but is now unreachable
+    paused = "paused"  # user paused — Vast.ai instance stopped, disk retained
+    resuming = "resuming"  # user resumed — Vast.ai instance restarting
     stopping = "stopping"  # user requested stop, teardown in progress
     stopped = "stopped"  # session ended normally
     failed = "failed"  # provisioning or runtime failure

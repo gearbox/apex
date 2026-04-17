@@ -31,6 +31,8 @@ async def _create_gpu_session(
         id=new_id(),
         user_id=uuid4() if user_id is None else user_id,
         product_id="vex",
+        bundle_name="test_bundle",
+        model_type="aisha-image",
         status=status,
         node_host=host,
         node_port=port,

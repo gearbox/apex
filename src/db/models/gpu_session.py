@@ -1,4 +1,13 @@
-"""GPU session model — tracks on-demand Vast.ai node lifecycle."""
+"""GPU session model — tracks on-demand Vast.ai node lifecycle.
+
+Covers the full provisioning, tunnel, pause/resume, and billing workflow:
+- Bundle identity: which ai-bundles bundle/version was deployed
+- Cloudflare tunnel: tunnel ID, DNS record, and hostname for routing
+- Vast.ai details: offer ID, GPU name, hourly cost captured at creation
+- Provisioning tracking: attempt counter for retry logic
+- Pause/resume timestamps: for billing and UX
+- Phase 2 callback token: pre-wired for GPU → Apex callbacks
+"""
 
 from __future__ import annotations
 
@@ -24,15 +33,21 @@ from src.db.models.base import Base
 class GpuSession(Base):
     """Tracks the lifecycle of an on-demand Vast.ai GPU node session.
 
-    The health reconciler probes active sessions and transitions
-    unreachable ones to 'stale'. Future billing and recovery workers
-    also operate on this table.
+    The health reconciler probes active/stale/paused/resuming sessions and
+    transitions unreachable ones to 'stale'. The provisioning worker drives
+    pending → provisioning → active transitions and handles pause/resume.
 
     Key columns for health reconciliation:
-    - status: only 'active' and 'stale' sessions are probed
+    - status: 'active', 'stale', 'paused', 'resuming' sessions are probed
     - node_host / node_port: ComfyUI endpoint to probe
     - stale_detected_at: set by reconciler when probe fails
     - stale_notified: prevents duplicate admin notifications
+
+    Key columns for provisioning:
+    - bundle_name / bundle_version / model_type: what was deployed
+    - vastai_offer_id / vastai_gpu_name: Vast.ai node selected
+    - provision_attempt: retry counter
+    - cf_tunnel_id / cf_dns_record_id / tunnel_hostname: routing
     """
 
     __tablename__ = "gpu_sessions"
@@ -54,6 +69,23 @@ class GpuSession(Base):
         String(32),
         nullable=False,
         index=True,
+    )
+
+    # Bundle identity
+    bundle_name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        comment="ai-bundles bundle name (e.g. wan_2.2_i2v)",
+    )
+    bundle_version: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="Specific bundle version (e.g. 260105-01). None = 'current' symlink",
+    )
+    model_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        comment="ModelType slug that triggered this session (e.g. aisha-image)",
     )
 
     # Session status
@@ -78,6 +110,58 @@ class GpuSession(Base):
         Integer,
         nullable=True,
         comment="ComfyUI port on the GPU node",
+    )
+
+    # Cloudflare tunnel
+    cf_tunnel_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    cf_dns_record_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    tunnel_hostname: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    # Vast.ai details (captured at instance creation)
+    vastai_offer_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    vastai_cost_per_hour_micros: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Vast.ai $/hr in microdollars (1_000_000 = $1.00) at instance creation time",
+    )
+    vastai_gpu_name: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    # Provisioning tracking
+    provision_attempt: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+    )
+
+    # Pause/resume tracking
+    paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    resumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Phase 2 callback
+    callback_token: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
     )
 
     # Staleness tracking (health reconciler)
@@ -121,6 +205,14 @@ class GpuSession(Base):
             "ix_gpu_sessions_active_stale",
             "status",
             "stale_detected_at",
-            postgresql_where=text("status IN ('active', 'stale')"),
+            postgresql_where=text("status IN ('active', 'stale', 'paused', 'resuming')"),
+        ),
+        Index(
+            "ix_gpu_sessions_active_user_model",
+            "user_id",
+            "product_id",
+            "model_type",
+            unique=True,
+            postgresql_where=text("status NOT IN ('stopped', 'failed')"),
         ),
     )
