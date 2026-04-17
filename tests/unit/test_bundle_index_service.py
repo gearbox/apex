@@ -141,6 +141,95 @@ class TestParseIndex:
         assert svc._model_index == {}
         assert svc._bundle_index == {}
 
+    def test_bundles_not_a_list_is_noop(self, tmp_path: Path) -> None:
+        """If 'bundles' is a mapping instead of a list, don't crash."""
+        (tmp_path / "bundle-index.yaml").write_text(
+            yaml.dump({"bundles": {"not": "a list"}}),
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        assert svc._model_index == {}
+        assert svc._bundle_index == {}
+
+    def test_bad_bundle_entry_is_skipped(self, tmp_path: Path) -> None:
+        """A single malformed entry must not poison the whole index."""
+        _write_bundle_yaml(tmp_path / "bundles" / "good")
+        # Missing 'path' field in second entry
+        _write_index(
+            tmp_path,
+            [
+                {
+                    "name": "good",
+                    "path": "bundles/good",
+                    "model_type": "aisha-good",
+                    "default_bundle": True,
+                },
+                {
+                    "name": "bad",
+                    "model_type": "aisha-bad",
+                    "default_bundle": True,
+                },  # missing 'path'
+            ],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        # Good bundle parsed, bad bundle skipped
+        assert "aisha-good" in svc._model_index
+        assert "aisha-bad" not in svc._model_index
+        assert "good" in svc._bundle_index
+        assert "bad" not in svc._bundle_index
+
+    def test_bundle_with_invalid_hardware_is_skipped(self, tmp_path: Path) -> None:
+        """If a bundle's bundle.yaml has invalid hardware, skip only that bundle."""
+        _write_bundle_yaml(tmp_path / "bundles" / "good")
+        # Write an invalid bundle.yaml for the second bundle
+        bad_dir = tmp_path / "bundles" / "bad" / "current"
+        bad_dir.mkdir(parents=True)
+        (bad_dir / "bundle.yaml").write_text(yaml.dump({"name": "bad", "hardware": "garbage"}))
+        _write_index(
+            tmp_path,
+            [
+                {
+                    "name": "good",
+                    "path": "bundles/good",
+                    "model_type": "aisha-good",
+                    "default_bundle": True,
+                },
+                {
+                    "name": "bad",
+                    "path": "bundles/bad",
+                    "model_type": "aisha-bad",
+                    "default_bundle": True,
+                },
+            ],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        assert "aisha-good" in svc._model_index
+        assert "aisha-bad" not in svc._model_index
+
+    def test_non_mapping_entry_is_skipped(self, tmp_path: Path) -> None:
+        """A YAML list where entries are strings instead of mappings."""
+        _write_bundle_yaml(tmp_path / "bundles" / "good")
+        (tmp_path / "bundle-index.yaml").write_text(
+            yaml.dump(
+                {
+                    "bundles": [
+                        "not a dict",
+                        {
+                            "name": "good",
+                            "path": "bundles/good",
+                            "model_type": "aisha-good",
+                            "default_bundle": True,
+                        },
+                    ]
+                }
+            )
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        assert "good" in svc._bundle_index
+
 
 class TestResolveBundle:
     def test_returns_correct_mapping(self, fake_repo: Path) -> None:
@@ -401,3 +490,53 @@ class TestSyncErrorBehavior:
         scrubbed = svc._scrub_token("fatal: unable to access 'https://ghp_secret_abc@github.com/'")
         assert "ghp_secret_abc" not in scrubbed
         assert "***" in scrubbed
+
+
+# ---------------------------------------------------------------------------
+# _validate_repo_url
+# ---------------------------------------------------------------------------
+
+
+class TestValidateRepoUrl:
+    def test_accepts_https_url(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path)
+        svc._validate_repo_url()  # must not raise
+
+    def test_accepts_ssh_url(self, tmp_path: Path) -> None:
+        svc = BundleIndexService(
+            repo_url="git@github.com:gearbox/ai-bundles.git",
+            github_token="",
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+        )
+        svc._validate_repo_url()
+
+    def test_accepts_ssh_scheme_url(self, tmp_path: Path) -> None:
+        svc = BundleIndexService(
+            repo_url="ssh://git@github.com/gearbox/ai-bundles.git",
+            github_token="",
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+        )
+        svc._validate_repo_url()
+
+    def test_rejects_dash_prefix_argument_injection(self, tmp_path: Path) -> None:
+        """Leading '-' would be parsed as a git option flag, not a URL."""
+        svc = BundleIndexService(
+            repo_url="--upload-pack=malicious",
+            github_token="",
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match="must not start with '-'"):
+            svc._validate_repo_url()
+
+    def test_rejects_unsupported_scheme(self, tmp_path: Path) -> None:
+        svc = BundleIndexService(
+            repo_url="file:///etc/passwd",
+            github_token="",
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match="https://.*git@.*ssh://"):
+            svc._validate_repo_url()

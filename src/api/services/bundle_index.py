@@ -38,8 +38,13 @@ class BundleIndexService:
     files for hardware requirements.
 
     Thread-safety: reads are from an in-memory cache; writes (sync) are infrequent
-    and replace the cache atomically.
+    and serialized by an asyncio.Lock so concurrent sync() calls don't race on
+    the on-disk cache directory.
     """
+
+    # Max wall time for any single git invocation. Prevents a hung/prompting
+    # git process from blocking the thread pool indefinitely.
+    _GIT_TIMEOUT_SECONDS = 120
 
     def __init__(
         self,
@@ -58,6 +63,7 @@ class BundleIndexService:
         self._bundle_index: dict[str, _BundleIndexEntry] = {}
         self._running = False
         self._sync_task: asyncio.Task[None] | None = None
+        self._sync_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Initial sync + start periodic background sync.
@@ -108,19 +114,22 @@ class BundleIndexService:
         """Single sync pass. Raises when raise_on_error=True, else logs and swallows.
 
         Runs git operations in a thread executor to avoid blocking the event loop.
+        Serialized by an asyncio.Lock so concurrent callers don't race on the
+        shared on-disk cache.
         """
-        try:
-            await asyncio.to_thread(self._git_sync)
-            self._parse_index()
-            logger.info(
-                "bundle_index.synced",
-                model_types=list(self._model_index.keys()),
-                bundle_count=len(self._bundle_index),
-            )
-        except Exception:
-            logger.exception("bundle_index.sync_error")
-            if raise_on_error:
-                raise
+        async with self._sync_lock:
+            try:
+                await asyncio.to_thread(self._git_sync)
+                self._parse_index()
+                logger.info(
+                    "bundle_index.synced",
+                    model_types=list(self._model_index.keys()),
+                    bundle_count=len(self._bundle_index),
+                )
+            except Exception:
+                logger.exception("bundle_index.sync_error")
+                if raise_on_error:
+                    raise
 
     def resolve_bundle(self, model_type: str) -> BundleMapping:
         """Resolve the default bundle for a ModelType.
@@ -176,7 +185,11 @@ class BundleIndexService:
     # ------------------------------------------------------------------
 
     def _parse_index(self) -> None:
-        """Parse bundle-index.yaml and build the in-memory index."""
+        """Parse bundle-index.yaml and build the in-memory index.
+
+        Malformed individual bundle entries are skipped with a warning so one
+        bad bundle doesn't poison the entire index.
+        """
         index_file = self._cache_dir / "bundle-index.yaml"
         if not index_file.exists():
             logger.warning("bundle_index.index_file_missing", path=str(index_file))
@@ -196,38 +209,80 @@ class BundleIndexService:
             )
             return
 
+        bundles_raw = data.get("bundles", [])
+        if not isinstance(bundles_raw, list):
+            logger.warning(
+                "bundle_index.bundles_not_a_list",
+                path=str(index_file),
+                got_type=type(bundles_raw).__name__,
+            )
+            return
+
         model_index: dict[str, _BundleIndexEntry] = {}
         bundle_index: dict[str, _BundleIndexEntry] = {}
+        skipped = 0
 
-        for item in data.get("bundles", []):
-            name: str = item["name"]
-            path: str = item["path"]
-            model_type: str = item["model_type"]
-            is_default: bool = bool(item.get("default_bundle", False))
+        for item in bundles_raw:
+            if not isinstance(item, dict):
+                logger.warning(
+                    "bundle_index.entry_not_a_mapping",
+                    got_type=type(item).__name__,
+                )
+                skipped += 1
+                continue
+            try:
+                entry = self._build_entry(item)
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "bundle_index.entry_invalid",
+                    bundle_name=item.get("name") if isinstance(item, dict) else None,
+                    error=str(exc),
+                )
+                skipped += 1
+                continue
 
-            bundle_path = self._cache_dir / path
-            hardware = self._parse_hardware(bundle_path)
+            bundle_index[entry.bundle_name] = entry
+            if entry.is_default:
+                model_index[entry.model_type] = entry
 
-            mapping = BundleMapping(
-                bundle_name=name,
-                bundle_version=None,
-                hardware=hardware,
-            )
-            entry = _BundleIndexEntry(
-                bundle_name=name,
-                bundle_path=path,
-                model_type=model_type,
-                is_default=is_default,
-                mapping=mapping,
-            )
-
-            bundle_index[name] = entry
-            if is_default:
-                model_index[model_type] = entry
+        if skipped:
+            logger.warning("bundle_index.entries_skipped", skipped=skipped)
 
         # Atomic replacement
         self._model_index = model_index
         self._bundle_index = bundle_index
+
+    def _build_entry(self, item: dict) -> _BundleIndexEntry:
+        """Build a single index entry from a raw YAML mapping.
+
+        Raises:
+            KeyError: If a required field is missing.
+            ValueError: If the bundle's hardware section is invalid.
+        """
+        for field in ("name", "path", "model_type"):
+            if field not in item:
+                raise KeyError(f"bundle-index.yaml entry missing required field '{field}'")
+
+        name = str(item["name"])
+        path = str(item["path"])
+        model_type = str(item["model_type"])
+        is_default = bool(item.get("default_bundle", False))
+
+        bundle_path = self._cache_dir / path
+        hardware = self._parse_hardware(bundle_path)
+
+        mapping = BundleMapping(
+            bundle_name=name,
+            bundle_version=None,
+            hardware=hardware,
+        )
+        return _BundleIndexEntry(
+            bundle_name=name,
+            bundle_path=path,
+            model_type=model_type,
+            is_default=is_default,
+            mapping=mapping,
+        )
 
     def _parse_hardware(self, bundle_path: Path) -> HardwareRequirements:
         """Parse hardware requirements from a bundle.yaml file.
@@ -322,18 +377,77 @@ class BundleIndexService:
         encoded = base64.b64encode(credentials).decode()
         return ["-c", f"http.extraHeader=Authorization: Basic {encoded}"]
 
+    def _validate_repo_url(self) -> None:
+        """Reject repo URLs that would be interpreted as CLI options by git.
+
+        Defense-in-depth: repo_url comes from operator-controlled settings, but
+        a URL starting with ``-`` (or ``--``) would be parsed as an option flag
+        rather than a positional URL argument, potentially triggering unintended
+        git behavior. Accept only HTTPS and SSH forms.
+        """
+        url = self._repo_url
+        if url.startswith("-"):
+            raise ValueError(f"repo_url must not start with '-': {url!r}")
+        if not (url.startswith("https://") or url.startswith("git@") or url.startswith("ssh://")):
+            raise ValueError(f"repo_url must be an https://, git@, or ssh:// URL, got {url!r}")
+
     def _git_sync(self) -> None:
-        """Perform the actual git clone or pull (runs in thread executor)."""
+        """Perform the actual git clone or pull (runs in thread executor).
+
+        Security notes:
+        - ``shell=False`` (default) + list argv: no shell metacharacters can
+          trigger command injection; each argv element is passed as-is to
+          execve(). This is why Semgrep's ``dangerous-subprocess-use-audit``
+          warning is a false positive here — but we still validate inputs.
+        - ``self._repo_url`` is operator-controlled (env var), validated via
+          ``_validate_repo_url`` to reject leading-dash argument injection.
+        - ``self._cache_dir`` is operator-controlled.
+        - ``auth_args`` is either empty or a ``-c http.extraHeader=...`` pair
+          with a base64-encoded token (never raw user input).
+        - ``--`` separator ensures subsequent positional args are parsed as
+          URLs/paths even if git adds new option flags in future versions.
+        - Bounded timeout prevents a hung/prompting git process from blocking
+          the thread pool indefinitely.
+        """
+        self._validate_repo_url()
         repo_dir = self._cache_dir
         auth_args = self._auth_extra_header()
 
         if (repo_dir / ".git").exists():
-            cmd = ["git", *auth_args, "-C", str(repo_dir), "pull", "--ff-only"]
+            cmd = [
+                "git",
+                *auth_args,
+                "-C",
+                str(repo_dir),
+                "pull",
+                "--ff-only",
+            ]
         else:
             repo_dir.mkdir(parents=True, exist_ok=True)
-            cmd = ["git", *auth_args, "clone", "--depth=1", self._repo_url, str(repo_dir)]
+            cmd = [
+                "git",
+                *auth_args,
+                "clone",
+                "--depth=1",
+                "--",  # lock down positional args against future git option additions
+                self._repo_url,
+                str(repo_dir),
+            ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+            # Safe: shell=False, static-prefix list argv, repo_url validated above.
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"git operation timed out after {self._GIT_TIMEOUT_SECONDS}s"
+            ) from exc
 
         if result.returncode != 0:
             # Scrub stderr of any accidental token echo before raising/logging
