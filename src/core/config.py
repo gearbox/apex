@@ -98,6 +98,80 @@ class Settings(BaseSettings):
         description="Vast.ai API key for GPU node management. Required for Aisha on-demand sessions.",
     )
 
+    # --- GPU Session Provisioning (ai-bundles) ---
+    ai_bundles_github_token: str = Field(
+        default="",
+        description="GitHub PAT for cloning the private ai-bundles repository",
+    )
+    ai_bundles_repo_url: str = Field(
+        default="https://github.com/gearbox/ai-bundles.git",
+        description="Git URL for the ai-bundles repository",
+    )
+    ai_bundles_sync_interval_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=60,
+        description="How often to git-pull ai-bundles for bundle index updates",
+    )
+    hf_token: str = Field(
+        default="",
+        description="HuggingFace token for private model downloads on GPU nodes",
+    )
+    civitai_api_token: str = Field(
+        default="",
+        description="Civitai API token for model downloads on GPU nodes",
+    )
+
+    # --- Cloudflare Tunnel ---
+    cf_api_token: str = Field(
+        default="",
+        description="Cloudflare API token with Tunnel:Edit permission",
+    )
+    cf_account_id: str = Field(
+        default="",
+        description="Cloudflare account ID",
+    )
+    cf_zone_id: str = Field(
+        default="",
+        description="Cloudflare zone ID for the tunnel domain (cloudin.space)",
+    )
+    cf_tunnel_domain: str = Field(
+        default="gpu.cloudin.space",
+        description="Base domain for GPU session tunnel hostnames",
+    )
+
+    # --- GPU Provisioning Worker ---
+    gpu_provision_poll_interval_seconds: int = Field(
+        default=15,
+        ge=5,
+        le=60,
+        description="How often to poll pending/provisioning/resuming sessions",
+    )
+    gpu_provision_timeout_minutes: int = Field(
+        default=20,
+        ge=5,
+        le=60,
+        description="Max time per provisioning attempt before retry/failure",
+    )
+    gpu_resume_timeout_minutes: int = Field(
+        default=5,
+        ge=1,
+        le=15,
+        description="Max time to wait for a paused session to resume",
+    )
+    max_node_provisioning_retries: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Max provisioning attempts before marking session as failed",
+    )
+
+    # --- Phase 2 Callback (pre-wired) ---
+    apex_callback_url: str = Field(
+        default="",
+        description="Public URL for GPU node → Apex callbacks (Phase 2, unused in Phase 1)",
+    )
+
     # Grok video polling settings
     grok_video_poll_interval: int = Field(
         default=5,
