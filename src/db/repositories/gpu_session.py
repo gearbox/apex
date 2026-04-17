@@ -29,7 +29,7 @@ class GpuSessionRepository:
         id: UUID,
         user_id: UUID,
         product_id: str,
-        status: str,
+        status: GpuSessionStatus | str,
         bundle_name: str,
         model_type: str,
         bundle_version: str | None = None,
@@ -48,7 +48,7 @@ class GpuSessionRepository:
             id: Session UUID (caller provides, e.g. via UUIDv7).
             user_id: Owner user.
             product_id: Product scope.
-            status: Initial GpuSessionStatus value.
+            status: Initial GpuSessionStatus value (enum member preferred).
             bundle_name: ai-bundles bundle name.
             model_type: ModelType slug.
             bundle_version: Pinned bundle version; None = 'current' symlink.
@@ -178,13 +178,12 @@ class GpuSessionRepository:
         Returns:
             Non-terminal GpuSession or None.
         """
-        terminal_values = [s.value for s in _TERMINAL_STATUSES]
         result = await self._session.execute(
             select(GpuSession).where(
                 GpuSession.user_id == user_id,
                 GpuSession.product_id == product_id,
                 GpuSession.model_type == model_type,
-                GpuSession.status.not_in(terminal_values),
+                GpuSession.status.not_in(_TERMINAL_STATUSES),
             )
         )
         return result.scalar_one_or_none()
@@ -211,25 +210,24 @@ class GpuSessionRepository:
             GpuSession.product_id == product_id,
         )
         if not include_terminal:
-            terminal_values = [s.value for s in _TERMINAL_STATUSES]
-            query = query.where(GpuSession.status.not_in(terminal_values))
+            query = query.where(GpuSession.status.not_in(_TERMINAL_STATUSES))
 
         result = await self._session.execute(query.order_by(GpuSession.created_at.desc()))
         return result.scalars().all()
 
-    async def list_by_status(self, *statuses: str) -> Sequence[GpuSession]:
+    async def list_by_status(self, *statuses: GpuSessionStatus | str) -> Sequence[GpuSession]:
         """List sessions matching any of the given statuses.
 
         Used by the provisioning worker to poll pending/provisioning/resuming sessions.
 
         Args:
-            *statuses: One or more GpuSessionStatus string values.
+            *statuses: One or more GpuSessionStatus values (enum members preferred).
 
         Returns:
             Sequence of matching GpuSession rows.
         """
         result = await self._session.execute(
-            select(GpuSession).where(GpuSession.status.in_(list(statuses)))
+            select(GpuSession).where(GpuSession.status.in_(statuses))
         )
         return result.scalars().all()
 
@@ -250,14 +248,14 @@ class GpuSessionRepository:
     async def update_status(
         self,
         session_id: UUID,
-        status: str,
+        status: GpuSessionStatus | str,
         **extra_fields: Any,
     ) -> None:
         """Update session status and any additional fields atomically.
 
         Args:
             session_id: Session to update.
-            status: New GpuSessionStatus value.
+            status: New GpuSessionStatus value (enum member preferred).
             **extra_fields: Additional model field assignments (e.g. started_at=...).
         """
         values: dict[str, Any] = {"status": status, **extra_fields}

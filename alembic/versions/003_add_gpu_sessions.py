@@ -42,7 +42,6 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("false"),
         ),
-
         # Bundle identity columns
         sa.Column(
             "bundle_name",
@@ -64,17 +63,19 @@ def upgrade() -> None:
             server_default="",
             comment="ModelType slug that triggered this session (e.g. aisha-image)",
         ),
-
         # Cloudflare tunnel columns
         sa.Column("cf_tunnel_id", sa.String(64), nullable=True),
         sa.Column("cf_dns_record_id", sa.String(64), nullable=True),
         sa.Column("tunnel_hostname", sa.String(255), nullable=True),
-
         # Vast.ai detail columns
         sa.Column("vastai_offer_id", sa.Integer(), nullable=True),
-        sa.Column("vastai_cost_per_hour_micros", sa.Integer(), nullable=True, comment="Vast.ai $/hr in microdollars (1_000_000 = $1.00) at instance creation time"),
+        sa.Column(
+            "vastai_cost_per_hour_micros",
+            sa.Integer(),
+            nullable=True,
+            comment="Vast.ai $/hr in microdollars (1_000_000 = $1.00) at instance creation time",
+        ),
         sa.Column("vastai_gpu_name", sa.String(50), nullable=True),
-
         # Provisioning tracking
         sa.Column(
             "provision_attempt",
@@ -82,14 +83,11 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("1"),
         ),
-
         # Pause/resume tracking
         sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("resumed_at", sa.DateTime(timezone=True), nullable=True),
-
         # Phase 2 callback token
         sa.Column("callback_token", sa.String(128), nullable=True),
-
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column(
             "created_at",
