@@ -252,7 +252,7 @@ class BundleIndexService:
         self._model_index = model_index
         self._bundle_index = bundle_index
 
-    def _build_entry(self, item: dict) -> _BundleIndexEntry:
+    def _build_entry(self, item: dict[str, object]) -> _BundleIndexEntry:
         """Build a single index entry from a raw YAML mapping.
 
         Raises:
