@@ -70,7 +70,21 @@ class CloudflareTunnelClient:
                 status_code=resp.status_code,
             )
 
-        result = msgspec.json.decode(resp.content, type=CreateTunnelResult)
+        try:
+            result = msgspec.json.decode(resp.content, type=CreateTunnelResult)
+        except msgspec.DecodeError as exc:
+            logger.error(
+                "cloudflare.tunnel.create_decode_error",
+                error=str(exc),
+                status=resp.status_code,
+                name=name,
+            )
+            raise TunnelCreationError(
+                f"Failed to parse Cloudflare response while creating tunnel '{name}' "
+                f"(HTTP {resp.status_code}): {exc}",
+                status_code=resp.status_code,
+            ) from exc
+
         if not result.success or result.result is None:
             logger.error("cloudflare.tunnel.create_api_error", errors=result.errors, name=name)
             raise TunnelCreationError(
@@ -163,7 +177,21 @@ class CloudflareTunnelClient:
                 status_code=resp.status_code,
             )
 
-        result = msgspec.json.decode(resp.content, type=CreateDNSResult)
+        try:
+            result = msgspec.json.decode(resp.content, type=CreateDNSResult)
+        except msgspec.DecodeError as exc:
+            logger.error(
+                "cloudflare.dns.create_decode_error",
+                error=str(exc),
+                status=resp.status_code,
+                hostname=hostname,
+            )
+            raise DNSRecordError(
+                f"Failed to parse Cloudflare response while creating DNS record "
+                f"for '{hostname}' (HTTP {resp.status_code}): {exc}",
+                status_code=resp.status_code,
+            ) from exc
+
         if not result.success or result.result is None:
             logger.error("cloudflare.dns.create_api_error", errors=result.errors, hostname=hostname)
             raise DNSRecordError(
@@ -261,7 +289,31 @@ class CloudflareTunnelClient:
                 status_code=resp.status_code,
             )
 
-        result = msgspec.json.decode(resp.content, type=TunnelListResult)
+        try:
+            result = msgspec.json.decode(resp.content, type=TunnelListResult)
+        except msgspec.DecodeError as exc:
+            logger.error(
+                "cloudflare.tunnel.list_decode_error",
+                error=str(exc),
+                status=resp.status_code,
+            )
+            raise CloudflareError(
+                f"Failed to parse Cloudflare response while listing tunnels "
+                f"(HTTP {resp.status_code}): {exc}",
+                status_code=resp.status_code,
+            ) from exc
+
+        if not result.success:
+            logger.error(
+                "cloudflare.tunnel.list_api_error",
+                errors=result.errors,
+                status=resp.status_code,
+            )
+            raise CloudflareError(
+                f"CF API error listing tunnels: {result.errors}",
+                status_code=resp.status_code,
+            )
+
         return result.result
 
     async def create_session_tunnel(

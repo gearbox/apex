@@ -179,6 +179,20 @@ class TestCreateDnsRecord:
 
         assert exc_info.value.status_code == 403
 
+    async def test_create_dns_record_api_error_in_body(self) -> None:
+        body = {
+            "success": False,
+            "errors": [{"message": "zone not found"}],
+            "messages": [],
+            "result": None,
+        }
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.post = AsyncMock(return_value=_mock_response(200, body))
+        client = _make_client(mock_http)
+
+        with pytest.raises(DNSRecordError):
+            await client.create_dns_record("host.example.com", "tunnel-abc")
+
 
 # ---------------------------------------------------------------------------
 # delete_tunnel
@@ -295,6 +309,34 @@ class TestListTunnels:
         mock_http.get = AsyncMock(
             return_value=_mock_response(500, {"success": False, "errors": [], "messages": []})
         )
+        client = _make_client(mock_http)
+
+        with pytest.raises(CloudflareError):
+            await client.list_tunnels()
+
+    async def test_list_tunnels_api_error_in_body(self) -> None:
+        body = {
+            "success": False,
+            "errors": [{"message": "permission denied"}],
+            "messages": [],
+            "result": [],
+        }
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.get = AsyncMock(return_value=_mock_response(200, body))
+        client = _make_client(mock_http)
+
+        with pytest.raises(CloudflareError):
+            await client.list_tunnels()
+
+    async def test_list_tunnels_decode_error(self) -> None:
+        """Non-JSON response (e.g. proxy HTML error page) raises CloudflareError."""
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.is_success = True
+        resp.content = b"<html><body>502 Bad Gateway</body></html>"
+
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.get = AsyncMock(return_value=resp)
         client = _make_client(mock_http)
 
         with pytest.raises(CloudflareError):
