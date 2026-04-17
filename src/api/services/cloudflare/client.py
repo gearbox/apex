@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import httpx
 import msgspec
 import structlog
@@ -39,6 +41,9 @@ class CloudflareTunnelClient:
         tunnel_domain: str,
     ) -> None:
         self._http = http_client
+        # SECURITY: self._headers contains the Bearer API token. Never log headers,
+        # request/response content, or full URLs that include account/zone IDs.
+        # Log only narrow identifiers (tunnel_id, dns_record_id, hostname, name).
         self._headers = {
             "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json",
@@ -86,9 +91,15 @@ class CloudflareTunnelClient:
             ) from exc
 
         if not result.success or result.result is None:
-            logger.error("cloudflare.tunnel.create_api_error", errors=result.errors, name=name)
+            logger.error(
+                "cloudflare.tunnel.create_api_error",
+                errors=result.errors,
+                name=name,
+                status=resp.status_code,
+            )
             raise TunnelCreationError(
                 f"CF API error creating tunnel '{name}': {result.errors}",
+                status_code=resp.status_code,
             )
 
         logger.info("cloudflare.tunnel.created", tunnel_id=result.result.id, name=name)
@@ -193,9 +204,15 @@ class CloudflareTunnelClient:
             ) from exc
 
         if not result.success or result.result is None:
-            logger.error("cloudflare.dns.create_api_error", errors=result.errors, hostname=hostname)
+            logger.error(
+                "cloudflare.dns.create_api_error",
+                errors=result.errors,
+                hostname=hostname,
+                status=resp.status_code,
+            )
             raise DNSRecordError(
                 f"CF API error creating DNS record for '{hostname}': {result.errors}",
+                status_code=resp.status_code,
             )
 
         logger.info(
@@ -321,6 +338,10 @@ class CloudflareTunnelClient:
     ) -> tuple[str, str, str, str]:
         """High-level: create tunnel + configure + DNS for a GPU session.
 
+        If a later step fails (configure or DNS), the already-created tunnel is
+        deleted best-effort to avoid orphans. If cleanup itself fails, the
+        OrphanedTunnelCleanupWorker will pick it up on its next sweep.
+
         Args:
             session_id_short: First 8 chars of session UUIDv7.
             comfyui_port: ComfyUI port (typically 18188).
@@ -331,8 +352,18 @@ class CloudflareTunnelClient:
         tunnel_name = f"gpu-session-{session_id_short}"
         hostname = f"{session_id_short}.{self._tunnel_domain}"
         tunnel_id, tunnel_token = await self.create_tunnel(tunnel_name)
-        await self.configure_tunnel_ingress(tunnel_id, hostname, comfyui_port)
-        dns_record_id = await self.create_dns_record(hostname, tunnel_id)
+        try:
+            await self.configure_tunnel_ingress(tunnel_id, hostname, comfyui_port)
+            dns_record_id = await self.create_dns_record(hostname, tunnel_id)
+        except Exception:
+            logger.warning(
+                "cloudflare.tunnel.session_create_rollback",
+                tunnel_id=tunnel_id,
+                hostname=hostname,
+            )
+            with contextlib.suppress(Exception):
+                await self.delete_tunnel(tunnel_id)
+            raise
         return tunnel_id, tunnel_token, dns_record_id, hostname
 
     async def delete_session_tunnel(self, tunnel_id: str, dns_record_id: str) -> None:

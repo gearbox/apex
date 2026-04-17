@@ -116,8 +116,11 @@ class TestCreateTunnel:
         mock_http.post = AsyncMock(return_value=_mock_response(200, body))
         client = _make_client(mock_http)
 
-        with pytest.raises(TunnelCreationError):
+        with pytest.raises(TunnelCreationError) as exc_info:
             await client.create_tunnel("gpu-session-01jf8x3k")
+
+        # The HTTP status should be preserved even when API-level error has HTTP 2xx
+        assert exc_info.value.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +193,10 @@ class TestCreateDnsRecord:
         mock_http.post = AsyncMock(return_value=_mock_response(200, body))
         client = _make_client(mock_http)
 
-        with pytest.raises(DNSRecordError):
+        with pytest.raises(DNSRecordError) as exc_info:
             await client.create_dns_record("host.example.com", "tunnel-abc")
+
+        assert exc_info.value.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +385,67 @@ class TestCreateSessionTunnel:
         assert "/cfd_tunnel" in create_url
         assert "/configurations" in configure_url
         assert "/dns_records" in dns_url
+
+    async def test_create_session_tunnel_rolls_back_on_configure_failure(self) -> None:
+        """If configure_tunnel_ingress fails, the created tunnel must be deleted."""
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.post = AsyncMock(return_value=_mock_response(200, _CREATE_TUNNEL_OK))
+        mock_http.put = AsyncMock(
+            return_value=_mock_response(500, {"success": False, "errors": [], "messages": []})
+        )
+        mock_http.delete = AsyncMock(
+            return_value=_mock_response(200, {"success": True, "errors": [], "messages": []})
+        )
+        client = _make_client(mock_http)
+
+        with pytest.raises(TunnelConfigError):
+            await client.create_session_tunnel("01jf8x3k", 18188)
+
+        # Rollback: tunnel should have been deleted
+        mock_http.delete.assert_called_once()
+        delete_url = mock_http.delete.call_args[0][0]
+        assert "/cfd_tunnel/tunnel-abc" in delete_url
+
+    async def test_create_session_tunnel_rolls_back_on_dns_failure(self) -> None:
+        """If create_dns_record fails, the created tunnel must be deleted."""
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.post = AsyncMock(
+            side_effect=[
+                _mock_response(200, _CREATE_TUNNEL_OK),  # create_tunnel OK
+                _mock_response(500, {"success": False, "errors": [], "messages": []}),  # DNS fails
+            ]
+        )
+        mock_http.put = AsyncMock(return_value=_mock_response(200, _CONFIGURE_OK))
+        mock_http.delete = AsyncMock(
+            return_value=_mock_response(200, {"success": True, "errors": [], "messages": []})
+        )
+        client = _make_client(mock_http)
+
+        with pytest.raises(DNSRecordError):
+            await client.create_session_tunnel("01jf8x3k", 18188)
+
+        mock_http.delete.assert_called_once()
+        delete_url = mock_http.delete.call_args[0][0]
+        assert "/cfd_tunnel/tunnel-abc" in delete_url
+
+    async def test_create_session_tunnel_rollback_swallows_cleanup_errors(self) -> None:
+        """If the rollback delete itself fails, the original error must still propagate."""
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.post = AsyncMock(return_value=_mock_response(200, _CREATE_TUNNEL_OK))
+        mock_http.put = AsyncMock(
+            return_value=_mock_response(500, {"success": False, "errors": [], "messages": []})
+        )
+        # Delete itself fails — should be suppressed so the original error surfaces
+        mock_http.delete = AsyncMock(
+            return_value=_mock_response(500, {"success": False, "errors": [], "messages": []})
+        )
+        client = _make_client(mock_http)
+
+        # Original TunnelConfigError must propagate, not the delete failure
+        with pytest.raises(TunnelConfigError):
+            await client.create_session_tunnel("01jf8x3k", 18188)
+
+        mock_http.delete.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
