@@ -388,6 +388,22 @@ class TestParseHardware:
         with pytest.raises(ValueError, match="gpu_whitelist.*list"):
             svc._parse_hardware(tmp_path / "bad")
 
+    def test_raises_on_non_integer_comfyui_port(self, tmp_path: Path) -> None:
+        """comfyui_port must go through _require_int so errors are field-specific."""
+        hw = {**_HW_YAML, "comfyui_port": "not a number"}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="hardware.comfyui_port.*integer"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_comfyui_port_default_applied_when_missing(self, tmp_path: Path) -> None:
+        """Missing comfyui_port uses the default 18188, still goes through _require_int."""
+        hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
+        _write_bundle_yaml(tmp_path / "no_port", hw)
+        svc = _make_service(tmp_path)
+        result = svc._parse_hardware(tmp_path / "no_port")
+        assert result.comfyui_port == 18188
+
 
 # ---------------------------------------------------------------------------
 # _auth_extra_header
@@ -490,6 +506,36 @@ class TestSyncErrorBehavior:
         scrubbed = svc._scrub_token("fatal: unable to access 'https://ghp_secret_abc@github.com/'")
         assert "ghp_secret_abc" not in scrubbed
         assert "***" in scrubbed
+
+    async def test_scrub_token_removes_base64_encoded_credentials(self, tmp_path: Path) -> None:
+        """If verbose git output leaks the base64 Authorization header, redact it too."""
+        token = "ghp_verbose_leak_xyz"
+        svc = BundleIndexService(
+            repo_url="https://github.com/gearbox/ai-bundles.git",
+            github_token=token,
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+        )
+        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        # Simulate what GIT_CURL_VERBOSE might emit
+        noisy_stderr = f"> Authorization: Basic {encoded}\n< HTTP/1.1 200 OK"
+
+        scrubbed = svc._scrub_token(noisy_stderr)
+
+        assert encoded not in scrubbed
+        assert token not in scrubbed
+        assert "***" in scrubbed
+
+    async def test_scrub_token_handles_empty_or_missing_token(self, tmp_path: Path) -> None:
+        """Empty token or empty text must be a noop (no-op, no traceback)."""
+        svc = BundleIndexService(
+            repo_url="https://github.com/gearbox/ai-bundles.git",
+            github_token="",
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+        )
+        assert svc._scrub_token("any text") == "any text"
+        assert svc._scrub_token("") == ""
 
 
 # ---------------------------------------------------------------------------

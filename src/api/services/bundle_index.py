@@ -346,6 +346,10 @@ class BundleIndexService:
                 f"{type(gpu_whitelist_raw).__name__}"
             )
 
+        # Apply default for optional int fields before validation so _require_int
+        # produces consistent error messages for invalid values.
+        hw.setdefault("comfyui_port", 18188)
+
         return HardwareRequirements(
             gpu_whitelist=tuple(gpu_whitelist_raw),
             min_disk_gb=_require_int("min_disk_gb"),
@@ -353,7 +357,7 @@ class BundleIndexService:
             min_network_download_mbps=_require_int("min_network_download_mbps"),
             cuda_min_version=cuda_min,
             num_gpus=_require_int("num_gpus"),
-            comfyui_port=int(hw.get("comfyui_port", 18188)),
+            comfyui_port=_require_int("comfyui_port"),
         )
 
     def _auth_extra_header(self) -> list[str]:
@@ -408,6 +412,9 @@ class BundleIndexService:
           URLs/paths even if git adds new option flags in future versions.
         - Bounded timeout prevents a hung/prompting git process from blocking
           the thread pool indefinitely.
+        - ``shlex.escape()`` does NOT apply here: it's for shell-string
+          construction (``shell=True``), not for list argv. Using it would
+          corrupt arguments containing special characters.
         """
         self._validate_repo_url()
         repo_dir = self._cache_dir
@@ -435,15 +442,7 @@ class BundleIndexService:
             ]
 
         try:
-            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-            # Safe: shell=False, static-prefix list argv, repo_url validated above.
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._GIT_TIMEOUT_SECONDS,
-                check=False,
-            )
+            result = self._run_git(cmd)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
                 f"git operation timed out after {self._GIT_TIMEOUT_SECONDS}s"
@@ -454,11 +453,45 @@ class BundleIndexService:
             stderr = self._scrub_token(result.stderr.strip())
             raise RuntimeError(f"git operation failed (exit {result.returncode}): {stderr}")
 
+    def _run_git(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        """Execute ``git`` with a pre-validated argv list.
+
+        Isolated in its own method so the ``# nosemgrep`` annotation stays
+        adjacent to the call and survives code reformatting. See ``_git_sync``
+        docstring for the full safety argument. Do NOT call this with unvalidated
+        input — callers must ensure ``cmd[0] == "git"`` and positional args were
+        validated by ``_validate_repo_url``.
+        """
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+        return subprocess.run(  # noqa: S603  # shell=False + validated argv; see docstring
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+
     def _scrub_token(self, text: str) -> str:
-        """Best-effort removal of the PAT from text before logging/raising."""
-        if self._github_token and self._github_token in text:
-            return text.replace(self._github_token, "***")
-        return text
+        """Best-effort removal of the PAT (raw + base64-encoded) from text.
+
+        Redacts both forms because git surfaces output from multiple layers:
+        - HTTP error messages may contain the raw token if it slipped into a URL
+        - Verbose / debug output (GIT_CURL_VERBOSE, etc.) may echo the
+          ``Authorization: Basic <base64>`` header, which contains the encoded
+          form of ``x-access-token:<PAT>``
+        """
+        if not text or not self._github_token:
+            return text
+
+        scrubbed = text
+        if self._github_token in scrubbed:
+            scrubbed = scrubbed.replace(self._github_token, "***")
+
+        encoded = base64.b64encode(f"x-access-token:{self._github_token}".encode()).decode()
+        if encoded in scrubbed:
+            scrubbed = scrubbed.replace(encoded, "***")
+
+        return scrubbed
 
     async def _sync_loop(self) -> None:
         """Periodic background sync loop."""
