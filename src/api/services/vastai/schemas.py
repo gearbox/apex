@@ -22,8 +22,14 @@ class VastAIOffer(msgspec.Struct, forbid_unknown_fields=False):
 
     @property
     def dph_total_micros(self) -> int:
-        """Cost in microdollars (1_000_000 = $1.00). Lossless for Vast.ai's 6-decimal precision."""
-        return int(self.dph_total * 1_000_000)
+        """Cost in microdollars (1_000_000 = $1.00).
+
+        Uses ``round()`` rather than ``int()`` to avoid off-by-one errors from
+        IEEE-754 float representation. For example ``0.258607 * 1_000_000`` is
+        ``258606.99999999997`` in float64, which ``int()`` truncates to
+        ``258606``; ``round()`` produces the correct ``258607``.
+        """
+        return round(self.dph_total * 1_000_000)
 
 
 class VastAIInstance(msgspec.Struct, forbid_unknown_fields=False):

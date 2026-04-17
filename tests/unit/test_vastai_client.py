@@ -122,6 +122,29 @@ async def test_search_offers_api_error() -> None:
     assert exc_info.value.status_code == 500
 
 
+async def test_search_offers_invalid_cuda_version_raises_clear_error() -> None:
+    """Non-numeric cuda_min_version should raise VastAIError without hitting the network."""
+    bad_hardware = HardwareRequirements(
+        gpu_whitelist=("RTX_4090",),
+        min_disk_gb=100,
+        min_network_upload_mbps=500,
+        min_network_download_mbps=1000,
+        cuda_min_version="12.1+",  # not a plain float
+        num_gpus=1,
+    )
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(return_value=_mock_response(200, {"offers": [_make_offer(1)]}))
+    client = _make_client(mock_http)
+
+    with pytest.raises(VastAIError) as exc_info:
+        await client.search_offers(bad_hardware)
+
+    assert "cuda_min_version" in str(exc_info.value)
+    assert "12.1+" in str(exc_info.value)
+    # Must fail BEFORE the HTTP call
+    mock_http.post.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # create_instance
 # ---------------------------------------------------------------------------
@@ -171,6 +194,24 @@ async def test_create_instance_payment_error() -> None:
             onstart_cmd="bash /start.sh",
         )
     assert exc_info.value.status_code == 402
+
+
+async def test_create_instance_generic_server_error() -> None:
+    """Non-2xx responses other than 402/409 should raise VastAIError via _raise_for_status."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.put = AsyncMock(return_value=_mock_response(500, {"error": "internal"}))
+    client = _make_client(mock_http)
+    with pytest.raises(VastAIError) as exc_info:
+        await client.create_instance(
+            offer_id=7,
+            image="vastai/comfy:latest",
+            disk_gb=100,
+            env={},
+            onstart_cmd="bash /start.sh",
+        )
+    # Must be the base class, not one of the specific subclasses
+    assert type(exc_info.value) is VastAIError
+    assert exc_info.value.status_code == 500
 
 
 # ---------------------------------------------------------------------------
@@ -287,3 +328,35 @@ def test_dph_total_micros_conversion() -> None:
         verified=True,
     )
     assert offer.dph_total_micros == 234567
+
+
+def test_dph_total_micros_handles_float_precision_edge_cases() -> None:
+    """Some 6-decimal values aren't exactly representable in float64.
+
+    E.g. ``0.258607 * 1_000_000 == 258606.99999999997`` — truncation via
+    ``int()`` would yield ``258606`` (wrong). ``round()`` yields ``258607``.
+    """
+    # These values all suffer from float representation issues when multiplied by 1M
+    cases = [
+        (0.258607, 258607),
+        (0.517488, 517488),
+        (0.509597, 509597),
+        (0.259947, 259947),
+        (0.261941, 261941),
+    ]
+    for dph, expected_micros in cases:
+        offer = VastAIOffer(
+            id=1,
+            gpu_name="RTX_4090",
+            num_gpus=1,
+            gpu_ram=24,
+            disk_space=200.0,
+            dph_total=dph,
+            inet_up=1000.0,
+            inet_down=2000.0,
+            cuda_max_good=12.4,
+            verified=True,
+        )
+        assert offer.dph_total_micros == expected_micros, (
+            f"dph={dph}: expected {expected_micros}, got {offer.dph_total_micros}"
+        )

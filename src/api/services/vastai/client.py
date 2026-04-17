@@ -57,13 +57,23 @@ class VastAIClient:
             NoCapacityError: If no offers match.
             VastAIError: On API errors.
         """
+        try:
+            cuda_min = float(hardware.cuda_min_version)
+        except ValueError as exc:
+            # HardwareRequirements.cuda_min_version should be validated upstream
+            # by BundleIndexService, but surface a clear error just in case.
+            raise VastAIError(
+                f"Invalid cuda_min_version {hardware.cuda_min_version!r}: "
+                f"must be a numeric string (e.g. '12.1')"
+            ) from exc
+
         payload: dict[str, Any] = {
             "gpu_name": {"in": list(hardware.gpu_whitelist)},
             "num_gpus": {"gte": hardware.num_gpus},
             "disk_space": {"gte": hardware.min_disk_gb},
             "inet_up": {"gte": hardware.min_network_upload_mbps},
             "inet_down": {"gte": hardware.min_network_download_mbps},
-            "cuda_max_good": {"gte": float(hardware.cuda_min_version)},
+            "cuda_max_good": {"gte": cuda_min},
             "verified": {"eq": True},
             "rentable": {"eq": True},
             "rented": {"eq": False},
