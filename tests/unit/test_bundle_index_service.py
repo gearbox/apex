@@ -5,6 +5,7 @@ Git operations (clone/pull) require network access and are NOT tested here.
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,22 @@ class TestParseIndex:
     def test_missing_index_file_is_noop(self, tmp_path: Path) -> None:
         svc = _make_service(tmp_path)
         svc._parse_index()  # should not raise
+        assert svc._model_index == {}
+        assert svc._bundle_index == {}
+
+    def test_empty_index_file_is_noop(self, tmp_path: Path) -> None:
+        """Empty YAML file → safe_load returns None, must not crash."""
+        (tmp_path / "bundle-index.yaml").write_text("")
+        svc = _make_service(tmp_path)
+        svc._parse_index()  # must not raise
+        assert svc._model_index == {}
+        assert svc._bundle_index == {}
+
+    def test_non_dict_index_file_is_noop(self, tmp_path: Path) -> None:
+        """YAML list at top level → not a dict, must not crash."""
+        (tmp_path / "bundle-index.yaml").write_text("- this is a list\n- not a mapping\n")
+        svc = _make_service(tmp_path)
+        svc._parse_index()  # must not raise
         assert svc._model_index == {}
         assert svc._bundle_index == {}
 
@@ -251,27 +268,136 @@ class TestParseHardware:
         with pytest.raises(ValueError, match="bundle.yaml"):
             svc._parse_hardware(bundle_dir)
 
+    def test_raises_with_field_name_on_missing_int_field(self, tmp_path: Path) -> None:
+        """Missing required int field produces a message naming the field and file."""
+        hw = {k: v for k, v in _HW_YAML.items() if k != "min_disk_gb"}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="hardware.min_disk_gb"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_raises_on_non_integer_field_value(self, tmp_path: Path) -> None:
+        """Non-coercible values for int fields produce a clear error."""
+        hw = {**_HW_YAML, "min_disk_gb": "one hundred"}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="min_disk_gb.*integer"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_raises_on_invalid_cuda_min_version(self, tmp_path: Path) -> None:
+        """Non-numeric cuda_min_version is rejected at parse time (upstream of VastAI)."""
+        hw = {**_HW_YAML, "cuda_min_version": "12.1+"}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="cuda_min_version"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_raises_on_non_list_gpu_whitelist(self, tmp_path: Path) -> None:
+        hw = {**_HW_YAML, "gpu_whitelist": "RTX_4090"}  # string instead of list
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="gpu_whitelist.*list"):
+            svc._parse_hardware(tmp_path / "bad")
+
 
 # ---------------------------------------------------------------------------
-# _build_repo_url_with_token
+# _auth_extra_header
 # ---------------------------------------------------------------------------
 
 
-class TestBuildRepoUrl:
-    def test_injects_token(self) -> None:
+class TestAuthExtraHeader:
+    def _decoded_header(self, args: list[str]) -> str:
+        """Extract and base64-decode the Authorization header from git -c args."""
+        # args look like ["-c", "http.extraHeader=Authorization: Basic <b64>"]
+        assert len(args) == 2
+        assert args[0] == "-c"
+        prefix = "http.extraHeader=Authorization: Basic "
+        assert args[1].startswith(prefix)
+        b64 = args[1][len(prefix) :]
+        return base64.b64decode(b64).decode()
+
+    def test_injects_header_for_https_url(self) -> None:
         svc = BundleIndexService(
             repo_url="https://github.com/gearbox/ai-bundles.git",
             github_token="ghp_abc123",
             sync_interval_minutes=15,
         )
-        url = svc._build_repo_url_with_token()
-        assert url == "https://ghp_abc123@github.com/gearbox/ai-bundles.git"
+        args = svc._auth_extra_header()
+        assert self._decoded_header(args) == "x-access-token:ghp_abc123"
 
-    def test_no_token_returns_original_url(self) -> None:
+    def test_empty_token_returns_no_args(self) -> None:
         svc = BundleIndexService(
             repo_url="https://github.com/gearbox/ai-bundles.git",
             github_token="",
             sync_interval_minutes=15,
         )
-        url = svc._build_repo_url_with_token()
-        assert url == "https://github.com/gearbox/ai-bundles.git"
+        assert svc._auth_extra_header() == []
+
+    def test_non_https_url_with_token_returns_no_args(self) -> None:
+        """Non-HTTPS URLs (e.g. SSH) can't use HTTP Basic auth; no header injected."""
+        svc = BundleIndexService(
+            repo_url="git@github.com:gearbox/ai-bundles.git",
+            github_token="ghp_abc123",
+            sync_interval_minutes=15,
+        )
+        assert svc._auth_extra_header() == []
+
+    def test_token_not_in_plaintext_args(self) -> None:
+        """The raw PAT must not appear verbatim in the argv."""
+        svc = BundleIndexService(
+            repo_url="https://github.com/gearbox/ai-bundles.git",
+            github_token="ghp_secret_value_xyz",
+            sync_interval_minutes=15,
+        )
+        args = svc._auth_extra_header()
+        joined = " ".join(args)
+        assert "ghp_secret_value_xyz" not in joined
+        # But it should be recoverable via base64 decode
+        assert "ghp_secret_value_xyz" in self._decoded_header(args)
+
+
+# ---------------------------------------------------------------------------
+# start() / sync() error behavior
+# ---------------------------------------------------------------------------
+
+
+class TestSyncErrorBehavior:
+    async def test_start_raises_on_initial_sync_failure(self, tmp_path: Path) -> None:
+        """If initial sync fails, start() must re-raise and not leave the service running."""
+        svc = _make_service(tmp_path)
+
+        def boom() -> None:
+            raise RuntimeError("git clone failed")
+
+        svc._git_sync = boom  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="git clone failed"):
+            await svc.start()
+
+        # Service must not be marked as running and no background task should exist
+        assert svc._running is False
+        assert svc._sync_task is None
+
+    async def test_sync_swallows_errors(self, tmp_path: Path) -> None:
+        """The public sync() method logs errors but does not raise (background-safe)."""
+        svc = _make_service(tmp_path)
+
+        def boom() -> None:
+            raise RuntimeError("transient git pull failure")
+
+        svc._git_sync = boom  # type: ignore[method-assign]
+
+        # Must not raise — background loop depends on this
+        await svc.sync()
+
+    async def test_scrub_token_removes_pat(self, tmp_path: Path) -> None:
+        """If git echoes the PAT in stderr, _scrub_token must redact it."""
+        svc = BundleIndexService(
+            repo_url="https://github.com/gearbox/ai-bundles.git",
+            github_token="ghp_secret_abc",
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+        )
+        scrubbed = svc._scrub_token("fatal: unable to access 'https://ghp_secret_abc@github.com/'")
+        assert "ghp_secret_abc" not in scrubbed
+        assert "***" in scrubbed

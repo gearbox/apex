@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import subprocess
 from dataclasses import dataclass
@@ -59,11 +60,22 @@ class BundleIndexService:
         self._sync_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        """Initial sync + start periodic background sync."""
+        """Initial sync + start periodic background sync.
+
+        Raises:
+            Exception: If the initial clone or index parse fails. The service
+                must have a usable index after start() returns; subsequent
+                background sync failures are logged but do not stop the loop.
+        """
         if self._running:
             return
         self._running = True
-        await self.sync()
+        try:
+            await self._sync_once(raise_on_error=True)
+        except Exception:
+            # Initial sync failed — roll back and re-raise so startup fails loudly
+            self._running = False
+            raise
         self._sync_task = asyncio.create_task(self._sync_loop())
         logger.info(
             "bundle_index.started",
@@ -86,6 +98,15 @@ class BundleIndexService:
     async def sync(self) -> None:
         """Clone or pull the ai-bundles repo and rebuild the in-memory index.
 
+        Errors are logged but not raised — use this for background/manual
+        refreshes where stale data is preferable to crashing. For startup,
+        use start() which re-raises.
+        """
+        await self._sync_once(raise_on_error=False)
+
+    async def _sync_once(self, *, raise_on_error: bool) -> None:
+        """Single sync pass. Raises when raise_on_error=True, else logs and swallows.
+
         Runs git operations in a thread executor to avoid blocking the event loop.
         """
         try:
@@ -98,6 +119,8 @@ class BundleIndexService:
             )
         except Exception:
             logger.exception("bundle_index.sync_error")
+            if raise_on_error:
+                raise
 
     def resolve_bundle(self, model_type: str) -> BundleMapping:
         """Resolve the default bundle for a ModelType.
@@ -162,6 +185,17 @@ class BundleIndexService:
         with index_file.open() as fh:
             data = yaml.safe_load(fh)
 
+        if data is None:
+            logger.warning("bundle_index.index_file_empty", path=str(index_file))
+            return
+        if not isinstance(data, dict):
+            logger.warning(
+                "bundle_index.index_file_invalid_structure",
+                path=str(index_file),
+                got_type=type(data).__name__,
+            )
+            return
+
         model_index: dict[str, _BundleIndexEntry] = {}
         bundle_index: dict[str, _BundleIndexEntry] = {}
 
@@ -214,50 +248,103 @@ class BundleIndexService:
         with bundle_yaml.open() as fh:
             data = yaml.safe_load(fh)
 
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"{bundle_yaml}: expected a YAML mapping at top level, got {type(data).__name__}"
+            )
+
         hw = data.get("hardware")
         if hw is None:
-            raise ValueError(f"Missing 'hardware' section in {bundle_yaml}")
+            raise ValueError(f"{bundle_yaml}: missing 'hardware' section")
+        if not isinstance(hw, dict):
+            raise ValueError(
+                f"{bundle_yaml}: 'hardware' must be a mapping, got {type(hw).__name__}"
+            )
+
+        def _require_int(field: str) -> int:
+            if field not in hw:
+                raise ValueError(f"{bundle_yaml}: missing required field 'hardware.{field}'")
+            value = hw[field]
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{bundle_yaml}: 'hardware.{field}' must be an integer, got "
+                    f"{value!r} ({type(value).__name__})"
+                ) from exc
+
+        if "cuda_min_version" not in hw:
+            raise ValueError(f"{bundle_yaml}: missing required field 'hardware.cuda_min_version'")
+        cuda_min = str(hw["cuda_min_version"])
+        try:
+            float(cuda_min)
+        except ValueError as exc:
+            raise ValueError(
+                f"{bundle_yaml}: 'hardware.cuda_min_version' must be a numeric string "
+                f"(e.g. '12.1'), got {cuda_min!r}"
+            ) from exc
 
         gpu_whitelist_raw = hw.get("gpu_whitelist", [])
+        if not isinstance(gpu_whitelist_raw, list):
+            raise ValueError(
+                f"{bundle_yaml}: 'hardware.gpu_whitelist' must be a list, got "
+                f"{type(gpu_whitelist_raw).__name__}"
+            )
+
         return HardwareRequirements(
             gpu_whitelist=tuple(gpu_whitelist_raw),
-            min_disk_gb=int(hw["min_disk_gb"]),
-            min_network_upload_mbps=int(hw["min_network_upload_mbps"]),
-            min_network_download_mbps=int(hw["min_network_download_mbps"]),
-            cuda_min_version=str(hw["cuda_min_version"]),
-            num_gpus=int(hw["num_gpus"]),
+            min_disk_gb=_require_int("min_disk_gb"),
+            min_network_upload_mbps=_require_int("min_network_upload_mbps"),
+            min_network_download_mbps=_require_int("min_network_download_mbps"),
+            cuda_min_version=cuda_min,
+            num_gpus=_require_int("num_gpus"),
             comfyui_port=int(hw.get("comfyui_port", 18188)),
         )
 
-    def _build_repo_url_with_token(self) -> str:
-        """Build HTTPS URL with embedded PAT for git operations."""
-        if self._github_token and self._repo_url.startswith("https://"):
-            return self._repo_url.replace("https://", f"https://{self._github_token}@", 1)
-        return self._repo_url
+    def _auth_extra_header(self) -> list[str]:
+        """Return git `-c http.extraHeader=...` args for PAT auth, or empty list.
+
+        Uses the GitHub-recommended pattern — same as ``actions/checkout`` —
+        which authenticates via HTTP header instead of URL embedding. This avoids:
+
+        - Persisting the token to ``.git/config`` (URL embedding does this on clone)
+        - Leaking the token if git echoes the remote URL in errors
+
+        The token is still passed in argv (visible to ``ps`` on the local host
+        during the brief window of the subprocess), but it is never written to
+        disk and the clone URL remains clean.
+        """
+        if not self._github_token or not self._repo_url.startswith("https://"):
+            return []
+        # GitHub accepts x-access-token:<PAT> as HTTP Basic; the token itself
+        # is the password, and x-access-token is a recognized sentinel username.
+        credentials = f"x-access-token:{self._github_token}".encode()
+        encoded = base64.b64encode(credentials).decode()
+        return ["-c", f"http.extraHeader=Authorization: Basic {encoded}"]
 
     def _git_sync(self) -> None:
         """Perform the actual git clone or pull (runs in thread executor)."""
         repo_dir = self._cache_dir
-        url = self._build_repo_url_with_token()
+        auth_args = self._auth_extra_header()
 
         if (repo_dir / ".git").exists():
-            result = subprocess.run(
-                ["git", "-C", str(repo_dir), "pull", "--ff-only"],
-                capture_output=True,
-                text=True,
-            )
+            cmd = ["git", *auth_args, "-C", str(repo_dir), "pull", "--ff-only"]
         else:
             repo_dir.mkdir(parents=True, exist_ok=True)
-            result = subprocess.run(
-                ["git", "clone", "--depth=1", url, str(repo_dir)],
-                capture_output=True,
-                text=True,
-            )
+            cmd = ["git", *auth_args, "clone", "--depth=1", self._repo_url, str(repo_dir)]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"git operation failed (exit {result.returncode}): {result.stderr.strip()}"
-            )
+            # Scrub stderr of any accidental token echo before raising/logging
+            stderr = self._scrub_token(result.stderr.strip())
+            raise RuntimeError(f"git operation failed (exit {result.returncode}): {stderr}")
+
+    def _scrub_token(self, text: str) -> str:
+        """Best-effort removal of the PAT from text before logging/raising."""
+        if self._github_token and self._github_token in text:
+            return text.replace(self._github_token, "***")
+        return text
 
     async def _sync_loop(self) -> None:
         """Periodic background sync loop."""
