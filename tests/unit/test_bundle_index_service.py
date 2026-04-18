@@ -141,6 +141,14 @@ class TestParseIndex:
         assert svc._model_index == {}
         assert svc._bundle_index == {}
 
+    def test_mapping_without_bundles_key_is_noop(self, tmp_path: Path) -> None:
+        """Valid mapping file without 'bundles' key — behaves like empty index."""
+        (tmp_path / "bundle-index.yaml").write_text(yaml.dump({"something_else": 1}))
+        svc = _make_service(tmp_path)
+        svc._parse_index()  # must not raise
+        assert svc._model_index == {}
+        assert svc._bundle_index == {}
+
     def test_bundles_not_a_list_is_noop(self, tmp_path: Path) -> None:
         """If 'bundles' is a mapping instead of a list, don't crash."""
         (tmp_path / "bundle-index.yaml").write_text(
@@ -373,6 +381,41 @@ class TestParseHardware:
         with pytest.raises(ValueError, match="min_disk_gb.*integer"):
             svc._parse_hardware(tmp_path / "bad")
 
+    def test_rejects_float_for_int_field(self, tmp_path: Path) -> None:
+        """YAML floats (e.g. 1.5, 42.0) must be rejected, not silently truncated.
+
+        ``int(1.5)`` would produce ``1`` — silently accepting a misconfiguration.
+        """
+        hw = {**_HW_YAML, "min_disk_gb": 150.5}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="min_disk_gb.*integer"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_rejects_decimal_string_for_int_field(self, tmp_path: Path) -> None:
+        """String like '150.5' must be rejected (int('150.5') also raises)."""
+        hw = {**_HW_YAML, "min_disk_gb": "150.5"}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="min_disk_gb.*integer"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_rejects_bool_for_int_field(self, tmp_path: Path) -> None:
+        """``bool`` is an ``int`` subclass — must be explicitly rejected."""
+        hw = {**_HW_YAML, "num_gpus": True}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="num_gpus.*bool"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_accepts_integer_valued_string(self, tmp_path: Path) -> None:
+        """``'100'`` is legitimate — YAML sometimes quotes numbers. Must accept."""
+        hw = {**_HW_YAML, "min_disk_gb": "100"}
+        _write_bundle_yaml(tmp_path / "ok", hw)
+        svc = _make_service(tmp_path)
+        result = svc._parse_hardware(tmp_path / "ok")
+        assert result.min_disk_gb == 100
+
     def test_raises_on_invalid_cuda_min_version(self, tmp_path: Path) -> None:
         """Non-numeric cuda_min_version is rejected at parse time (upstream of VastAI)."""
         hw = {**_HW_YAML, "cuda_min_version": "12.1+"}
@@ -386,6 +429,14 @@ class TestParseHardware:
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
         with pytest.raises(ValueError, match="gpu_whitelist.*list"):
+            svc._parse_hardware(tmp_path / "bad")
+
+    def test_raises_on_non_string_gpu_whitelist_entry(self, tmp_path: Path) -> None:
+        """YAML loading ``[4090]`` unquoted produces an int — must be rejected."""
+        hw = {**_HW_YAML, "gpu_whitelist": ["RTX_4090", 4090, "A100_SXM4"]}
+        _write_bundle_yaml(tmp_path / "bad", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match=r"gpu_whitelist\[1\].*string"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_raises_on_non_integer_comfyui_port(self, tmp_path: Path) -> None:
@@ -586,3 +637,30 @@ class TestValidateRepoUrl:
         )
         with pytest.raises(ValueError, match="https://.*git@.*ssh://"):
             svc._validate_repo_url()
+
+
+# ---------------------------------------------------------------------------
+# __init__ validation
+# ---------------------------------------------------------------------------
+
+
+class TestInitValidation:
+    def test_rejects_zero_sync_interval(self, tmp_path: Path) -> None:
+        """sync_interval_minutes=0 would cause a tight-loop background sync."""
+        with pytest.raises(ValueError, match="sync_interval_minutes must be a positive"):
+            BundleIndexService(
+                repo_url="https://github.com/x/y.git",
+                github_token="",
+                sync_interval_minutes=0,
+                cache_dir=tmp_path,
+            )
+
+    def test_rejects_negative_sync_interval(self, tmp_path: Path) -> None:
+        """asyncio.sleep() with a negative value raises; fail fast instead."""
+        with pytest.raises(ValueError, match="sync_interval_minutes must be a positive"):
+            BundleIndexService(
+                repo_url="https://github.com/x/y.git",
+                github_token="",
+                sync_interval_minutes=-5,
+                cache_dir=tmp_path,
+            )

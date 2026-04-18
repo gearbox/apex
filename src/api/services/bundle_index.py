@@ -53,6 +53,10 @@ class BundleIndexService:
         sync_interval_minutes: int,
         cache_dir: Path | None = None,
     ) -> None:
+        if sync_interval_minutes <= 0:
+            raise ValueError(
+                f"sync_interval_minutes must be a positive integer, got {sync_interval_minutes!r}"
+            )
         self._repo_url = repo_url
         self._github_token = github_token
         self._sync_interval = sync_interval_minutes
@@ -317,16 +321,34 @@ class BundleIndexService:
             )
 
         def _require_int(field: str) -> int:
+            """Strict: accepts int (not bool) or integer-valued string. Rejects float.
+
+            Rationale: ``int()`` silently coerces ``True`` → ``1``, ``"3.14"`` →
+            ValueError (good) but ``3.14`` → ``3`` (silent truncation of a
+            config error). YAML also loads ``42`` as int and ``42.0`` as float,
+            so we can distinguish them.
+            """
             if field not in hw:
                 raise ValueError(f"{bundle_yaml}: missing required field 'hardware.{field}'")
             value = hw[field]
-            try:
-                return int(value)
-            except (TypeError, ValueError) as exc:
+            # bool is a subclass of int — reject it explicitly
+            if isinstance(value, bool):
                 raise ValueError(
-                    f"{bundle_yaml}: 'hardware.{field}' must be an integer, got "
-                    f"{value!r} ({type(value).__name__})"
-                ) from exc
+                    f"{bundle_yaml}: 'hardware.{field}' must be an integer, got bool {value!r}"
+                )
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                try:
+                    return int(value)  # accepts "42", rejects "42.0" / "1e3"
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{bundle_yaml}: 'hardware.{field}' must be an integer, got {value!r} (str)"
+                    ) from exc
+            raise ValueError(
+                f"{bundle_yaml}: 'hardware.{field}' must be an integer, "
+                f"got {value!r} ({type(value).__name__})"
+            )
 
         if "cuda_min_version" not in hw:
             raise ValueError(f"{bundle_yaml}: missing required field 'hardware.cuda_min_version'")
@@ -345,6 +367,12 @@ class BundleIndexService:
                 f"{bundle_yaml}: 'hardware.gpu_whitelist' must be a list, got "
                 f"{type(gpu_whitelist_raw).__name__}"
             )
+        for idx, entry in enumerate(gpu_whitelist_raw):
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"{bundle_yaml}: 'hardware.gpu_whitelist[{idx}]' must be a string, "
+                    f"got {entry!r} ({type(entry).__name__})"
+                )
 
         # Apply default for optional int fields before validation so _require_int
         # produces consistent error messages for invalid values.
