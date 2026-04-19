@@ -147,6 +147,11 @@ class GpuSession(Base):
         nullable=False,
         server_default=text("1"),
     )
+    provisioning_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Set on first provision attempt (or reset on retry) — used for timeout calculation",
+    )
 
     # Pause/resume tracking
     paused_at: Mapped[datetime | None] = mapped_column(

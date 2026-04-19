@@ -15,7 +15,14 @@ from .exceptions import (
     TunnelCreationError,
     TunnelDeletionError,
 )
-from .schemas import CreateDNSResult, CreateTunnelResult, TunnelListEntry, TunnelListResult
+from .schemas import (
+    CreateDNSResult,
+    CreateTunnelResult,
+    DNSRecordListResult,
+    TunnelListEntry,
+    TunnelListResult,
+    TunnelTokenResult,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -332,6 +339,108 @@ class CloudflareTunnelClient:
             )
 
         return result.result
+
+    async def get_tunnel_token(self, tunnel_id: str) -> str:
+        """Retrieve the token for an existing tunnel.
+
+        Used by the provisioning worker retry path to rebuild the env dict
+        without re-creating the tunnel.
+
+        Args:
+            tunnel_id: CF tunnel UUID.
+
+        Returns:
+            Base64-encoded tunnel token string.
+
+        Raises:
+            CloudflareError: If the request fails or returns no token.
+        """
+        url = f"{self._CF_API_BASE}/accounts/{self._account_id}/cfd_tunnel/{tunnel_id}/token"
+        resp = await self._http.get(url, headers=self._headers)
+
+        if not resp.is_success:
+            logger.error(
+                "cloudflare.tunnel.get_token_failed",
+                status=resp.status_code,
+                tunnel_id=tunnel_id,
+            )
+            raise CloudflareError(
+                f"Failed to get token for tunnel '{tunnel_id}': HTTP {resp.status_code}",
+                status_code=resp.status_code,
+            )
+
+        try:
+            result = msgspec.json.decode(resp.content, type=TunnelTokenResult)
+        except msgspec.DecodeError as exc:
+            raise CloudflareError(
+                f"Failed to parse token response for tunnel '{tunnel_id}': {exc}",
+                status_code=resp.status_code,
+            ) from exc
+
+        if not result.success or result.result is None:
+            raise CloudflareError(
+                f"CF API returned no token for tunnel '{tunnel_id}': {result.errors}",
+                status_code=resp.status_code,
+            )
+
+        logger.info("cloudflare.tunnel.get_token_success", tunnel_id=tunnel_id)
+        return result.result
+
+    async def find_dns_record_by_hostname(self, hostname: str) -> str | None:
+        """Find a DNS record ID by its hostname.
+
+        Used by the orphaned tunnel cleanup worker to look up the DNS record ID
+        before calling delete_session_tunnel.
+
+        Args:
+            hostname: Full hostname to search for (e.g. "01jf8x3k.gpu.cloudin.space").
+
+        Returns:
+            DNS record ID if found, None otherwise.
+
+        Raises:
+            CloudflareError: If the DNS list request fails.
+        """
+        url = f"{self._CF_API_BASE}/zones/{self._zone_id}/dns_records"
+        resp = await self._http.get(
+            url, headers=self._headers, params={"name": hostname, "type": "CNAME"}
+        )
+
+        if not resp.is_success:
+            logger.error(
+                "cloudflare.dns.list_failed",
+                status=resp.status_code,
+                hostname=hostname,
+            )
+            raise CloudflareError(
+                f"Failed to list DNS records for '{hostname}': HTTP {resp.status_code}",
+                status_code=resp.status_code,
+            )
+
+        try:
+            result = msgspec.json.decode(resp.content, type=DNSRecordListResult)
+        except msgspec.DecodeError as exc:
+            raise CloudflareError(
+                f"Failed to parse DNS list response for '{hostname}': {exc}",
+                status_code=resp.status_code,
+            ) from exc
+
+        if not result.success:
+            raise CloudflareError(
+                f"CF API error listing DNS records for '{hostname}': {result.errors}",
+                status_code=resp.status_code,
+            )
+
+        if not result.result:
+            return None
+
+        record_id = result.result[0].id
+        logger.info(
+            "cloudflare.dns.found_by_hostname",
+            hostname=hostname,
+            dns_record_id=record_id,
+        )
+        return record_id
 
     async def create_session_tunnel(
         self, session_id_short: str, comfyui_port: int

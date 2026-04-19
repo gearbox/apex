@@ -83,6 +83,12 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("1"),
         ),
+        sa.Column(
+            "provisioning_started_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+            comment="Set on first provision attempt (or reset on retry) — used for timeout calculation",
+        ),
         # Pause/resume tracking
         sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("resumed_at", sa.DateTime(timezone=True), nullable=True),
