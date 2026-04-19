@@ -14,13 +14,14 @@ from sqlalchemy.exc import IntegrityError
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.vastai.client import VastAIClient
-from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
+from src.api.services.vastai.exceptions import NoCapacityError
 from src.api.services.vastai.schemas import VastAIOffer
 from src.core.enums import GpuSessionStatus, ModelType
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.repositories.gpu_session import GpuSessionRepository
 
+from ._provisioning import provision_vastai_instance
 from .exceptions import (
     GpuSessionError,
     InvalidSessionStateError,
@@ -43,10 +44,8 @@ _STOPPABLE_STATUSES = frozenset(
     }
 )
 
-_VASTAI_IMAGE = "vastai/comfy:latest"
-_ONSTART_CMD = (
-    "curl -sL https://raw.githubusercontent.com/gearbox/aisha/main/scripts/onstart.sh | bash"
-)
+# Re-exported for backward compat with any code that imported from this module directly.
+__all__ = ["GpuSessionService"]
 
 
 class GpuSessionService:
@@ -770,53 +769,11 @@ class GpuSessionService:
         disk_gb: int,
         env: dict[str, str],
     ) -> tuple[int, VastAIOffer]:
-        """Try to create a Vast.ai instance, walking down cheapest offers on OfferTakenError.
-
-        Bounded by ``settings.max_node_provisioning_retries``. Returns the
-        created ``(instance_id, selected_offer)`` on success. On failure,
-        raises either the last non-OfferTaken exception encountered, or a
-        generic ``VastAIError`` if every candidate offer was taken.
-
-        Caller is responsible for tunnel/other-resource cleanup on failure.
-        """
-        max_retries = self._settings.max_node_provisioning_retries
-        # Defense-in-depth: Settings enforces ge=1 via Pydantic, but a misconstructed
-        # Settings (in tests, scripts, future callers) would otherwise silently make
-        # ``candidates`` empty and raise a misleading "all offers taken" error.
-        if max_retries <= 0:
-            raise VastAIError(f"max_node_provisioning_retries must be >= 1, got {max_retries}")
-        candidates = offers[:max_retries]
-        last_exc: Exception | None = None
-
-        for attempt, offer in enumerate(candidates):
-            try:
-                instance_id = await self._vastai.create_instance(
-                    offer.id,
-                    image=_VASTAI_IMAGE,
-                    disk_gb=disk_gb,
-                    env=env,
-                    onstart_cmd=_ONSTART_CMD,
-                )
-            except OfferTakenError:
-                remaining = len(candidates) - attempt - 1
-                logger.warning(
-                    "gpu_session.start.offer_taken_retry",
-                    offer_id=offer.id,
-                    attempt=attempt + 1,
-                    remaining_offers=remaining,
-                )
-                continue
-            except Exception as exc:
-                last_exc = exc
-                break
-            logger.info(
-                "gpu_session.start.instance_created",
-                instance_id=instance_id,
-                offer_id=offer.id,
-                dph_micros=offer.dph_total_micros,
-            )
-            return instance_id, offer
-
-        if last_exc is not None:
-            raise last_exc
-        raise VastAIError("All offers were taken — no instance could be created after retries")
+        """Thin wrapper around the shared provision_vastai_instance helper."""
+        return await provision_vastai_instance(
+            vastai_client=self._vastai,
+            offers=offers,
+            disk_gb=disk_gb,
+            env=env,
+            max_retries=self._settings.max_node_provisioning_retries,
+        )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, update
@@ -244,6 +245,57 @@ class GpuSessionRepository:
             select(GpuSession).order_by(GpuSession.created_at.desc()).limit(limit)
         )
         return result.scalars().all()
+
+    async def increment_provision_attempt(self, session_id: UUID) -> int:
+        """Atomic increment of provision_attempt; returns the new value.
+
+        Args:
+            session_id: Session to update.
+
+        Returns:
+            New provision_attempt value after increment.
+        """
+        result = await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(provision_attempt=GpuSession.provision_attempt + 1)
+            .returning(GpuSession.provision_attempt)
+        )
+        await self._session.flush()
+        return result.scalar_one()
+
+    async def update_instance(
+        self,
+        session_id: UUID,
+        *,
+        vastai_instance_id: int,
+        vastai_offer_id: int,
+        vastai_cost_per_hour_micros: int,
+        vastai_gpu_name: str,
+        provisioning_started_at: datetime,
+    ) -> None:
+        """Swap instance info on a session after a retry; status unchanged (stays 'pending').
+
+        Args:
+            session_id: Session to update.
+            vastai_instance_id: New Vast.ai instance ID.
+            vastai_offer_id: New offer ID.
+            vastai_cost_per_hour_micros: New hourly cost.
+            vastai_gpu_name: New GPU model name.
+            provisioning_started_at: Reset timestamp (restarts the timeout window).
+        """
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(
+                vastai_instance_id=vastai_instance_id,
+                vastai_offer_id=vastai_offer_id,
+                vastai_cost_per_hour_micros=vastai_cost_per_hour_micros,
+                vastai_gpu_name=vastai_gpu_name,
+                provisioning_started_at=provisioning_started_at,
+            )
+        )
+        await self._session.flush()
 
     async def update_status(
         self,

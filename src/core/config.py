@@ -166,6 +166,26 @@ class Settings(BaseSettings):
         description="Max provisioning attempts before marking session as failed",
     )
 
+    # --- Orphaned Tunnel Cleanup Worker ---
+    orphaned_tunnel_cleanup_interval_minutes: int = Field(
+        default=60,
+        ge=5,
+        le=1440,
+        description="How often to run the orphaned tunnel cleanup sweep",
+    )
+    orphaned_tunnel_cleanup_grace_period_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Tunnels younger than this are skipped by the orphan cleanup worker",
+    )
+    gpu_provision_worker_concurrency: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Max sessions processed concurrently per provisioning worker sweep",
+    )
+
     # --- Phase 2 Callback (pre-wired) ---
     apex_callback_url: str = Field(
         default="",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import msgspec
 
 
@@ -48,9 +50,31 @@ class TunnelListEntry(msgspec.Struct, kw_only=True, forbid_unknown_fields=False)
     id: str
     name: str
     status: str
+    created_at: datetime | None = None
+    deleted_at: datetime | None = None
 
 
 class TunnelListResult(CFApiResult):
     """Response from GET /accounts/{id}/cfd_tunnel."""
 
     result: list[TunnelListEntry] = []
+
+
+class TunnelTokenResult(CFApiResult):
+    """Response from GET /accounts/{id}/cfd_tunnel/{id}/token."""
+
+    result: str | None = None
+
+
+class DNSListRecordData(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
+    """Entry in a DNS records list response."""
+
+    id: str
+    name: str
+    type: str
+
+
+class DNSRecordListResult(CFApiResult):
+    """Response from GET /zones/{id}/dns_records."""
+
+    result: list[DNSListRecordData] = []
