@@ -242,13 +242,13 @@ class GpuSessionService:
             instance_id, selected_offer = await self._provision_instance(
                 offers, hardware.min_disk_gb, env
             )
-        except Exception:
+        except Exception as exc:
             await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
             logger.error(
                 "gpu_session.start.failed",
                 user_id=str(user_id),
                 model_type=model_type.value,
-                error_class="VastAIError",
+                error_class=exc.__class__.__name__,
                 phase="create_instance",
             )
             raise
@@ -327,16 +327,19 @@ class GpuSessionService:
 
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
-            session_row = self._verify_ownership(
-                await repo.get_by_id(session_id, for_update=True),
+            session_row = await self._load_session_for_update(
+                repo,
                 session_id,
                 user_id,
                 product_id,
+                frozenset({GpuSessionStatus.active}),
+                "pause",
             )
-            self._ensure_status(session_row, frozenset({GpuSessionStatus.active}), "pause")
 
             # VastAI call inside the transaction: if it fails, exception propagates,
             # transaction rolls back, and session stays 'active' (no partial state).
+            # The row lock prevents concurrent pause/stop races on the same instance —
+            # correctness matters more than marginal throughput on sub-2s calls.
             if session_row.vastai_instance_id is None:
                 raise GpuSessionError(f"Session {session_id} has no Vast.ai instance to pause")
             await self._vastai.stop_instance(session_row.vastai_instance_id)
@@ -385,15 +388,17 @@ class GpuSessionService:
 
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
-            session_row = self._verify_ownership(
-                await repo.get_by_id(session_id, for_update=True),
+            session_row = await self._load_session_for_update(
+                repo,
                 session_id,
                 user_id,
                 product_id,
+                frozenset({GpuSessionStatus.paused}),
+                "resume",
             )
-            self._ensure_status(session_row, frozenset({GpuSessionStatus.paused}), "resume")
 
             # VastAI call inside the transaction: if it fails, session stays 'paused'.
+            # Row lock prevents resume+stop races (same reasoning as pause_session).
             if session_row.vastai_instance_id is None:
                 raise GpuSessionError(f"Session {session_id} has no Vast.ai instance to resume")
             await self._vastai.start_instance(session_row.vastai_instance_id)
@@ -554,6 +559,29 @@ class GpuSessionService:
                 operation=operation,
             )
 
+    async def _load_session_for_update(
+        self,
+        repo: GpuSessionRepository,
+        session_id: UUID,
+        user_id: UUID,
+        product_id: str,
+        allowed_statuses: frozenset[GpuSessionStatus],
+        operation: str,
+    ) -> GpuSession:
+        """Combined row-lock load + ownership check + status guard.
+
+        Caller must already be inside ``async with db.begin()`` so the
+        ``for_update=True`` lock stays active until the caller commits/rolls back.
+        """
+        session_row = self._verify_ownership(
+            await repo.get_by_id(session_id, for_update=True),
+            session_id,
+            user_id,
+            product_id,
+        )
+        self._ensure_status(session_row, allowed_statuses, operation)
+        return session_row
+
     async def _set_status(
         self,
         repo: GpuSessionRepository,
@@ -668,27 +696,42 @@ class GpuSessionService:
         user_id: UUID,
         product_id: str,
     ) -> GpuSession:
-        """Execute confirmed stop: teardown external resources and mark stopped."""
+        """Execute confirmed stop: teardown external resources and mark stopped.
+
+        Concurrency note: the ``stopping`` intermediate status acts as a mutex.
+        Once the first transaction commits with status='stopping', any concurrent
+        ``_stop_confirmed`` call on the same session will fail ``_ensure_status``
+        (stopping is not in _STOPPABLE_STATUSES). This lets us release the row
+        lock during the slow external teardown (destroy instance + delete tunnel)
+        without risking duplicate teardown calls.
+        """
         logger.info("gpu_session.stop.begun", session_id=str(session_id))
 
+        # Transaction 1 (short): verify + transition to 'stopping' (the mutex).
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
-            session_row = self._verify_ownership(
-                await repo.get_by_id(session_id, for_update=True),
-                session_id,
-                user_id,
-                product_id,
+            session_row = await self._load_session_for_update(
+                repo, session_id, user_id, product_id, _STOPPABLE_STATUSES, "stop"
             )
-            self._ensure_status(session_row, _STOPPABLE_STATUSES, "stop")
-
             await self._set_status(repo, session_row, GpuSessionStatus.stopping)
 
-            teardown_had_errors = await self._teardown_external_resources(
-                session_row, log_prefix="gpu_session.stop"
-            )
+        # External teardown — outside any DB transaction. Best-effort; errors are
+        # logged but don't block the final 'stopped' transition. Orphaned resources
+        # are cleaned by OrphanedTunnelCleanupWorker (Phase 1E-2).
+        teardown_had_errors = await self._teardown_external_resources(
+            session_row, log_prefix="gpu_session.stop"
+        )
 
-            # Always transition to 'stopped' regardless of teardown failures —
-            # orphaned resources are cleaned by OrphanedTunnelCleanupWorker (Phase 1E-2)
+        # Transaction 2 (short): finalize status='stopped'. We re-load the row
+        # in this transaction to attach it to the new session (the earlier
+        # session_row is detached after its transaction closed) and to pick up
+        # any concurrent column updates (e.g. billing finalization in Phase 1F).
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionRepository(db)
+            reloaded = await repo.get_by_id(session_id, for_update=True)
+            if reloaded is None:  # pragma: no cover — race with DB deletion
+                raise GpuSessionError(f"Session {session_id} disappeared during stop teardown")
+            session_row = reloaded
             await self._set_status(
                 repo, session_row, GpuSessionStatus.stopped, stopped_at=datetime.now(UTC)
             )
@@ -737,6 +780,11 @@ class GpuSessionService:
         Caller is responsible for tunnel/other-resource cleanup on failure.
         """
         max_retries = self._settings.max_node_provisioning_retries
+        # Defense-in-depth: Settings enforces ge=1 via Pydantic, but a misconstructed
+        # Settings (in tests, scripts, future callers) would otherwise silently make
+        # ``candidates`` empty and raise a misleading "all offers taken" error.
+        if max_retries <= 0:
+            raise VastAIError(f"max_node_provisioning_retries must be >= 1, got {max_retries}")
         candidates = offers[:max_retries]
         last_exc: Exception | None = None
 

@@ -456,6 +456,110 @@ class TestStartSession:
             _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
         )
 
+    async def test_non_offer_taken_vastai_error_cleans_up_and_no_db_write(self) -> None:
+        """A non-OfferTaken VastAI error aborts the retry loop immediately.
+
+        Must: (1) re-raise the original exception, (2) delete the CF tunnel,
+        (3) never call repo.create.
+        """
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        # Non-OfferTaken error: generic VastAIError (could be network failure, 500, etc.)
+        provisioning_error = VastAIError("unexpected upstream error")
+        mocks["vastai_client"].create_instance.side_effect = provisioning_error
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+
+            with pytest.raises(VastAIError) as exc_info:
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                )
+            # The original exception is preserved (not replaced with a generic one)
+            assert exc_info.value is provisioning_error
+
+        # Only one create_instance attempt — loop aborted, no retry on non-OfferTaken
+        assert mocks["vastai_client"].create_instance.call_count == 1
+        # Tunnel was cleaned up
+        mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
+            _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
+        )
+        # No DB session row was persisted
+        mock_repo.create.assert_not_called()
+
+    async def test_zero_max_retries_raises_config_error(self) -> None:
+        """max_node_provisioning_retries=0 is a misconfiguration, not 'all taken'.
+
+        Settings enforces ge=1 via Pydantic, but defense-in-depth in the service
+        gives a clearer error if a misconstructed Settings slips through.
+        """
+        service, mocks = _make_service(settings=_make_settings(max_retries=0))
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+
+            with pytest.raises(VastAIError, match="max_node_provisioning_retries must be >= 1"):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                )
+
+        # No create_instance attempts at all
+        mocks["vastai_client"].create_instance.assert_not_called()
+        # Tunnel still cleaned up
+        mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
+            _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
+        )
+        mock_repo.create.assert_not_called()
+
+    async def test_failure_log_uses_actual_exception_class(self) -> None:
+        """error_class field in gpu_session.start.failed must reflect the actual exception."""
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+
+        class CustomVastAIError(VastAIError):
+            pass
+
+        mocks["vastai_client"].create_instance.side_effect = CustomVastAIError("custom")
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.logger") as mock_logger,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+
+            with pytest.raises(CustomVastAIError):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                )
+
+        # Find the gpu_session.start.failed call and verify error_class matches
+        failed_calls = [
+            call
+            for call in mock_logger.error.call_args_list
+            if call.args and call.args[0] == "gpu_session.start.failed"
+        ]
+        assert len(failed_calls) == 1
+        assert failed_calls[0].kwargs["error_class"] == "CustomVastAIError"
+
     async def test_integrity_error_cleans_up_resources(self) -> None:
         service, mocks = _make_service()
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
