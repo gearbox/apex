@@ -103,9 +103,16 @@ class OrphanedTunnelCleanupWorker:
         """One cleanup sweep: find orphaned tunnels and delete them."""
         started = time.monotonic()
 
-        # 1. Pull all CF tunnels we own (by name prefix, not deleted)
+        # 1. Pull all CF tunnels we own (by name prefix, not deleted).
+        # Client-side filter on deleted_at is defense-in-depth: list_tunnels
+        # already sends is_deleted=false to Cloudflare, but we don't want to
+        # re-delete (and log noise for) tunnels that slip through.
         all_tunnels = await self._cf.list_tunnels(name_prefix=self._TUNNEL_NAME_PREFIX)
-        session_tunnels = [t for t in all_tunnels if t.name.startswith(self._TUNNEL_NAME_PREFIX)]
+        session_tunnels = [
+            t
+            for t in all_tunnels
+            if t.name.startswith(self._TUNNEL_NAME_PREFIX) and t.deleted_at is None
+        ]
 
         # 2. Pull all non-terminal sessions' tunnel IDs in one shot.
         #    Terminal sessions (stopped/failed) don't claim their tunnels —

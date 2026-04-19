@@ -142,8 +142,17 @@ class GpuProvisioningWorker:
                 count=len(sessions),
             )
 
+        # Bound per-sweep concurrency. Settings enforces ge=1, so this is always
+        # a valid positive int in production; tests that pass a misconstructed
+        # Settings mock will fail fast here, which is the right behavior.
+        semaphore = asyncio.Semaphore(self._settings.gpu_provision_worker_concurrency)
+
+        async def _bounded(session: GpuSession) -> None:
+            async with semaphore:
+                await self._advance(session)
+
         results = await asyncio.gather(
-            *[self._advance(s) for s in sessions],
+            *[_bounded(s) for s in sessions],
             return_exceptions=True,
         )
 

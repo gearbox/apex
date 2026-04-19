@@ -719,3 +719,216 @@ class TestEnvReconstruction:
 
         env = mocks["vastai_client"].create_instance.call_args[1]["env"]
         assert "-p 18188:18188" in env
+
+
+class TestSweepConcurrency:
+    async def test_sweep_bounds_concurrency_with_semaphore(self) -> None:
+        """With gpu_provision_worker_concurrency=2 and 5 sessions, at most 2 _advance
+        calls run in parallel at any instant.
+        """
+        worker, mocks = _make_worker(settings=_make_settings(gpu_provision_worker_concurrency=2))
+        sessions = [_make_gpu_session(status=GpuSessionStatus.pending) for _ in range(5)]
+
+        # Track how many _advance calls are in-flight concurrently
+        in_flight = 0
+        max_in_flight = 0
+        advance_lock = asyncio.Lock()
+
+        async def fake_advance(_session: GpuSession) -> None:
+            nonlocal in_flight, max_in_flight
+            async with advance_lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            # Yield to the event loop so other tasks get a chance to start
+            await asyncio.sleep(0.01)
+            async with advance_lock:
+                in_flight -= 1
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch.object(worker, "_advance", side_effect=fake_advance),
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_by_status.return_value = sessions
+
+            await worker._sweep_once()
+
+        assert max_in_flight <= 2, f"Expected <=2 concurrent, observed {max_in_flight}"
+        # Sanity: we actually exercised concurrency (otherwise the test is trivially true)
+        assert max_in_flight >= 2
+
+    async def test_sweep_concurrency_one_serializes(self) -> None:
+        """With concurrency=1, _advance calls must be strictly serialized."""
+        worker, _ = _make_worker(settings=_make_settings(gpu_provision_worker_concurrency=1))
+        sessions = [_make_gpu_session(status=GpuSessionStatus.pending) for _ in range(3)]
+
+        in_flight = 0
+        max_in_flight = 0
+        advance_lock = asyncio.Lock()
+
+        async def fake_advance(_session: GpuSession) -> None:
+            nonlocal in_flight, max_in_flight
+            async with advance_lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.01)
+            async with advance_lock:
+                in_flight -= 1
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch.object(worker, "_advance", side_effect=fake_advance),
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_by_status.return_value = sessions
+
+            await worker._sweep_once()
+
+        assert max_in_flight == 1
+
+
+class TestMarkFailed:
+    """Direct tests of _mark_failed cleanup behavior.
+
+    The retry_exhausted path tests cover this indirectly, but these tests
+    pin the contract of _mark_failed itself — specifically the skip-when-None
+    branches — so cleanup regressions are caught precisely.
+    """
+
+    async def test_destroys_instance_and_deletes_tunnel_when_ids_present(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=12345,
+            cf_tunnel_id="tun-abc",
+            cf_dns_record_id="dns-abc",
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test failure")
+
+        mocks["vastai_client"].destroy_instance.assert_awaited_once_with(12345)
+        mocks["cf_client"].delete_session_tunnel.assert_awaited_once_with("tun-abc", "dns-abc")
+        # And the status transition was performed
+        mock_repo.update_status.assert_awaited()
+        update_kwargs = mock_repo.update_status.await_args.kwargs
+        update_args = mock_repo.update_status.await_args.args
+        # update_status(session_id, status, **extras) — second positional is status
+        assert update_args[1] == GpuSessionStatus.failed
+        assert update_kwargs.get("error_message") == "test failure"
+
+    async def test_skips_destroy_when_instance_id_missing(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id="tun-abc",
+            cf_dns_record_id="dns-abc",
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test")
+
+        mocks["vastai_client"].destroy_instance.assert_not_awaited()
+        mocks["cf_client"].delete_session_tunnel.assert_awaited_once()
+
+    async def test_skips_tunnel_delete_when_dns_id_missing(self) -> None:
+        """Tunnel delete requires both tunnel_id and dns_record_id — skip if either is None."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=99,
+            cf_tunnel_id="tun-abc",
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test")
+
+        mocks["vastai_client"].destroy_instance.assert_awaited_once_with(99)
+        mocks["cf_client"].delete_session_tunnel.assert_not_awaited()
+
+    async def test_instance_not_found_during_destroy_is_swallowed(self) -> None:
+        """InstanceNotFoundError (404 from Vast) must not abort tunnel cleanup or status transition."""
+        from src.api.services.vastai.exceptions import InstanceNotFoundError
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=99,
+            cf_tunnel_id="tun-abc",
+            cf_dns_record_id="dns-abc",
+        )
+        mocks["vastai_client"].destroy_instance.side_effect = InstanceNotFoundError(
+            "gone", status_code=404
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            # Must not raise
+            await worker._mark_failed(session, reason="test")
+
+        # Tunnel cleanup still runs
+        mocks["cf_client"].delete_session_tunnel.assert_awaited_once()
+        # Status still transitions
+        mock_repo.update_status.assert_awaited()
+
+    async def test_tunnel_delete_failure_still_transitions_to_failed(self) -> None:
+        """Best-effort tunnel cleanup: a CF error must not block the 'failed' transition."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id="tun-abc",
+            cf_dns_record_id="dns-abc",
+        )
+        mocks["cf_client"].delete_session_tunnel.side_effect = RuntimeError("CF unreachable")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test")
+
+        mock_repo.update_status.assert_awaited()
+        assert mock_repo.update_status.await_args.args[1] == GpuSessionStatus.failed
+
+    async def test_error_message_truncated_to_500_chars(self) -> None:
+        """Long reasons must be truncated so the DB column is never overflowed."""
+        worker, _ = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+        long_reason = "x" * 1000
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason=long_reason)
+
+        stored = mock_repo.update_status.await_args.kwargs["error_message"]
+        assert len(stored) == 500
+        assert stored == "x" * 500

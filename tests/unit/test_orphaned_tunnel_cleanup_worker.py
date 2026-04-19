@@ -232,6 +232,35 @@ class TestSweep:
 
         mocks["cf_client"].delete_tunnel.assert_not_called()
 
+    async def test_soft_deleted_tunnel_is_ignored(self) -> None:
+        """Tunnels with deleted_at set (soft-deleted) must not be re-deleted.
+
+        Defense-in-depth: list_tunnels already passes is_deleted=false to CF,
+        but if CF ever surfaces a soft-deleted entry we skip it to avoid noise.
+        """
+        worker, mocks = _make_worker()
+
+        orphan_age = datetime.now(UTC) - timedelta(hours=2)
+        soft_deleted_tunnel = _make_tunnel(
+            tunnel_id="tun-soft-deleted",
+            name="gpu-session-deadbeef",
+            created_at=orphan_age,
+            deleted_at=datetime.now(UTC) - timedelta(minutes=30),
+        )
+        mocks["cf_client"].list_tunnels.return_value = [soft_deleted_tunnel]
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_by_status.return_value = []
+
+            await worker._sweep_once()
+
+        # Despite being orphaned + past the grace period, the soft-deleted
+        # tunnel must not be touched.
+        mocks["cf_client"].delete_tunnel.assert_not_called()
+        mocks["cf_client"].find_dns_record_by_hostname.assert_not_called()
+
     async def test_delete_failure_continues_to_next_candidate(self) -> None:
         """If deleting one orphan fails, the worker must continue to the next."""
         worker, mocks = _make_worker()
