@@ -24,7 +24,7 @@ class AgeGatePolicy(StrEnum):
 class AuthMethod(StrEnum):
     """Supported authentication methods."""
 
-    EMAIL_PASSWORD = "email_password"
+    EMAIL_PASSWORD = "email_password"  # noqa: S105
     GOOGLE_OAUTH = "google_oauth"
     APPLE_OAUTH = "apple_oauth"
     # SSO_SAML = "sso_saml"  # Future: enterprise SSO

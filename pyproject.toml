@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.14.1"
+version = "0.14.2"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -81,10 +81,22 @@ select = [
     "UP",   # pyupgrade
     "ARG",  # flake8-unused-arguments
     "SIM",  # flake8-simplify
+    "S",    # Enables all Bandit security rules
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
     "B008",   # do not perform function calls in argument defaults
+    "S101",   # FIX in production, Ignore use of assert detected
+    "S108",   # FIX in production, probable insecure usage of temporary file or directory
+    "S607",   # FIX in production, Starting a process with a partial executable path
+]
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",   # Ignore use of assert detected
+    "S105",   # Ignore hardcoded password rules in any file within the tests directory
+    "S106",   # Ignore possible hardcoded password assigned to argument within the tests directory
+    "S107",   # Ignore possible hardcoded password assigned to function default within the tests directory
+    "S607",   # Ignore starting a process with a partial executable path
 ]
 
 [tool.ruff.lint.isort]

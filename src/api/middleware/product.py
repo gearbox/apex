@@ -60,7 +60,7 @@ class ProductMiddleware(AbstractMiddleware):
         # 4. Try localhost/dev fallback
         if product_config is None:
             host = headers.get(b"host", b"").decode("utf-8", errors="ignore").split(":")[0]
-            if host in ("localhost", "127.0.0.1", "0.0.0.0"):
+            if host in ("localhost", "127.0.0.1", "0.0.0.0"):  # noqa: S104
                 settings = get_settings()
                 product_config = resolve_product_by_slug(settings.default_product)
 

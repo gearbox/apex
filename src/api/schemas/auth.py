@@ -80,7 +80,7 @@ class TokenResponse(msgspec.Struct, kw_only=True):
 
     access_token: str
     refresh_token: str
-    token_type: str = "bearer"
+    token_type: str = "bearer"  # noqa: S105
     expires_in: int  # Seconds until access token expires
     expires_at: datetime  # Absolute expiration time
 
@@ -89,7 +89,7 @@ class AccessTokenResponse(msgspec.Struct, kw_only=True):
     """Access token only response (for refresh)."""
 
     access_token: str
-    token_type: str = "bearer"
+    token_type: str = "bearer"  # noqa: S105
     expires_in: int
     expires_at: datetime
 

@@ -56,13 +56,13 @@ VEX_CONFIG = ProductConfig(
         }
     ),
     stripe_config=StripeConfig(
-        secret_key_env="stripe_secret_key_vex",
-        webhook_secret_env="stripe_webhook_secret_vex",
+        secret_key_env="stripe_secret_key_vex",  # noqa: S106
+        webhook_secret_env="stripe_webhook_secret_vex",  # noqa: S106
         publishable_key_env="stripe_publishable_key_vex",
     ),
     nowpayments_config=NowPaymentsConfig(
         api_key_env="nowpayments_api_key_vex",
-        ipn_secret_env="nowpayments_ipn_secret_vex",
+        ipn_secret_env="nowpayments_ipn_secret_vex",  # noqa: S106
     ),
     rate_limits=ProductRateLimits(
         generation_per_user="120/hour",
@@ -111,8 +111,8 @@ SYNTHARA_CONFIG = ProductConfig(
         }
     ),
     stripe_config=StripeConfig(
-        secret_key_env="stripe_secret_key_synthara",
-        webhook_secret_env="stripe_webhook_secret_synthara",
+        secret_key_env="stripe_secret_key_synthara",  # noqa: S106
+        webhook_secret_env="stripe_webhook_secret_synthara",  # noqa: S106
         publishable_key_env="stripe_publishable_key_synthara",
     ),
     nowpayments_config=None,
