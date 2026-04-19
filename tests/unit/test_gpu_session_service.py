@@ -289,6 +289,113 @@ class TestStartSession:
             _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
         )
 
+    async def test_empty_offers_list_raises_no_capacity_and_cleans_up_tunnel(self) -> None:
+        """Defensive: if search_offers returns [] instead of raising, we must not IndexError.
+
+        The Vast.ai client should raise NoCapacityError on empty results, but the
+        service guards the contract and raises explicitly rather than crashing
+        when it indexes offers[0].
+        """
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        # Note: intentionally returning [] instead of raising, simulating a
+        # (hypothetical) client contract drift.
+        mocks["vastai_client"].search_offers.return_value = []
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+
+            with pytest.raises(NoCapacityError):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                )
+
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
+            _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
+        )
+        mock_repo.create.assert_not_called()
+
+    async def test_cf_tunnel_creation_failure_does_not_proceed(self) -> None:
+        """If Cloudflare tunnel creation fails, no Vast.ai calls happen and no DB row is created.
+
+        The CF client is expected to have already cleaned up its own partial
+        resources (see CloudflareTunnelClient.create_session_tunnel rollback
+        behavior), so the service just propagates the exception.
+        """
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.side_effect = RuntimeError(
+            "cf tunnel creation failed"
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+
+            with pytest.raises(RuntimeError, match="cf tunnel creation failed"):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                )
+
+        # Must not have called any Vast.ai APIs
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        # Must not have deleted a tunnel (the client is responsible for its own rollback)
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        # Must not have persisted any session row
+        mock_repo.create.assert_not_called()
+
+    async def test_port_mapping_uses_hardware_comfyui_port(self) -> None:
+        """The env dict's port mapping must be derived from hardware.comfyui_port, not hardcoded."""
+        service, mocks = _make_service()
+        # Custom port — different from the default 18188
+        custom_hardware = HardwareRequirements(
+            gpu_whitelist=("RTX_4090",),
+            min_disk_gb=100,
+            min_network_upload_mbps=100,
+            min_network_download_mbps=500,
+            cuda_min_version="12.1",
+            num_gpus=1,
+            comfyui_port=9999,
+        )
+        bundle = BundleMapping(
+            bundle_name="custom_bundle",
+            bundle_version=None,
+            hardware=custom_hardware,
+        )
+        mocks["bundle_index"].resolve_bundle.return_value = bundle
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 77777
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+            mock_repo.create.return_value = MagicMock(spec=GpuSession)
+
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+            )
+
+        # Inspect the env dict passed to create_instance
+        env_arg = mocks["vastai_client"].create_instance.call_args.kwargs["env"]
+        assert "-p 9999:9999" in env_arg
+        assert "-p 18188:18188" not in env_arg
+        # Also verify CF tunnel was configured for the same port
+        mocks["cf_client"].create_session_tunnel.assert_called_once_with(ANY, 9999)
+
     async def test_offer_taken_retries_with_next_offer(self) -> None:
         service, mocks = _make_service(settings=_make_settings(max_retries=3))
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()

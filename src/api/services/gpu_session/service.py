@@ -15,6 +15,7 @@ from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
+from src.api.services.vastai.schemas import VastAIOffer
 from src.core.enums import GpuSessionStatus, ModelType
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
@@ -197,6 +198,23 @@ class GpuSessionService:
                 phase="search_offers",
             )
             raise
+
+        # Defensive: search_offers should raise NoCapacityError on an empty list
+        # (see VastAIClient.search_offers), but if the contract ever drifts we
+        # handle it explicitly rather than IndexError'ing on offers[0] below.
+        if not offers:
+            await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
+            logger.error(
+                "gpu_session.start.failed",
+                user_id=str(user_id),
+                model_type=model_type.value,
+                error_class="NoCapacityError",
+                phase="search_offers",
+            )
+            raise NoCapacityError(
+                "Vast.ai search_offers returned an empty list (no offers match hardware)"
+            )
+
         logger.info(
             "gpu_session.start.offers_found",
             count=len(offers),
@@ -205,6 +223,7 @@ class GpuSessionService:
 
         # Build env dict (SECURITY: never log this dict — contains tunnel_token, callback_token,
         # hf_token, civitai_api_token)
+        comfyui_port = hardware.comfyui_port
         env: dict[str, str] = {
             "ACS_BUNDLE": bundle.bundle_name,
             "ACS_BUNDLE_VERSION": bundle.bundle_version or "current",
@@ -214,45 +233,16 @@ class GpuSessionService:
             "ACS_APEX_CALLBACK_TOKEN": callback_token,
             "ACS_HF_TOKEN": self._settings.hf_token,
             "ACS_CIVITAI_API_TOKEN": self._settings.civitai_api_token,
-            "-p 18188:18188": "1",
+            # Port mapping for ComfyUI (derived from bundle.yaml — no hardcoded drift).
+            f"-p {comfyui_port}:{comfyui_port}": "1",
         }
 
         # Step 6: create Vast.ai instance with retry loop
-        max_retries = self._settings.max_node_provisioning_retries
-        instance_id: int | None = None
-        selected_offer = None
-        last_exc: Exception | None = None
-
-        for attempt, offer in enumerate(offers[:max_retries]):
-            try:
-                instance_id = await self._vastai.create_instance(
-                    offer.id,
-                    image=_VASTAI_IMAGE,
-                    disk_gb=hardware.min_disk_gb,
-                    env=env,
-                    onstart_cmd=_ONSTART_CMD,
-                )
-                selected_offer = offer
-                logger.info(
-                    "gpu_session.start.instance_created",
-                    instance_id=instance_id,
-                    offer_id=offer.id,
-                    dph_micros=offer.dph_total_micros,
-                )
-                break
-            except OfferTakenError:
-                remaining = len(offers[:max_retries]) - attempt - 1
-                logger.warning(
-                    "gpu_session.start.offer_taken_retry",
-                    offer_id=offer.id,
-                    attempt=attempt + 1,
-                    remaining_offers=remaining,
-                )
-            except Exception as exc:
-                last_exc = exc
-                break
-
-        if instance_id is None or selected_offer is None:
+        try:
+            instance_id, selected_offer = await self._provision_instance(
+                offers, hardware.min_disk_gb, env
+            )
+        except Exception:
             await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
             logger.error(
                 "gpu_session.start.failed",
@@ -261,9 +251,7 @@ class GpuSessionService:
                 error_class="VastAIError",
                 phase="create_instance",
             )
-            if last_exc is not None:
-                raise last_exc
-            raise VastAIError("All offers were taken — no instance could be created after retries")
+            raise
 
         # Step 7: persist session (separate write transaction)
         async with self._session_factory() as db, db.begin():
@@ -339,20 +327,13 @@ class GpuSessionService:
 
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
-            session_row = await repo.get_by_id(session_id, for_update=True)
-            if (
-                session_row is None
-                or session_row.user_id != user_id
-                or session_row.product_id != product_id
-            ):
-                raise GpuSessionError(f"Session {session_id} not found or access denied")
-
-            if session_row.status != GpuSessionStatus.active:
-                raise InvalidSessionStateError(
-                    f"Cannot pause session in state '{session_row.status}'",
-                    current_status=session_row.status,
-                    operation="pause",
-                )
+            session_row = self._verify_ownership(
+                await repo.get_by_id(session_id, for_update=True),
+                session_id,
+                user_id,
+                product_id,
+            )
+            self._ensure_status(session_row, frozenset({GpuSessionStatus.active}), "pause")
 
             # VastAI call inside the transaction: if it fails, exception propagates,
             # transaction rolls back, and session stays 'active' (no partial state).
@@ -360,10 +341,9 @@ class GpuSessionService:
                 raise GpuSessionError(f"Session {session_id} has no Vast.ai instance to pause")
             await self._vastai.stop_instance(session_row.vastai_instance_id)
 
-            now = datetime.now(UTC)
-            await repo.update_status(session_id, GpuSessionStatus.paused, paused_at=now)
-            session_row.status = GpuSessionStatus.paused
-            session_row.paused_at = now
+            await self._set_status(
+                repo, session_row, GpuSessionStatus.paused, paused_at=datetime.now(UTC)
+            )
 
         logger.info("gpu_session.pause.done", session_id=str(session_id))
         # TODO: publish GPU_SESSION_STATUS_CHANGED event (wire up in Phase 1F)
@@ -405,30 +385,22 @@ class GpuSessionService:
 
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
-            session_row = await repo.get_by_id(session_id, for_update=True)
-            if (
-                session_row is None
-                or session_row.user_id != user_id
-                or session_row.product_id != product_id
-            ):
-                raise GpuSessionError(f"Session {session_id} not found or access denied")
-
-            if session_row.status != GpuSessionStatus.paused:
-                raise InvalidSessionStateError(
-                    f"Cannot resume session in state '{session_row.status}'",
-                    current_status=session_row.status,
-                    operation="resume",
-                )
+            session_row = self._verify_ownership(
+                await repo.get_by_id(session_id, for_update=True),
+                session_id,
+                user_id,
+                product_id,
+            )
+            self._ensure_status(session_row, frozenset({GpuSessionStatus.paused}), "resume")
 
             # VastAI call inside the transaction: if it fails, session stays 'paused'.
             if session_row.vastai_instance_id is None:
                 raise GpuSessionError(f"Session {session_id} has no Vast.ai instance to resume")
             await self._vastai.start_instance(session_row.vastai_instance_id)
 
-            now = datetime.now(UTC)
-            await repo.update_status(session_id, GpuSessionStatus.resuming, resumed_at=now)
-            session_row.status = GpuSessionStatus.resuming
-            session_row.resumed_at = now
+            await self._set_status(
+                repo, session_row, GpuSessionStatus.resuming, resumed_at=datetime.now(UTC)
+            )
 
         logger.info("gpu_session.resume.done", session_id=str(session_id))
         # TODO: publish GPU_SESSION_STATUS_CHANGED event (wire up in Phase 1F)
@@ -547,6 +519,107 @@ class GpuSessionService:
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
 
+    def _verify_ownership(
+        self,
+        session_row: GpuSession | None,
+        session_id: UUID,
+        user_id: UUID,
+        product_id: str,
+    ) -> GpuSession:
+        """Raise GpuSessionError if the session isn't owned by (user_id, product_id).
+
+        Returns the validated session row. Kept as a synchronous helper because
+        it performs no I/O — the caller is responsible for opening the DB session
+        and loading the row (typically with ``for_update=True``).
+        """
+        if (
+            session_row is None
+            or session_row.user_id != user_id
+            or session_row.product_id != product_id
+        ):
+            raise GpuSessionError(f"Session {session_id} not found or access denied")
+        return session_row
+
+    def _ensure_status(
+        self,
+        session_row: GpuSession,
+        allowed: frozenset[GpuSessionStatus],
+        operation: str,
+    ) -> None:
+        """Raise InvalidSessionStateError if session is not in an allowed state."""
+        if session_row.status not in allowed:
+            raise InvalidSessionStateError(
+                f"Cannot {operation} session in state '{session_row.status}'",
+                current_status=session_row.status,
+                operation=operation,
+            )
+
+    async def _set_status(
+        self,
+        repo: GpuSessionRepository,
+        session_row: GpuSession,
+        new_status: GpuSessionStatus,
+        *,
+        paused_at: datetime | None = None,
+        resumed_at: datetime | None = None,
+        stopped_at: datetime | None = None,
+    ) -> None:
+        """Persist new_status + optional timestamp, and mirror onto the in-memory row.
+
+        Extra timestamp fields are only forwarded to the repo when non-None so
+        we don't accidentally clobber existing values with NULL.
+        """
+        extra: dict[str, datetime] = {}
+        if paused_at is not None:
+            extra["paused_at"] = paused_at
+        if resumed_at is not None:
+            extra["resumed_at"] = resumed_at
+        if stopped_at is not None:
+            extra["stopped_at"] = stopped_at
+
+        await repo.update_status(session_row.id, new_status, **extra)
+        session_row.status = new_status
+        if paused_at is not None:
+            session_row.paused_at = paused_at
+        if resumed_at is not None:
+            session_row.resumed_at = resumed_at
+        if stopped_at is not None:
+            session_row.stopped_at = stopped_at
+
+    async def _teardown_external_resources(
+        self, session_row: GpuSession, *, log_prefix: str
+    ) -> bool:
+        """Best-effort teardown of Vast.ai instance + CF tunnel for a session.
+
+        Always continues on failure so the DB status transition can proceed.
+        Returns True if any teardown step failed (caller may want to log it).
+        """
+        had_errors = False
+        if session_row.vastai_instance_id is not None:
+            try:
+                await self._vastai.destroy_instance(session_row.vastai_instance_id)
+            except Exception:
+                had_errors = True
+                logger.warning(
+                    f"{log_prefix}.teardown_instance_failed",
+                    session_id=str(session_row.id),
+                    instance_id=session_row.vastai_instance_id,
+                )
+        if session_row.cf_tunnel_id is not None and session_row.cf_dns_record_id is not None:
+            try:
+                await self._cf.delete_session_tunnel(
+                    session_row.cf_tunnel_id,
+                    session_row.cf_dns_record_id,
+                )
+            except Exception:
+                had_errors = True
+                logger.warning(
+                    f"{log_prefix}.teardown_tunnel_failed",
+                    session_id=str(session_row.id),
+                    tunnel_id=session_row.cf_tunnel_id,
+                )
+        return had_errors
+
     async def _stop_confirmation(
         self,
         session_id: UUID,
@@ -556,22 +629,17 @@ class GpuSessionService:
         """Build stop confirmation DTO without changing any state."""
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
-            session_row = await repo.get_by_id_for_user(session_id, user_id, product_id)
-
-        if session_row is None:
-            raise GpuSessionError(f"Session {session_id} not found or access denied")
-
-        if session_row.status not in _STOPPABLE_STATUSES:
-            raise InvalidSessionStateError(
-                f"Cannot stop session in state '{session_row.status}'",
-                current_status=session_row.status,
-                operation="stop",
+            session_row = self._verify_ownership(
+                await repo.get_by_id_for_user(session_id, user_id, product_id),
+                session_id,
+                user_id,
+                product_id,
             )
 
+        self._ensure_status(session_row, _STOPPABLE_STATUSES, "stop")
+
         now = datetime.now(UTC)
-        start = (
-            session_row.started_at if session_row.started_at is not None else session_row.created_at
-        )
+        start = session_row.started_at or session_row.created_at
         if session_row.status == GpuSessionStatus.paused and session_row.paused_at is not None:
             end = session_row.paused_at
         else:
@@ -605,59 +673,25 @@ class GpuSessionService:
 
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
-            session_row = await repo.get_by_id(session_id, for_update=True)
-            if (
-                session_row is None
-                or session_row.user_id != user_id
-                or session_row.product_id != product_id
-            ):
-                raise GpuSessionError(f"Session {session_id} not found or access denied")
+            session_row = self._verify_ownership(
+                await repo.get_by_id(session_id, for_update=True),
+                session_id,
+                user_id,
+                product_id,
+            )
+            self._ensure_status(session_row, _STOPPABLE_STATUSES, "stop")
 
-            if session_row.status not in _STOPPABLE_STATUSES:
-                raise InvalidSessionStateError(
-                    f"Cannot stop session in state '{session_row.status}'",
-                    current_status=session_row.status,
-                    operation="stop",
-                )
+            await self._set_status(repo, session_row, GpuSessionStatus.stopping)
 
-            await repo.update_status(session_id, GpuSessionStatus.stopping)
-            session_row.status = GpuSessionStatus.stopping
-
-            teardown_had_errors = False
-
-            # Destroy Vast.ai instance (best-effort — must not block 'stopped' transition)
-            if session_row.vastai_instance_id is not None:
-                try:
-                    await self._vastai.destroy_instance(session_row.vastai_instance_id)
-                except Exception:
-                    teardown_had_errors = True
-                    logger.warning(
-                        "gpu_session.stop.teardown_instance_failed",
-                        session_id=str(session_id),
-                        instance_id=session_row.vastai_instance_id,
-                    )
-
-            # Delete CF tunnel + DNS (best-effort)
-            if session_row.cf_tunnel_id is not None and session_row.cf_dns_record_id is not None:
-                try:
-                    await self._cf.delete_session_tunnel(
-                        session_row.cf_tunnel_id,
-                        session_row.cf_dns_record_id,
-                    )
-                except Exception:
-                    teardown_had_errors = True
-                    logger.warning(
-                        "gpu_session.stop.teardown_tunnel_failed",
-                        session_id=str(session_id),
-                        tunnel_id=session_row.cf_tunnel_id,
-                    )
+            teardown_had_errors = await self._teardown_external_resources(
+                session_row, log_prefix="gpu_session.stop"
+            )
 
             # Always transition to 'stopped' regardless of teardown failures —
             # orphaned resources are cleaned by OrphanedTunnelCleanupWorker (Phase 1E-2)
-            now = datetime.now(UTC)
-            await repo.update_status(session_id, GpuSessionStatus.stopped, stopped_at=now)
-            session_row.status = GpuSessionStatus.stopped
-            session_row.stopped_at = now
+            await self._set_status(
+                repo, session_row, GpuSessionStatus.stopped, stopped_at=datetime.now(UTC)
+            )
 
         logger.info(
             "gpu_session.stop.done",
@@ -686,3 +720,55 @@ class GpuSessionService:
                 "gpu_session.start.instance_cleanup_failed",
                 instance_id=instance_id,
             )
+
+    async def _provision_instance(
+        self,
+        offers: Sequence[VastAIOffer],
+        disk_gb: int,
+        env: dict[str, str],
+    ) -> tuple[int, VastAIOffer]:
+        """Try to create a Vast.ai instance, walking down cheapest offers on OfferTakenError.
+
+        Bounded by ``settings.max_node_provisioning_retries``. Returns the
+        created ``(instance_id, selected_offer)`` on success. On failure,
+        raises either the last non-OfferTaken exception encountered, or a
+        generic ``VastAIError`` if every candidate offer was taken.
+
+        Caller is responsible for tunnel/other-resource cleanup on failure.
+        """
+        max_retries = self._settings.max_node_provisioning_retries
+        candidates = offers[:max_retries]
+        last_exc: Exception | None = None
+
+        for attempt, offer in enumerate(candidates):
+            try:
+                instance_id = await self._vastai.create_instance(
+                    offer.id,
+                    image=_VASTAI_IMAGE,
+                    disk_gb=disk_gb,
+                    env=env,
+                    onstart_cmd=_ONSTART_CMD,
+                )
+            except OfferTakenError:
+                remaining = len(candidates) - attempt - 1
+                logger.warning(
+                    "gpu_session.start.offer_taken_retry",
+                    offer_id=offer.id,
+                    attempt=attempt + 1,
+                    remaining_offers=remaining,
+                )
+                continue
+            except Exception as exc:
+                last_exc = exc
+                break
+            logger.info(
+                "gpu_session.start.instance_created",
+                instance_id=instance_id,
+                offer_id=offer.id,
+                dph_micros=offer.dph_total_micros,
+            )
+            return instance_id, offer
+
+        if last_exc is not None:
+            raise last_exc
+        raise VastAIError("All offers were taken — no instance could be created after retries")

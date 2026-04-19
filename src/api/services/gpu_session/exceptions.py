@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.enums import GpuSessionStatus
+
 
 class GpuSessionError(Exception):
     """Base class for GPU session service errors."""
@@ -31,7 +36,16 @@ class InvalidSessionStateError(GpuSessionError):
     active session, stop() on an already-stopped session.
     """
 
-    def __init__(self, message: str, *, current_status: str, operation: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        current_status: GpuSessionStatus | str,
+        operation: str,
+    ) -> None:
         super().__init__(message)
-        self.current_status = current_status
+        # Coerce to plain str so downstream consumers (logging, HTTP responses)
+        # get a consistent type regardless of whether callers passed the enum
+        # or the raw DB column value.
+        self.current_status: str = str(current_status)
         self.operation = operation
