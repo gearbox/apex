@@ -52,6 +52,7 @@ _PRICE_ID_GROK_VID_I2V = "00000000-0000-0000-0002-000000000006"
 _PRICE_ID_GROK_VID_V2V = "00000000-0000-0000-0002-000000000007"
 _PRICE_ID_GROK_VID_FLF2V = "00000000-0000-0000-0002-000000000008"
 _PRICE_ID_GROK_2IMG_T2I = "00000000-0000-0000-0002-000000000009"
+_PRICE_ID_GPU_SESSION_START = "00000000-0000-0000-0002-000000000020"
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +148,14 @@ _PRICING_RULES = [
         "generation_type": "t2i",
         "model": "grok-2-image-1212",
         "token_cost": 15,
+    },
+    # GPU session base reservation
+    {
+        "id": _PRICE_ID_GPU_SESSION_START,
+        "provider": "gpu_session",
+        "generation_type": "session_start",
+        "model": None,
+        "token_cost": 500,
     },
     # Grok Imagine Video — all supported generation types
     {

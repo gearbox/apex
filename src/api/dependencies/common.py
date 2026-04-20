@@ -24,6 +24,9 @@ from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
 from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
+from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
+from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
+from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.health.service import HealthService
@@ -77,6 +80,11 @@ class ServiceContainer:
     health_service: HealthService | None = None
     health_snapshot_worker: HealthSnapshotWorker | None = None
     health_http_client: httpx.AsyncClient | None = None
+    # GPU session stack (optional — requires Vast.ai + CF configuration)
+    gpu_session_service: GpuSessionService | None = None
+    gpu_provisioning_worker: GpuProvisioningWorker | None = None
+    orphaned_tunnel_cleanup_worker: OrphanedTunnelCleanupWorker | None = None
+    gpu_session_http_client: httpx.AsyncClient | None = None
 
 
 _services = ServiceContainer()
@@ -353,6 +361,17 @@ def get_health_service() -> HealthService:
     return _services.health_service
 
 
+async def get_gpu_session_service() -> GpuSessionService:
+    """Provide GpuSessionService singleton (503 if GPU stack not configured)."""
+    if _services.gpu_session_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(
+            detail="GPU session service not available (Vast.ai/CF not configured)"
+        )
+    return _services.gpu_session_service
+
+
 def get_content_proxy(
     r2_storage: R2StorageService,
     settings: Settings,
@@ -453,7 +472,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     init_rate_limiter(settings)
 
     # Initialize ComfyUI client
-    _services.comfyui_client = ComfyUIClient(settings)
+    _services.comfyui_client = ComfyUIClient(settings.comfyui_base_url)
     await _services.comfyui_client.connect()
     logger.info("comfyui.connected", url=settings.comfyui_base_url)
 
@@ -556,6 +575,69 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     )
     logger.info("unified_job_service.initialized")
 
+    # Initialize GPU session stack (requires both Vast.ai + CF to be configured)
+    if settings.vastai_configured and settings.cf_configured:
+        from src.api.services.bundle_index import BundleIndexService
+        from src.api.services.cloudflare.client import CloudflareTunnelClient
+        from src.api.services.vastai.client import VastAIClient
+
+        _services.gpu_session_http_client = httpx.AsyncClient(timeout=30.0)
+
+        vastai_client = VastAIClient(
+            http_client=_services.gpu_session_http_client,
+            api_key=settings.vastai_api_key,
+        )
+        cf_client = CloudflareTunnelClient(
+            http_client=_services.gpu_session_http_client,
+            api_token=settings.cf_api_token,
+            account_id=settings.cf_account_id,
+            zone_id=settings.cf_zone_id,
+            tunnel_domain=settings.cf_tunnel_domain,
+        )
+        bundle_index = BundleIndexService(
+            repo_url=settings.ai_bundles_repo_url,
+            github_token=settings.ai_bundles_github_token,
+            sync_interval_minutes=settings.ai_bundles_sync_interval_minutes,
+        )
+        await bundle_index.start()
+
+        billing_service_for_worker = BillingService(event_bus=_services.event_bus)
+
+        _services.gpu_session_service = GpuSessionService(
+            vastai_client=vastai_client,
+            cf_client=cf_client,
+            bundle_index=bundle_index,
+            session_factory=_services.db_manager.session_factory,
+            settings=settings,
+            event_bus=_services.event_bus,
+        )
+
+        _services.gpu_provisioning_worker = GpuProvisioningWorker(
+            session_factory=_services.db_manager.session_factory,
+            vastai_client=vastai_client,
+            cf_client=cf_client,
+            bundle_index=bundle_index,
+            http_client=_services.gpu_session_http_client,
+            settings=settings,
+            billing_service=billing_service_for_worker,
+            event_bus=_services.event_bus,
+        )
+        await _services.gpu_provisioning_worker.start()
+
+        _services.orphaned_tunnel_cleanup_worker = OrphanedTunnelCleanupWorker(
+            session_factory=_services.db_manager.session_factory,
+            cf_client=cf_client,
+            settings=settings,
+        )
+        await _services.orphaned_tunnel_cleanup_worker.start()
+
+        logger.info("gpu_session_stack.initialized")
+    else:
+        logger.warning(
+            "gpu_session_stack.not_configured",
+            hint="Set VASTAI_API_KEY and CF_API_TOKEN/CF_ACCOUNT_ID/CF_ZONE_ID to enable GPU sessions",
+        )
+
     # Initialize unified generation service
     from src.api.services.generation.aisha_provider import AishaGenerationProvider
     from src.api.services.generation.grok_provider import GrokGenerationProvider
@@ -563,8 +645,8 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
 
     generation_providers: dict[Provider, object] = {
         Provider.AISHA: AishaGenerationProvider(
-            comfyui_client=_services.comfyui_client,
             workflow_service=_services.workflow_service,
+            gpu_session_service=_services.gpu_session_service,
         )
     }
 
@@ -679,6 +761,17 @@ async def shutdown_services() -> None:
     """
     global _services
 
+    # Stop GPU session workers before closing their dependencies
+    if _services.gpu_provisioning_worker is not None:
+        await _services.gpu_provisioning_worker.stop()
+
+    if _services.orphaned_tunnel_cleanup_worker is not None:
+        await _services.orphaned_tunnel_cleanup_worker.stop()
+
+    if _services.gpu_session_http_client is not None:
+        await _services.gpu_session_http_client.aclose()
+        logger.info("gpu_session_http_client.closed")
+
     if _services.comfyui_client is not None:
         await _services.comfyui_client.close()
         logger.info("comfyui.closed")
@@ -759,4 +852,6 @@ dependencies = {
     "idempotency_service": Provide(get_idempotency_service, sync_to_thread=False),
     # Health
     "health_service": Provide(get_health_service, sync_to_thread=False),
+    # GPU sessions
+    "gpu_session_service": Provide(get_gpu_session_service),
 }

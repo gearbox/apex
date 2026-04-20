@@ -11,6 +11,8 @@ from uuid import UUID
 import structlog
 from sqlalchemy.exc import IntegrityError
 
+from src.api.schemas.events import EventType, GpuSessionStatusPayload
+from src.api.services.billing_errors import InsufficientBalanceError
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.vastai.client import VastAIClient
@@ -32,6 +34,8 @@ from .schemas import StopConfirmation
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from src.api.services.billing import BillingService
+    from src.api.services.event_bus import EventBus
     from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
@@ -72,12 +76,14 @@ class GpuSessionService:
         bundle_index: BundleIndexService,
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._vastai = vastai_client
         self._cf = cf_client
         self._bundles = bundle_index
         self._session_factory = session_factory
         self._settings = settings
+        self._event_bus = event_bus
 
     # ------------------------------------------------------------------ #
     # Public lifecycle methods                                             #
@@ -90,6 +96,8 @@ class GpuSessionService:
         product_id: str,
         model_type: ModelType,
         bundle_override: str | None = None,
+        account_id: UUID,
+        billing_service: BillingService,
     ) -> GpuSession:
         """Create a new GPU session and trigger provisioning.
 
@@ -97,6 +105,7 @@ class GpuSessionService:
         1. Resolve bundle (default via model_type OR override if provided)
         2. Pre-check uniqueness via get_non_terminal_for_model (fast fail)
         3. Generate session_id (UUIDv7) and callback_token (token_urlsafe)
+        1.5. Assert sufficient balance BEFORE creating any external resources
         4. Create CF tunnel + DNS (CloudflareTunnelClient.create_session_tunnel)
            → on failure: nothing to clean up yet, re-raise
         5. Search Vast.ai for offers matching hardware requirements
@@ -106,27 +115,12 @@ class GpuSessionService:
            → on persistent failure: destroy any partially-created instance,
              delete tunnel, re-raise
         7. Persist GpuSession row with status='pending' and all populated fields
+           7.5. In same transaction: reserve tokens via billing_service.check_and_reserve
            → on IntegrityError (race with concurrent start_session):
              destroy instance, delete tunnel, raise SessionAlreadyExistsError
-        8. Return the persisted GpuSession
-
-        Args:
-            user_id: Owner user.
-            product_id: Product scope ("vex" or "synthara").
-            model_type: ModelType for which the session is being started.
-            bundle_override: Optional admin-only "name" or "name:version" spec.
-                If provided, takes precedence over model_type's default bundle.
-
-        Returns:
-            The created GpuSession with status='pending'.
-
-        Raises:
-            BundleNotFoundError: Unknown model_type or bundle override.
-            SessionAlreadyExistsError: User already has a non-terminal session for
-                this (product, model_type).
-            NoCapacityError: No Vast.ai offers match requirements.
-            TunnelCreationError / DNSRecordError: CF tunnel setup failed.
-            VastAIError: Instance creation failed after all retries.
+           → on check_and_reserve failure: destroy instance, delete tunnel, re-raise
+        8. Publish GPU_SESSION_STATUS_CHANGED event (fire-and-forget)
+        9. Return the persisted GpuSession
         """
         logger.info(
             "gpu_session.start.begun",
@@ -164,6 +158,11 @@ class GpuSessionService:
         session_id_short = str(session_id)[:8]
         callback_token = secrets.token_urlsafe(48)
 
+        # Step 1.5: assert sufficient balance BEFORE creating external resources
+        token_cost = self._settings.gpu_session_base_reservation_tokens
+        async with self._session_factory() as db:
+            await billing_service.assert_sufficient_balance(account_id, token_cost, session=db)
+
         # Step 4: create CF tunnel + DNS
         try:
             tunnel_id, tunnel_token, dns_record_id, hostname = await self._cf.create_session_tunnel(
@@ -199,8 +198,6 @@ class GpuSessionService:
             raise
 
         # Defensive: search_offers should raise NoCapacityError on an empty list
-        # (see VastAIClient.search_offers), but if the contract ever drifts we
-        # handle it explicitly rather than IndexError'ing on offers[0] below.
         if not offers:
             await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
             logger.error(
@@ -252,7 +249,7 @@ class GpuSessionService:
             )
             raise
 
-        # Step 7: persist session (separate write transaction)
+        # Step 7: persist session + billing reservation in a single transaction
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             try:
@@ -272,6 +269,7 @@ class GpuSessionService:
                     vastai_cost_per_hour_micros=selected_offer.dph_total_micros,
                     vastai_gpu_name=selected_offer.gpu_name,
                     callback_token=callback_token,
+                    account_id=account_id,
                 )
             except IntegrityError:
                 # Race with a concurrent start_session call that slipped past our pre-check.
@@ -283,12 +281,33 @@ class GpuSessionService:
                     f"model_type={model_type.value}"
                 ) from None
 
+            # Step 7.5: billing reservation in the same transaction
+            try:
+                await billing_service.check_and_reserve(
+                    account_id,
+                    token_cost,
+                    session_id,
+                    metadata={
+                        "type": "gpu_session_base",
+                        "model_type": model_type.value,
+                        "bundle_name": bundle.bundle_name,
+                    },
+                    session=db,
+                    product_id=product_id,
+                    user_id=user_id,
+                )
+            except (InsufficientBalanceError, Exception):
+                # Balance changed between assert and reserve — clean up external resources
+                await self._destroy_instance_best_effort(instance_id)
+                await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
+                raise
+
         logger.info(
             "gpu_session.start.persisted",
             session_id=str(session_id),
             status=GpuSessionStatus.pending,
         )
-        # TODO: publish GPU_SESSION_STATUS_CHANGED event (wire up in Phase 1F)
+        await self._publish_status_event(session_row, previous_status="none")
         return session_row
 
     async def pause_session(
@@ -348,7 +367,7 @@ class GpuSessionService:
             )
 
         logger.info("gpu_session.pause.done", session_id=str(session_id))
-        # TODO: publish GPU_SESSION_STATUS_CHANGED event (wire up in Phase 1F)
+        await self._publish_status_event(session_row, previous_status="active")
         return session_row
 
     async def resume_session(
@@ -402,12 +421,18 @@ class GpuSessionService:
                 raise GpuSessionError(f"Session {session_id} has no Vast.ai instance to resume")
             await self._vastai.start_instance(session_row.vastai_instance_id)
 
+            # Accumulate paused duration before transitioning
+            if session_row.paused_at is not None:
+                paused_seconds = int((datetime.now(UTC) - session_row.paused_at).total_seconds())
+                await repo.add_paused_seconds(session_row.id, paused_seconds)
+                session_row.total_paused_seconds = session_row.total_paused_seconds + paused_seconds
+
             await self._set_status(
                 repo, session_row, GpuSessionStatus.resuming, resumed_at=datetime.now(UTC)
             )
 
         logger.info("gpu_session.resume.done", session_id=str(session_id))
-        # TODO: publish GPU_SESSION_STATUS_CHANGED event (wire up in Phase 1F)
+        await self._publish_status_event(session_row, previous_status="paused")
         return session_row
 
     async def stop_session(
@@ -481,7 +506,7 @@ class GpuSessionService:
         product_id: str,
         model_type: ModelType,
     ) -> GpuSession | None:
-        """Used by AishaGenerationProvider (Phase 1F) for routing.
+        """Used by AishaGenerationProvider for routing.
 
         Returns only sessions with status='active'. Paused/stale/provisioning
         sessions are NOT routable for generation.
@@ -671,7 +696,10 @@ class GpuSessionService:
             end = session_row.paused_at
         else:
             end = now
-        active_duration_seconds = int((end - start).total_seconds())
+        active_seconds = max(
+            0, int((end - start).total_seconds()) - session_row.total_paused_seconds
+        )
+        active_duration_seconds = active_seconds
 
         logger.info("gpu_session.stop.confirmation_requested", session_id=str(session_id))
         return StopConfirmation(
@@ -712,7 +740,10 @@ class GpuSessionService:
             session_row = await self._load_session_for_update(
                 repo, session_id, user_id, product_id, _STOPPABLE_STATUSES, "stop"
             )
+            previous_status = str(session_row.status)
             await self._set_status(repo, session_row, GpuSessionStatus.stopping)
+
+        await self._publish_status_event(session_row, previous_status=previous_status)
 
         # External teardown — outside any DB transaction. Best-effort; errors are
         # logged but don't block the final 'stopped' transition. Orphaned resources
@@ -724,7 +755,7 @@ class GpuSessionService:
         # Transaction 2 (short): finalize status='stopped'. We re-load the row
         # in this transaction to attach it to the new session (the earlier
         # session_row is detached after its transaction closed) and to pick up
-        # any concurrent column updates (e.g. billing finalization in Phase 1F).
+        # any concurrent column updates.
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             reloaded = await repo.get_by_id(session_id, for_update=True)
@@ -740,8 +771,103 @@ class GpuSessionService:
             session_id=str(session_id),
             teardown_had_errors=teardown_had_errors,
         )
-        # TODO: publish GPU_SESSION_STATUS_CHANGED event (wire up in Phase 1F)
+        await self._publish_status_event(session_row, previous_status="stopping")
+
+        # Billing finalization — runs AFTER TX2 commits, outside any transaction.
+        # If this fails the session is already stopped; billing drift is reconciled separately.
+        if session_row.account_id is not None:
+            await self._finalize_billing(session_row)
+
         return session_row
+
+    async def _finalize_billing(self, session_row: GpuSession) -> None:
+        """Compute actual usage and create overage debit or partial refund."""
+        from src.api.services.billing import BillingService
+
+        billing_service = BillingService(event_bus=self._event_bus)
+        account_id = session_row.account_id
+        if account_id is None:
+            return
+
+        stopped_at = session_row.stopped_at or datetime.now(UTC)
+        start = session_row.started_at or session_row.created_at
+        total_seconds = max(0, int((stopped_at - start).total_seconds()))
+        active_seconds = max(0, total_seconds - session_row.total_paused_seconds)
+        actual_minutes = max(5, active_seconds // 60)  # 5-min minimum
+
+        billable_tokens = actual_minutes * self._settings.gpu_session_tokens_per_minute
+        reserved_tokens = self._settings.gpu_session_base_reservation_tokens
+
+        try:
+            async with self._session_factory() as db, db.begin():
+                if billable_tokens > reserved_tokens:
+                    await billing_service.check_and_reserve(
+                        account_id,
+                        billable_tokens - reserved_tokens,
+                        session_row.id,
+                        metadata={
+                            "type": "gpu_session_overage",
+                            "model_type": session_row.model_type,
+                            "bundle_name": session_row.bundle_name,
+                            "actual_minutes": actual_minutes,
+                        },
+                        session=db,
+                        product_id=session_row.product_id,
+                        user_id=session_row.user_id,
+                    )
+                    logger.info(
+                        "gpu_session.billing.overage_charged",
+                        session_id=str(session_row.id),
+                        overage_tokens=billable_tokens - reserved_tokens,
+                    )
+                elif billable_tokens < reserved_tokens:
+                    await billing_service.partial_refund(
+                        session_row.id,
+                        reserved_tokens - billable_tokens,
+                        description=(
+                            f"GPU session partial refund: "
+                            f"used {actual_minutes}min, reserved 5min minimum"
+                        ),
+                        session=db,
+                        product_id=session_row.product_id,
+                        user_id=session_row.user_id,
+                    )
+                    logger.info(
+                        "gpu_session.billing.partial_refund",
+                        session_id=str(session_row.id),
+                        refund_tokens=reserved_tokens - billable_tokens,
+                    )
+        except Exception:
+            logger.exception(
+                "gpu_session.billing.finalization_failed",
+                session_id=str(session_row.id),
+            )
+
+    async def _publish_status_event(
+        self,
+        session: GpuSession,
+        previous_status: str,
+        error_message: str | None = None,
+    ) -> None:
+        """Fire-and-forget SSE publish. Failures are logged but never propagate."""
+        if self._event_bus is None:
+            return
+        try:
+            await self._event_bus.publish(
+                user_id=session.user_id,
+                event_type=EventType.GPU_SESSION_STATUS_CHANGED,
+                payload=GpuSessionStatusPayload(
+                    session_id=session.id,
+                    status=str(session.status),
+                    previous_status=previous_status,
+                    model_type=session.model_type,
+                    bundle_name=session.bundle_name,
+                    tunnel_hostname=session.tunnel_hostname,
+                    error_message=error_message,
+                ),
+            )
+        except Exception:
+            logger.exception("gpu_session.event_publish_failed", session_id=str(session.id))
 
     async def _delete_tunnel_best_effort(self, tunnel_id: str, dns_record_id: str) -> None:
         """Delete CF tunnel and DNS record, logging failures without re-raising."""

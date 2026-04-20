@@ -5,8 +5,6 @@ from typing import Any
 import httpx
 import structlog
 
-from src.core.config import Settings
-
 logger = structlog.get_logger(__name__)
 
 
@@ -40,9 +38,16 @@ class ComfyUIClient:
     - Image retrieval
     """
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-        self._base_url = settings.comfyui_base_url
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        connect_timeout: float = 10.0,
+        request_timeout: float = 60.0,
+    ) -> None:
+        self._base_url = base_url
+        self._connect_timeout = connect_timeout
+        self._request_timeout = request_timeout
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> "ComfyUIClient":
@@ -59,7 +64,7 @@ class ComfyUIClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
-                timeout=httpx.Timeout(60.0, connect=10.0),
+                timeout=httpx.Timeout(self._request_timeout, connect=self._connect_timeout),
             )
             logger.info("comfyui.connected", url=self._base_url)
 

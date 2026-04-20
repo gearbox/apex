@@ -89,6 +89,21 @@ def upgrade() -> None:
             nullable=True,
             comment="Set on first provision attempt (or reset on retry) — used for timeout calculation",
         ),
+        # Billing (set on session creation; used for debit/refund at stop time)
+        sa.Column(
+            "account_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("token_accounts.id", ondelete="RESTRICT"),
+            nullable=True,
+            comment="Billing account to charge/refund at stop time. Captured at session start.",
+        ),
+        sa.Column(
+            "total_paused_seconds",
+            sa.Integer,
+            nullable=False,
+            server_default="0",
+            comment="Cumulative paused duration; subtracted from billable time at stop.",
+        ),
         # Pause/resume tracking
         sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("resumed_at", sa.DateTime(timezone=True), nullable=True),
@@ -107,6 +122,7 @@ def upgrade() -> None:
     )
 
     op.create_index("ix_gpu_sessions_user_id", "gpu_sessions", ["user_id"])
+    op.create_index("ix_gpu_sessions_account_id", "gpu_sessions", ["account_id"])
     op.create_index("ix_gpu_sessions_product_id", "gpu_sessions", ["product_id"])
     op.create_index("ix_gpu_sessions_status", "gpu_sessions", ["status"])
     op.create_index(

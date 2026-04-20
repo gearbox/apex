@@ -186,6 +186,21 @@ class Settings(BaseSettings):
         description="Max sessions processed concurrently per provisioning worker sweep",
     )
 
+    # --- GPU Session Billing ---
+    gpu_session_base_reservation_tokens: int = Field(
+        default=500,
+        ge=1,
+        description=(
+            "Base token reservation charged at GPU session start (5-min minimum deposit). "
+            "Refunded or topped-up at stop based on actual usage."
+        ),
+    )
+    gpu_session_tokens_per_minute: int = Field(
+        default=100,
+        ge=1,
+        description="Token cost per active minute of GPU session runtime.",
+    )
+
     # --- Phase 2 Callback (pre-wired) ---
     apex_callback_url: str = Field(
         default="",
@@ -618,6 +633,11 @@ class Settings(BaseSettings):
     def vastai_configured(self) -> bool:
         """Check if Vast.ai API is configured."""
         return bool(self.vastai_api_key)
+
+    @property
+    def cf_configured(self) -> bool:
+        """Check if Cloudflare Tunnel is configured."""
+        return bool(self.cf_api_token and self.cf_account_id and self.cf_zone_id)
 
     @property
     def grok_billing(self) -> GrokBillingConfig:

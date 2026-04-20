@@ -34,6 +34,7 @@ from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.content import ContentProxyController
 from src.api.routes.gallery import GalleryController
 from src.api.routes.generation import ImageController
+from src.api.routes.gpu_session import GpuSessionController
 from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
@@ -367,6 +368,8 @@ def create_app() -> Litestar:
             UnifiedGenerationController,  # POST /v1/generate
             ProvidersController,  # GET /v1/providers
             ImageController,
+            # GPU Sessions
+            GpuSessionController,  # /v1/sessions/*
             # Storage
             StorageController,
             # Jobs (unified, cross-provider)

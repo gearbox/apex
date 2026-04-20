@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
+from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.core.enums import GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
@@ -31,8 +32,10 @@ from ._provisioning import provision_vastai_instance
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from src.api.services.billing import BillingService
     from src.api.services.bundle_index import BundleIndexService
     from src.api.services.cloudflare.client import CloudflareTunnelClient
+    from src.api.services.event_bus import EventBus
     from src.api.services.vastai.client import VastAIClient
     from src.core.config import Settings
     from src.db.models.gpu_session import GpuSession
@@ -66,6 +69,8 @@ class GpuProvisioningWorker:
         bundle_index: BundleIndexService,
         http_client: httpx.AsyncClient,
         settings: Settings,
+        billing_service: BillingService | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._vastai = vastai_client
@@ -73,6 +78,8 @@ class GpuProvisioningWorker:
         self._bundles = bundle_index
         self._http = http_client
         self._settings = settings
+        self._billing_service = billing_service
+        self._event_bus = event_bus
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
@@ -434,6 +441,7 @@ class GpuProvisioningWorker:
         **extra_fields: Any,
     ) -> None:
         """Re-load under SELECT FOR UPDATE, validate status, then write new_status."""
+        previous_status = str(session.status)
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             current = await repo.get_by_id(session.id, for_update=True)
@@ -447,10 +455,12 @@ class GpuProvisioningWorker:
                     intended_status=new_status.value,
                 )
                 return
+            previous_status = str(current.status)
             await repo.update_status(session.id, new_status, **extra_fields)
+            current.status = new_status
 
         logger.info(log_event, session_id=str(session.id), new_status=new_status.value)
-        # TODO: publish GPU_SESSION_STATUS_CHANGED event (Phase 1F)
+        await self._publish_status_event(current, previous_status=previous_status)
 
     async def _mark_active(self, session: GpuSession) -> None:
         """Transition to active; set started_at if not already set (preserve for resuming)."""
@@ -465,7 +475,7 @@ class GpuProvisioningWorker:
         )
 
     async def _mark_failed(self, session: GpuSession, reason: str) -> None:
-        """Destroy instance + delete tunnel (best-effort), then transition to failed."""
+        """Destroy instance + delete tunnel (best-effort), refund billing, transition to failed."""
         if session.vastai_instance_id is not None:
             try:
                 await self._vastai.destroy_instance(session.vastai_instance_id)
@@ -492,6 +502,57 @@ class GpuProvisioningWorker:
             log_event="gpu_session.provision.failed",
             error_message=reason[:500],
         )
+
+        # Issue full refund of base reservation — session never became usable
+        if self._billing_service is not None:
+            try:
+                async with self._session_factory() as db, db.begin():
+                    await self._billing_service.refund(
+                        job_id=session.id,
+                        description=f"GPU session failed: {reason[:200]}",
+                        session=db,
+                        product_id=session.product_id,
+                        user_id=session.user_id,
+                    )
+                logger.info(
+                    "gpu_session.provision.refund_issued",
+                    session_id=str(session.id),
+                )
+            except Exception:
+                logger.exception(
+                    "gpu_session.provision.refund_failed",
+                    session_id=str(session.id),
+                )
+
+    # ------------------------------------------------------------------
+    # SSE event publishing
+    # ------------------------------------------------------------------
+
+    async def _publish_status_event(
+        self,
+        session: GpuSession,
+        previous_status: str,
+        error_message: str | None = None,
+    ) -> None:
+        """Fire-and-forget SSE publish. Failures are logged but never propagate."""
+        if self._event_bus is None:
+            return
+        try:
+            await self._event_bus.publish(
+                user_id=session.user_id,
+                event_type=EventType.GPU_SESSION_STATUS_CHANGED,
+                payload=GpuSessionStatusPayload(
+                    session_id=session.id,
+                    status=str(session.status),
+                    previous_status=previous_status,
+                    model_type=session.model_type,
+                    bundle_name=session.bundle_name,
+                    tunnel_hostname=session.tunnel_hostname,
+                    error_message=error_message,
+                ),
+            )
+        except Exception:
+            logger.exception("gpu_session.event_publish_failed", session_id=str(session.id))
 
     # ------------------------------------------------------------------
     # Timeout helpers

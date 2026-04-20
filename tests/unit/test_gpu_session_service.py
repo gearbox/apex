@@ -38,6 +38,21 @@ _REPO_PATH = "src.api.services.gpu_session.service.GpuSessionRepository"
 # ---------------------------------------------------------------------------
 
 
+def _make_billing_mock() -> MagicMock:
+    """Return a MagicMock whose async billing methods are explicit AsyncMocks.
+
+    Plain AsyncMock() refuses attributes whose names start with "assert" (Python
+    mock treats them as spy-assertion calls). By building the mock manually we
+    avoid the AttributeError for assert_sufficient_balance.
+    """
+    m = MagicMock()
+    m.assert_sufficient_balance = AsyncMock(return_value=None)
+    m.check_and_reserve = AsyncMock(return_value=None)
+    m.refund = AsyncMock(return_value=None)
+    m.partial_refund = AsyncMock(return_value=None)
+    return m
+
+
 def _make_hardware() -> HardwareRequirements:
     return HardwareRequirements(
         gpu_whitelist=("RTX_4090",),
@@ -106,6 +121,8 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.node_host = None
     session.node_port = None
     session.provision_attempt = 1
+    session.total_paused_seconds = 0
+    session.account_id = uuid4()
     for k, v in kwargs.items():
         setattr(session, k, v)
     return session
@@ -117,6 +134,8 @@ def _make_settings(*, max_retries: int = 3) -> MagicMock:
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
+    settings.gpu_session_base_reservation_tokens = 500
+    settings.gpu_session_tokens_per_minute = 100
     return settings
 
 
@@ -146,6 +165,9 @@ def _make_service(
         "session_factory": mock_factory,
         "mock_session": mock_session,
         "settings": _make_settings(),
+        "billing_service": _make_billing_mock(),
+        "account_id": uuid4(),
+        "event_bus": None,
     } | overrides
     service = GpuSessionService(
         vastai_client=mocks["vastai_client"],
@@ -153,6 +175,7 @@ def _make_service(
         bundle_index=mocks["bundle_index"],
         session_factory=mocks["session_factory"],
         settings=mocks["settings"],
+        event_bus=mocks["event_bus"],
     )
     return service, mocks
 
@@ -191,6 +214,8 @@ class TestStartSession:
                 user_id=user_id,
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
         assert result is expected_session
@@ -227,6 +252,8 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 bundle_override="custom_bundle:260201-01",
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
         mocks["bundle_index"].resolve_bundle_override.assert_called_once_with(
@@ -245,6 +272,8 @@ class TestStartSession:
                 user_id=uuid4(),
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
     async def test_already_exists_precheck_raises_before_external_calls(self) -> None:
@@ -261,6 +290,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         mocks["cf_client"].create_session_tunnel.assert_not_called()
@@ -283,6 +314,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
@@ -313,6 +346,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         mocks["vastai_client"].create_instance.assert_not_called()
@@ -344,6 +379,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         # Must not have called any Vast.ai APIs
@@ -387,6 +424,8 @@ class TestStartSession:
                 user_id=uuid4(),
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
         # Inspect the env dict passed to create_instance
@@ -418,6 +457,8 @@ class TestStartSession:
                 user_id=uuid4(),
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
         assert result.status == GpuSessionStatus.pending
@@ -447,6 +488,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         # Exhausted 2 retries (max_retries=2, 2 offers)
@@ -480,6 +523,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
             # The original exception is preserved (not replaced with a generic one)
             assert exc_info.value is provisioning_error
@@ -514,6 +559,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         # No create_instance attempts at all
@@ -549,6 +596,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         # Find the gpu_session.start.failed call and verify error_class matches
@@ -578,6 +627,8 @@ class TestStartSession:
                     user_id=uuid4(),
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
                 )
 
         mocks["vastai_client"].destroy_instance.assert_called_once_with(77777)
@@ -603,6 +654,8 @@ class TestStartSession:
                 user_id=uuid4(),
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
         _, kwargs = mocks["vastai_client"].create_instance.call_args
@@ -642,10 +695,18 @@ class TestStartSession:
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
-                user_id=uuid4(), product_id="vex", model_type=ModelType.AISHA_IMAGE
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
             await service.start_session(
-                user_id=uuid4(), product_id="vex", model_type=ModelType.AISHA_IMAGE
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
         assert len(tokens) == 2
@@ -667,11 +728,151 @@ class TestStartSession:
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
-                user_id=uuid4(), product_id="vex", model_type=ModelType.AISHA_IMAGE
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
             )
 
         _, kwargs = mocks["vastai_client"].create_instance.call_args
         assert kwargs["env"]["ACS_BUNDLE_VERSION"] == "current"
+
+    async def test_start_session_insufficient_balance_raises_before_tunnel_creation(self) -> None:
+        from src.api.services.billing_errors import InsufficientBalanceError
+
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["billing_service"].assert_sufficient_balance.side_effect = InsufficientBalanceError(  # type: ignore[union-attr]
+            balance=100, required=500
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+
+            with pytest.raises(InsufficientBalanceError):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
+                )
+
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mock_repo.create.assert_not_called()
+
+    async def test_start_session_reserves_tokens_in_same_tx_as_insert(self) -> None:
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 99999
+        expected_session = _make_gpu_session(status=GpuSessionStatus.pending)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+            mock_repo.create.return_value = expected_session
+
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
+            )
+
+        mocks["billing_service"].check_and_reserve.assert_called_once()
+        call_args = mocks["billing_service"].check_and_reserve.call_args
+        assert call_args.args[0] == mocks["account_id"]
+        assert call_args.args[1] == 500  # gpu_session_base_reservation_tokens
+
+    async def test_start_session_reservation_failure_cleans_up_instance_and_tunnel(self) -> None:
+        from src.api.services.billing_errors import InsufficientBalanceError
+
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 77777
+        mocks["billing_service"].check_and_reserve.side_effect = InsufficientBalanceError(
+            balance=100, required=500
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            with pytest.raises(InsufficientBalanceError):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                    billing_service=mocks["billing_service"],
+                )
+
+        mocks["vastai_client"].destroy_instance.assert_called_once_with(77777)
+        mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
+            _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
+        )
+
+    async def test_start_session_publishes_status_event(self) -> None:
+        event_bus = AsyncMock()
+        service, mocks = _make_service(event_bus=event_bus)
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 11111
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
+            )
+
+        event_bus.publish.assert_called_once()
+
+    async def test_start_session_event_publish_failure_does_not_break(self) -> None:
+        event_bus = AsyncMock()
+        event_bus.publish.side_effect = Exception("redis down")
+        service, mocks = _make_service(event_bus=event_bus)
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 33333
+        expected_session = _make_gpu_session(status=GpuSessionStatus.pending)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+            mock_repo.create.return_value = expected_session
+
+            result = await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+                billing_service=mocks["billing_service"],
+            )
+
+        assert result is expected_session
 
 
 # ---------------------------------------------------------------------------

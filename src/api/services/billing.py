@@ -324,6 +324,76 @@ class BillingService:
 
         return txn
 
+    async def partial_refund(
+        self,
+        job_id: UUID,
+        amount: int,
+        *,
+        description: str,
+        session: AsyncSession,
+        product_id: str,
+        user_id: UUID | None = None,
+    ) -> TokenTransaction:
+        """Create a partial refund for a variable-cost resource.
+
+        Unlike refund(), which refunds the full original debit, this creates
+        a REFUND transaction for exactly ``amount`` tokens. Used for GPU sessions
+        where the user may have been overcharged relative to actual usage.
+
+        Raises:
+            RefundNotEligibleError: If no debit found, already partially refunded
+                with amount >= requested, or amount exceeds the original debit.
+        """
+        repo = BillingRepository(session)
+
+        debit = await repo.get_debit_for_job(job_id)
+        if debit is None:
+            raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
+
+        original_amount = abs(debit.amount)
+        if amount > original_amount:
+            raise RefundNotEligibleError(
+                f"Partial refund amount {amount} exceeds original debit {original_amount} "
+                f"for job {job_id}"
+            )
+
+        account = await repo.get_account_for_update(debit.account_id)
+        if account is None:
+            raise RefundNotEligibleError("Account not found for partial refund")
+
+        balance = await repo.get_balance(debit.account_id)
+        new_balance = balance + amount
+
+        txn = await repo.create_transaction(
+            id=new_id(),
+            account_id=debit.account_id,
+            transaction_type=TransactionType.REFUND.value,
+            amount=amount,
+            balance_after=new_balance,
+            job_id=job_id,
+            description=description,
+            product_id=product_id,
+        )
+
+        logger.info(
+            "billing.partial_refund_processed",
+            account_id=str(debit.account_id),
+            job_id=str(job_id),
+            amount=amount,
+            balance_after=new_balance,
+            reason=description,
+        )
+
+        await self._publish_balance_update(
+            user_ids=[user_id] if user_id is not None else [],
+            account_id=debit.account_id,
+            balance=new_balance,
+            delta=amount,
+            transaction_type=TransactionType.REFUND.value,
+        )
+
+        return txn
+
     async def credit(
         self,
         account_id: UUID,
