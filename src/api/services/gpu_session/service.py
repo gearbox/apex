@@ -11,7 +11,6 @@ from uuid import UUID
 import structlog
 from sqlalchemy.exc import IntegrityError
 
-from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.billing_errors import InsufficientBalanceError
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
@@ -23,6 +22,7 @@ from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.repositories.gpu_session import GpuSessionRepository
 
+from ._events import publish_status_event
 from ._provisioning import provision_vastai_instance
 from .exceptions import (
     GpuSessionError,
@@ -76,6 +76,7 @@ class GpuSessionService:
         bundle_index: BundleIndexService,
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
+        billing_service: BillingService,
         event_bus: EventBus | None = None,
     ) -> None:
         self._vastai = vastai_client
@@ -83,6 +84,7 @@ class GpuSessionService:
         self._bundles = bundle_index
         self._session_factory = session_factory
         self._settings = settings
+        self._billing_service = billing_service
         self._event_bus = event_bus
 
     # ------------------------------------------------------------------ #
@@ -782,9 +784,6 @@ class GpuSessionService:
 
     async def _finalize_billing(self, session_row: GpuSession) -> None:
         """Compute actual usage and create overage debit or partial refund."""
-        from src.api.services.billing import BillingService
-
-        billing_service = BillingService(event_bus=self._event_bus)
         account_id = session_row.account_id
         if account_id is None:
             return
@@ -801,7 +800,7 @@ class GpuSessionService:
         try:
             async with self._session_factory() as db, db.begin():
                 if billable_tokens > reserved_tokens:
-                    await billing_service.check_and_reserve(
+                    await self._billing_service.check_and_reserve(
                         account_id,
                         billable_tokens - reserved_tokens,
                         session_row.id,
@@ -821,7 +820,7 @@ class GpuSessionService:
                         overage_tokens=billable_tokens - reserved_tokens,
                     )
                 elif billable_tokens < reserved_tokens:
-                    await billing_service.partial_refund(
+                    await self._billing_service.partial_refund(
                         session_row.id,
                         reserved_tokens - billable_tokens,
                         description=(
@@ -849,25 +848,13 @@ class GpuSessionService:
         previous_status: str,
         error_message: str | None = None,
     ) -> None:
-        """Fire-and-forget SSE publish. Failures are logged but never propagate."""
-        if self._event_bus is None:
-            return
-        try:
-            await self._event_bus.publish(
-                user_id=session.user_id,
-                event_type=EventType.GPU_SESSION_STATUS_CHANGED,
-                payload=GpuSessionStatusPayload(
-                    session_id=session.id,
-                    status=str(session.status),
-                    previous_status=previous_status,
-                    model_type=session.model_type,
-                    bundle_name=session.bundle_name,
-                    tunnel_hostname=session.tunnel_hostname,
-                    error_message=error_message,
-                ),
-            )
-        except Exception:
-            logger.exception("gpu_session.event_publish_failed", session_id=str(session.id))
+        """Fire-and-forget SSE publish. Delegates to the shared helper."""
+        await publish_status_event(
+            self._event_bus,
+            session,
+            previous_status=previous_status,
+            error_message=error_message,
+        )
 
     async def _delete_tunnel_best_effort(self, tunnel_id: str, dns_record_id: str) -> None:
         """Delete CF tunnel and DNS record, logging failures without re-raising."""

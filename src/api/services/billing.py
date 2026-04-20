@@ -340,10 +340,18 @@ class BillingService:
         a REFUND transaction for exactly ``amount`` tokens. Used for GPU sessions
         where the user may have been overcharged relative to actual usage.
 
+        Cumulative invariant: the sum of all partial refunds for a given job
+        must never exceed the original debit. This is enforced by querying
+        existing refunds on the same job_id and rejecting requests that would
+        overflow.
+
         Raises:
-            RefundNotEligibleError: If no debit found, already partially refunded
-                with amount >= requested, or amount exceeds the original debit.
+            RefundNotEligibleError: If no debit found, ``amount`` is <= 0, or
+                ``already_refunded + amount > original_amount``.
         """
+        if amount <= 0:
+            raise RefundNotEligibleError(f"Partial refund amount must be positive, got {amount}")
+
         repo = BillingRepository(session)
 
         debit = await repo.get_debit_for_job(job_id)
@@ -351,10 +359,12 @@ class BillingService:
             raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
 
         original_amount = abs(debit.amount)
-        if amount > original_amount:
+        already_refunded = await repo.sum_refunds_for_job(job_id)
+        if already_refunded + amount > original_amount:
             raise RefundNotEligibleError(
-                f"Partial refund amount {amount} exceeds original debit {original_amount} "
-                f"for job {job_id}"
+                f"Partial refund would exceed original debit for job {job_id}: "
+                f"already_refunded={already_refunded}, requested={amount}, "
+                f"original={original_amount}"
             )
 
         account = await repo.get_account_for_update(debit.account_id)
@@ -381,6 +391,8 @@ class BillingService:
             job_id=str(job_id),
             amount=amount,
             balance_after=new_balance,
+            already_refunded_before=already_refunded,
+            original_debit=original_amount,
             reason=description,
         )
 

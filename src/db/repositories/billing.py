@@ -164,6 +164,21 @@ class BillingRepository:
         )
         return int(result.scalar_one()) > 0
 
+    async def sum_refunds_for_job(self, job_id: UUID) -> int:
+        """Sum refund token amounts for a job.
+
+        Returns the total positive amount already refunded (0 if none).
+        Used by ``partial_refund`` to enforce the invariant that cumulative
+        refunds never exceed the original debit.
+        """
+        result = await self._session.execute(
+            select(func.coalesce(func.sum(TokenTransaction.amount), 0)).where(
+                TokenTransaction.job_id == job_id,
+                TokenTransaction.transaction_type == TransactionType.REFUND.value,
+            )
+        )
+        return int(result.scalar_one())
+
     async def get_transaction_history(
         self,
         account_id: UUID,

@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.gpu_session import (
@@ -175,6 +176,7 @@ def _make_service(
         bundle_index=mocks["bundle_index"],
         session_factory=mocks["session_factory"],
         settings=mocks["settings"],
+        billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
     )
     return service, mocks
@@ -772,6 +774,7 @@ class TestStartSession:
         mocks["vastai_client"].search_offers.return_value = [_make_offer()]
         mocks["vastai_client"].create_instance.return_value = 99999
         expected_session = _make_gpu_session(status=GpuSessionStatus.pending)
+        user_id = uuid4()
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -780,7 +783,7 @@ class TestStartSession:
             mock_repo.create.return_value = expected_session
 
             await service.start_session(
-                user_id=uuid4(),
+                user_id=user_id,
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
@@ -789,8 +792,22 @@ class TestStartSession:
 
         mocks["billing_service"].check_and_reserve.assert_called_once()
         call_args = mocks["billing_service"].check_and_reserve.call_args
+        # Positional: (account_id, token_cost, session_id)
         assert call_args.args[0] == mocks["account_id"]
         assert call_args.args[1] == 500  # gpu_session_base_reservation_tokens
+
+        # The session_id passed to check_and_reserve must equal the id passed to repo.create
+        # (both come from the same new_id() call inside start_session)
+        create_kwargs = mock_repo.create.call_args.kwargs
+        assert call_args.args[2] == create_kwargs["id"]
+
+        # Keyword wiring — product_id, user_id, metadata all flow through
+        assert call_args.kwargs["product_id"] == "vex"
+        assert call_args.kwargs["user_id"] == user_id
+        metadata = call_args.kwargs["metadata"]
+        assert metadata["type"] == "gpu_session_base"
+        assert metadata["model_type"] == ModelType.AISHA_IMAGE.value
+        assert metadata["bundle_name"] == _make_bundle_mapping().bundle_name
 
     async def test_start_session_reservation_failure_cleans_up_instance_and_tunnel(self) -> None:
         from src.api.services.billing_errors import InsufficientBalanceError
@@ -831,12 +848,13 @@ class TestStartSession:
         mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
         mocks["vastai_client"].search_offers.return_value = [_make_offer()]
         mocks["vastai_client"].create_instance.return_value = 11111
+        expected_session = _make_gpu_session(status=GpuSessionStatus.pending)
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_non_terminal_for_model.return_value = None
-            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.create.return_value = expected_session
 
             await service.start_session(
                 user_id=uuid4(),
@@ -847,6 +865,17 @@ class TestStartSession:
             )
 
         event_bus.publish.assert_called_once()
+        kwargs = event_bus.publish.call_args.kwargs
+        assert kwargs["event_type"] == EventType.GPU_SESSION_STATUS_CHANGED
+        assert kwargs["user_id"] == expected_session.user_id
+        payload = kwargs["payload"]
+        assert isinstance(payload, GpuSessionStatusPayload)
+        assert payload.session_id == expected_session.id
+        assert payload.status == GpuSessionStatus.pending.value
+        assert payload.previous_status == "none"
+        assert payload.model_type == expected_session.model_type
+        assert payload.bundle_name == expected_session.bundle_name
+        assert payload.error_message is None
 
     async def test_start_session_event_publish_failure_does_not_break(self) -> None:
         event_bus = AsyncMock()
@@ -1341,6 +1370,245 @@ class TestStopSession:
 
         assert exc_info.value.current_status == bad_status
         assert exc_info.value.operation == "stop"
+
+
+# ---------------------------------------------------------------------------
+# Billing finalization branch tests (_finalize_billing)
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeBilling:
+    """Covers the three _finalize_billing branches: overage, underage, exact match.
+
+    _finalize_billing runs AFTER _stop_confirmed's TX2 commits the 'stopped'
+    status. It reads the session's timestamps + total_paused_seconds, computes
+    billable minutes (5-min floor), multiplies by tokens_per_minute, and compares
+    against the base reservation to decide overage/refund/no-op.
+    """
+
+    async def _run_stop_and_capture_billing(
+        self,
+        *,
+        started_at: datetime,
+        stopped_now: datetime,
+        total_paused_seconds: int,
+        tokens_per_minute: int = 100,
+    ) -> tuple[MagicMock, GpuSession]:
+        """Drive a confirmed stop and return the mock billing service + session."""
+        settings = _make_settings()
+        settings.gpu_session_base_reservation_tokens = 500
+        settings.gpu_session_tokens_per_minute = tokens_per_minute
+
+        service, mocks = _make_service(settings=settings)
+        user_id = uuid4()
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.active,
+            started_at=started_at,
+            total_paused_seconds=total_paused_seconds,
+        )
+
+        # Freeze time so stopped_at is predictable
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = stopped_now
+            # datetime.fromisoformat / UTC / timedelta still need to work
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        return mocks["billing_service"], result
+
+    async def test_overage_creates_additional_debit(self) -> None:
+        """10 min active @ 100 tok/min = 1000 tokens, reserved 500 → 500 overage debit."""
+        now = datetime.now(UTC)
+        started = now - timedelta(minutes=10)
+
+        billing, session = await self._run_stop_and_capture_billing(
+            started_at=started,
+            stopped_now=now,
+            total_paused_seconds=0,
+        )
+
+        billing.check_and_reserve.assert_awaited_once()
+        args = billing.check_and_reserve.await_args.args
+        kwargs = billing.check_and_reserve.await_args.kwargs
+        assert args[0] == session.account_id
+        assert args[1] == 500  # overage = 1000 billable - 500 reserved
+        assert args[2] == session.id
+        metadata = kwargs["metadata"]
+        assert metadata["type"] == "gpu_session_overage"
+        assert metadata["actual_minutes"] == 10
+        assert metadata["bundle_name"] == session.bundle_name
+        assert metadata["model_type"] == session.model_type
+        # No refund in overage branch
+        billing.partial_refund.assert_not_called()
+
+    async def test_partial_refund_when_billable_below_reservation(self) -> None:
+        """5 min floor @ 80 tok/min = 400 tokens, reserved 500 → 100 refund."""
+        now = datetime.now(UTC)
+        # Actual runtime 3 min, but billable is floored to 5 min
+        started = now - timedelta(minutes=3)
+
+        billing, session = await self._run_stop_and_capture_billing(
+            started_at=started,
+            stopped_now=now,
+            total_paused_seconds=0,
+            tokens_per_minute=80,  # 5 * 80 = 400 < 500 reserved
+        )
+
+        billing.partial_refund.assert_awaited_once()
+        args = billing.partial_refund.await_args.args
+        assert args[0] == session.id
+        assert args[1] == 100  # refund = 500 reserved - 400 billable
+        kwargs = billing.partial_refund.await_args.kwargs
+        assert kwargs["product_id"] == session.product_id
+        assert kwargs["user_id"] == session.user_id
+        assert "used 5min" in kwargs["description"]
+        # No overage debit
+        billing.check_and_reserve.assert_not_called()
+
+    async def test_exact_match_creates_neither_debit_nor_refund(self) -> None:
+        """5 min active @ 100 tok/min = 500 tokens, reserved 500 → no-op."""
+        now = datetime.now(UTC)
+        started = now - timedelta(minutes=5)
+
+        billing, _ = await self._run_stop_and_capture_billing(
+            started_at=started,
+            stopped_now=now,
+            total_paused_seconds=0,
+        )
+
+        billing.check_and_reserve.assert_not_called()
+        billing.partial_refund.assert_not_called()
+
+    async def test_paused_seconds_excluded_from_billable_duration(self) -> None:
+        """Session ran 20 min wall-clock, paused 15 min → 5 min billable → exact match."""
+        now = datetime.now(UTC)
+        started = now - timedelta(minutes=20)
+
+        billing, _ = await self._run_stop_and_capture_billing(
+            started_at=started,
+            stopped_now=now,
+            total_paused_seconds=15 * 60,  # 15 min paused
+        )
+
+        # 20 min total - 15 min paused = 5 min active → 500 tokens = reservation → no-op
+        billing.check_and_reserve.assert_not_called()
+        billing.partial_refund.assert_not_called()
+
+    async def test_paused_seconds_exclusion_plus_overage(self) -> None:
+        """30 min wall-clock - 10 min paused = 20 min billable @ 100 = 2000 → 1500 overage."""
+        now = datetime.now(UTC)
+        started = now - timedelta(minutes=30)
+
+        billing, session = await self._run_stop_and_capture_billing(
+            started_at=started,
+            stopped_now=now,
+            total_paused_seconds=10 * 60,
+        )
+
+        billing.check_and_reserve.assert_awaited_once()
+        args = billing.check_and_reserve.await_args.args
+        assert args[1] == 1500  # 2000 billable - 500 reserved
+        kwargs = billing.check_and_reserve.await_args.kwargs
+        assert kwargs["metadata"]["actual_minutes"] == 20
+
+
+# ---------------------------------------------------------------------------
+# Pause/resume duration tracking (total_paused_seconds accumulation)
+# ---------------------------------------------------------------------------
+
+
+class TestPauseResumeDuration:
+    """Verifies that total_paused_seconds is updated on resume and consumed correctly.
+
+    The architecture stores cumulative paused time on the gpu_sessions row via
+    total_paused_seconds. On each resume we add (resumed_at - paused_at). At stop
+    time, _finalize_billing subtracts this from wall-clock seconds to compute
+    billable minutes.
+    """
+
+    async def test_resume_updates_total_paused_seconds_with_pause_duration(self) -> None:
+        """resumed_at - paused_at must be persisted via repo.add_paused_seconds."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        paused_at = datetime.now(UTC) - timedelta(minutes=10)
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.paused,
+            paused_at=paused_at,
+            total_paused_seconds=0,
+        )
+        resume_now = paused_at + timedelta(minutes=10)  # exactly 600s paused
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = resume_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.resume_session(
+                session_id=session.id, user_id=user_id, product_id=session.product_id
+            )
+
+        # The repo must be told to add exactly 600s to total_paused_seconds
+        mock_repo.add_paused_seconds.assert_awaited_once_with(session.id, 600)
+        # Status updated to resuming with resumed_at
+        mock_repo.update_status.assert_called_once()
+        call_kwargs = mock_repo.update_status.call_args.kwargs
+        assert "resumed_at" in call_kwargs
+        # And the in-memory session_row is updated so downstream consumers see it
+        assert session.total_paused_seconds == 600
+
+    async def test_resume_accumulates_across_multiple_pause_cycles(self) -> None:
+        """Second resume adds to the already-accumulated total_paused_seconds."""
+        service, _ = _make_service()
+        user_id = uuid4()
+        paused_at = datetime.now(UTC) - timedelta(minutes=5)
+        # Session already has 300s from a prior pause/resume cycle
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.paused,
+            paused_at=paused_at,
+            total_paused_seconds=300,
+        )
+        resume_now = paused_at + timedelta(minutes=5)  # 300s this pause
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = resume_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.resume_session(
+                session_id=session.id, user_id=user_id, product_id=session.product_id
+            )
+
+        # Repo receives just the delta (300), not the cumulative total
+        mock_repo.add_paused_seconds.assert_awaited_once_with(session.id, 300)
+        # In-memory session reflects 300 (prior) + 300 (this pause) = 600
+        assert session.total_paused_seconds == 600
 
 
 # ---------------------------------------------------------------------------

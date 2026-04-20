@@ -609,6 +609,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             bundle_index=bundle_index,
             session_factory=_services.db_manager.session_factory,
             settings=settings,
+            billing_service=billing_service_for_worker,
             event_bus=_services.event_bus,
         )
 

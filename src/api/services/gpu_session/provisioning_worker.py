@@ -22,11 +22,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.core.enums import GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
 
+from ._events import publish_status_event
 from ._provisioning import provision_vastai_instance
 
 if TYPE_CHECKING:
@@ -442,6 +442,8 @@ class GpuProvisioningWorker:
     ) -> None:
         """Re-load under SELECT FOR UPDATE, validate status, then write new_status."""
         previous_status = str(session.status)
+        # Pop error_message so it reaches the SSE event as well as the DB row.
+        error_message = extra_fields.get("error_message")
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             current = await repo.get_by_id(session.id, for_update=True)
@@ -460,7 +462,11 @@ class GpuProvisioningWorker:
             current.status = new_status
 
         logger.info(log_event, session_id=str(session.id), new_status=new_status.value)
-        await self._publish_status_event(current, previous_status=previous_status)
+        await self._publish_status_event(
+            current,
+            previous_status=previous_status,
+            error_message=error_message,
+        )
 
     async def _mark_active(self, session: GpuSession) -> None:
         """Transition to active; set started_at if not already set (preserve for resuming)."""
@@ -534,25 +540,13 @@ class GpuProvisioningWorker:
         previous_status: str,
         error_message: str | None = None,
     ) -> None:
-        """Fire-and-forget SSE publish. Failures are logged but never propagate."""
-        if self._event_bus is None:
-            return
-        try:
-            await self._event_bus.publish(
-                user_id=session.user_id,
-                event_type=EventType.GPU_SESSION_STATUS_CHANGED,
-                payload=GpuSessionStatusPayload(
-                    session_id=session.id,
-                    status=str(session.status),
-                    previous_status=previous_status,
-                    model_type=session.model_type,
-                    bundle_name=session.bundle_name,
-                    tunnel_hostname=session.tunnel_hostname,
-                    error_message=error_message,
-                ),
-            )
-        except Exception:
-            logger.exception("gpu_session.event_publish_failed", session_id=str(session.id))
+        """Fire-and-forget SSE publish. Delegates to the shared helper."""
+        await publish_status_event(
+            self._event_bus,
+            session,
+            previous_status=previous_status,
+            error_message=error_message,
+        )
 
     # ------------------------------------------------------------------
     # Timeout helpers
