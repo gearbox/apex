@@ -191,7 +191,7 @@ class BillingService:
         self,
         account_id: UUID,
         token_cost: int,
-        job_id: UUID,
+        job_id: UUID | None,
         *,
         metadata: dict[str, Any],
         session: AsyncSession,
@@ -199,6 +199,12 @@ class BillingService:
         user_id: UUID | None = None,
     ) -> TokenTransaction:
         """Atomically check balance and create a debit transaction.
+
+        ``job_id`` may be None for billing events that are not 1:1 with a
+        generation job (e.g. GPU session overage debits, where the parent
+        session is recorded in ``metadata`` instead). The base reservation
+        for a GPU session keeps using the session id as ``job_id`` so that
+        full refund-on-failure via ``refund(job_id=...)`` continues to work.
 
         1. SELECT token_accounts WHERE id = account_id FOR UPDATE
         2. Compute live balance from SUM(amount)
@@ -242,7 +248,7 @@ class BillingService:
         logger.info(
             "billing.debit_processed",
             account_id=str(account_id),
-            job_id=str(job_id),
+            job_id=str(job_id) if job_id is not None else None,
             amount=token_cost,
             balance_after=new_balance,
             provider=metadata.get("provider"),

@@ -48,8 +48,33 @@ _STOPPABLE_STATUSES = frozenset(
     }
 )
 
+# Minimum billable duration for a GPU session in minutes. The base reservation
+# at start time covers exactly this much usage.
+_MIN_BILLABLE_MINUTES = 5
+
+
+def billable_minutes_for_active_seconds(active_seconds: int) -> int:
+    """Convert active seconds to billable minutes (per-started-minute, with floor).
+
+    Per-started-minute means a session running 5m01s is billed as 6 minutes;
+    any partial second of a minute counts as a full minute. The floor matches
+    the base reservation so a freshly-started session that's stopped within
+    seconds still costs exactly the reservation.
+
+    Sentinel cases:
+        0   → 5 (floor)
+        1   → 5 (floor)
+        300 → 5 (exact)
+        301 → 6 (rounded up; the next started minute counts)
+        359 → 6
+        360 → 6 (exact)
+    """
+    rounded_up = (max(0, active_seconds) + 59) // 60
+    return max(_MIN_BILLABLE_MINUTES, rounded_up)
+
+
 # Re-exported for backward compat with any code that imported from this module directly.
-__all__ = ["GpuSessionService"]
+__all__ = ["GpuSessionService", "billable_minutes_for_active_seconds"]
 
 
 class GpuSessionService:
@@ -783,7 +808,20 @@ class GpuSessionService:
         return session_row
 
     async def _finalize_billing(self, session_row: GpuSession) -> None:
-        """Compute actual usage and create overage debit or partial refund."""
+        """Compute actual usage and create overage debit or partial refund.
+
+        Billing is per-started-minute (ceiling), with a 5-minute floor that
+        matches the base reservation. A session running 5m01s is billed as
+        6 minutes; the partial second of the sixth minute is fully charged.
+
+        The base reservation uses ``session_row.id`` as ``job_id`` so that
+        full refund-on-failure (``BillingService.refund(job_id=...)``) and the
+        single-debit lookup (``get_debit_for_job``) keep working. The overage
+        debit, when present, uses ``job_id=None`` and records the parent
+        session in metadata. This preserves the one-debit-per-job invariant
+        on the base reservation while still giving us a complete audit trail
+        via the metadata link.
+        """
         account_id = session_row.account_id
         if account_id is None:
             return
@@ -792,23 +830,27 @@ class GpuSessionService:
         start = session_row.started_at or session_row.created_at
         total_seconds = max(0, int((stopped_at - start).total_seconds()))
         active_seconds = max(0, total_seconds - session_row.total_paused_seconds)
-        actual_minutes = max(5, active_seconds // 60)  # 5-min minimum
+        billable_minutes = billable_minutes_for_active_seconds(active_seconds)
 
-        billable_tokens = actual_minutes * self._settings.gpu_session_tokens_per_minute
+        billable_tokens = billable_minutes * self._settings.gpu_session_tokens_per_minute
         reserved_tokens = self._settings.gpu_session_base_reservation_tokens
 
         try:
             async with self._session_factory() as db, db.begin():
                 if billable_tokens > reserved_tokens:
+                    # Overage debit: job_id=None to preserve one-debit-per-job
+                    # on the base reservation. The link to the session lives in
+                    # metadata for reconciliation queries.
                     await self._billing_service.check_and_reserve(
                         account_id,
                         billable_tokens - reserved_tokens,
-                        session_row.id,
+                        None,
                         metadata={
                             "type": "gpu_session_overage",
+                            "session_id": str(session_row.id),
                             "model_type": session_row.model_type,
                             "bundle_name": session_row.bundle_name,
-                            "actual_minutes": actual_minutes,
+                            "billable_minutes": billable_minutes,
                         },
                         session=db,
                         product_id=session_row.product_id,
@@ -818,6 +860,7 @@ class GpuSessionService:
                         "gpu_session.billing.overage_charged",
                         session_id=str(session_row.id),
                         overage_tokens=billable_tokens - reserved_tokens,
+                        billable_minutes=billable_minutes,
                     )
                 elif billable_tokens < reserved_tokens:
                     await self._billing_service.partial_refund(
@@ -825,7 +868,7 @@ class GpuSessionService:
                         reserved_tokens - billable_tokens,
                         description=(
                             f"GPU session partial refund: "
-                            f"used {actual_minutes}min, reserved 5min minimum"
+                            f"used {billable_minutes}min, reserved 5min minimum"
                         ),
                         session=db,
                         product_id=session_row.product_id,
@@ -835,6 +878,7 @@ class GpuSessionService:
                         "gpu_session.billing.partial_refund",
                         session_id=str(session_row.id),
                         refund_tokens=reserved_tokens - billable_tokens,
+                        billable_minutes=billable_minutes,
                     )
         except Exception:
             logger.exception(

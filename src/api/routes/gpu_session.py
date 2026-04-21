@@ -39,7 +39,10 @@ from src.api.services.gpu_session.exceptions import (
     SessionAlreadyExistsError,
 )
 from src.api.services.gpu_session.schemas import StopConfirmation
-from src.api.services.gpu_session.service import GpuSessionService
+from src.api.services.gpu_session.service import (
+    GpuSessionService,
+    billable_minutes_for_active_seconds,
+)
 from src.api.services.vastai.exceptions import NoCapacityError, VastAIError
 from src.core.config import Settings
 from src.core.enums import UserRole
@@ -210,7 +213,7 @@ class GpuSessionController(Controller):
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 
         if isinstance(result, StopConfirmation):
-            minutes = max(5, result.active_duration_seconds // 60)
+            minutes = billable_minutes_for_active_seconds(result.active_duration_seconds)
             estimated_tokens = minutes * settings.gpu_session_tokens_per_minute
             return Response(
                 content=StopConfirmationResponse(

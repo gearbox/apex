@@ -23,6 +23,7 @@ from src.api.services.gpu_session import (
     InvalidSessionStateError,
     SessionAlreadyExistsError,
     StopConfirmation,
+    billable_minutes_for_active_seconds,
 )
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
@@ -1372,6 +1373,40 @@ class TestStopSession:
         assert exc_info.value.operation == "stop"
 
 
+class TestBillableMinutesHelper:
+    """Unit tests for billable_minutes_for_active_seconds.
+
+    Per-started-minute billing: any partial second of a minute counts as a full
+    minute. A 5-minute floor matches the base reservation.
+    """
+
+    @pytest.mark.parametrize(
+        "active_seconds,expected_minutes",
+        [
+            (0, 5),  # zero usage still pays the minimum
+            (1, 5),  # 1 second — floor wins
+            (59, 5),  # under 1 min — floor wins
+            (60, 5),  # exactly 1 min — floor wins
+            (299, 5),  # 4m59s — floor wins
+            (300, 5),  # exactly 5 min — exact match
+            (301, 6),  # 5m01s — rounds up to 6 (per-started-minute)
+            (359, 6),  # 5m59s — the specific case the reviewer flagged
+            (360, 6),  # exactly 6 min
+            (361, 7),  # 6m01s — rounds up
+            (3600, 60),  # exactly 60 min
+            (3601, 61),  # 60m01s — rounds up
+        ],
+    )
+    def test_rounds_up_with_five_minute_floor(
+        self, active_seconds: int, expected_minutes: int
+    ) -> None:
+        assert billable_minutes_for_active_seconds(active_seconds) == expected_minutes
+
+    def test_negative_input_treated_as_zero(self) -> None:
+        """Defensive: negative seconds (clock drift edge case) floor to the 5-min minimum."""
+        assert billable_minutes_for_active_seconds(-100) == 5
+
+
 # ---------------------------------------------------------------------------
 # Billing finalization branch tests (_finalize_billing)
 # ---------------------------------------------------------------------------
@@ -1432,7 +1467,12 @@ class TestFinalizeBilling:
         return mocks["billing_service"], result
 
     async def test_overage_creates_additional_debit(self) -> None:
-        """10 min active @ 100 tok/min = 1000 tokens, reserved 500 → 500 overage debit."""
+        """10 min active @ 100 tok/min = 1000 tokens, reserved 500 → 500 overage debit.
+
+        The overage debit MUST use job_id=None to preserve the one-debit-per-job
+        invariant on the base reservation (which keeps the session.id as job_id
+        for refund-on-failure lookups). The session link is carried in metadata.
+        """
         now = datetime.now(UTC)
         started = now - timedelta(minutes=10)
 
@@ -1447,17 +1487,50 @@ class TestFinalizeBilling:
         kwargs = billing.check_and_reserve.await_args.kwargs
         assert args[0] == session.account_id
         assert args[1] == 500  # overage = 1000 billable - 500 reserved
-        assert args[2] == session.id
+        # CRITICAL: overage debit must NOT reuse the session's job_id — that would
+        # create two debits with the same job_id and break get_debit_for_job().
+        assert args[2] is None
         metadata = kwargs["metadata"]
         assert metadata["type"] == "gpu_session_overage"
-        assert metadata["actual_minutes"] == 10
+        assert metadata["session_id"] == str(session.id)  # link via metadata
+        assert metadata["billable_minutes"] == 10
         assert metadata["bundle_name"] == session.bundle_name
         assert metadata["model_type"] == session.model_type
         # No refund in overage branch
         billing.partial_refund.assert_not_called()
 
+    async def test_overage_5m59s_rounds_up_to_6_billable_minutes(self) -> None:
+        """Per-started-minute billing: 5m59s must bill as 6 min, not 5 (floor bug).
+
+        5m59s active @ 100 tok/min = 600 tokens; reserved = 500 → 100 overage.
+        The prior floor-division logic returned 5 min = 500 tokens = no charge,
+        undercharging the user by a full minute of the sixth-started minute.
+        """
+        now = datetime.now(UTC)
+        started = now - timedelta(seconds=5 * 60 + 59)  # 5m59s
+
+        billing, session = await self._run_stop_and_capture_billing(
+            started_at=started,
+            stopped_now=now,
+            total_paused_seconds=0,
+        )
+
+        billing.check_and_reserve.assert_awaited_once()
+        args = billing.check_and_reserve.await_args.args
+        assert args[1] == 100  # overage = (6 × 100) - 500 reserved
+        metadata = billing.check_and_reserve.await_args.kwargs["metadata"]
+        assert metadata["billable_minutes"] == 6
+        # Overage debit not linked to a job
+        assert args[2] is None
+        assert metadata["session_id"] == str(session.id)
+
     async def test_partial_refund_when_billable_below_reservation(self) -> None:
-        """5 min floor @ 80 tok/min = 400 tokens, reserved 500 → 100 refund."""
+        """5 min floor @ 80 tok/min = 400 tokens, reserved 500 → 100 refund.
+
+        The partial refund uses the session.id as job_id (not None) because
+        the base reservation debit is stamped with that same job_id, and
+        partial_refund looks up the debit via get_debit_for_job(job_id).
+        """
         now = datetime.now(UTC)
         # Actual runtime 3 min, but billable is floored to 5 min
         started = now - timedelta(minutes=3)
@@ -1471,7 +1544,7 @@ class TestFinalizeBilling:
 
         billing.partial_refund.assert_awaited_once()
         args = billing.partial_refund.await_args.args
-        assert args[0] == session.id
+        assert args[0] == session.id  # partial refund IS linked to the base reservation
         assert args[1] == 100  # refund = 500 reserved - 400 billable
         kwargs = billing.partial_refund.await_args.kwargs
         assert kwargs["product_id"] == session.product_id
@@ -1523,8 +1596,10 @@ class TestFinalizeBilling:
         billing.check_and_reserve.assert_awaited_once()
         args = billing.check_and_reserve.await_args.args
         assert args[1] == 1500  # 2000 billable - 500 reserved
+        assert args[2] is None  # overage debit still not linked by job_id
         kwargs = billing.check_and_reserve.await_args.kwargs
-        assert kwargs["metadata"]["actual_minutes"] == 20
+        assert kwargs["metadata"]["billable_minutes"] == 20
+        assert kwargs["metadata"]["session_id"] == str(session.id)
 
 
 # ---------------------------------------------------------------------------

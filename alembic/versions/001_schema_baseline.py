@@ -562,14 +562,9 @@ def upgrade() -> None:
         postgresql_where="is_deleted = TRUE",
     )
 
-    # Add cross-reference FKs now that both tables exist
-    op.create_foreign_key(
-        None,
-        "token_transactions",
-        "generation_jobs",
-        ["job_id"],
-        ["id"],
-    )
+    # Cross-reference FK: generation_jobs.debit_transaction_id → token_transactions.id
+    # (only this direction — token_transactions.job_id has NO FK because the ledger
+    # also links non-job resources like GPU sessions; see src/db/models/billing.py)
     op.create_foreign_key(
         None,
         "generation_jobs",
@@ -842,11 +837,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop all tables in reverse dependency order."""
-    # Drop circular FKs first
     op.drop_constraint(
         "generation_jobs_debit_transaction_id_fkey", "generation_jobs", type_="foreignkey"
     )
-    op.drop_constraint("token_transactions_job_id_fkey", "token_transactions", type_="foreignkey")
+    op.drop_constraint("fk_generation_jobs_source_output", "generation_jobs", type_="foreignkey")
+    op.drop_constraint("fk_generation_jobs_input_image", "generation_jobs", type_="foreignkey")
+    op.drop_constraint("fk_generation_jobs_source_job", "generation_jobs", type_="foreignkey")
 
     op.drop_index("ix_audit_created", table_name="admin_audit_log")
     op.drop_index("ix_audit_target_product", table_name="admin_audit_log")
