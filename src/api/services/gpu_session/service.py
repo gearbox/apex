@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import msgspec
 import structlog
 from sqlalchemy.exc import IntegrityError
 
@@ -73,8 +74,69 @@ def billable_minutes_for_active_seconds(active_seconds: int) -> int:
     return max(_MIN_BILLABLE_MINUTES, rounded_up)
 
 
+class SessionDurations(msgspec.Struct, kw_only=True, frozen=True):
+    """Two-bucket duration breakdown for a GPU session.
+
+    These are the two billable quantities. Today only ``active_seconds`` has
+    a per-minute rate (GPU compute); in a later phase ``paused_seconds`` will
+    be multiplied by the storage rate (Vast.ai charges us for disk while a
+    node is stopped but not destroyed).
+
+    Invariants:
+    - Both values are non-negative.
+    - ``active_seconds + paused_seconds`` equals the session's total wall-clock
+      lifetime from start to the relevant endpoint (stopped_at, paused_at if
+      currently paused, or ``now`` if neither), minus any time before
+      ``started_at`` was set.
+    """
+
+    active_seconds: int
+    paused_seconds: int
+
+
+def compute_session_durations(session: GpuSession, *, now: datetime) -> SessionDurations:
+    """Split a session's wall-clock lifetime into active vs paused buckets.
+
+    Single source of truth for both the stop-confirmation preview and the
+    post-stop finalize-billing calculation. Previously these two paths had
+    independent formulas and drifted.
+
+    ``total_paused_seconds`` on the session row is maintained on resume AND
+    on stop-from-paused (see ``_stop_confirmed``). This helper reads that
+    column as-is and does NOT try to derive an in-flight pause: if the column
+    is wrong, billing is wrong. Column maintenance is the write-path's job.
+
+    End-of-lifetime timestamp:
+        - If the session is stopped, use ``stopped_at``.
+        - Else if the session is currently paused, use ``paused_at``
+          (the preview path; rendering active duration frozen at pause start).
+        - Else use ``now``.
+    """
+    start = session.started_at or session.created_at
+
+    if session.stopped_at is not None:
+        end = session.stopped_at
+    elif session.status == GpuSessionStatus.paused and session.paused_at is not None:
+        end = session.paused_at
+    else:
+        end = now
+
+    total_seconds = max(0, int((end - start).total_seconds()))
+    paused_seconds = max(0, session.total_paused_seconds)
+    # Clamp against total in case of clock-skew or column drift, so active
+    # never goes negative and paused never exceeds wall-clock.
+    paused_seconds = min(paused_seconds, total_seconds)
+    active_seconds = total_seconds - paused_seconds
+    return SessionDurations(active_seconds=active_seconds, paused_seconds=paused_seconds)
+
+
 # Re-exported for backward compat with any code that imported from this module directly.
-__all__ = ["GpuSessionService", "billable_minutes_for_active_seconds"]
+__all__ = [
+    "GpuSessionService",
+    "SessionDurations",
+    "billable_minutes_for_active_seconds",
+    "compute_session_durations",
+]
 
 
 class GpuSessionService:
@@ -717,16 +779,9 @@ class GpuSessionService:
 
         self._ensure_status(session_row, _STOPPABLE_STATUSES, "stop")
 
-        now = datetime.now(UTC)
-        start = session_row.started_at or session_row.created_at
-        if session_row.status == GpuSessionStatus.paused and session_row.paused_at is not None:
-            end = session_row.paused_at
-        else:
-            end = now
-        active_seconds = max(
-            0, int((end - start).total_seconds()) - session_row.total_paused_seconds
-        )
-        active_duration_seconds = active_seconds
+        durations = compute_session_durations(session_row, now=datetime.now(UTC))
+        active_duration_seconds = durations.active_seconds
+        paused_duration_seconds = durations.paused_seconds
 
         logger.info("gpu_session.stop.confirmation_requested", session_id=str(session_id))
         return StopConfirmation(
@@ -736,6 +791,7 @@ class GpuSessionService:
             vastai_gpu_name=session_row.vastai_gpu_name,
             vastai_cost_per_hour_micros=session_row.vastai_cost_per_hour_micros,
             active_duration_seconds=active_duration_seconds,
+            paused_duration_seconds=paused_duration_seconds,
             message=(
                 f"Stopping this session will permanently destroy the GPU node. "
                 f"Active time: {active_duration_seconds // 3600}h "
@@ -761,13 +817,39 @@ class GpuSessionService:
         """
         logger.info("gpu_session.stop.begun", session_id=str(session_id))
 
+        # Capture a single "now" for the whole stop sequence so the paused-time
+        # rollup in TX1 and the stopped_at timestamp in TX2 are consistent. This
+        # avoids classifying the external-teardown window as active time.
+        stop_now = datetime.now(UTC)
+
         # Transaction 1 (short): verify + transition to 'stopping' (the mutex).
+        # If stopping from 'paused', roll the in-flight pause duration into
+        # total_paused_seconds so the column stays authoritative for the
+        # post-stop billing calculation. Without this rollup, stop-from-paused
+        # would bill the idle pause interval as active GPU time.
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             session_row = await self._load_session_for_update(
                 repo, session_id, user_id, product_id, _STOPPABLE_STATUSES, "stop"
             )
             previous_status = str(session_row.status)
+
+            if session_row.status == GpuSessionStatus.paused and session_row.paused_at is not None:
+                in_flight_pause_seconds = max(
+                    0, int((stop_now - session_row.paused_at).total_seconds())
+                )
+                if in_flight_pause_seconds > 0:
+                    await repo.add_paused_seconds(session_row.id, in_flight_pause_seconds)
+                    # Keep the in-memory row aligned with the DB so downstream
+                    # reads (and _finalize_billing) see the updated total.
+                    session_row.total_paused_seconds += in_flight_pause_seconds
+                    logger.info(
+                        "gpu_session.stop.pause_rolled_up",
+                        session_id=str(session_id),
+                        in_flight_pause_seconds=in_flight_pause_seconds,
+                        total_paused_seconds=session_row.total_paused_seconds,
+                    )
+
             await self._set_status(repo, session_row, GpuSessionStatus.stopping)
 
         await self._publish_status_event(session_row, previous_status=previous_status)
@@ -789,9 +871,7 @@ class GpuSessionService:
             if reloaded is None:  # pragma: no cover — race with DB deletion
                 raise GpuSessionError(f"Session {session_id} disappeared during stop teardown")
             session_row = reloaded
-            await self._set_status(
-                repo, session_row, GpuSessionStatus.stopped, stopped_at=datetime.now(UTC)
-            )
+            await self._set_status(repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now)
 
         logger.info(
             "gpu_session.stop.done",
@@ -826,11 +906,12 @@ class GpuSessionService:
         if account_id is None:
             return
 
-        stopped_at = session_row.stopped_at or datetime.now(UTC)
-        start = session_row.started_at or session_row.created_at
-        total_seconds = max(0, int((stopped_at - start).total_seconds()))
-        active_seconds = max(0, total_seconds - session_row.total_paused_seconds)
-        billable_minutes = billable_minutes_for_active_seconds(active_seconds)
+        # total_paused_seconds is authoritative by this point (resume and
+        # stop-from-paused both roll their pauses into the column). The helper
+        # returns a two-bucket split; today we bill only active_seconds, but
+        # paused_seconds is already separated out for upcoming storage billing.
+        durations = compute_session_durations(session_row, now=datetime.now(UTC))
+        billable_minutes = billable_minutes_for_active_seconds(durations.active_seconds)
 
         billable_tokens = billable_minutes * self._settings.gpu_session_tokens_per_minute
         reserved_tokens = self._settings.gpu_session_base_reservation_tokens

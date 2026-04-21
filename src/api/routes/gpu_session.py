@@ -223,6 +223,7 @@ class GpuSessionController(Controller):
                     vastai_gpu_name=result.vastai_gpu_name,
                     vastai_cost_per_hour_micros=result.vastai_cost_per_hour_micros,
                     active_duration_seconds=result.active_duration_seconds,
+                    paused_duration_seconds=result.paused_duration_seconds,
                     estimated_final_tokens=estimated_tokens,
                     message=result.message,
                 ),

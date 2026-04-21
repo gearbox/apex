@@ -9,7 +9,12 @@ from .exceptions import (
 )
 from .provisioning_worker import GpuProvisioningWorker
 from .schemas import StopConfirmation
-from .service import GpuSessionService, billable_minutes_for_active_seconds
+from .service import (
+    GpuSessionService,
+    SessionDurations,
+    billable_minutes_for_active_seconds,
+    compute_session_durations,
+)
 
 __all__ = [
     "GpuProvisioningWorker",
@@ -19,6 +24,8 @@ __all__ = [
     "NoActiveSessionError",
     "OrphanedTunnelCleanupWorker",
     "SessionAlreadyExistsError",
+    "SessionDurations",
     "StopConfirmation",
     "billable_minutes_for_active_seconds",
+    "compute_session_durations",
 ]

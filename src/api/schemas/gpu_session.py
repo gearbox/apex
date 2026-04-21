@@ -69,6 +69,9 @@ class StopConfirmationResponse(msgspec.Struct, kw_only=True):
     vastai_gpu_name: str | None
     vastai_cost_per_hour_micros: int | None
     active_duration_seconds: int
+    paused_duration_seconds: int
+    """Cumulative time the session spent paused. Useful for UX ("5m active, 20m paused")
+    and billed in a later phase at the storage rate."""
     estimated_final_tokens: int
     """Estimated total token cost if stopped now (including overage)."""
     message: str

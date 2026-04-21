@@ -10,6 +10,7 @@ import structlog
 
 from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationRequest
 from src.api.services.comfyui_client import ComfyUIClient
+from src.api.services.generation.service import ProviderResponseError
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, ModelType, Provider
@@ -162,8 +163,28 @@ class AishaGenerationProvider:
                 db_job.started_at = datetime.now(UTC)
                 db_job.external_request_id = prompt_id
         elif db_job is not None:
+            # The backend accepted the request but returned no job handle we can
+            # poll. Mark the job FAILED so the user can see the failure via
+            # GET /v1/jobs/{id}, flush so the error_message persists alongside
+            # the debit, then raise. The orchestrator's except-path refunds the
+            # debit and wraps this into a user-visible GenerationError. We
+            # deliberately keep the user-facing message infrastructure-agnostic;
+            # the structlog entry below captures the backend detail for ops.
             db_job.status = JobStatus.FAILED
-            db_job.error_message = "No prompt_id from ComfyUI"
+            db_job.error_message = "Generation backend returned an unexpected response."
+            await session.flush()
+            logger.error(
+                "aisha.queue_prompt.no_prompt_id",
+                job_id=str(job_id),
+                gpu_session_id=str(gpu_session.id),
+                tunnel_hostname=gpu_session.tunnel_hostname,
+                response_keys=list(result.keys()) if isinstance(result, dict) else None,
+            )
+            raise ProviderResponseError(
+                "The generation backend returned an unexpected response. "
+                "Your tokens have been refunded. "
+                "Please try again or report the error if it persists."
+            )
 
         if db_job is None:
             raise ValueError("Failed to create Aisha job record")

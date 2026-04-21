@@ -22,8 +22,10 @@ from src.api.services.gpu_session import (
     GpuSessionService,
     InvalidSessionStateError,
     SessionAlreadyExistsError,
+    SessionDurations,
     StopConfirmation,
     billable_minutes_for_active_seconds,
+    compute_session_durations,
 )
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
@@ -1684,6 +1686,369 @@ class TestPauseResumeDuration:
         mock_repo.add_paused_seconds.assert_awaited_once_with(session.id, 300)
         # In-memory session reflects 300 (prior) + 300 (this pause) = 600
         assert session.total_paused_seconds == 600
+
+
+# ---------------------------------------------------------------------------
+# compute_session_durations — pure helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSessionDurations:
+    """Unit tests for the active/paused split helper.
+
+    Returns (active_seconds, paused_seconds). Non-negative. Authoritative
+    consumer of the ``total_paused_seconds`` column; does not try to derive
+    in-flight pause intervals — that's the write path's job.
+    """
+
+    def test_running_session_uses_now_as_end(self) -> None:
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        now = started + timedelta(minutes=10)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.active,
+            started_at=started,
+            stopped_at=None,
+            total_paused_seconds=0,
+        )
+
+        result = compute_session_durations(session, now=now)
+
+        assert result == SessionDurations(active_seconds=600, paused_seconds=0)
+
+    def test_paused_session_uses_paused_at_as_end(self) -> None:
+        """Preview path: while a session is paused, active time is frozen."""
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        paused = started + timedelta(minutes=10)
+        now = paused + timedelta(minutes=30)  # irrelevant — end is paused_at
+        session = _make_gpu_session(
+            status=GpuSessionStatus.paused,
+            started_at=started,
+            paused_at=paused,
+            stopped_at=None,
+            total_paused_seconds=0,
+        )
+
+        result = compute_session_durations(session, now=now)
+
+        # end = paused_at → total wall-clock = 10 min, all active (no prior pauses)
+        assert result.active_seconds == 600
+        assert result.paused_seconds == 0
+
+    def test_stopped_session_uses_stopped_at_as_end(self) -> None:
+        """Post-stop: end is stopped_at, paused is what's in the column."""
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        stopped = started + timedelta(minutes=60)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.stopped,
+            started_at=started,
+            stopped_at=stopped,
+            total_paused_seconds=15 * 60,  # 15 min paused
+        )
+
+        result = compute_session_durations(session, now=stopped + timedelta(hours=1))
+
+        # 60 min wall-clock - 15 min paused = 45 min active
+        assert result.active_seconds == 45 * 60
+        assert result.paused_seconds == 15 * 60
+
+    def test_paused_seconds_clamped_to_wall_clock(self) -> None:
+        """Defensive: if total_paused_seconds somehow exceeds wall-clock, clamp."""
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        stopped = started + timedelta(minutes=10)  # 600s wall-clock
+        session = _make_gpu_session(
+            status=GpuSessionStatus.stopped,
+            started_at=started,
+            stopped_at=stopped,
+            total_paused_seconds=99999,  # bogus — larger than wall-clock
+        )
+
+        result = compute_session_durations(session, now=stopped)
+
+        # Clamped so active never goes negative
+        assert result.active_seconds == 0
+        assert result.paused_seconds == 600
+
+    def test_negative_total_paused_seconds_treated_as_zero(self) -> None:
+        """Defensive: negative paused column value (corrupt data) treated as 0."""
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        stopped = started + timedelta(minutes=10)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.stopped,
+            started_at=started,
+            stopped_at=stopped,
+            total_paused_seconds=-5,
+        )
+
+        result = compute_session_durations(session, now=stopped)
+
+        assert result.active_seconds == 600
+        assert result.paused_seconds == 0
+
+    def test_session_with_no_started_at_falls_back_to_created_at(self) -> None:
+        created = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        now = created + timedelta(minutes=5)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.active,
+            started_at=None,
+            total_paused_seconds=0,
+        )
+        session.created_at = created
+
+        result = compute_session_durations(session, now=now)
+
+        assert result.active_seconds == 300
+
+
+# ---------------------------------------------------------------------------
+# Stop-from-paused rollup regression tests (Issue 1)
+# ---------------------------------------------------------------------------
+
+
+class TestStopFromPausedRollup:
+    """Regression: stopping a paused session rolled the pause interval up into
+    the authoritative column, rather than leaving it uncounted.
+
+    Before the fix, ``total_paused_seconds`` was only updated on resume. Stopping
+    a paused session therefore left the in-flight pause entirely uncounted, and
+    ``_finalize_billing`` would bill the full wall-clock as active GPU time.
+    Example: session active 10 min, paused 50 min, stopped → billed 60 min of
+    GPU when the user only used 10.
+    """
+
+    async def test_stopping_from_paused_without_resume_rolls_up_pause(self) -> None:
+        """repo.add_paused_seconds is called at TX1 with the in-flight pause delta."""
+        settings = _make_settings()
+        settings.gpu_session_base_reservation_tokens = 500
+        settings.gpu_session_tokens_per_minute = 100
+
+        service, mocks = _make_service(settings=settings)
+        user_id = uuid4()
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        paused = started + timedelta(minutes=10)
+        stop_now = started + timedelta(minutes=60)  # 50 min paused
+
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.paused,
+            started_at=started,
+            paused_at=paused,
+            total_paused_seconds=0,
+        )
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = stop_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        # The in-flight pause (50 min = 3000s) must be rolled up into the column
+        # in TX1 before the external teardown runs.
+        mock_repo.add_paused_seconds.assert_awaited_once_with(session.id, 3000)
+        # In-memory row is kept in sync so _finalize_billing reads the new total.
+        assert session.total_paused_seconds == 3000
+
+    async def test_stopping_from_paused_bills_only_active_duration(self) -> None:
+        """The pure regression: 10 min active + 50 min paused → 10 min billed.
+
+        Before the fix, _finalize_billing saw total_paused_seconds=0 and billed
+        the full 60 min as active, leaving the user overcharged by 50 min.
+        """
+        settings = _make_settings()
+        settings.gpu_session_base_reservation_tokens = 500  # covers 5 min @ 100 tok/min
+        settings.gpu_session_tokens_per_minute = 100
+
+        service, mocks = _make_service(settings=settings)
+        user_id = uuid4()
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        paused = started + timedelta(minutes=10)
+        stop_now = started + timedelta(minutes=60)
+
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.paused,
+            started_at=started,
+            paused_at=paused,
+            total_paused_seconds=0,
+        )
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = stop_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        billing = mocks["billing_service"]
+        # 10 min active @ 100 tok/min = 1000 tokens billable
+        # Reserved 500 → overage of 500 tokens
+        billing.check_and_reserve.assert_awaited_once()
+        args = billing.check_and_reserve.await_args.args
+        assert args[1] == 500  # overage amount
+        metadata = billing.check_and_reserve.await_args.kwargs["metadata"]
+        assert metadata["billable_minutes"] == 10
+
+    async def test_stop_from_paused_with_prior_pause_accumulates(self) -> None:
+        """Session was previously paused+resumed, now paused again and stopped.
+
+        Prior pauses live in total_paused_seconds; the in-flight pause is the
+        delta to add. Billing should exclude the total of both.
+        """
+        settings = _make_settings()
+        settings.gpu_session_base_reservation_tokens = 500
+        settings.gpu_session_tokens_per_minute = 100
+
+        service, mocks = _make_service(settings=settings)
+        user_id = uuid4()
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        # Session ran 20 min (5 min before first pause, 5 min paused and rolled up,
+        # 10 min active after resume), then paused again at minute 20.
+        paused = started + timedelta(minutes=20)
+        stop_now = started + timedelta(minutes=35)  # 15 min in this second pause
+
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.paused,
+            started_at=started,
+            paused_at=paused,
+            total_paused_seconds=5 * 60,  # from a prior pause/resume cycle
+        )
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = stop_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        # Repo is told to add only the new pause delta (15 min = 900s), not the cumulative
+        mock_repo.add_paused_seconds.assert_awaited_once_with(session.id, 900)
+        # In-memory row shows 5 + 15 = 20 min total paused
+        assert session.total_paused_seconds == 20 * 60
+
+        billing = mocks["billing_service"]
+        # 35 min wall - 20 min paused = 15 min active
+        # 15 × 100 = 1500 billable, 500 reserved → 1000 overage
+        billing.check_and_reserve.assert_awaited_once()
+        args = billing.check_and_reserve.await_args.args
+        assert args[1] == 1000
+        metadata = billing.check_and_reserve.await_args.kwargs["metadata"]
+        assert metadata["billable_minutes"] == 15
+
+    async def test_stopping_from_active_does_not_call_add_paused_seconds(self) -> None:
+        """Regression guard: the rollup only triggers from 'paused'."""
+        settings = _make_settings()
+        settings.gpu_session_base_reservation_tokens = 500
+        settings.gpu_session_tokens_per_minute = 100
+
+        service, _ = _make_service(settings=settings)
+        user_id = uuid4()
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        stop_now = started + timedelta(minutes=10)
+
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.active,
+            started_at=started,
+            paused_at=None,
+            total_paused_seconds=0,
+        )
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = stop_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        # No pause to roll up — the rollup path must not run
+        mock_repo.add_paused_seconds.assert_not_awaited()
+
+    async def test_stopped_at_equals_stop_now_no_teardown_drift(self) -> None:
+        """stopped_at uses the same captured 'now' as the TX1 pause rollup.
+
+        This is the guard against teardown-window drift: if _stop_confirmed
+        called datetime.now() twice, the gap between TX1 and TX2 would land
+        in the active bucket. We want the active bucket to stop at TX1.
+        """
+        service, _ = _make_service()
+        user_id = uuid4()
+        started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        paused = started + timedelta(minutes=10)
+        stop_now = started + timedelta(minutes=60)
+
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.paused,
+            started_at=started,
+            paused_at=paused,
+            total_paused_seconds=0,
+        )
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+        ):
+            mock_dt.now.return_value = stop_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.stopped_at == stop_now
 
 
 # ---------------------------------------------------------------------------
