@@ -308,6 +308,21 @@ class GpuSessionRepository:
         )
         await self._session.flush()
 
+    async def mark_billing_finalized(self, session_id: UUID, finalized_at: datetime) -> None:
+        """Stamp ``billing_finalized_at`` to mark a session as billing-complete.
+
+        Called by ``GpuSessionService._finalize_billing`` on a successful
+        overage debit / partial refund / no-op. A NULL value indicates the
+        billing finalization has not run (or failed both retries) and a
+        reconciler worker should pick it up.
+        """
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(billing_finalized_at=finalized_at)
+        )
+        await self._session.flush()
+
     async def update_status(
         self,
         session_id: UUID,

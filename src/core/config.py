@@ -187,18 +187,16 @@ class Settings(BaseSettings):
     )
 
     # --- GPU Session Billing ---
-    gpu_session_base_reservation_tokens: int = Field(
-        default=500,
-        ge=1,
-        description=(
-            "Base token reservation charged at GPU session start (5-min minimum deposit). "
-            "Refunded or topped-up at stop based on actual usage."
-        ),
-    )
     gpu_session_tokens_per_minute: int = Field(
         default=100,
         ge=1,
-        description="Token cost per active minute of GPU session runtime.",
+        description=(
+            "Token cost per active minute of GPU session runtime. "
+            "The start-time reservation is computed as MIN_BILLABLE_MINUTES × rate "
+            "(see src.api.services.gpu_session.service._MIN_BILLABLE_MINUTES). "
+            "Keeping reservation and rate coupled prevents settings drift from "
+            "causing over-refunds between session start and finalize."
+        ),
     )
 
     # --- Phase 2 Callback (pre-wired) ---

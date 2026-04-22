@@ -92,7 +92,6 @@ class GpuSessionController(Controller):
                 model_type=data.model,
                 bundle_override=bundle_override,
                 account_id=account.id,
-                billing_service=billing_service,
             )
         except SessionAlreadyExistsError as exc:
             return _error(HTTP_409_CONFLICT, "session_already_exists", str(exc))

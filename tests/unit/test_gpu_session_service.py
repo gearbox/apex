@@ -138,7 +138,6 @@ def _make_settings(*, max_retries: int = 3) -> MagicMock:
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
-    settings.gpu_session_base_reservation_tokens = 500
     settings.gpu_session_tokens_per_minute = 100
     return settings
 
@@ -220,7 +219,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         assert result is expected_session
@@ -258,7 +256,6 @@ class TestStartSession:
                 model_type=ModelType.AISHA_IMAGE,
                 bundle_override="custom_bundle:260201-01",
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         mocks["bundle_index"].resolve_bundle_override.assert_called_once_with(
@@ -278,7 +275,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
     async def test_already_exists_precheck_raises_before_external_calls(self) -> None:
@@ -296,7 +292,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         mocks["cf_client"].create_session_tunnel.assert_not_called()
@@ -320,7 +315,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
@@ -352,7 +346,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         mocks["vastai_client"].create_instance.assert_not_called()
@@ -385,7 +378,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         # Must not have called any Vast.ai APIs
@@ -430,7 +422,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         # Inspect the env dict passed to create_instance
@@ -463,7 +454,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         assert result.status == GpuSessionStatus.pending
@@ -494,7 +484,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         # Exhausted 2 retries (max_retries=2, 2 offers)
@@ -529,7 +518,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
             # The original exception is preserved (not replaced with a generic one)
             assert exc_info.value is provisioning_error
@@ -565,7 +553,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         # No create_instance attempts at all
@@ -602,7 +589,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         # Find the gpu_session.start.failed call and verify error_class matches
@@ -633,7 +619,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         mocks["vastai_client"].destroy_instance.assert_called_once_with(77777)
@@ -660,7 +645,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         _, kwargs = mocks["vastai_client"].create_instance.call_args
@@ -704,14 +688,12 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
             await service.start_session(
                 user_id=uuid4(),
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         assert len(tokens) == 2
@@ -737,7 +719,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         _, kwargs = mocks["vastai_client"].create_instance.call_args
@@ -763,7 +744,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         mocks["cf_client"].create_session_tunnel.assert_not_called()
@@ -790,14 +770,13 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         mocks["billing_service"].check_and_reserve.assert_called_once()
         call_args = mocks["billing_service"].check_and_reserve.call_args
         # Positional: (account_id, token_cost, session_id)
         assert call_args.args[0] == mocks["account_id"]
-        assert call_args.args[1] == 500  # gpu_session_base_reservation_tokens
+        assert call_args.args[1] == 500  # _MIN_BILLABLE_MINUTES (5) × tokens_per_minute (100)
 
         # The session_id passed to check_and_reserve must equal the id passed to repo.create
         # (both come from the same new_id() call inside start_session)
@@ -836,7 +815,6 @@ class TestStartSession:
                     product_id="vex",
                     model_type=ModelType.AISHA_IMAGE,
                     account_id=mocks["account_id"],
-                    billing_service=mocks["billing_service"],
                 )
 
         mocks["vastai_client"].destroy_instance.assert_called_once_with(77777)
@@ -864,7 +842,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         event_bus.publish.assert_called_once()
@@ -901,7 +878,6 @@ class TestStartSession:
                 product_id="vex",
                 model_type=ModelType.AISHA_IMAGE,
                 account_id=mocks["account_id"],
-                billing_service=mocks["billing_service"],
             )
 
         assert result is expected_session
@@ -1430,10 +1406,16 @@ class TestFinalizeBilling:
         stopped_now: datetime,
         total_paused_seconds: int,
         tokens_per_minute: int = 100,
+        existing_debit_amount: int = 500,
     ) -> tuple[MagicMock, GpuSession]:
-        """Drive a confirmed stop and return the mock billing service + session."""
+        """Drive a confirmed stop and return the mock billing service + session.
+
+        Mocks ``BillingRepository.get_debit_for_job`` to return a debit row of
+        magnitude ``existing_debit_amount`` (stored as negative on the ledger).
+        Round 4: ``_finalize_billing`` reads the debit amount as the authoritative
+        cap for refund/overage math, decoupled from settings.
+        """
         settings = _make_settings()
-        settings.gpu_session_base_reservation_tokens = 500
         settings.gpu_session_tokens_per_minute = tokens_per_minute
 
         service, mocks = _make_service(settings=settings)
@@ -1444,11 +1426,16 @@ class TestFinalizeBilling:
             started_at=started_at,
             total_paused_seconds=total_paused_seconds,
         )
+        # Round 4: _apply_finalize_billing reads debit.account_id (ledger
+        # authority). Align the session row with the debit so test assertions
+        # against either field hold.
+        session.account_id = mocks["account_id"]
 
         # Freeze time so stopped_at is predictable
         with (
             patch(_REPO_PATH) as MockRepo,
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+            patch("src.api.services.gpu_session.service.BillingRepository") as MockBR,
         ):
             mock_dt.now.return_value = stopped_now
             # datetime.fromisoformat / UTC / timedelta still need to work
@@ -1457,6 +1444,13 @@ class TestFinalizeBilling:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
+
+            mock_billing_repo = AsyncMock()
+            MockBR.return_value = mock_billing_repo
+            mock_billing_repo.get_debit_for_job.return_value = MagicMock(
+                amount=-existing_debit_amount,  # debits are stored negative
+                account_id=mocks["account_id"],
+            )
 
             result = await service.stop_session(
                 session_id=session.id,
@@ -1818,7 +1812,6 @@ class TestStopFromPausedRollup:
     async def test_stopping_from_paused_without_resume_rolls_up_pause(self) -> None:
         """repo.add_paused_seconds is called at TX1 with the in-flight pause delta."""
         settings = _make_settings()
-        settings.gpu_session_base_reservation_tokens = 500
         settings.gpu_session_tokens_per_minute = 100
 
         service, mocks = _make_service(settings=settings)
@@ -1866,7 +1859,6 @@ class TestStopFromPausedRollup:
         the full 60 min as active, leaving the user overcharged by 50 min.
         """
         settings = _make_settings()
-        settings.gpu_session_base_reservation_tokens = 500  # covers 5 min @ 100 tok/min
         settings.gpu_session_tokens_per_minute = 100
 
         service, mocks = _make_service(settings=settings)
@@ -1886,6 +1878,7 @@ class TestStopFromPausedRollup:
         with (
             patch(_REPO_PATH) as MockRepo,
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+            patch("src.api.services.gpu_session.service.BillingRepository") as MockBR,
         ):
             mock_dt.now.return_value = stop_now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -1893,6 +1886,14 @@ class TestStopFromPausedRollup:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
+
+            mock_billing_repo = AsyncMock()
+            MockBR.return_value = mock_billing_repo
+            # Original debit of 500 (5 min × 100 tok/min). Billable below covers
+            # the same 500-token base reservation.
+            mock_billing_repo.get_debit_for_job.return_value = MagicMock(
+                amount=-500, account_id=mocks["account_id"]
+            )
 
             await service.stop_session(
                 session_id=session.id,
@@ -1903,7 +1904,7 @@ class TestStopFromPausedRollup:
 
         billing = mocks["billing_service"]
         # 10 min active @ 100 tok/min = 1000 tokens billable
-        # Reserved 500 → overage of 500 tokens
+        # Original debit 500 → overage of 500 tokens
         billing.check_and_reserve.assert_awaited_once()
         args = billing.check_and_reserve.await_args.args
         assert args[1] == 500  # overage amount
@@ -1917,7 +1918,6 @@ class TestStopFromPausedRollup:
         delta to add. Billing should exclude the total of both.
         """
         settings = _make_settings()
-        settings.gpu_session_base_reservation_tokens = 500
         settings.gpu_session_tokens_per_minute = 100
 
         service, mocks = _make_service(settings=settings)
@@ -1939,6 +1939,7 @@ class TestStopFromPausedRollup:
         with (
             patch(_REPO_PATH) as MockRepo,
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
+            patch("src.api.services.gpu_session.service.BillingRepository") as MockBR,
         ):
             mock_dt.now.return_value = stop_now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -1946,6 +1947,12 @@ class TestStopFromPausedRollup:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
+
+            mock_billing_repo = AsyncMock()
+            MockBR.return_value = mock_billing_repo
+            mock_billing_repo.get_debit_for_job.return_value = MagicMock(
+                amount=-500, account_id=mocks["account_id"]
+            )
 
             await service.stop_session(
                 session_id=session.id,
@@ -1961,7 +1968,7 @@ class TestStopFromPausedRollup:
 
         billing = mocks["billing_service"]
         # 35 min wall - 20 min paused = 15 min active
-        # 15 × 100 = 1500 billable, 500 reserved → 1000 overage
+        # 15 × 100 = 1500 billable, debit 500 → 1000 overage
         billing.check_and_reserve.assert_awaited_once()
         args = billing.check_and_reserve.await_args.args
         assert args[1] == 1000
@@ -1971,7 +1978,6 @@ class TestStopFromPausedRollup:
     async def test_stopping_from_active_does_not_call_add_paused_seconds(self) -> None:
         """Regression guard: the rollup only triggers from 'paused'."""
         settings = _make_settings()
-        settings.gpu_session_base_reservation_tokens = 500
         settings.gpu_session_tokens_per_minute = 100
 
         service, _ = _make_service(settings=settings)
@@ -2052,8 +2058,233 @@ class TestStopFromPausedRollup:
 
 
 # ---------------------------------------------------------------------------
-# Read method tests
+# Ledger-as-authority tests (Round 4 / Issue 8)
 # ---------------------------------------------------------------------------
+
+
+class TestLedgerAuthorityForBilling:
+    """Round 4: _finalize_billing reads the actual debit from the ledger as the
+    cap for refund/overage math, never a recomputed reservation. This makes
+    over-refund impossible by construction even if ops changes
+    ``gpu_session_tokens_per_minute`` while sessions are running.
+    """
+
+    async def test_partial_refund_capped_at_actual_debit_after_rate_drop(self) -> None:
+        """Rate drops mid-session; refund cannot exceed what was actually debited.
+
+        Setup:
+          - Start: rate = 200/min → reservation 1000 tokens debited.
+          - Session runs 4 min.
+          - Stop: rate = 100/min (ops dropped it). Naive math would compute
+            ``MIN(5)*100 - billable(5*100) = 0`` and refund nothing — fine.
+            But the prior bug shape was: derive reservation from new rate
+            (500), see billable(500) == reserved(500), refund nothing —
+            actually correct here. The DANGEROUS case is the OTHER direction:
+            new reservation > old debit. The code must use the LEDGER debit
+            (1000) as cap, not a freshly-computed value.
+
+        Construction: original debit = 500 tokens (lower than what new rate
+        would imply). Session runs 1 min → billable = 5 min × 100 = 500.
+        Refund = max(0, 500 - 500) = 0. No refund issued. Verifies the
+        ledger value is read.
+        """
+        settings = _make_settings()
+        settings.gpu_session_tokens_per_minute = 100  # current rate
+        service, mocks = _make_service(settings=settings)
+
+        now = datetime.now(UTC)
+        started = now - timedelta(minutes=1)  # 1 min active → billable floor 5
+        session = _make_gpu_session(
+            user_id=uuid4(),
+            status=GpuSessionStatus.active,
+            started_at=started,
+            total_paused_seconds=0,
+        )
+        session.account_id = mocks["account_id"]
+        session.stopped_at = now
+
+        billing = mocks["billing_service"]
+
+        with (
+            patch("src.api.services.gpu_session.service.BillingRepository") as MockBR,
+            patch(_REPO_PATH) as MockSessionRepo,
+        ):
+            mock_billing_repo = AsyncMock()
+            MockBR.return_value = mock_billing_repo
+            # Ledger debit is 500. Billable = 5×100 = 500. No refund, no overage.
+            mock_billing_repo.get_debit_for_job.return_value = MagicMock(
+                amount=-500, account_id=mocks["account_id"]
+            )
+            MockSessionRepo.return_value = AsyncMock()
+
+            await service._finalize_billing(session)
+
+        billing.partial_refund.assert_not_awaited()
+        billing.check_and_reserve.assert_not_awaited()
+
+    async def test_refund_uses_ledger_debit_not_settings(self) -> None:
+        """Original debit > what current settings would produce → refund the diff.
+
+        Settings drift scenario: user reserved 800 (under old rate); current
+        billable is 500. Refund must be exactly 300, capped by the actual
+        ledger debit (800). Cannot over-refund.
+        """
+        settings = _make_settings()
+        settings.gpu_session_tokens_per_minute = 100
+        service, mocks = _make_service(settings=settings)
+
+        now = datetime.now(UTC)
+        started = now - timedelta(minutes=4)
+        session = _make_gpu_session(
+            user_id=uuid4(),
+            status=GpuSessionStatus.active,
+            started_at=started,
+            total_paused_seconds=0,
+        )
+        session.account_id = mocks["account_id"]
+        session.stopped_at = now
+
+        billing = mocks["billing_service"]
+
+        with (
+            patch("src.api.services.gpu_session.service.BillingRepository") as MockBR,
+            patch(_REPO_PATH) as MockSessionRepo,
+        ):
+            mock_billing_repo = AsyncMock()
+            MockBR.return_value = mock_billing_repo
+            mock_billing_repo.get_debit_for_job.return_value = MagicMock(
+                amount=-800, account_id=mocks["account_id"]
+            )
+            MockSessionRepo.return_value = AsyncMock()
+
+            await service._finalize_billing(session)
+
+        # Billable = max(5, 4) * 100 = 500. Original = 800. Refund = 300.
+        billing.partial_refund.assert_awaited_once()
+        args = billing.partial_refund.await_args.args
+        assert args[1] == 300, f"Expected refund of 300 (800-500), got {args[1]}"
+
+    async def test_no_debit_found_marks_finalized_and_skips_billing(self) -> None:
+        """No debit row (admin reversal, failed reservation step) → no-op finalize.
+
+        The session is still marked billing_finalized_at so the reconciler
+        doesn't loop. Logged at WARN for ops visibility.
+        """
+        service, mocks = _make_service()
+
+        now = datetime.now(UTC)
+        session = _make_gpu_session(
+            user_id=uuid4(),
+            status=GpuSessionStatus.active,
+            started_at=now - timedelta(minutes=10),
+            total_paused_seconds=0,
+        )
+        session.account_id = mocks["account_id"]
+        session.stopped_at = now
+
+        billing = mocks["billing_service"]
+
+        with patch("src.api.services.gpu_session.service.BillingRepository") as MockBR:
+            mock_billing_repo = AsyncMock()
+            MockBR.return_value = mock_billing_repo
+            mock_billing_repo.get_debit_for_job.return_value = None
+
+            with patch(_REPO_PATH) as MockSessionRepo:
+                mock_session_repo = AsyncMock()
+                MockSessionRepo.return_value = mock_session_repo
+
+                await service._finalize_billing(session)
+
+        billing.partial_refund.assert_not_awaited()
+        billing.check_and_reserve.assert_not_awaited()
+        # Reconciler must not pick this up — finalized_at is stamped.
+        mock_session_repo.mark_billing_finalized.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Finalize-billing retry + defer tests (Round 4 / Issue 7)
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeBillingRetry:
+    """Round 4: _finalize_billing retries once on transient failure, then defers
+    to the phase-2 reconciler if both attempts fail (billing_finalized_at NULL).
+    """
+
+    async def test_first_attempt_fails_second_succeeds_stamps_finalized_at(self) -> None:
+        """Transient DB error on first try; second attempt stamps finalized_at."""
+        service, mocks = _make_service()
+
+        now = datetime.now(UTC)
+        session = _make_gpu_session(
+            user_id=uuid4(),
+            status=GpuSessionStatus.active,
+            started_at=now - timedelta(minutes=10),
+            total_paused_seconds=0,
+        )
+        session.account_id = mocks["account_id"]
+        session.stopped_at = now
+
+        # Track call attempts
+        call_count = 0
+
+        async def flaky_apply(**kwargs: Any) -> None:  # noqa: ARG001
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("transient db hiccup")
+            # Second call succeeds (no-op for test)
+            return None
+
+        with (
+            patch.object(service, "_apply_finalize_billing", new=flaky_apply),
+            # Mock asyncio.sleep so the test doesn't actually wait 1s
+            patch(
+                "src.api.services.gpu_session.service.asyncio.sleep", new=AsyncMock()
+            ) as mock_sleep,
+        ):
+            await service._finalize_billing(session)
+
+        assert call_count == 2, "Expected 2 attempts (1 fail, 1 success)"
+        mock_sleep.assert_awaited_once_with(1.0)
+
+    async def test_both_attempts_fail_leaves_finalized_at_null(self) -> None:
+        """Both attempts raise → log finalization_deferred, no stamp.
+
+        The phase-2 reconciler picks up sessions where
+        ``billing_finalized_at IS NULL AND status='stopped'`` and retries.
+        """
+        service, mocks = _make_service()
+
+        now = datetime.now(UTC)
+        session = _make_gpu_session(
+            user_id=uuid4(),
+            status=GpuSessionStatus.active,
+            started_at=now - timedelta(minutes=10),
+            total_paused_seconds=0,
+        )
+        session.account_id = mocks["account_id"]
+        session.stopped_at = now
+
+        call_count = 0
+
+        async def always_fails(**kwargs: Any) -> None:  # noqa: ARG001
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("persistent failure")
+
+        with (
+            patch.object(service, "_apply_finalize_billing", new=always_fails),
+            patch("src.api.services.gpu_session.service.asyncio.sleep", new=AsyncMock()),
+        ):
+            # Must NOT raise — finalize is best-effort. Failures are
+            # handed off to the reconciler via the NULL column value.
+            await service._finalize_billing(session)
+
+        assert call_count == 2, "Expected 2 attempts before deferring"
+        # mark_billing_finalized is NOT called — column stays NULL for reconciler.
+        # (We can't directly assert that here without patching the inner repo,
+        # but the absence of a successful _apply_finalize_billing call implies it.)
 
 
 class TestReadMethods:

@@ -17,6 +17,7 @@ from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
+from src.api.services.bundle_index import BundleIndexService
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.content_proxy import ContentProxyService
 from src.api.services.email import EmailService, LogEmailService, ResendEmailService
@@ -85,6 +86,7 @@ class ServiceContainer:
     gpu_provisioning_worker: GpuProvisioningWorker | None = None
     orphaned_tunnel_cleanup_worker: OrphanedTunnelCleanupWorker | None = None
     gpu_session_http_client: httpx.AsyncClient | None = None
+    bundle_index: BundleIndexService | None = None
 
 
 _services = ServiceContainer()
@@ -577,7 +579,6 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
 
     # Initialize GPU session stack (requires both Vast.ai + CF to be configured)
     if settings.vastai_configured and settings.cf_configured:
-        from src.api.services.bundle_index import BundleIndexService
         from src.api.services.cloudflare.client import CloudflareTunnelClient
         from src.api.services.vastai.client import VastAIClient
 
@@ -594,19 +595,19 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             zone_id=settings.cf_zone_id,
             tunnel_domain=settings.cf_tunnel_domain,
         )
-        bundle_index = BundleIndexService(
+        _services.bundle_index = BundleIndexService(
             repo_url=settings.ai_bundles_repo_url,
             github_token=settings.ai_bundles_github_token,
             sync_interval_minutes=settings.ai_bundles_sync_interval_minutes,
         )
-        await bundle_index.start()
+        await _services.bundle_index.start()
 
         billing_service_for_worker = BillingService(event_bus=_services.event_bus)
 
         _services.gpu_session_service = GpuSessionService(
             vastai_client=vastai_client,
             cf_client=cf_client,
-            bundle_index=bundle_index,
+            bundle_index=_services.bundle_index,
             session_factory=_services.db_manager.session_factory,
             settings=settings,
             billing_service=billing_service_for_worker,
@@ -617,7 +618,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             session_factory=_services.db_manager.session_factory,
             vastai_client=vastai_client,
             cf_client=cf_client,
-            bundle_index=bundle_index,
+            bundle_index=_services.bundle_index,
             http_client=_services.gpu_session_http_client,
             settings=settings,
             billing_service=billing_service_for_worker,
@@ -648,6 +649,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         Provider.AISHA: AishaGenerationProvider(
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,
+            tunnel_domain=settings.cf_tunnel_domain,
         )
     }
 
@@ -768,6 +770,13 @@ async def shutdown_services() -> None:
 
     if _services.orphaned_tunnel_cleanup_worker is not None:
         await _services.orphaned_tunnel_cleanup_worker.stop()
+
+    # Stop the bundle-index sync loop. Owned by the GPU session stack — its
+    # background asyncio task must be cancelled before the event loop closes
+    # to avoid pending-task warnings on shutdown.
+    if _services.bundle_index is not None:
+        await _services.bundle_index.stop()
+        logger.info("bundle_index.stopped")
 
     if _services.gpu_session_http_client is not None:
         await _services.gpu_session_http_client.aclose()

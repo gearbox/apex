@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from src.api.services.vastai.schemas import VastAIOffer
 from src.core.enums import GpuSessionStatus, ModelType
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
+from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
 
 from ._events import publish_status_event
@@ -122,7 +124,11 @@ def compute_session_durations(session: GpuSession, *, now: datetime) -> SessionD
         end = now
 
     total_seconds = max(0, int((end - start).total_seconds()))
-    paused_seconds = max(0, session.total_paused_seconds)
+    # Defensive cast: total_paused_seconds is NOT NULL DEFAULT 0 in the schema,
+    # so this should always be an int, but `int(... or 0)` keeps the helper
+    # robust against handcrafted in-memory rows in tests and any future column
+    # migration that briefly allows NULL.
+    paused_seconds = max(0, int(session.total_paused_seconds or 0))
     # Clamp against total in case of clock-skew or column drift, so active
     # never goes negative and paused never exceeds wall-clock.
     paused_seconds = min(paused_seconds, total_seconds)
@@ -186,7 +192,6 @@ class GpuSessionService:
         model_type: ModelType,
         bundle_override: str | None = None,
         account_id: UUID,
-        billing_service: BillingService,
     ) -> GpuSession:
         """Create a new GPU session and trigger provisioning.
 
@@ -204,7 +209,7 @@ class GpuSessionService:
            → on persistent failure: destroy any partially-created instance,
              delete tunnel, re-raise
         7. Persist GpuSession row with status='pending' and all populated fields
-           7.5. In same transaction: reserve tokens via billing_service.check_and_reserve
+           7.5. In same transaction: reserve tokens via self._billing_service.check_and_reserve
            → on IntegrityError (race with concurrent start_session):
              destroy instance, delete tunnel, raise SessionAlreadyExistsError
            → on check_and_reserve failure: destroy instance, delete tunnel, re-raise
@@ -247,10 +252,15 @@ class GpuSessionService:
         session_id_short = str(session_id)[:8]
         callback_token = secrets.token_urlsafe(48)
 
-        # Step 1.5: assert sufficient balance BEFORE creating external resources
-        token_cost = self._settings.gpu_session_base_reservation_tokens
+        # Step 1.5: assert sufficient balance BEFORE creating external resources.
+        # The base reservation is derived from the per-minute rate so start-time
+        # and finalize-time calculations can never drift apart if ops changes
+        # billing settings while sessions are running.
+        token_cost = _MIN_BILLABLE_MINUTES * self._settings.gpu_session_tokens_per_minute
         async with self._session_factory() as db:
-            await billing_service.assert_sufficient_balance(account_id, token_cost, session=db)
+            await self._billing_service.assert_sufficient_balance(
+                account_id, token_cost, session=db
+            )
 
         # Step 4: create CF tunnel + DNS
         try:
@@ -372,7 +382,7 @@ class GpuSessionService:
 
             # Step 7.5: billing reservation in the same transaction
             try:
-                await billing_service.check_and_reserve(
+                await self._billing_service.check_and_reserve(
                     account_id,
                     token_cost,
                     session_id,
@@ -894,6 +904,13 @@ class GpuSessionService:
         matches the base reservation. A session running 5m01s is billed as
         6 minutes; the partial second of the sixth minute is fully charged.
 
+        **Ledger-as-authority.** The refund/overage math uses the actual debit
+        amount from the ledger (``get_debit_for_job(session.id).amount``), not
+        a freshly-computed reservation amount. This makes over-refund impossible
+        by construction even if ops changes ``gpu_session_tokens_per_minute``
+        while sessions are running — we can only refund down to zero net charge
+        on what was actually debited.
+
         The base reservation uses ``session_row.id`` as ``job_id`` so that
         full refund-on-failure (``BillingService.refund(job_id=...)``) and the
         single-debit lookup (``get_debit_for_job``) keep working. The overage
@@ -901,6 +918,12 @@ class GpuSessionService:
         session in metadata. This preserves the one-debit-per-job invariant
         on the base reservation while still giving us a complete audit trail
         via the metadata link.
+
+        **Failure semantics.** On success, ``billing_finalized_at`` is stamped
+        on the session row. On failure, it stays NULL and a phase-2 reconciler
+        worker will retry (see ``billing_finalized_at`` column docstring). A
+        single in-line retry with fixed backoff handles transient DB/connection
+        hiccups; persistent failures are handed off to the reconciler.
         """
         account_id = session_row.account_id
         if account_id is None:
@@ -912,60 +935,122 @@ class GpuSessionService:
         # paused_seconds is already separated out for upcoming storage billing.
         durations = compute_session_durations(session_row, now=datetime.now(UTC))
         billable_minutes = billable_minutes_for_active_seconds(durations.active_seconds)
-
         billable_tokens = billable_minutes * self._settings.gpu_session_tokens_per_minute
-        reserved_tokens = self._settings.gpu_session_base_reservation_tokens
 
-        try:
-            async with self._session_factory() as db, db.begin():
-                if billable_tokens > reserved_tokens:
-                    # Overage debit: job_id=None to preserve one-debit-per-job
-                    # on the base reservation. The link to the session lives in
-                    # metadata for reconciliation queries.
-                    await self._billing_service.check_and_reserve(
-                        account_id,
-                        billable_tokens - reserved_tokens,
-                        None,
-                        metadata={
-                            "type": "gpu_session_overage",
-                            "session_id": str(session_row.id),
-                            "model_type": session_row.model_type,
-                            "bundle_name": session_row.bundle_name,
-                            "billable_minutes": billable_minutes,
-                        },
-                        session=db,
-                        product_id=session_row.product_id,
-                        user_id=session_row.user_id,
-                    )
-                    logger.info(
-                        "gpu_session.billing.overage_charged",
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                await self._apply_finalize_billing(
+                    session_row=session_row,
+                    billable_tokens=billable_tokens,
+                    billable_minutes=billable_minutes,
+                )
+                return  # success — billing_finalized_at stamped inside
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning(
+                        "gpu_session.billing.finalization_attempt_failed",
                         session_id=str(session_row.id),
-                        overage_tokens=billable_tokens - reserved_tokens,
-                        billable_minutes=billable_minutes,
+                        attempt=attempt,
+                        error=str(last_exc),
                     )
-                elif billable_tokens < reserved_tokens:
-                    await self._billing_service.partial_refund(
-                        session_row.id,
-                        reserved_tokens - billable_tokens,
-                        description=(
-                            f"GPU session partial refund: "
-                            f"used {billable_minutes}min, reserved 5min minimum"
-                        ),
-                        session=db,
-                        product_id=session_row.product_id,
-                        user_id=session_row.user_id,
-                    )
-                    logger.info(
-                        "gpu_session.billing.partial_refund",
-                        session_id=str(session_row.id),
-                        refund_tokens=reserved_tokens - billable_tokens,
-                        billable_minutes=billable_minutes,
-                    )
-        except Exception:
-            logger.exception(
-                "gpu_session.billing.finalization_failed",
-                session_id=str(session_row.id),
-            )
+                    # Fixed 1s backoff — keeps this synchronous stop path short.
+                    # Anything that doesn't recover in 1s is a bug or persistent
+                    # issue; the reconciler is the right recovery channel.
+                    await asyncio.sleep(1.0)
+
+        # Both attempts failed. Leave billing_finalized_at NULL for the
+        # reconciler to pick up. Log at ERROR level for alerting.
+        logger.error(
+            "gpu_session.billing.finalization_deferred",
+            session_id=str(session_row.id),
+            billable_tokens=billable_tokens,
+            billable_minutes=billable_minutes,
+            error=str(last_exc) if last_exc else "unknown",
+        )
+
+    async def _apply_finalize_billing(
+        self,
+        *,
+        session_row: GpuSession,
+        billable_tokens: int,
+        billable_minutes: int,
+    ) -> None:
+        """One finalization attempt — isolates the transactional work.
+
+        Compares ``billable_tokens`` against the actual debit on the ledger
+        (not a recomputed reservation) and creates an overage debit or partial
+        refund as appropriate. Stamps ``billing_finalized_at`` on success so
+        the reconciler knows to skip this session.
+        """
+        async with self._session_factory() as db, db.begin():
+            repo = BillingRepository(db)
+            debit = await repo.get_debit_for_job(session_row.id)
+            if debit is None:
+                # No base reservation found. This can happen if the reservation
+                # step failed between external resource creation and commit, OR
+                # if an admin manually reversed the debit. Nothing to reconcile.
+                logger.warning(
+                    "gpu_session.billing.no_debit_found",
+                    session_id=str(session_row.id),
+                )
+                await GpuSessionRepository(db).mark_billing_finalized(
+                    session_row.id, datetime.now(UTC)
+                )
+                return
+
+            original_debit = abs(debit.amount)
+
+            if billable_tokens > original_debit:
+                overage = billable_tokens - original_debit
+                # Overage debit: job_id=None to preserve one-debit-per-job on
+                # the base reservation. Link via metadata for reconciliation.
+                await self._billing_service.check_and_reserve(
+                    debit.account_id,
+                    overage,
+                    None,
+                    metadata={
+                        "type": "gpu_session_overage",
+                        "session_id": str(session_row.id),
+                        "model_type": session_row.model_type,
+                        "bundle_name": session_row.bundle_name,
+                        "billable_minutes": billable_minutes,
+                    },
+                    session=db,
+                    product_id=session_row.product_id,
+                    user_id=session_row.user_id,
+                )
+                logger.info(
+                    "gpu_session.billing.overage_charged",
+                    session_id=str(session_row.id),
+                    overage_tokens=overage,
+                    billable_minutes=billable_minutes,
+                    original_debit=original_debit,
+                )
+            elif billable_tokens < original_debit:
+                # Partial refund capped by actual debit. Cannot over-refund
+                # even if rate/reservation settings drifted mid-session.
+                refund_amount = original_debit - billable_tokens
+                await self._billing_service.partial_refund(
+                    session_row.id,
+                    refund_amount,
+                    description=(
+                        f"GPU session partial refund: used {billable_minutes}min at current rate"
+                    ),
+                    session=db,
+                    product_id=session_row.product_id,
+                    user_id=session_row.user_id,
+                )
+                logger.info(
+                    "gpu_session.billing.partial_refund",
+                    session_id=str(session_row.id),
+                    refund_tokens=refund_amount,
+                    billable_minutes=billable_minutes,
+                    original_debit=original_debit,
+                )
+
+            await GpuSessionRepository(db).mark_billing_finalized(session_row.id, datetime.now(UTC))
 
     async def _publish_status_event(
         self,

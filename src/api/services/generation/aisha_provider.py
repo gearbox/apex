@@ -40,9 +40,16 @@ class AishaGenerationProvider:
         self,
         workflow_service: WorkflowService,
         gpu_session_service: GpuSessionService | None,
+        tunnel_domain: str = "",
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
+        # Allowlist suffix for the tunnel hostname. Defense in depth: the write
+        # path (CloudflareTunnelClient.create_session_tunnel) only ever produces
+        # hostnames of the form ``{id_short}.{tunnel_domain}``, but we re-check
+        # at outbound-request time so a corrupted DB row, bad migration, or a
+        # future code path that writes the column can't cause SSRF.
+        self._tunnel_domain = tunnel_domain
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
         """Aisha-specific validation beyond what the enum provides."""
@@ -138,8 +145,33 @@ class AishaGenerationProvider:
             db_job.debit_transaction_id = txn.id
         await session.flush()
 
-        # 2. Build a session-scoped ComfyUI client
-        base_url = f"https://{gpu_session.tunnel_hostname}"
+        # 2. Build a session-scoped ComfyUI client.
+        # SSRF guard: validate the tunnel hostname against the configured domain
+        # before constructing an outbound URL. The write path always produces
+        # hostnames of the form ``{id_short}.{tunnel_domain}``, but a corrupted
+        # row, bad migration, or future code path could produce something else.
+        # We only ever speak HTTPS to our own tunnel domain.
+        hostname = gpu_session.tunnel_hostname or ""
+        expected_suffix = f".{self._tunnel_domain}" if self._tunnel_domain else ""
+        if not expected_suffix or not hostname.endswith(expected_suffix):
+            logger.error(
+                "aisha.tunnel_hostname.allowlist_violation",
+                job_id=str(job_id),
+                gpu_session_id=str(gpu_session.id),
+                tunnel_hostname=hostname,
+                expected_suffix=expected_suffix,
+            )
+            if db_job is not None:
+                db_job.status = JobStatus.FAILED
+                db_job.error_message = "Generation backend session is misconfigured."
+                await session.flush()
+            raise ProviderResponseError(
+                "Your generation session is misconfigured. "
+                "Your tokens have been refunded. "
+                "Please start a new session and try again."
+            )
+
+        base_url = f"https://{hostname}"
         client = ComfyUIClient(base_url)
         try:
             await client.connect()

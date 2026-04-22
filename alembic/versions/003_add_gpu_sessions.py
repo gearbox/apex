@@ -118,6 +118,17 @@ def upgrade() -> None:
         ),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("stopped_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "billing_finalized_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+            comment=(
+                "Set by GpuSessionService._finalize_billing on success. NULL means the "
+                "session has not had its overage/refund applied yet (either still "
+                "pre-stop, or finalize failed). A phase-2 reconciler worker picks up "
+                "rows where status='stopped' AND billing_finalized_at IS NULL."
+            ),
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
 

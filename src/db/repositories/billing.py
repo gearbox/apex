@@ -144,14 +144,25 @@ class BillingRepository:
         await self._session.flush()
         return txn
 
-    async def get_debit_for_job(self, job_id: UUID) -> TokenTransaction | None:
-        """Find the debit transaction for a given job."""
-        result = await self._session.execute(
-            select(TokenTransaction).where(
-                TokenTransaction.job_id == job_id,
-                TokenTransaction.transaction_type == TransactionType.DEBIT.value,
-            )
+    async def get_debit_for_job(
+        self, job_id: UUID, *, for_update: bool = False
+    ) -> TokenTransaction | None:
+        """Find the debit transaction for a given job.
+
+        When ``for_update=True``, acquires a row-level lock on the debit so
+        concurrent partial-refund callers serialize. Required by
+        ``BillingService.partial_refund`` to make the cumulative-refund
+        invariant check (read ``sum_refunds_for_job``, insert REFUND) atomic.
+        Without the lock, two concurrent refunds could both pass the check
+        and together exceed the original debit.
+        """
+        stmt = select(TokenTransaction).where(
+            TokenTransaction.job_id == job_id,
+            TokenTransaction.transaction_type == TransactionType.DEBIT.value,
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def has_refund_for_job(self, job_id: UUID) -> bool:

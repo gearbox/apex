@@ -51,9 +51,13 @@ def _make_provider_with_mocks() -> tuple[AishaGenerationProvider, dict]:
         return_value=_make_active_gpu_session()
     )
 
+    # tunnel_domain matches the mocked hostname suffix so the SSRF allowlist
+    # check passes by default; SSRF-specific tests construct their own provider
+    # with a deliberately-mismatched tunnel_domain.
     provider = AishaGenerationProvider(
         workflow_service=workflow,
         gpu_session_service=gpu_session_service,
+        tunnel_domain="gpu.test",
     )
     return provider, {"workflow": workflow, "gpu_session_service": gpu_session_service}
 
@@ -167,3 +171,158 @@ class TestAishaProviderRouting:
                 token_cost=50,
                 product_id="vex",
             )
+
+
+class TestAishaProviderSSRFGuard:
+    """Round 4 / Issue 1: tunnel_hostname must end with the configured tunnel
+    domain before we make any outbound HTTP request. Defense in depth — the
+    write path always produces hostnames of the form ``{id_short}.{domain}``,
+    but a corrupted DB row or future code path that writes the column could
+    produce something else, and we don't want to make outbound HTTPS calls
+    to attacker-controlled destinations.
+    """
+
+    async def test_rejects_off_domain_hostname(self) -> None:
+        """Hostname ending in attacker.com (not gpu.test) must raise."""
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        # GPU session row whose hostname is OUTSIDE our allowlist. Could happen
+        # via a corrupted column, bad migration, or a hypothetical future bug
+        # that lets attacker-controlled input flow into the column.
+        malicious_session = MagicMock()
+        malicious_session.id = uuid4()
+        malicious_session.tunnel_hostname = "evil.attacker.com"
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=malicious_session)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",  # legitimate domain — hostname must end with .gpu.test
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+
+            with pytest.raises(ProviderResponseError) as exc_info:
+                await provider.submit(
+                    _make_request(),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )
+
+        # Job stamped FAILED + flushed so the orchestrator's refund commit
+        # persists the user-visible failure state.
+        assert db_job.status == JobStatus.FAILED
+        assert "misconfigured" in (db_job.error_message or "").lower()
+        session.flush.assert_awaited()
+
+        # User-facing message must NOT disclose internal infrastructure.
+        msg = str(exc_info.value)
+        assert "ComfyUI" not in msg
+        assert "tunnel" not in msg.lower()
+        assert "attacker.com" not in msg
+        assert "gpu.test" not in msg
+        assert "refunded" in msg.lower()
+
+    async def test_rejects_empty_hostname(self) -> None:
+        """A NULL/empty tunnel_hostname (race or schema corruption) must raise."""
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        broken_session = MagicMock()
+        broken_session.id = uuid4()
+        broken_session.tunnel_hostname = None  # never populated
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=broken_session)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+
+            with pytest.raises(ProviderResponseError):
+                await provider.submit(
+                    _make_request(),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )
+
+    async def test_rejects_suffix_match_attack(self) -> None:
+        """Hostname like 'evil.com-gpu.test' (suffix attack) must be rejected.
+
+        Regression for the classic suffix-confusion bug — naive
+        ``hostname.endswith(domain)`` would pass for ``evil-gpu.test`` if
+        domain were ``gpu.test``. The fix uses ``endswith("." + domain)``
+        which requires the dot separator.
+        """
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        sneaky_session = MagicMock()
+        sneaky_session.id = uuid4()
+        # NOT a subdomain of gpu.test — it's a separate domain that just ends
+        # in the literal characters "gpu.test" without the dot separator.
+        sneaky_session.tunnel_hostname = "evil-gpu.test"
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=sneaky_session)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+
+            with pytest.raises(ProviderResponseError):
+                await provider.submit(
+                    _make_request(),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )

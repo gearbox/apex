@@ -218,6 +218,14 @@ class GpuSession(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    billing_finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "Set by _finalize_billing on success. NULL after stop = a "
+            "phase-2 reconciler worker should retry."
+        ),
+    )
 
     __table_args__ = (
         Index("ix_gpu_sessions_status_product", "status", "product_id"),

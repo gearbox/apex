@@ -283,7 +283,7 @@ class BillingService:
         repo = BillingRepository(session)
 
         # Find original debit
-        debit = await repo.get_debit_for_job(job_id)
+        debit = await repo.get_debit_for_job(job_id, for_update=True)
         if debit is None:
             raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
 
@@ -360,7 +360,11 @@ class BillingService:
 
         repo = BillingRepository(session)
 
-        debit = await repo.get_debit_for_job(job_id)
+        # Lock the debit row so concurrent partial-refund callers serialize.
+        # Without this, two concurrent refunds can both pass the cumulative
+        # invariant check (sum_refunds + amount <= original) and both commit,
+        # producing a cumulative over-refund.
+        debit = await repo.get_debit_for_job(job_id, for_update=True)
         if debit is None:
             raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
 
