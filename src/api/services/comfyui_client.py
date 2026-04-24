@@ -45,6 +45,10 @@ class ComfyUIClient:
         connect_timeout: float = 10.0,
         request_timeout: float = 60.0,
     ) -> None:
+        if not base_url:
+            raise ValueError("base_url cannot be empty")
+        if connect_timeout <= 0 or request_timeout <= 0:
+            raise ValueError("Timeout values must be positive")
         self._base_url = base_url
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout

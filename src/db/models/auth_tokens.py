@@ -85,7 +85,6 @@ class EmailVerificationToken(Base):
     user: Mapped[User] = relationship("User", back_populates="email_verification_tokens")
 
     __table_args__ = (
-        Index("ix_email_verification_tokens_cleanup", "expires_at"),
         Index("ix_email_verification_tokens_user_active", "user_id", "used_at"),
     )
 
@@ -147,7 +146,6 @@ class PasswordResetToken(Base):
     user: Mapped[User] = relationship("User", back_populates="password_reset_tokens")
 
     __table_args__ = (
-        Index("ix_password_reset_tokens_cleanup", "expires_at"),
         Index("ix_password_reset_tokens_user_active", "user_id", "used_at"),
     )
 

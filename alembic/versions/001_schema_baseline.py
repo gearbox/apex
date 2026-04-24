@@ -200,9 +200,6 @@ def upgrade() -> None:
         unique=True,
     )
     op.create_index(
-        "ix_email_verification_tokens_cleanup", "email_verification_tokens", ["expires_at"]
-    )
-    op.create_index(
         "ix_email_verification_tokens_user_active",
         "email_verification_tokens",
         ["user_id", "used_at"],
@@ -242,7 +239,6 @@ def upgrade() -> None:
         ["token_hash"],
         unique=True,
     )
-    op.create_index("ix_password_reset_tokens_cleanup", "password_reset_tokens", ["expires_at"])
     op.create_index(
         "ix_password_reset_tokens_user_active",
         "password_reset_tokens",
@@ -604,7 +600,6 @@ def upgrade() -> None:
     op.create_index(op.f("ix_user_images_user_id"), "user_images", ["user_id"])
     op.create_index(op.f("ix_user_images_expires_at"), "user_images", ["expires_at"])
     op.create_index("ix_user_images_user_created", "user_images", ["user_id", "created_at"])
-    op.create_index("ix_user_images_cleanup", "user_images", ["expires_at"])
     op.create_index(op.f("ix_user_images_product_id"), "user_images", ["product_id"])
 
     # -------------------------------------------------------------------------

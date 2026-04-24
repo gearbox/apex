@@ -62,6 +62,7 @@ class GpuSessionRepository:
             vastai_cost_per_hour_micros: Hourly cost in microdollars.
             vastai_gpu_name: GPU model name from Vast.ai.
             callback_token: Shared secret for Phase 2 GPU → Apex callbacks.
+            account_id: Billing account ID for charging; may be None if not yet determined.
 
         Returns:
             Created and flushed GpuSession instance.

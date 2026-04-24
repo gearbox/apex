@@ -395,7 +395,7 @@ class GpuSessionService:
                     product_id=product_id,
                     user_id=user_id,
                 )
-            except (InsufficientBalanceError, Exception):
+            except Exception:
                 # Balance changed between assert and reserve — clean up external resources
                 await self._destroy_instance_best_effort(instance_id)
                 await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)

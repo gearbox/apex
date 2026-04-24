@@ -8,6 +8,7 @@ contract lives in one place.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import structlog
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
     from src.db.models.gpu_session import GpuSession
 
 logger = structlog.get_logger(__name__)
+
+FIRE_AND_FORGET_TIMEOUT = 5
 
 
 async def publish_status_event(
@@ -38,22 +41,31 @@ async def publish_status_event(
     if event_bus is None:
         return
     try:
-        await event_bus.publish(
-            user_id=session.user_id,
-            event_type=EventType.GPU_SESSION_STATUS_CHANGED,
-            payload=GpuSessionStatusPayload(
-                session_id=session.id,
-                # session.status is already a string (Mapped[str] on the model);
-                # this str() is defensive against enum-typed test mocks.
-                status=str(session.status),
-                previous_status=previous_status,
-                # session.model_type is stored as the enum `.value` already;
-                # use it directly for consistency across all call sites.
-                model_type=session.model_type,
-                bundle_name=session.bundle_name,
-                tunnel_hostname=session.tunnel_hostname,
-                error_message=error_message,
+        await asyncio.wait_for(
+            event_bus.publish(
+                user_id=session.user_id,
+                event_type=EventType.GPU_SESSION_STATUS_CHANGED,
+                payload=GpuSessionStatusPayload(
+                    session_id=session.id,
+                    # session.status is already a string (Mapped[str] on the model);
+                    # this str() is defensive against enum-typed test mocks.
+                    status=str(session.status),
+                    previous_status=previous_status,
+                    # session.model_type is stored as the enum `.value` already;
+                    # use it directly for consistency across all call sites.
+                    model_type=session.model_type,
+                    bundle_name=session.bundle_name,
+                    tunnel_hostname=session.tunnel_hostname,
+                    error_message=error_message,
+                ),
             ),
+            timeout=FIRE_AND_FORGET_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "gpu_session.event_publish_timeout",
+            session_id=str(session.id),
+            timeout=FIRE_AND_FORGET_TIMEOUT,
         )
     except Exception:
         logger.exception("gpu_session.event_publish_failed", session_id=str(session.id))

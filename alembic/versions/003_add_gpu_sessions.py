@@ -99,7 +99,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             "total_paused_seconds",
-            sa.Integer,
+            sa.Integer(),
             nullable=False,
             server_default="0",
             comment="Cumulative paused duration; subtracted from billable time at stop.",
