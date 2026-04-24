@@ -84,9 +84,7 @@ class EmailVerificationToken(Base):
     # Relationship
     user: Mapped[User] = relationship("User", back_populates="email_verification_tokens")
 
-    __table_args__ = (
-        Index("ix_email_verification_tokens_user_active", "user_id", "used_at"),
-    )
+    __table_args__ = (Index("ix_email_verification_tokens_user_active", "user_id", "used_at"),)
 
     @property
     def is_used(self) -> bool:
@@ -145,9 +143,7 @@ class PasswordResetToken(Base):
     # Relationship
     user: Mapped[User] = relationship("User", back_populates="password_reset_tokens")
 
-    __table_args__ = (
-        Index("ix_password_reset_tokens_user_active", "user_id", "used_at"),
-    )
+    __table_args__ = (Index("ix_password_reset_tokens_user_active", "user_id", "used_at"),)
 
     @property
     def is_used(self) -> bool:

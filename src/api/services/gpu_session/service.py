@@ -13,7 +13,6 @@ import msgspec
 import structlog
 from sqlalchemy.exc import IntegrityError
 
-from src.api.services.billing_errors import InsufficientBalanceError
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.vastai.client import VastAIClient

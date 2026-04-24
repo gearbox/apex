@@ -61,7 +61,7 @@ async def publish_status_event(
             ),
             timeout=FIRE_AND_FORGET_TIMEOUT,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "gpu_session.event_publish_timeout",
             session_id=str(session.id),
