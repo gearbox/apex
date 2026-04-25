@@ -3,7 +3,7 @@ name: CI / Deploy Staging
 # =============================================================================
 # Trigger Rules
 # =============================================================================
-# - Every push to `develop` runs full CI + deploys to staging
+# - Every push to `master` runs full CI + deploys to staging
 # - Every PR targeting `main` or `develop` runs CI only (no deploy)
 # - Manual trigger available via GitHub UI (Actions → Run workflow)
 on:
@@ -50,15 +50,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true           # Cache uv's package cache between runs
 
@@ -83,15 +83,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
 
@@ -105,7 +105,7 @@ jobs:
             --tb=short \
             --no-header \
             --cov=src \
-            --cov-report=xml \
+            --cov-report=xml:coverage-unit.xml \
             --cov-report=term-missing \
             --cov-fail-under=60
         env:
@@ -117,7 +117,7 @@ jobs:
         if: always()                   # Upload even if tests fail
         with:
           name: unit-coverage
-          path: coverage.xml
+          path: coverage-unit.xml
           retention-days: 7
 
   # ---------------------------------------------------------------------------
@@ -146,15 +146,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
 
@@ -174,7 +174,7 @@ jobs:
             --tb=short \
             --no-header \
             --cov=src \
-            --cov-report=xml \
+            --cov-report=xml:coverage-integration.xml \
             --cov-report=term-missing
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://apex_test:apex_test@localhost:5432/apex_test
@@ -186,15 +186,48 @@ jobs:
           R2_BUCKET_NAME: apex-test
 
       - name: Upload integration coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: integration-coverage
-          path: coverage.xml
+          path: coverage-integration.xml
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Job 4: Build & Push Docker Image
+  # Job 4: SonarQube Analysis
+  # Runs after both test jobs so it can merge both coverage reports
+  # ---------------------------------------------------------------------------
+  sonarqube:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    if: always() && !cancelled()      # Run even if tests fail, to get partial coverage
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+
+      - name: Download unit coverage report
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: unit-coverage
+          path: .
+
+      - name: Download integration coverage report
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: integration-coverage
+          path: .
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v7.1.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Build & Push Docker Image
   # Only runs on `master` branch (not PRs), after tests pass
   # ---------------------------------------------------------------------------
   build-and-push:
@@ -217,14 +250,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
 
       # Speeds up multi-platform builds significantly
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4.0.0
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -233,7 +266,7 @@ jobs:
       # Generates image tags and labels from git metadata
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@v6.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -247,7 +280,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.1.0
         with:
           context: .
           file: Dockerfile
@@ -263,7 +296,7 @@ jobs:
             BUILD_DATE=${{ github.event.repository.updated_at }}
 
   # ---------------------------------------------------------------------------
-  # Job 5: Deploy to Staging (Portainer webhook)
+  # Job 6: Deploy to Staging (Portainer webhook)
   # Triggers Portainer to pull the new :staging image and redeploy
   # ---------------------------------------------------------------------------
   deploy-staging:
