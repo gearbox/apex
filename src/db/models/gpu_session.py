@@ -226,6 +226,18 @@ class GpuSession(Base):
             "phase-2 reconciler worker should retry."
         ),
     )
+    billing_finalization_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        comment=(
+            "Number of times the billing reconciler has attempted to finalize "
+            "this session. Bumped each sweep when finalization fails. Used to "
+            "trigger ops alerts after a quarantine threshold without mutating "
+            "billing_finalized_at (the session must remain reconcilable once "
+            "the underlying issue is fixed)."
+        ),
+    )
 
     __table_args__ = (
         Index("ix_gpu_sessions_status_product", "status", "product_id"),

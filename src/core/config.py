@@ -186,6 +186,50 @@ class Settings(BaseSettings):
         description="Max sessions processed concurrently per provisioning worker sweep",
     )
 
+    # --- Billing Finalization Reconciler ---
+    billing_reconciler_interval_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description=(
+            "How often the billing reconciler scans for sessions where "
+            "billing_finalized_at IS NULL AND status='stopped'. Shorter than "
+            "the orphan cleanup interval (default 60min) because a stuck "
+            "billing finalization means a user is potentially over- or "
+            "under-charged until reconciled."
+        ),
+    )
+    billing_reconciler_grace_period_minutes: int = Field(
+        default=2,
+        ge=1,
+        le=30,
+        description=(
+            "Sessions whose stopped_at is younger than this are skipped. "
+            "Avoids racing with the in-line _finalize_billing retry path "
+            "which can take up to ~2s but may be longer under load."
+        ),
+    )
+    billing_reconciler_quarantine_threshold: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "After this many failed reconciliation attempts, the worker logs "
+            "at ERROR with a quarantine flag for ops alerting. The session "
+            "row is NOT mutated — billing_finalized_at stays NULL so the "
+            "worker keeps retrying after the underlying issue is fixed."
+        ),
+    )
+    billing_reconciler_max_per_sweep: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description=(
+            "Maximum sessions processed per sweep. Caps wall-clock time of "
+            "any single sweep so a backlog can't starve the worker loop."
+        ),
+    )
+
     # --- GPU Session Billing ---
     gpu_session_tokens_per_minute: int = Field(
         default=100,
