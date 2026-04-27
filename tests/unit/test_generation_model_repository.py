@@ -125,3 +125,65 @@ class TestSetEnabled:
         # updated_at should have been set to a new datetime
         assert model.updated_at != original_updated_at
         mock_session.flush.assert_awaited_once()
+
+
+class TestListEnabledForProduct:
+    async def test_filters_by_product_allowed_models(self, mock_session: AsyncMock) -> None:
+        """list_enabled_for_product returns only models allowed by product config."""
+        from unittest.mock import MagicMock
+
+        from src.core.enums import ModelType
+        from src.core.product import ProductConfig
+
+        allowed_key = ModelType.AISHA_IMAGE.value
+        disallowed_key = "grok-imagine-image"
+
+        m_allowed = _make_model(model_key=allowed_key, provider="aisha")
+        m_disallowed = _make_model(model_key=disallowed_key, provider="grok")
+
+        result_mock = MagicMock()
+        result_mock.scalars.return_value.all.return_value = [m_allowed, m_disallowed]
+        mock_session.execute = AsyncMock(return_value=result_mock)
+
+        product_config = MagicMock(spec=ProductConfig)
+        product_config.is_model_allowed.side_effect = lambda mt: mt == ModelType.AISHA_IMAGE
+
+        repo = GenerationModelRepository(mock_session)
+        result = await repo.list_enabled_for_product(product_config)
+
+        assert m_allowed in result
+        assert m_disallowed not in result
+
+    async def test_skips_models_with_unknown_model_key(self, mock_session: AsyncMock) -> None:
+        """list_enabled_for_product skips rows where model_key is not a valid ModelType."""
+        from unittest.mock import MagicMock
+
+        from src.core.product import ProductConfig
+
+        unknown = _make_model(model_key="completely-unknown-key", provider="aisha")
+
+        result_mock = MagicMock()
+        result_mock.scalars.return_value.all.return_value = [unknown]
+        mock_session.execute = AsyncMock(return_value=result_mock)
+
+        product_config = MagicMock(spec=ProductConfig)
+        product_config.is_model_allowed.return_value = True
+
+        repo = GenerationModelRepository(mock_session)
+        result = await repo.list_enabled_for_product(product_config)
+
+        assert result == []
+
+
+class TestGetByModelKey:
+    async def test_is_alias_for_get_by_key(self, mock_session: AsyncMock) -> None:
+        """get_by_model_key delegates to get_by_key."""
+        model = _make_model("aisha")
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = model
+        mock_session.execute = AsyncMock(return_value=result_mock)
+
+        repo = GenerationModelRepository(mock_session)
+        result = await repo.get_by_model_key("aisha")
+
+        assert result is model

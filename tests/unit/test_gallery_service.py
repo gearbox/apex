@@ -232,6 +232,68 @@ class TestAspectRatioPassthrough:
         assert job.aspect_ratio == "4:3"
 
 
+class TestResolveCoverV2V:
+    def test_v2v_uses_source_output(self) -> None:
+        svc = _make_service()
+        source_id = uuid4()
+        job = _make_job(generation_type="v2v", source_output_id=source_id)
+        cover_data = CoverData(output_count=1)
+        cover_url, _ = svc._resolve_cover(job, cover_data)
+        assert cover_url == f"/v1/content/outputs/{source_id}"
+
+    def test_v2v_falls_back_to_thumbnail(self) -> None:
+        svc = _make_service()
+        thumb_id = uuid4()
+        job = _make_job(generation_type="v2v")
+        cover_data = CoverData(thumbnail_output_id=thumb_id, output_count=1)
+        cover_url, _ = svc._resolve_cover(job, cover_data)
+        assert cover_url == f"/v1/content/outputs/{thumb_id}"
+
+    def test_t2i_fallback_when_no_cover_output(self) -> None:
+        svc = _make_service()
+        job = _make_job(generation_type="t2i")
+        cover_data = CoverData(output_count=0)
+        cover_url, video_url = svc._resolve_cover(job, cover_data)
+        assert cover_url == "/v1/content/outputs/unknown"
+        assert video_url is None
+
+    def test_i2i_thumbnail_fallback(self) -> None:
+        svc = _make_service()
+        thumb_id = uuid4()
+        job = _make_job(generation_type="i2i")
+        cover_data = CoverData(thumbnail_output_id=thumb_id, output_count=1)
+        cover_url, _ = svc._resolve_cover(job, cover_data)
+        assert cover_url == f"/v1/content/outputs/{thumb_id}"
+
+
+class TestBuildOutputItem:
+    def test_image_output_no_thumbnail(self) -> None:
+        svc = _make_service()
+        output = MagicMock()
+        output.id = uuid4()
+        output.content_type = "image/jpeg"
+        output.output_index = 0
+        output.width = 512
+        output.height = 512
+        item = svc._build_output_item(output)
+        assert item.thumbnail_url is None
+        assert item.media_type == OutputMediaType.IMAGE
+
+    def test_video_output_with_thumbnail(self) -> None:
+        svc = _make_service()
+        output = MagicMock()
+        output.id = uuid4()
+        output.content_type = "video/mp4"
+        output.output_index = 0
+        output.width = 512
+        output.height = 512
+        thumbnail = MagicMock()
+        thumbnail.id = uuid4()
+        item = svc._build_output_item(output, thumbnail)
+        assert item.thumbnail_url == f"/v1/content/outputs/{thumbnail.id}"
+        assert item.media_type == OutputMediaType.VIDEO
+
+
 class TestListGallery:
     async def test_returns_empty_page_when_no_jobs(self) -> None:
         mock_session = AsyncMock()
@@ -247,6 +309,44 @@ class TestListGallery:
         assert page.has_more is False
         assert page.next_cursor is None
 
+    async def test_returns_page_with_jobs_and_cursor(self) -> None:
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+        job = _make_job(generation_type="t2i")
+        cover_id = uuid4()
+        # Return limit+1 jobs to trigger has_more=True
+        mock_repo.list_gallery_jobs.return_value = [job, job]
+        mock_repo.batch_cover_data.return_value = {job.id: CoverData(cover_output_id=cover_id)}
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            page = await svc.list_gallery(uuid4(), "vex", session=mock_session, limit=1)
+
+        assert len(page.items) == 1
+        assert page.has_more is True
+        assert page.next_cursor is not None
+
+    async def test_uses_cursor_to_decode(self) -> None:
+        from src.api.schemas.pagination import encode_cursor
+
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+        mock_repo.list_gallery_jobs.return_value = []
+        mock_repo.batch_cover_data.return_value = {}
+        cursor = encode_cursor(datetime.now(UTC), uuid4())
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            page = await svc.list_gallery(
+                uuid4(), "vex", session=mock_session, limit=20, cursor=cursor
+            )
+
+        assert page.items == []
+        mock_repo.list_gallery_jobs.assert_awaited_once()
+        call_kwargs = mock_repo.list_gallery_jobs.call_args
+        # Verify cursor was decoded and passed through
+        assert call_kwargs.kwargs.get("cursor_ts") is not None or call_kwargs.args
+
 
 class TestGetGalleryDetail:
     async def test_returns_none_for_missing_job(self) -> None:
@@ -259,3 +359,47 @@ class TestGetGalleryDetail:
             result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is None
+
+    async def test_returns_detail_for_found_job_with_source_output(self) -> None:
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+        source_output_id = uuid4()
+        job = _make_job(generation_type="t2i", source_output_id=source_output_id)
+        job.outputs = []
+        mock_repo.get_gallery_job.return_value = job
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
+
+        assert result is not None
+        assert result.input_image_url == f"/v1/content/outputs/{source_output_id}"
+
+    async def test_returns_detail_for_found_job_with_input_image(self) -> None:
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+        image_id = uuid4()
+        job = _make_job(generation_type="t2i", input_image_id=image_id)
+        job.outputs = []
+        mock_repo.get_gallery_job.return_value = job
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
+
+        assert result is not None
+        assert result.input_image_url == f"/v1/content/uploads/{image_id}"
+
+    async def test_returns_detail_with_no_input(self) -> None:
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+        job = _make_job(generation_type="t2i")
+        job.outputs = []
+        mock_repo.get_gallery_job.return_value = job
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
+
+        assert result is not None
+        assert result.input_image_url is None

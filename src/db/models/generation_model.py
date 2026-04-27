@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import Boolean, DateTime, Index, String, Text, text
@@ -63,7 +63,7 @@ class GenerationModel(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
-        onupdate=datetime.now(UTC),
+        onupdate=text("clock_timestamp()"),
     )
 
     __table_args__ = (

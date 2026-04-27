@@ -106,8 +106,7 @@ jobs:
             --no-header \
             --cov=src \
             --cov-report=xml:coverage-unit.xml \
-            --cov-report=term-missing \
-            --cov-fail-under=60
+            --cov-report=term-missing
         env:
           # Minimal env needed to satisfy Settings validation
           JWT_SECRET_KEY: "ci-unit-test-secret-key-32-bytes-long"

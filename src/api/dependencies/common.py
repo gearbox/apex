@@ -97,7 +97,7 @@ _services = ServiceContainer()
 # -----------------------------------------------------------------------------
 
 
-async def get_comfyui_client() -> ComfyUIClient:
+def get_comfyui_client() -> ComfyUIClient:
     """Provide ComfyUI client instance.
 
     Returns:
@@ -111,7 +111,7 @@ async def get_comfyui_client() -> ComfyUIClient:
     return _services.comfyui_client
 
 
-async def get_workflow_service() -> WorkflowService:
+def get_workflow_service() -> WorkflowService:
     """Provide workflow service instance.
 
     Returns:
@@ -130,7 +130,7 @@ async def get_workflow_service() -> WorkflowService:
 # -----------------------------------------------------------------------------
 
 
-async def get_r2_storage() -> R2StorageService:
+def get_r2_storage() -> R2StorageService:
     """Provide R2 storage service instance.
 
     Returns:
@@ -157,7 +157,7 @@ async def get_db_session() -> AsyncGenerator[AsyncSession]:
         yield session
 
 
-async def get_user_content(
+def get_user_content(
     r2_storage: R2StorageService,
     session: AsyncSession,
     settings: Settings,
@@ -217,7 +217,7 @@ def get_password_service() -> PasswordService:
     return _services.password_service
 
 
-async def get_auth_service(session: AsyncSession) -> AuthService:
+def get_auth_service(session: AsyncSession) -> AuthService:
     """Provide auth service for request scope.
 
     Args:
@@ -236,7 +236,7 @@ async def get_auth_service(session: AsyncSession) -> AuthService:
     )
 
 
-async def get_user_service(session: AsyncSession) -> UserService:
+def get_user_service(session: AsyncSession) -> UserService:
     """Provide user service for request scope.
 
     Args:
@@ -279,7 +279,7 @@ def get_email_verification_service() -> EmailVerificationService:
 # -----------------------------------------------------------------------------
 
 
-async def get_grok_job_service() -> GrokJobService | None:
+def get_grok_job_service() -> GrokJobService | None:
     """Provide Grok job service (None if not configured)."""
     return _services.grok_job_service
 
@@ -363,7 +363,7 @@ def get_health_service() -> HealthService:
     return _services.health_service
 
 
-async def get_gpu_session_service() -> GpuSessionService:
+def get_gpu_session_service() -> GpuSessionService:
     """Provide GpuSessionService singleton (503 if GPU stack not configured)."""
     if _services.gpu_session_service is None:
         from litestar.exceptions import ServiceUnavailableException
@@ -825,18 +825,18 @@ async def shutdown_services() -> None:
 # Dependency providers for Litestar
 dependencies = {
     # Authentication services
-    "auth_service": Provide(get_auth_service),
-    "user_service": Provide(get_user_service),
+    "auth_service": Provide(get_auth_service, sync_to_thread=False),
+    "user_service": Provide(get_user_service, sync_to_thread=False),
     # Core services
-    "comfyui_client": Provide(get_comfyui_client),
-    "workflow_service": Provide(get_workflow_service),
+    "comfyui_client": Provide(get_comfyui_client, sync_to_thread=False),
+    "workflow_service": Provide(get_workflow_service, sync_to_thread=False),
     "settings": Provide(provide_settings, sync_to_thread=False),
     # Storage services
-    "r2_storage": Provide(get_r2_storage),
+    "r2_storage": Provide(get_r2_storage, sync_to_thread=False),
     "session": Provide(get_db_session),
-    "user_content": Provide(get_user_content),
+    "user_content": Provide(get_user_content, sync_to_thread=False),
     # Grok services
-    "grok_job_service": Provide(get_grok_job_service),
+    "grok_job_service": Provide(get_grok_job_service, sync_to_thread=False),
     # Billing services
     "billing_service": Provide(get_billing_service, sync_to_thread=False),
     "pricing_service": Provide(get_pricing_service, sync_to_thread=False),
@@ -863,5 +863,5 @@ dependencies = {
     # Health
     "health_service": Provide(get_health_service, sync_to_thread=False),
     # GPU sessions
-    "gpu_session_service": Provide(get_gpu_session_service),
+    "gpu_session_service": Provide(get_gpu_session_service, sync_to_thread=False),
 }

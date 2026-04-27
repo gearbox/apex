@@ -138,7 +138,7 @@ disable_error_code = ["import-untyped"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-v"
+addopts = "-v --cov=src --cov-report=term-missing --cov-report=xml"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::pytest.PytestCollectionWarning",
@@ -152,6 +152,8 @@ source = ["src"]
 branch = true
 
 [tool.coverage.report]
+fail_under = 80
+show_missing = true
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

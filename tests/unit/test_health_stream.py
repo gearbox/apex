@@ -56,3 +56,104 @@ class TestPollingFallback:
                 break
 
         assert events[0] == {"comment": "error"}
+
+
+class TestRedisStream:
+    """Tests for _redis_stream via health_sse_generator with redis_url set."""
+
+    async def test_yields_snapshot_event_from_redis_message(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.api.services.health.stream import _redis_stream
+
+        mock_pubsub = AsyncMock()
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.aclose = AsyncMock()
+
+        message = {"type": "message", "data": b'{"status":"healthy"}'}
+        mock_pubsub.get_message = AsyncMock(return_value=message)
+
+        mock_client = MagicMock()
+        mock_client.pubsub.return_value = mock_pubsub
+
+        events: list[dict[str, str]] = []
+        with patch("src.api.services.health.stream.get_redis_client", return_value=mock_client):
+            async for event in _redis_stream():
+                events.append(event)
+                if events:
+                    break
+
+        assert events[0]["event"] == "health.snapshot"
+        assert "healthy" in events[0]["data"]
+
+    async def test_yields_keepalive_when_no_message(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.api.services.health.stream import _redis_stream
+
+        mock_pubsub = AsyncMock()
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.aclose = AsyncMock()
+        # Returns None — no message
+        mock_pubsub.get_message = AsyncMock(return_value=None)
+
+        mock_client = MagicMock()
+        mock_client.pubsub.return_value = mock_pubsub
+
+        events: list[dict[str, str]] = []
+        with patch("src.api.services.health.stream.get_redis_client", return_value=mock_client):
+            async for event in _redis_stream():
+                events.append(event)
+                if events:
+                    break
+
+        assert events[0] == {"comment": "keepalive"}
+
+    async def test_yields_keepalive_on_timeout(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.api.services.health.stream import _redis_stream
+
+        mock_pubsub = AsyncMock()
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.aclose = AsyncMock()
+        mock_pubsub.get_message = AsyncMock(side_effect=asyncio.TimeoutError)
+
+        mock_client = MagicMock()
+        mock_client.pubsub.return_value = mock_pubsub
+
+        events: list[dict[str, str]] = []
+        with patch("src.api.services.health.stream.get_redis_client", return_value=mock_client):
+            async for event in _redis_stream():
+                events.append(event)
+                if events:
+                    break
+
+        assert events[0] == {"comment": "keepalive"}
+
+    async def test_health_sse_generator_routes_to_redis_when_url_set(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_service = AsyncMock()
+        mock_settings = MagicMock()
+        mock_settings.redis_url = "redis://localhost"
+
+        async def _fake_redis_stream() -> object:
+            yield {"event": "health.snapshot", "data": "{}"}
+
+        events: list[dict[str, str]] = []
+        with patch(
+            "src.api.services.health.stream._redis_stream",
+            return_value=_fake_redis_stream(),
+        ):
+            async for event in health_sse_generator(
+                health_service=mock_service, settings=mock_settings
+            ):
+                events.append(event)
+                break
+
+        assert events[0]["event"] == "health.snapshot"
