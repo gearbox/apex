@@ -25,6 +25,7 @@ from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
 from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
+from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
 from src.api.services.gpu_session.service import GpuSessionService
@@ -85,6 +86,7 @@ class ServiceContainer:
     gpu_session_service: GpuSessionService | None = None
     gpu_provisioning_worker: GpuProvisioningWorker | None = None
     orphaned_tunnel_cleanup_worker: OrphanedTunnelCleanupWorker | None = None
+    billing_reconciler_worker: BillingReconcilerWorker | None = None
     gpu_session_http_client: httpx.AsyncClient | None = None
     bundle_index: BundleIndexService | None = None
 
@@ -633,6 +635,14 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         )
         await _services.orphaned_tunnel_cleanup_worker.start()
 
+        assert _services.gpu_session_service is not None  # set immediately above
+        _services.billing_reconciler_worker = BillingReconcilerWorker(
+            session_factory=_services.db_manager.session_factory,
+            gpu_session_service=_services.gpu_session_service,
+            settings=settings,
+        )
+        await _services.billing_reconciler_worker.start()
+
         logger.info("gpu_session_stack.initialized")
     else:
         logger.warning(
@@ -767,6 +777,9 @@ async def shutdown_services() -> None:
     # Stop GPU session workers before closing their dependencies
     if _services.gpu_provisioning_worker is not None:
         await _services.gpu_provisioning_worker.stop()
+
+    if _services.billing_reconciler_worker is not None:
+        await _services.billing_reconciler_worker.stop()
 
     if _services.orphaned_tunnel_cleanup_worker is not None:
         await _services.orphaned_tunnel_cleanup_worker.stop()

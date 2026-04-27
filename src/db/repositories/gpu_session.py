@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import GpuSessionStatus
@@ -308,6 +308,52 @@ class GpuSessionRepository:
             .values(total_paused_seconds=GpuSession.total_paused_seconds + seconds)
         )
         await self._session.flush()
+
+    async def list_pending_billing_finalization(
+        self,
+        *,
+        grace_cutoff: datetime,
+        limit: int,
+    ) -> Sequence[GpuSession]:
+        """List stopped sessions whose billing has not been finalized.
+
+        Filters:
+        - status = 'stopped' (terminal — the only status _finalize_billing applies to)
+        - billing_finalized_at IS NULL (not yet successfully finalized)
+        - stopped_at < grace_cutoff (skip in-flight in-line retries)
+
+        Ordered oldest-first so the longest-stuck sessions reconcile first
+        on each sweep. Bounded by ``limit`` to cap per-sweep work.
+        """
+        result = await self._session.execute(
+            select(GpuSession)
+            .where(
+                GpuSession.status == GpuSessionStatus.stopped,
+                GpuSession.billing_finalized_at.is_(None),
+                # NULL stopped_at skips the grace period — include unconditionally
+                # (stopped sessions should always have stopped_at, but be defensive).
+                or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
+            )
+            .order_by(GpuSession.stopped_at.asc())
+            .limit(limit)
+        )
+        return result.scalars().all()
+
+    async def increment_billing_finalization_attempts(self, session_id: UUID) -> int:
+        """Bump the attempt counter and return the new value.
+
+        Called by the reconciler after each failed sweep to track repeat
+        failures for quarantine alerting.
+        """
+        result = await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(billing_finalization_attempts=GpuSession.billing_finalization_attempts + 1)
+            .returning(GpuSession.billing_finalization_attempts)
+        )
+        new_count = result.scalar_one()
+        await self._session.flush()
+        return new_count
 
     async def mark_billing_finalized(self, session_id: UUID, finalized_at: datetime) -> None:
         """Stamp ``billing_finalized_at`` to mark a session as billing-complete.

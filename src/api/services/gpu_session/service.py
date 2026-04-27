@@ -969,6 +969,26 @@ class GpuSessionService:
             error=str(last_exc) if last_exc else "unknown",
         )
 
+    async def finalize_billing_for_session(self, session_row: GpuSession) -> bool:
+        """Public wrapper around ``_finalize_billing`` for the reconciler worker.
+
+        Runs the same in-line retry logic as the stop path, then re-checks
+        the row's ``billing_finalized_at`` column to determine whether the
+        attempt succeeded. Returns True on success, False otherwise.
+
+        Encapsulating the success check here (rather than in the worker)
+        keeps the worker's loop linear and avoids exposing the private
+        ``_finalize_billing`` method as part of any cross-component contract.
+
+        The re-fetch costs one extra query per candidate, paid for by
+        removing the worker's identical re-query — net zero query count.
+        """
+        await self._finalize_billing(session_row)
+        async with self._session_factory() as db:
+            repo = GpuSessionRepository(db)
+            refreshed = await repo.get_by_id(session_row.id)
+        return refreshed is not None and refreshed.billing_finalized_at is not None
+
     async def _apply_finalize_billing(
         self,
         *,
