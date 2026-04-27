@@ -8,6 +8,7 @@ including guards, dependency injection, and route handlers.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -536,3 +537,191 @@ class TestUnifiedJobControllerAuth:
         with TestClient(app=app) as client:
             resp = client.get(f"/v1/jobs/{uuid4()}")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for uncovered guard branches
+# ---------------------------------------------------------------------------
+
+
+class TestAuthGuardUncoveredBranches:
+    """Cover remaining branches of auth_guard and optional_auth_guard."""
+
+    def _make_connection(
+        self,
+        jwt_service: JWTService | None = None,
+        authorization: str | None = None,
+        state_product_id: str | None = None,
+    ) -> Any:
+        from unittest.mock import MagicMock
+
+        state: dict[str, Any] = {}
+        if state_product_id is not None:
+            state["product_id"] = state_product_id
+
+        conn = MagicMock()
+        conn.headers.get.return_value = authorization
+        conn.state.__getitem__ = lambda self, k: state[k]
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.state.get = state.get
+
+        conn.app.state.get.return_value = None if jwt_service is None else jwt_service
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_authenticated_user_user_property_returns_user(self) -> None:
+        from unittest.mock import MagicMock
+
+        from src.api.security.guards import AuthenticatedUser
+
+        mock_user = MagicMock()
+        auth_user = AuthenticatedUser(user_id=uuid4(), user=mock_user)
+        assert auth_user.user is mock_user
+
+    @pytest.mark.asyncio
+    async def test_auth_guard_raises_runtime_when_jwt_service_missing(self) -> None:
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        conn = self._make_connection(jwt_service=None, authorization="Bearer sometoken")
+
+        with pytest.raises(RuntimeError, match="JWT service not configured"):
+            await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+    @pytest.mark.asyncio
+    async def test_auth_guard_raises_on_invalid_uuid_in_sub(self, jwt_service: JWTService) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from litestar.exceptions import NotAuthorizedException
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        fake_payload = MagicMock()
+        fake_payload.sub = "not-a-uuid"
+        fake_payload.product_id = None
+
+        conn = self._make_connection(jwt_service=jwt_service, authorization="Bearer tok")
+        with (
+            patch.object(jwt_service, "decode_access_token", return_value=fake_payload),
+            pytest.raises(NotAuthorizedException, match="Invalid token subject"),
+        ):
+            await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+    @pytest.mark.asyncio
+    async def test_auth_guard_raises_on_product_mismatch(
+        self, jwt_service: JWTService, test_user_id: UUID
+    ) -> None:
+        from litestar.exceptions import NotAuthorizedException
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        token, _ = jwt_service.create_access_token(test_user_id, product_id="vex")
+        conn = self._make_connection(
+            jwt_service=jwt_service,
+            authorization=f"Bearer {token}",
+            state_product_id="synthara",
+        )
+        with pytest.raises(NotAuthorizedException, match="different product"):
+            await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+
+class TestOptionalAuthGuard:
+    """Tests for optional_auth_guard."""
+
+    def _make_connection(
+        self,
+        jwt_service: JWTService | None = None,
+        authorization: str | None = None,
+    ) -> Any:
+        from unittest.mock import MagicMock
+
+        state: dict[str, Any] = {}
+        conn = MagicMock()
+        conn.headers.get.return_value = authorization
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.state.__getitem__ = lambda self, k: state[k]
+        conn.state.get = state.get
+
+        conn.app.state.get.return_value = jwt_service
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_sets_none_when_no_token(self) -> None:
+        from unittest.mock import MagicMock
+
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        state: dict[str, Any] = {}
+        conn = MagicMock()
+        conn.headers.get.return_value = None
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert state["user_id"] is None
+        assert state["auth_user"] is None
+
+    @pytest.mark.asyncio
+    async def test_sets_none_when_jwt_service_missing(self) -> None:
+        from unittest.mock import MagicMock
+
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        state: dict[str, Any] = {}
+        conn = MagicMock()
+        conn.headers.get.return_value = "Bearer sometoken"
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.app.state.get.return_value = None
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert state["user_id"] is None
+        assert state["auth_user"] is None
+
+    @pytest.mark.asyncio
+    async def test_sets_user_id_when_valid_token(self, jwt_service: JWTService) -> None:
+        from unittest.mock import MagicMock
+
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid)
+        state: dict[str, Any] = {}
+        conn = MagicMock()
+        conn.headers.get.return_value = f"Bearer {token}"
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.app.state.get.return_value = jwt_service
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert state["user_id"] == uid
+        assert isinstance(state["auth_user"], AuthenticatedUser)
+        assert state["auth_user"].user_id == uid
+
+    @pytest.mark.asyncio
+    async def test_sets_none_when_invalid_token(self, jwt_service: JWTService) -> None:
+        from unittest.mock import MagicMock
+
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        state: dict[str, Any] = {}
+        conn = MagicMock()
+        conn.headers.get.return_value = "Bearer bad.token.here"
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.app.state.get.return_value = jwt_service
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert state["user_id"] is None
+        assert state["auth_user"] is None

@@ -24,4 +24,6 @@ class StopConfirmation(msgspec.Struct, kw_only=True):
     vastai_gpu_name: str | None
     vastai_cost_per_hour_micros: int | None
     active_duration_seconds: int
+    paused_duration_seconds: int
+    """Cumulative time the session spent paused. Exposed for upcoming storage billing."""
     message: str

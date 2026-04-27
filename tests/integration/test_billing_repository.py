@@ -337,11 +337,11 @@ async def test_get_transaction_history_filter_by_type(
         created_by=user.id,
         product_id="vex",
     )
-    credits = await billing_repo.get_transaction_history(
+    account_credits = await billing_repo.get_transaction_history(
         account.id, transaction_type=TransactionType.CREDIT.value
     )
-    assert len(list(credits)) == 1
-    assert all(t.transaction_type == TransactionType.CREDIT.value for t in credits)
+    assert len(list(account_credits)) == 1
+    assert all(t.transaction_type == TransactionType.CREDIT.value for t in account_credits)
 
 
 # ---------------------------------------------------------------------------

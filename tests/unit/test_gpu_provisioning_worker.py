@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import httpx
 
+from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
@@ -139,6 +140,8 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "bundle_index": MagicMock(spec=BundleIndexService),
         "http_client": AsyncMock(spec=httpx.AsyncClient),
         "settings": _make_settings(),
+        "billing_service": None,
+        "event_bus": None,
     } | overrides
     worker = GpuProvisioningWorker(
         session_factory=mocks["session_factory"],
@@ -147,6 +150,8 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         bundle_index=mocks["bundle_index"],
         http_client=mocks["http_client"],
         settings=mocks["settings"],
+        billing_service=mocks["billing_service"],
+        event_bus=mocks["event_bus"],
     )
     return worker, mocks
 
@@ -704,7 +709,7 @@ class TestEnvReconstruction:
         session = _make_gpu_session(status=GpuSessionStatus.pending)
         mocks["vastai_client"].destroy_instance = AsyncMock()
         mocks["cf_client"].get_tunnel_token.return_value = "tok"
-        bundle = _make_bundle_mapping()  # comfyui_port = 18188
+        bundle = _make_bundle_mapping()
         mocks["bundle_index"].resolve_bundle_override.return_value = bundle
         mocks["vastai_client"].search_offers.return_value = [_make_offer()]
         mocks["vastai_client"].create_instance.return_value = 12345
@@ -932,3 +937,126 @@ class TestMarkFailed:
         stored = mock_repo.update_status.await_args.kwargs["error_message"]
         assert len(stored) == 500
         assert stored == "x" * 500
+
+    async def test_mark_failed_issues_full_refund_via_billing_service(self) -> None:
+        """billing_service.refund must be called after the 'failed' transition."""
+        billing_mock = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing_mock)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="instance vanished")
+
+        billing_mock.refund.assert_awaited_once()
+        call_kwargs = billing_mock.refund.await_args.kwargs
+        assert call_kwargs["job_id"] == session.id
+        assert call_kwargs["product_id"] == session.product_id
+        assert call_kwargs["user_id"] == session.user_id
+
+    async def test_mark_failed_refund_failure_does_not_propagate(self) -> None:
+        """A billing refund error must never surface from _mark_failed (fire-and-forget)."""
+        billing_mock = AsyncMock()
+        billing_mock.refund.side_effect = Exception("billing down")
+        worker, _ = _make_worker(billing_service=billing_mock)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="timeout")  # must not raise
+
+        mock_repo.update_status.assert_awaited()  # status transition still completed
+
+    async def test_mark_failed_publishes_status_event(self) -> None:
+        """GPU_SESSION_STATUS_CHANGED must be published with accurate payload."""
+        event_bus_mock = AsyncMock()
+        worker, _ = _make_worker(event_bus=event_bus_mock)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="boot timeout")
+
+        event_bus_mock.publish.assert_awaited_once()
+        kwargs = event_bus_mock.publish.call_args.kwargs
+        assert kwargs["event_type"] == EventType.GPU_SESSION_STATUS_CHANGED
+        assert kwargs["user_id"] == session.user_id
+        payload = kwargs["payload"]
+        assert isinstance(payload, GpuSessionStatusPayload)
+        assert payload.session_id == session.id
+        assert payload.status == GpuSessionStatus.failed.value
+        assert payload.previous_status == GpuSessionStatus.pending.value
+        assert payload.error_message == "boot timeout"
+        assert payload.model_type == session.model_type
+        assert payload.bundle_name == session.bundle_name
+
+    async def test_mark_failed_truncates_error_message_in_status_event(self) -> None:
+        """Long reasons must be truncated to 500 chars in the payload."""
+        event_bus_mock = AsyncMock()
+        worker, _ = _make_worker(event_bus=event_bus_mock)
+        long_reason = "x" * 600  # 100 chars over the 500-char cap
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason=long_reason)
+
+        event_bus_mock.publish.assert_awaited_once()
+        payload = event_bus_mock.publish.call_args.kwargs["payload"]
+        assert isinstance(payload, GpuSessionStatusPayload)
+        assert payload.error_message is not None
+        assert len(payload.error_message) == 500
+        assert payload.error_message == "x" * 500
+
+    async def test_mark_failed_event_publish_failure_does_not_propagate(self) -> None:
+        """An SSE publish error inside _mark_failed must never surface."""
+        event_bus_mock = AsyncMock()
+        event_bus_mock.publish.side_effect = Exception("redis down")
+        worker, _ = _make_worker(event_bus=event_bus_mock)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test")  # must not raise
+
+        mock_repo.update_status.assert_awaited()

@@ -1,0 +1,71 @@
+"""Shared SSE event publishing for GPU session lifecycle.
+
+Both GpuSessionService and GpuProvisioningWorker emit the same
+GPU_SESSION_STATUS_CHANGED event shape at every transition. This helper
+centralizes the payload construction and error-swallowing so the event
+contract lives in one place.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+import structlog
+
+from src.api.schemas.events import EventType, GpuSessionStatusPayload
+
+if TYPE_CHECKING:
+    from src.api.services.event_bus import EventBus
+    from src.db.models.gpu_session import GpuSession
+
+logger = structlog.get_logger(__name__)
+
+FIRE_AND_FORGET_TIMEOUT_SECS = 5
+
+
+async def publish_status_event(
+    event_bus: EventBus | None,
+    session: GpuSession,
+    *,
+    previous_status: str,
+    error_message: str | None = None,
+) -> None:
+    """Fire-and-forget SSE publish. Failures are logged but never propagate.
+
+    A None ``event_bus`` is a legitimate "no-op" case (the GPU stack can run
+    without SSE when Redis isn't configured). Any other exception is caught
+    and logged so that an unhealthy EventBus never breaks a user-visible
+    state transition.
+    """
+    if event_bus is None:
+        return
+    try:
+        await asyncio.wait_for(
+            event_bus.publish(
+                user_id=session.user_id,
+                event_type=EventType.GPU_SESSION_STATUS_CHANGED,
+                payload=GpuSessionStatusPayload(
+                    session_id=session.id,
+                    # session.status is already a string (Mapped[str] on the model);
+                    # this str() is defensive against enum-typed test mocks.
+                    status=str(session.status),
+                    previous_status=previous_status,
+                    # session.model_type is stored as the enum `.value` already;
+                    # use it directly for consistency across all call sites.
+                    model_type=session.model_type,
+                    bundle_name=session.bundle_name,
+                    tunnel_hostname=session.tunnel_hostname,
+                    error_message=error_message,
+                ),
+            ),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "gpu_session.event_publish_timeout",
+            session_id=str(session.id),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except Exception:
+        logger.exception("gpu_session.event_publish_failed", session_id=str(session.id))

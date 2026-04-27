@@ -16,6 +16,7 @@ class EventType(StrEnum):
     JOB_PROGRESS = "job.progress"
     BALANCE_UPDATED = "balance.updated"
     SYSTEM_NOTIFICATION = "system.notification"
+    GPU_SESSION_STATUS_CHANGED = "gpu_session.status_changed"
 
 
 # --- Payloads ---
@@ -47,6 +48,18 @@ class SystemNotificationPayload(msgspec.Struct, kw_only=True):
     title: str
     message: str
     expires_at: datetime | None = None
+
+
+class GpuSessionStatusPayload(msgspec.Struct, kw_only=True):
+    """Emitted on every GPU session state transition."""
+
+    session_id: UUID
+    status: str
+    previous_status: str
+    model_type: str
+    bundle_name: str
+    tunnel_hostname: str | None = None
+    error_message: str | None = None
 
 
 # --- Envelope ---

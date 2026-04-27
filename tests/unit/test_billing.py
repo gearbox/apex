@@ -219,6 +219,149 @@ class TestRefund:
                 )
 
 
+class TestPartialRefund:
+    async def test_successful_partial_refund(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        """Partial refund under original debit succeeds and creates a REFUND txn."""
+        job_id = uuid4()
+        account_id = uuid4()
+        debit = _make_transaction(account_id=account_id, amount=-500)
+        refund_txn = _make_transaction(account_id=account_id, amount=200)
+        account = _make_account(account_id=account_id)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_debit_for_job = AsyncMock(return_value=debit)
+            repo.sum_refunds_for_job = AsyncMock(return_value=0)
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=75)
+            repo.create_transaction = AsyncMock(return_value=refund_txn)
+
+            result = await billing_service.partial_refund(
+                job_id,
+                amount=200,
+                description="GPU session partial refund: used 3min, reserved 5min minimum",
+                session=mock_session,
+                product_id="vex",
+                user_id=uuid4(),
+            )
+
+        assert result.amount == 200
+        call_kwargs = repo.create_transaction.call_args.kwargs
+        assert call_kwargs["amount"] == 200
+        assert call_kwargs["balance_after"] == 275  # 75 + 200
+        assert call_kwargs["transaction_type"] == TransactionType.REFUND.value
+        assert call_kwargs["job_id"] == job_id
+
+    async def test_rejects_zero_or_negative_amount(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        """Amount must be > 0; zero or negative is a caller bug."""
+        for bad_amount in (0, -1, -100):
+            with pytest.raises(RefundNotEligibleError, match="must be positive"):
+                await billing_service.partial_refund(
+                    uuid4(),
+                    amount=bad_amount,
+                    description="test",
+                    session=mock_session,
+                    product_id="vex",
+                )
+
+    async def test_rejects_amount_exceeding_debit_on_first_call(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        """With no prior refunds, requesting > original debit fails."""
+        debit = _make_transaction(amount=-500)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_debit_for_job = AsyncMock(return_value=debit)
+            repo.sum_refunds_for_job = AsyncMock(return_value=0)
+
+            with pytest.raises(RefundNotEligibleError, match="would exceed original debit"):
+                await billing_service.partial_refund(
+                    uuid4(),
+                    amount=501,
+                    description="test",
+                    session=mock_session,
+                    product_id="vex",
+                )
+
+    async def test_rejects_cumulative_refund_exceeding_original_debit(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        """Key contract: already_refunded + amount MUST NOT exceed original debit.
+
+        Simulates: original debit = 500, prior refund = 300, request = 250.
+        300 + 250 = 550 > 500 → reject.
+        """
+        debit = _make_transaction(amount=-500)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_debit_for_job = AsyncMock(return_value=debit)
+            repo.sum_refunds_for_job = AsyncMock(return_value=300)  # prior refunds
+
+            with pytest.raises(RefundNotEligibleError) as exc_info:
+                await billing_service.partial_refund(
+                    uuid4(),
+                    amount=250,
+                    description="test",
+                    session=mock_session,
+                    product_id="vex",
+                )
+            # Verify the error message includes the relevant numbers
+            msg = str(exc_info.value)
+            assert "already_refunded=300" in msg
+            assert "requested=250" in msg
+            assert "original=500" in msg
+
+    async def test_allows_cumulative_refund_up_to_original_debit(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        """Boundary: already_refunded + amount == original_debit must succeed."""
+        account_id = uuid4()
+        debit = _make_transaction(account_id=account_id, amount=-500)
+        refund_txn = _make_transaction(account_id=account_id, amount=200)
+        account = _make_account(account_id=account_id)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_debit_for_job = AsyncMock(return_value=debit)
+            repo.sum_refunds_for_job = AsyncMock(return_value=300)  # prior refunds
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=100)
+            repo.create_transaction = AsyncMock(return_value=refund_txn)
+
+            # 300 + 200 == 500, exactly at the boundary → allowed
+            await billing_service.partial_refund(
+                uuid4(),
+                amount=200,
+                description="final partial refund",
+                session=mock_session,
+                product_id="vex",
+            )
+
+        repo.create_transaction.assert_awaited_once()
+
+    async def test_raises_when_no_debit_exists(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_debit_for_job = AsyncMock(return_value=None)
+
+            with pytest.raises(RefundNotEligibleError, match="No debit transaction found"):
+                await billing_service.partial_refund(
+                    uuid4(),
+                    amount=100,
+                    description="test",
+                    session=mock_session,
+                    product_id="vex",
+                )
+
+
 # ---------------------------------------------------------------------------
 # PricingService.get_price
 # ---------------------------------------------------------------------------

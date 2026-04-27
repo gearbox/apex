@@ -180,3 +180,53 @@ class TestCleanupOnce:
 
             mock_repo.cleanup.assert_awaited_once_with(retention_days=7)
             mock_session.commit.assert_awaited_once()
+
+    async def test_cleanup_once_zero_deleted_no_log(self) -> None:
+        """_cleanup_once does not log when no rows are deleted."""
+        mock_db_manager = MagicMock()
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_db_manager.session.return_value = mock_session
+
+        worker = _make_worker(db_manager=mock_db_manager)
+
+        with patch("src.api.services.health.worker.HealthSnapshotRepository") as mock_repo_cls:
+            mock_repo = AsyncMock()
+            mock_repo.cleanup = AsyncMock(return_value=0)
+            mock_repo_cls.return_value = mock_repo
+
+            await worker._cleanup_once()
+
+        mock_session.commit.assert_awaited_once()
+
+
+class TestPersistSnapshot:
+    async def test_inserts_snapshot_to_db(self) -> None:
+        mock_db_manager = MagicMock()
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_db_manager.session.return_value = mock_session
+
+        worker = _make_worker(db_manager=mock_db_manager)
+        detailed = {"status": "healthy", "checked_at": "2026-01-01T00:00:00"}
+
+        with patch("src.api.services.health.worker.HealthSnapshotRepository") as mock_repo_cls:
+            mock_repo = AsyncMock()
+            mock_repo_cls.return_value = mock_repo
+
+            await worker._persist_snapshot(detailed)
+
+        mock_repo.insert.assert_awaited_once()
+        mock_session.commit.assert_awaited_once()
+
+
+class TestStopNotRunning:
+    async def test_stop_when_not_running_is_noop(self) -> None:
+        """stop() returns immediately when _running is False."""
+        worker = _make_worker()
+        assert worker._running is False
+        # Should not raise or do anything
+        await worker.stop()
+        assert worker._task is None

@@ -15,6 +15,7 @@ from litestar.status_codes import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
     HTTP_403_FORBIDDEN,
+    HTTP_409_CONFLICT,
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
@@ -33,6 +34,7 @@ from src.api.services.generation.service import (
     ModelNotAllowedError,
     ProviderUnavailableError,
 )
+from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.core.product import ProductConfig
 
@@ -110,6 +112,18 @@ class UnifiedGenerationController(Controller):
             )
             await session.commit()
             return Response(content=result, status_code=HTTP_201_CREATED)
+
+        except NoActiveSessionError as exc:
+            await idempotency_service.fail(record_id, session=session)
+            logger.info("generation.no_active_gpu_session", error=str(exc))
+            return Response(
+                content=ErrorEnvelope(
+                    error="no_active_gpu_session",
+                    message=str(exc),
+                    status_code=HTTP_409_CONFLICT,
+                ),
+                status_code=HTTP_409_CONFLICT,
+            )
 
         except RateLimitExceededError as exc:
             await idempotency_service.fail(record_id, session=session)

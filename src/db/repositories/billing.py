@@ -144,14 +144,25 @@ class BillingRepository:
         await self._session.flush()
         return txn
 
-    async def get_debit_for_job(self, job_id: UUID) -> TokenTransaction | None:
-        """Find the debit transaction for a given job."""
-        result = await self._session.execute(
-            select(TokenTransaction).where(
-                TokenTransaction.job_id == job_id,
-                TokenTransaction.transaction_type == TransactionType.DEBIT.value,
-            )
+    async def get_debit_for_job(
+        self, job_id: UUID, *, for_update: bool = False
+    ) -> TokenTransaction | None:
+        """Find the debit transaction for a given job.
+
+        When ``for_update=True``, acquires a row-level lock on the debit so
+        concurrent partial-refund callers serialize. Required by
+        ``BillingService.partial_refund`` to make the cumulative-refund
+        invariant check (read ``sum_refunds_for_job``, insert REFUND) atomic.
+        Without the lock, two concurrent refunds could both pass the check
+        and together exceed the original debit.
+        """
+        stmt = select(TokenTransaction).where(
+            TokenTransaction.job_id == job_id,
+            TokenTransaction.transaction_type == TransactionType.DEBIT.value,
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def has_refund_for_job(self, job_id: UUID) -> bool:
@@ -163,6 +174,21 @@ class BillingRepository:
             )
         )
         return int(result.scalar_one()) > 0
+
+    async def sum_refunds_for_job(self, job_id: UUID) -> int:
+        """Sum refund token amounts for a job.
+
+        Returns the total positive amount already refunded (0 if none).
+        Used by ``partial_refund`` to enforce the invariant that cumulative
+        refunds never exceed the original debit.
+        """
+        result = await self._session.execute(
+            select(func.coalesce(func.sum(TokenTransaction.amount), 0)).where(
+                TokenTransaction.job_id == job_id,
+                TokenTransaction.transaction_type == TransactionType.REFUND.value,
+            )
+        )
+        return int(result.scalar_one())
 
     async def get_transaction_history(
         self,

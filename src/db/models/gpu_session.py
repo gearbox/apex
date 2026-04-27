@@ -153,6 +153,21 @@ class GpuSession(Base):
         comment="Set on first provision attempt (or reset on retry) — used for timeout calculation",
     )
 
+    # Billing (set on session creation; used for debit/refund at stop time)
+    account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("token_accounts.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+        comment="Billing account captured at start; used for finalization at stop.",
+    )
+    total_paused_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        comment="Cumulative paused duration; subtracted from billable time at stop.",
+    )
+
     # Pause/resume tracking
     paused_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
@@ -202,6 +217,14 @@ class GpuSession(Base):
     stopped_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    billing_finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "Set by _finalize_billing on success. NULL after stop = a "
+            "phase-2 reconciler worker should retry."
+        ),
     )
 
     __table_args__ = (

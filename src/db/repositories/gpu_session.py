@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +14,6 @@ from src.db.models.gpu_session import GpuSession
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from uuid import UUID
 
 _TERMINAL_STATUSES = (GpuSessionStatus.stopped, GpuSessionStatus.failed)
 
@@ -42,6 +42,7 @@ class GpuSessionRepository:
         vastai_cost_per_hour_micros: int | None = None,
         vastai_gpu_name: str | None = None,
         callback_token: str | None = None,
+        account_id: UUID | None = None,
     ) -> GpuSession:
         """Create and persist a new GPU session row.
 
@@ -61,6 +62,7 @@ class GpuSessionRepository:
             vastai_cost_per_hour_micros: Hourly cost in microdollars.
             vastai_gpu_name: GPU model name from Vast.ai.
             callback_token: Shared secret for Phase 2 GPU → Apex callbacks.
+            account_id: Billing account ID for charging; may be None if not yet determined.
 
         Returns:
             Created and flushed GpuSession instance.
@@ -81,6 +83,7 @@ class GpuSessionRepository:
             vastai_cost_per_hour_micros=vastai_cost_per_hour_micros,
             vastai_gpu_name=vastai_gpu_name,
             callback_token=callback_token,
+            account_id=account_id,
         )
         self._session.add(session_row)
         await self._session.flush()
@@ -294,6 +297,30 @@ class GpuSessionRepository:
                 vastai_gpu_name=vastai_gpu_name,
                 provisioning_started_at=provisioning_started_at,
             )
+        )
+        await self._session.flush()
+
+    async def add_paused_seconds(self, session_id: UUID, seconds: int) -> None:
+        """Add to the cumulative total_paused_seconds counter."""
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(total_paused_seconds=GpuSession.total_paused_seconds + seconds)
+        )
+        await self._session.flush()
+
+    async def mark_billing_finalized(self, session_id: UUID, finalized_at: datetime) -> None:
+        """Stamp ``billing_finalized_at`` to mark a session as billing-complete.
+
+        Called by ``GpuSessionService._finalize_billing`` on a successful
+        overage debit / partial refund / no-op. A NULL value indicates the
+        billing finalization has not run (or failed both retries) and a
+        reconciler worker should pick it up.
+        """
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(billing_finalized_at=finalized_at)
         )
         await self._session.flush()
 

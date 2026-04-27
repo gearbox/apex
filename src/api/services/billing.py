@@ -191,7 +191,7 @@ class BillingService:
         self,
         account_id: UUID,
         token_cost: int,
-        job_id: UUID,
+        job_id: UUID | None,
         *,
         metadata: dict[str, Any],
         session: AsyncSession,
@@ -199,6 +199,12 @@ class BillingService:
         user_id: UUID | None = None,
     ) -> TokenTransaction:
         """Atomically check balance and create a debit transaction.
+
+        ``job_id`` may be None for billing events that are not 1:1 with a
+        generation job (e.g. GPU session overage debits, where the parent
+        session is recorded in ``metadata`` instead). The base reservation
+        for a GPU session keeps using the session id as ``job_id`` so that
+        full refund-on-failure via ``refund(job_id=...)`` continues to work.
 
         1. SELECT token_accounts WHERE id = account_id FOR UPDATE
         2. Compute live balance from SUM(amount)
@@ -242,7 +248,7 @@ class BillingService:
         logger.info(
             "billing.debit_processed",
             account_id=str(account_id),
-            job_id=str(job_id),
+            job_id=str(job_id) if job_id is not None else None,
             amount=token_cost,
             balance_after=new_balance,
             provider=metadata.get("provider"),
@@ -277,7 +283,7 @@ class BillingService:
         repo = BillingRepository(session)
 
         # Find original debit
-        debit = await repo.get_debit_for_job(job_id)
+        debit = await repo.get_debit_for_job(job_id, for_update=True)
         if debit is None:
             raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
 
@@ -319,6 +325,92 @@ class BillingService:
             account_id=debit.account_id,
             balance=new_balance,
             delta=refund_amount,
+            transaction_type=TransactionType.REFUND.value,
+        )
+
+        return txn
+
+    async def partial_refund(
+        self,
+        job_id: UUID,
+        amount: int,
+        *,
+        description: str,
+        session: AsyncSession,
+        product_id: str,
+        user_id: UUID | None = None,
+    ) -> TokenTransaction:
+        """Create a partial refund for a variable-cost resource.
+
+        Unlike refund(), which refunds the full original debit, this creates
+        a REFUND transaction for exactly ``amount`` tokens. Used for GPU sessions
+        where the user may have been overcharged relative to actual usage.
+
+        Cumulative invariant: the sum of all partial refunds for a given job
+        must never exceed the original debit. This is enforced by querying
+        existing refunds on the same job_id and rejecting requests that would
+        overflow.
+
+        Raises:
+            RefundNotEligibleError: If no debit found, ``amount`` is <= 0, or
+                ``already_refunded + amount > original_amount``.
+        """
+        if amount <= 0:
+            raise RefundNotEligibleError(f"Partial refund amount must be positive, got {amount}")
+
+        repo = BillingRepository(session)
+
+        # Lock the debit row so concurrent partial-refund callers serialize.
+        # Without this, two concurrent refunds can both pass the cumulative
+        # invariant check (sum_refunds + amount <= original) and both commit,
+        # producing a cumulative over-refund.
+        debit = await repo.get_debit_for_job(job_id, for_update=True)
+        if debit is None:
+            raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
+
+        original_amount = abs(debit.amount)
+        already_refunded = await repo.sum_refunds_for_job(job_id)
+        if already_refunded + amount > original_amount:
+            raise RefundNotEligibleError(
+                f"Partial refund would exceed original debit for job {job_id}: "
+                f"already_refunded={already_refunded}, requested={amount}, "
+                f"original={original_amount}"
+            )
+
+        account = await repo.get_account_for_update(debit.account_id)
+        if account is None:
+            raise RefundNotEligibleError("Account not found for partial refund")
+
+        balance = await repo.get_balance(debit.account_id)
+        new_balance = balance + amount
+
+        txn = await repo.create_transaction(
+            id=new_id(),
+            account_id=debit.account_id,
+            transaction_type=TransactionType.REFUND.value,
+            amount=amount,
+            balance_after=new_balance,
+            job_id=job_id,
+            description=description,
+            product_id=product_id,
+        )
+
+        logger.info(
+            "billing.partial_refund_processed",
+            account_id=str(debit.account_id),
+            job_id=str(job_id),
+            amount=amount,
+            balance_after=new_balance,
+            already_refunded_before=already_refunded,
+            original_debit=original_amount,
+            reason=description,
+        )
+
+        await self._publish_balance_update(
+            user_ids=[user_id] if user_id is not None else [],
+            account_id=debit.account_id,
+            balance=new_balance,
+            delta=amount,
             transaction_type=TransactionType.REFUND.value,
         )
 

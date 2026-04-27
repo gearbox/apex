@@ -652,3 +652,83 @@ class TestForceRevokeRole:
                     product_id="vex",
                     session=mock_session,
                 )
+
+
+# ---------------------------------------------------------------------------
+# list_admins / list_admins_with_permissions
+# ---------------------------------------------------------------------------
+
+
+class TestListAdmins:
+    async def test_list_admins_returns_users(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        users = [_make_user(role="admin"), _make_user(role="superadmin")]
+
+        with patch("src.api.services.admin_management.UserRepository") as MockUserRepo:
+            MockUserRepo.return_value.list_users_by_roles = AsyncMock(return_value=users)
+            result = await service.list_admins("vex", session=mock_session)
+
+        assert result == users
+
+    async def test_list_admins_with_permissions_empty(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        with patch("src.api.services.admin_management.UserRepository") as MockUserRepo:
+            MockUserRepo.return_value.list_users_by_roles = AsyncMock(return_value=[])
+            result = await service.list_admins_with_permissions("vex", session=mock_session)
+
+        assert result == []
+
+    async def test_list_admins_with_permissions_returns_pairs(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        user1 = _make_user(role="admin")
+        user2 = _make_user(role="superadmin")
+        perms_map = {user1.id: ["read_users"], user2.id: []}
+
+        with (
+            patch("src.api.services.admin_management.UserRepository") as MockUserRepo,
+            patch("src.api.services.admin_management.AdminRepository") as MockAdminRepo,
+        ):
+            MockUserRepo.return_value.list_users_by_roles = AsyncMock(return_value=[user1, user2])
+            MockAdminRepo.return_value.get_permissions_batch = AsyncMock(return_value=perms_map)
+
+            result = await service.list_admins_with_permissions("vex", session=mock_session)
+
+        assert len(result) == 2
+        assert result[0] == (user1, ["read_users"])
+        assert result[1] == (user2, [])
+
+
+# ---------------------------------------------------------------------------
+# get_user_permissions / get_audit_log
+# ---------------------------------------------------------------------------
+
+
+class TestGetUserPermissionsAndAuditLog:
+    async def test_get_user_permissions(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        grant1 = MagicMock()
+        grant1.permission = "read_users"
+        grant2 = MagicMock()
+        grant2.permission = "manage_billing"
+
+        with patch("src.api.services.admin_management.AdminRepository") as MockAdminRepo:
+            MockAdminRepo.return_value.get_permissions = AsyncMock(return_value=[grant1, grant2])
+            result = await service.get_user_permissions(uuid4(), "vex", session=mock_session)
+
+        assert result == ["read_users", "manage_billing"]
+
+    async def test_get_audit_log(
+        self, service: AdminManagementService, mock_session: AsyncMock
+    ) -> None:
+        entry1 = MagicMock()
+        entry2 = MagicMock()
+
+        with patch("src.api.services.admin_management.AdminRepository") as MockAdminRepo:
+            MockAdminRepo.return_value.get_audit_log = AsyncMock(return_value=[entry1, entry2])
+            result = await service.get_audit_log("vex", session=mock_session)
+
+        assert result == [entry1, entry2]

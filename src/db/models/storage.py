@@ -82,7 +82,7 @@ class UserImage(Base):
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        index=True,  # For cleanup queries
+        index=True,
     )
 
     # Relationships
@@ -96,10 +96,7 @@ class UserImage(Base):
         foreign_keys="GenerationOutput.input_image_id",
     )
 
-    __table_args__ = (
-        Index("ix_user_images_user_created", "user_id", "created_at"),
-        Index("ix_user_images_cleanup", "expires_at"),
-    )
+    __table_args__ = (Index("ix_user_images_user_created", "user_id", "created_at"),)
 
     def __repr__(self) -> str:
         return f"<UserImage {self.id} user={self.user_id} key={self.storage_key}>"

@@ -233,8 +233,14 @@ class TokenTransaction(Base):
     balance_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
     job_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("generation_jobs.id"),
         nullable=True,
+        comment=(
+            "Optional link to the billed resource. Historically a generation_jobs.id, "
+            "but Phase 1F extended the ledger to also link GPU session reservations "
+            "(gpu_sessions.id) and may carry NULL for non-resource-linked events like "
+            "GPU session overage debits (parent session recorded in metadata). "
+            "No FK constraint — the resource table is discriminated by metadata['type']."
+        ),
     )
     payment_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),

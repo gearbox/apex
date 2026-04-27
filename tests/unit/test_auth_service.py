@@ -424,3 +424,167 @@ class TestAuthServiceLogout:
 
         assert count == 5
         mock_repository.revoke_all_user_tokens.assert_called_once_with(user_id)
+
+
+class TestAuthServiceMissingBranches:
+    """Cover remaining uncovered branches."""
+
+    @pytest.mark.asyncio
+    async def test_register_with_session_creates_billing_account(
+        self, mock_repository: AsyncMock, jwt_service: JWTService, password_service: PasswordService
+    ) -> None:
+        from unittest.mock import patch
+
+        from src.api.services.auth import AuthService
+
+        session = AsyncMock()
+        mock_repository.email_exists.return_value = False
+        mock_user = MagicMock(spec=User)
+        mock_user.id = uuid4()
+        mock_repository.create_user.return_value = mock_user
+        mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
+
+        svc = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            session=session,
+        )
+
+        with patch("src.api.services.auth.BillingRepository") as billing_repo_cls:
+            billing_repo = AsyncMock()
+            billing_repo_cls.return_value = billing_repo
+
+            await svc.register(email="new@example.com", password="pw", product_id="vex")
+
+        billing_repo.create_personal_account.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_register_with_email_verification_sends_email(
+        self, mock_repository: AsyncMock, jwt_service: JWTService, password_service: PasswordService
+    ) -> None:
+        from src.api.services.auth import AuthService
+        from src.api.services.email_verification import EmailVerificationService
+
+        session = AsyncMock()
+        session.add = MagicMock()
+        mock_repository.email_exists.return_value = False
+        mock_user = MagicMock(spec=User)
+        mock_user.id = uuid4()
+        mock_repository.create_user.return_value = mock_user
+        mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
+
+        email_verification = AsyncMock(spec=EmailVerificationService)
+        email_verification.send_verification_email = AsyncMock()
+
+        svc = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            session=session,
+            email_verification_service=email_verification,
+        )
+
+        await svc.register(email="new@example.com", password="pw", product_id="vex")
+
+        email_verification.send_verification_email.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_register_email_verification_failure_is_non_blocking(
+        self, mock_repository: AsyncMock, jwt_service: JWTService, password_service: PasswordService
+    ) -> None:
+        """Email verification failure during register should not raise."""
+        from src.api.services.auth import AuthService
+        from src.api.services.email_verification import EmailVerificationService
+
+        session = AsyncMock()
+        session.add = MagicMock()
+        mock_repository.email_exists.return_value = False
+        mock_user = MagicMock(spec=User)
+        mock_user.id = uuid4()
+        mock_repository.create_user.return_value = mock_user
+        mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
+
+        email_verification = AsyncMock(spec=EmailVerificationService)
+        email_verification.send_verification_email = AsyncMock(side_effect=Exception("smtp down"))
+
+        svc = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            session=session,
+            email_verification_service=email_verification,
+        )
+
+        # Should not raise even though email fails
+        user, tokens = await svc.register(email="new@example.com", password="pw", product_id="vex")
+        assert user is mock_user
+
+    @pytest.mark.asyncio
+    async def test_login_triggers_password_rehash(
+        self, mock_repository: AsyncMock, jwt_service: JWTService, password_service: PasswordService
+    ) -> None:
+        from src.api.services.auth import AuthService
+
+        password = "correct"
+        password_hash = password_service.hash(password)
+
+        mock_user = MagicMock(spec=User)
+        mock_user.id = uuid4()
+        mock_user.password_hash = password_hash
+        mock_repository.get_active_user_by_email.return_value = mock_user
+        mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
+
+        svc = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+        )
+
+        # Make needs_rehash return True
+        svc._password.needs_rehash = MagicMock(return_value=True)
+
+        await svc.login(email="user@example.com", password=password, product_id="vex")
+
+        mock_repository.update_user.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_raises_when_token_not_found(
+        self, mock_repository: AsyncMock, jwt_service: JWTService, password_service: PasswordService
+    ) -> None:
+        from src.api.services.auth import AuthService, InvalidRefreshTokenError
+
+        mock_repository.get_refresh_token_by_hash.return_value = None
+
+        svc = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+        )
+
+        with pytest.raises(InvalidRefreshTokenError, match="Invalid refresh token"):
+            await svc.refresh_tokens("nonexistent_token")
+
+    @pytest.mark.asyncio
+    async def test_refresh_raises_user_inactive(
+        self, mock_repository: AsyncMock, jwt_service: JWTService, password_service: PasswordService
+    ) -> None:
+        from src.api.services.auth import AuthService, UserInactiveError
+
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.is_revoked = False
+        mock_token.expires_at = datetime.now(UTC) + timedelta(days=1)
+        mock_token.user_id = uuid4()
+        mock_token.family_id = uuid4()
+        mock_token.product_id = "vex"
+        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_active_user.return_value = None  # user not found/inactive
+
+        svc = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+        )
+
+        with pytest.raises(UserInactiveError):
+            await svc.refresh_tokens("valid_token_inactive_user")

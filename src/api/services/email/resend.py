@@ -42,7 +42,8 @@ class ResendEmailService(EmailService):
         from_name: str = "Apex",
     ) -> None:
         try:
-            import resend  # noqa: F401 — validate at construction, not import time
+            import resend  # noqa: F401
+            # validate at construction, not import time
         except ImportError as exc:
             raise ImportError(
                 "The 'resend' package is required for ResendEmailService. "

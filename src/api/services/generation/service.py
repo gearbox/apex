@@ -40,6 +40,15 @@ class ModelNotAllowedError(GenerationError):
     """Raised when the model is not available on the current product."""
 
 
+class ProviderResponseError(GenerationError):
+    """Raised when a generation backend returned a malformed or unexpected response.
+
+    The user-facing message on this exception MUST NOT name the specific backend
+    (ComfyUI, Grok, etc.) — it propagates directly into API responses. Backend
+    detail belongs in structured logs only.
+    """
+
+
 class GenerationService:
     """Orchestrates generation requests across providers.
 
