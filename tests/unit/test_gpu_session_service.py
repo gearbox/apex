@@ -2287,6 +2287,67 @@ class TestFinalizeBillingRetry:
         # but the absence of a successful _apply_finalize_billing call implies it.)
 
 
+class TestFinalizeBillingForSession:
+    """Public wrapper used by the BillingReconcilerWorker.
+
+    Wraps ``_finalize_billing`` and re-checks the row's ``billing_finalized_at``
+    column to return an explicit success/failure bool. Encapsulates the
+    success check so the worker doesn't need to peek into private state or
+    re-query independently.
+    """
+
+    async def test_returns_true_when_billing_finalized_at_set_after_call(self) -> None:
+        service, mocks = _make_service()
+        session = _make_gpu_session(user_id=uuid4())
+        refreshed = _make_gpu_session(billing_finalized_at=datetime.now(UTC))
+
+        with (
+            patch.object(service, "_finalize_billing", new=AsyncMock()),
+            patch(_REPO_PATH) as MockRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = refreshed
+
+            result = await service.finalize_billing_for_session(session)
+
+        assert result is True
+
+    async def test_returns_false_when_column_still_null_after_call(self) -> None:
+        service, _ = _make_service()
+        session = _make_gpu_session(user_id=uuid4())
+        refreshed = _make_gpu_session(billing_finalized_at=None)
+
+        with (
+            patch.object(service, "_finalize_billing", new=AsyncMock()),
+            patch(_REPO_PATH) as MockRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = refreshed
+
+            result = await service.finalize_billing_for_session(session)
+
+        assert result is False
+
+    async def test_returns_false_when_session_disappeared(self) -> None:
+        """If get_by_id returns None (deleted between calls), report failure."""
+        service, _ = _make_service()
+        session = _make_gpu_session(user_id=uuid4())
+
+        with (
+            patch.object(service, "_finalize_billing", new=AsyncMock()),
+            patch(_REPO_PATH) as MockRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = None
+
+            result = await service.finalize_billing_for_session(session)
+
+        assert result is False
+
+
 class TestReadMethods:
     async def test_get_session_returns_owned_session(self) -> None:
         service, _ = _make_service()

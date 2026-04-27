@@ -142,29 +142,44 @@ async def test_list_pending_billing_finalization_respects_grace_period(
     assert session.id not in ids
 
 
-async def test_list_pending_billing_finalization_limit_caps_results(
+async def test_list_pending_billing_finalization_limit_caps_results_oldest_first(
     db_session: AsyncSession,
     make_user: UserFactory,
 ) -> None:
-    """The limit parameter caps the number of returned rows."""
-    user = await make_user(email=f"reconciler-limit-{uuid4().hex[:6]}@example.com")
-    old_stopped_at = datetime.now(UTC) - timedelta(hours=2)
-    grace_cutoff = datetime.now(UTC) - timedelta(minutes=2)
+    """The limit parameter caps results AND preserves oldest-first ordering on stopped_at.
 
-    for _ in range(5):
+    The worker relies on oldest-first ordering so the longest-stuck sessions
+    reconcile first on each sweep. Asserting it here locks the contract in.
+    """
+    user = await make_user(email=f"reconciler-limit-{uuid4().hex[:6]}@example.com")
+    now = datetime.now(UTC)
+    grace_cutoff = now - timedelta(minutes=2)
+
+    # Five sessions with distinct stopped_at, all before the grace cutoff.
+    stopped_times = [
+        now - timedelta(hours=5),
+        now - timedelta(hours=4),
+        now - timedelta(hours=3),
+        now - timedelta(hours=2),
+        now - timedelta(hours=1),
+    ]
+    for stopped_at in stopped_times:
         await _create_stopped_session(
             db_session,
             user_id=user.id,
-            stopped_at=old_stopped_at,
+            stopped_at=stopped_at,
         )
 
     repo = GpuSessionRepository(db_session)
     results = await repo.list_pending_billing_finalization(
         grace_cutoff=grace_cutoff,
-        limit=3,
+        limit=2,
     )
 
-    assert len(results) == 3
+    # Limit honoured.
+    assert len(results) == 2
+    # Oldest two returned, in ascending stopped_at order.
+    assert [r.stopped_at for r in results] == stopped_times[:2]
 
 
 async def test_increment_billing_finalization_attempts_bumps_counter(

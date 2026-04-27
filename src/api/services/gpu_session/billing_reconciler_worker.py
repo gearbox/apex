@@ -108,57 +108,16 @@ class BillingReconcilerWorker:
         still_failing = 0
         quarantined = 0
 
-        # 2. Process each. _finalize_billing handles its own transaction
-        #    boundaries via the service's session_factory; we don't pass
-        #    our session in.
+        # 2. Classify each candidate. _process_session encapsulates the
+        #    finalize-or-bump decision so this loop stays linear.
         for session_row in candidates:
-            finalized = False
-            try:
-                await self._service._finalize_billing(session_row)
-
-                # Re-check the column to determine whether the inner method
-                # succeeded (billing_finalized_at stamped) or failed silently
-                # (column still NULL).
-                async with self._session_factory() as db:
-                    repo = GpuSessionRepository(db)
-                    refreshed = await repo.get_by_id(session_row.id)
-
-                if refreshed is not None and refreshed.billing_finalized_at is not None:
-                    finalized = True
-                    reconciled += 1
-                    logger.info(
-                        "billing_reconciler.session_reconciled",
-                        session_id=str(session_row.id),
-                        attempts_before=session_row.billing_finalization_attempts,
-                    )
-            except Exception:
-                # A worker-level exception (DB connection, etc.) shouldn't
-                # poison the sweep. Log and move on; next sweep tries again.
-                logger.exception(
-                    "billing_reconciler.session_error",
-                    session_id=str(session_row.id),
-                )
-
-            if not finalized:
+            outcome = await self._process_session(session_row)
+            if outcome == "reconciled":
+                reconciled += 1
+            elif outcome == "quarantined":
+                quarantined += 1
+            else:  # still_failing
                 still_failing += 1
-                try:
-                    new_count = await self._bump_and_check_quarantine(session_row)
-                    if new_count >= self._settings.billing_reconciler_quarantine_threshold:
-                        quarantined += 1
-                        logger.error(
-                            "billing_reconciler.session_quarantined",
-                            session_id=str(session_row.id),
-                            attempts=new_count,
-                            stopped_at=session_row.stopped_at.isoformat()
-                            if session_row.stopped_at
-                            else None,
-                            quarantine=True,
-                        )
-                except Exception:
-                    logger.exception(
-                        "billing_reconciler.bump_error",
-                        session_id=str(session_row.id),
-                    )
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
@@ -169,6 +128,57 @@ class BillingReconcilerWorker:
             quarantined=quarantined,
             duration_ms=elapsed_ms,
         )
+
+    async def _process_session(self, session_row: GpuSession) -> str:
+        """Run finalize on one session and classify the outcome.
+
+        Returns one of: ``"reconciled"``, ``"still_failing"``, ``"quarantined"``.
+
+        Calls the service's public ``finalize_billing_for_session`` method,
+        which returns True on success. On failure (or worker-level exception),
+        bumps the attempt counter and emits the quarantine log if the
+        threshold has been crossed.
+        """
+        try:
+            success = await self._service.finalize_billing_for_session(session_row)
+        except Exception:
+            # A worker-level exception (DB connection, etc.) shouldn't poison
+            # the sweep. Log and treat as still-failing so attempts get bumped.
+            logger.exception(
+                "billing_reconciler.session_error",
+                session_id=str(session_row.id),
+            )
+            success = False
+
+        if success:
+            logger.info(
+                "billing_reconciler.session_reconciled",
+                session_id=str(session_row.id),
+                attempts_before=session_row.billing_finalization_attempts,
+            )
+            return "reconciled"
+
+        # Failed: bump the attempt counter; emit quarantine log if threshold hit.
+        try:
+            new_count = await self._bump_and_check_quarantine(session_row)
+        except Exception:
+            logger.exception(
+                "billing_reconciler.bump_error",
+                session_id=str(session_row.id),
+            )
+            return "still_failing"
+
+        if new_count >= self._settings.billing_reconciler_quarantine_threshold:
+            logger.error(
+                "billing_reconciler.session_quarantined",
+                session_id=str(session_row.id),
+                attempts=new_count,
+                stopped_at=session_row.stopped_at.isoformat() if session_row.stopped_at else None,
+                quarantine=True,
+            )
+            return "quarantined"
+
+        return "still_failing"
 
     async def _bump_and_check_quarantine(self, session_row: GpuSession) -> int:
         """Increment attempt counter; return the new value."""

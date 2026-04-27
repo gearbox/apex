@@ -146,39 +146,37 @@ class TestSweep:
 
             await worker._sweep_once()
 
-        mocks["gpu_session_service"]._finalize_billing.assert_not_called()
+        mocks["gpu_session_service"].finalize_billing_for_session.assert_not_called()
 
     async def test_candidate_reconciles_on_first_sweep(self) -> None:
-        """Successful finalization: billing_finalized_at stamped → logged as reconciled."""
+        """Successful finalization: service reports True → logged as reconciled."""
         worker, mocks = _make_worker()
 
         candidate = _make_gpu_session()
-        # After _finalize_billing, the refreshed row has billing_finalized_at set.
-        refreshed = _make_gpu_session(billing_finalized_at=datetime.now(UTC))
+        # Service's public wrapper returns True on success.
+        mocks["gpu_session_service"].finalize_billing_for_session.return_value = True
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = [candidate]
-            mock_repo.get_by_id.return_value = refreshed
 
             await worker._sweep_once()
 
-        mocks["gpu_session_service"]._finalize_billing.assert_called_once_with(candidate)
+        mocks["gpu_session_service"].finalize_billing_for_session.assert_called_once_with(candidate)
         mock_repo.increment_billing_finalization_attempts.assert_not_called()
 
     async def test_candidate_still_failing_bumps_attempts_and_logs(self) -> None:
-        """Failed finalization: column still NULL → attempt counter bumped (no quarantine yet)."""
+        """Failed finalization: service reports False → attempt counter bumped (no quarantine yet)."""
         worker, mocks = _make_worker()
 
         candidate = _make_gpu_session(billing_finalization_attempts=0)
-        refreshed = _make_gpu_session(billing_finalized_at=None)
+        mocks["gpu_session_service"].finalize_billing_for_session.return_value = False
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = [candidate]
-            mock_repo.get_by_id.return_value = refreshed
             # Returns 1 — below the quarantine threshold of 10
             mock_repo.increment_billing_finalization_attempts.return_value = 1
 
@@ -186,7 +184,7 @@ class TestSweep:
 
         mock_repo.increment_billing_finalization_attempts.assert_called_once_with(candidate.id)
         # No quarantine error — just still_failing
-        mocks["gpu_session_service"]._finalize_billing.assert_called_once_with(candidate)
+        mocks["gpu_session_service"].finalize_billing_for_session.assert_called_once_with(candidate)
 
     async def test_quarantine_threshold_triggers_error_log(self) -> None:
         """Attempt counter at threshold → quarantine log at ERROR; session NOT mutated."""
@@ -195,7 +193,7 @@ class TestSweep:
         )
 
         candidate = _make_gpu_session(billing_finalization_attempts=4)
-        refreshed = _make_gpu_session(billing_finalized_at=None)
+        mocks["gpu_session_service"].finalize_billing_for_session.return_value = False
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -204,7 +202,6 @@ class TestSweep:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = [candidate]
-            mock_repo.get_by_id.return_value = refreshed
             # Returns 5 — equals the quarantine threshold
             mock_repo.increment_billing_finalization_attempts.return_value = 5
 
@@ -215,8 +212,6 @@ class TestSweep:
         call_kwargs = mock_logger.error.call_args
         assert call_kwargs[0][0] == "billing_reconciler.session_quarantined"
         assert call_kwargs[1].get("quarantine") is True
-        # billing_finalized_at is NOT touched (no update call on the session row)
-        assert refreshed.billing_finalized_at is None
 
     async def test_grace_period_skips_freshly_stopped_sessions(self) -> None:
         """Repository query receives grace_cutoff = now - grace_minutes."""
@@ -264,22 +259,23 @@ class TestSweep:
 
         candidate_a = _make_gpu_session()
         candidate_b = _make_gpu_session()
-        refreshed_b = _make_gpu_session(billing_finalized_at=datetime.now(UTC))
 
         finalize_calls: list[Any] = []
 
-        async def flaky_finalize(row: Any) -> None:
+        async def flaky_finalize(row: Any) -> bool:
             finalize_calls.append(row)
             if row is candidate_a:
                 raise RuntimeError("billing service down")
+            return True  # candidate_b succeeds
 
-        mocks["gpu_session_service"]._finalize_billing.side_effect = flaky_finalize
+        mocks["gpu_session_service"].finalize_billing_for_session.side_effect = flaky_finalize
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = [candidate_a, candidate_b]
-            mock_repo.get_by_id.return_value = refreshed_b
+            # candidate_a fails → bump path; configure increment to return below threshold
+            mock_repo.increment_billing_finalization_attempts.return_value = 1
 
             await worker._sweep_once()
 
