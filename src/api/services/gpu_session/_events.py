@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-FIRE_AND_FORGET_TIMEOUT = 5
+FIRE_AND_FORGET_TIMEOUT_SECS = 5
 
 
 async def publish_status_event(
@@ -59,13 +59,13 @@ async def publish_status_event(
                     error_message=error_message,
                 ),
             ),
-            timeout=FIRE_AND_FORGET_TIMEOUT,
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
         )
     except TimeoutError:
         logger.warning(
             "gpu_session.event_publish_timeout",
             session_id=str(session.id),
-            timeout=FIRE_AND_FORGET_TIMEOUT,
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
         )
     except Exception:
         logger.exception("gpu_session.event_publish_failed", session_id=str(session.id))

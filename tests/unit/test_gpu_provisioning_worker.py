@@ -709,7 +709,7 @@ class TestEnvReconstruction:
         session = _make_gpu_session(status=GpuSessionStatus.pending)
         mocks["vastai_client"].destroy_instance = AsyncMock()
         mocks["cf_client"].get_tunnel_token.return_value = "tok"
-        bundle = _make_bundle_mapping()  # comfyui_port = 18188
+        bundle = _make_bundle_mapping()
         mocks["bundle_index"].resolve_bundle_override.return_value = bundle
         mocks["vastai_client"].search_offers.return_value = [_make_offer()]
         mocks["vastai_client"].create_instance.return_value = 12345

@@ -120,4 +120,4 @@ class TestAdminRepository:
         session.execute.return_value.scalars.return_value.all.return_value = []
         repo = AdminRepository(session)
         result = await repo.get_audit_log("vex", target_user_id=uuid4())
-        assert list(result) == []
+        assert not list(result)

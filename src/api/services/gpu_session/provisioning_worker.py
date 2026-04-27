@@ -216,7 +216,7 @@ class GpuProvisioningWorker:
             return  # transient — try again next sweep
 
         if instance.actual_status != "running":
-            if self._pending_timeout_exceeded(session):
+            if self._provision_timeout_exceeded(session):
                 logger.warning(
                     "gpu_session.provision.pending_timeout",
                     session_id=str(session.id),
@@ -232,7 +232,7 @@ class GpuProvisioningWorker:
 
     async def _advance_provisioning(self, session: GpuSession) -> None:
         """Probe ComfyUI; on success → active; on timeout → retry or fail."""
-        if self._provisioning_timeout_exceeded(session):
+        if self._provision_timeout_exceeded(session):
             logger.warning(
                 "gpu_session.provision.provisioning_timeout",
                 session_id=str(session.id),
@@ -552,12 +552,7 @@ class GpuProvisioningWorker:
     # Timeout helpers
     # ------------------------------------------------------------------
 
-    def _pending_timeout_exceeded(self, session: GpuSession) -> bool:
-        base = session.provisioning_started_at or session.created_at
-        elapsed = datetime.now(UTC) - base
-        return elapsed > timedelta(minutes=self._settings.gpu_provision_timeout_minutes)
-
-    def _provisioning_timeout_exceeded(self, session: GpuSession) -> bool:
+    def _provision_timeout_exceeded(self, session: GpuSession) -> bool:
         base = session.provisioning_started_at or session.created_at
         elapsed = datetime.now(UTC) - base
         return elapsed > timedelta(minutes=self._settings.gpu_provision_timeout_minutes)

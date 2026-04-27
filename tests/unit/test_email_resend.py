@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -18,10 +19,10 @@ def _make_message(**kwargs: object) -> EmailMessage:
         subject=str(kwargs.get("subject", "Test Subject")),
         html_body=str(kwargs.get("html_body", "<p>Hello</p>")),
         text_body=str(kwargs.get("text_body", "Hello")),
-        from_address=kwargs.get("from_address", None),  # type: ignore[arg-type]
-        from_name=kwargs.get("from_name", None),  # type: ignore[arg-type]
-        reply_to=kwargs.get("reply_to", None),  # type: ignore[arg-type]
-        tags=kwargs.get("tags", None),  # type: ignore[arg-type]
+        from_address=kwargs.get("from_address"),  # type: ignore[arg-type]
+        from_name=kwargs.get("from_name"),  # type: ignore[arg-type]
+        reply_to=kwargs.get("reply_to"),  # type: ignore[arg-type]
+        tags=kwargs.get("tags"),  # type: ignore[arg-type]
     )
 
 
@@ -40,14 +41,16 @@ class TestInit:
 
         real_import = builtins.__import__
 
-        def mock_import(name: str, *args: object, **kwargs: object) -> object:
+        def mock_import(name: str, *args: Any, **kwargs: Any) -> object:
             if name == "resend":
                 raise ImportError("no module named resend")
             return real_import(name, *args, **kwargs)
 
-        with patch("builtins.__import__", side_effect=mock_import):
-            with pytest.raises(ImportError, match="resend"):
-                ResendEmailService(api_key="k", from_address="a@b.com")
+        with (
+            patch("builtins.__import__", side_effect=mock_import),
+            pytest.raises(ImportError, match="resend"),
+        ):
+            ResendEmailService(api_key="k", from_address="a@b.com")
 
 
 class TestSend:
@@ -66,7 +69,7 @@ class TestSend:
             await svc.send(msg)
 
         params = mock_send.call_args[0][0]
-        assert "Custom <custom@example.com>" == params["from"]
+        assert params["from"] == "Custom <custom@example.com>"
 
     async def test_includes_reply_to_when_set(self, svc: ResendEmailService) -> None:
         msg = _make_message(reply_to="reply@example.com")
@@ -90,9 +93,11 @@ class TestSend:
     async def test_raises_email_delivery_error_on_exception(self, svc: ResendEmailService) -> None:
         msg = _make_message()
 
-        with patch("resend.Emails.send", side_effect=Exception("API error")):
-            with pytest.raises(EmailDeliveryError, match="Resend delivery failed"):
-                await svc.send(msg)
+        with (
+            patch("resend.Emails.send", side_effect=Exception("API error")),
+            pytest.raises(EmailDeliveryError, match="Resend delivery failed"),
+        ):
+            await svc.send(msg)
 
     async def test_omits_reply_to_when_not_set(self, svc: ResendEmailService) -> None:
         msg = _make_message()

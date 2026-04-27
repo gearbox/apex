@@ -13,7 +13,7 @@ from src.api.services.email_verification import (
     UserNotFoundError,
 )
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
 def _make_user(user_id=None, email="user@example.com", display_name="Alice", locale="en"):
@@ -41,7 +41,8 @@ class TestSendVerificationEmail:
     async def test_sends_email_for_existing_user(self) -> None:
         user = _make_user()
         session = AsyncMock()
-        svc = _make_svc()
+        email_mock = AsyncMock()
+        svc = _make_svc(email_mock)
 
         with (
             patch("src.api.services.email_verification.UserRepository") as user_repo_cls,
@@ -57,8 +58,8 @@ class TestSendVerificationEmail:
 
             await svc.send_verification_email(user.id, session=session)
 
-        svc._email.send_verification_email.assert_awaited_once()
-        call_kwargs = svc._email.send_verification_email.call_args.kwargs
+        email_mock.send_verification_email.assert_awaited_once()
+        call_kwargs = email_mock.send_verification_email.call_args.kwargs
         assert "raw-token-abc" in call_kwargs["verification_url"]
         assert call_kwargs["to"] == user.email
 
@@ -134,7 +135,8 @@ class TestSendPasswordResetEmail:
     async def test_sends_reset_email_when_user_found(self) -> None:
         user = _make_user()
         session = AsyncMock()
-        svc = _make_svc()
+        email_mock = AsyncMock()
+        svc = _make_svc(email_mock)
 
         with (
             patch("src.api.services.email_verification.UserRepository") as user_repo_cls,
@@ -150,13 +152,14 @@ class TestSendPasswordResetEmail:
 
             await svc.send_password_reset_email(user.email, session=session, ip_address="1.2.3.4")
 
-        svc._email.send_password_reset_email.assert_awaited_once()
-        call_kwargs = svc._email.send_password_reset_email.call_args.kwargs
+        email_mock.send_password_reset_email.assert_awaited_once()
+        call_kwargs = email_mock.send_password_reset_email.call_args.kwargs
         assert "reset-xyz" in call_kwargs["reset_url"]
 
     async def test_silent_when_email_not_found(self) -> None:
         session = AsyncMock()
-        svc = _make_svc()
+        email_mock = AsyncMock()
+        svc = _make_svc(email_mock)
 
         with patch("src.api.services.email_verification.UserRepository") as user_repo_cls:
             user_repo = AsyncMock()
@@ -166,7 +169,7 @@ class TestSendPasswordResetEmail:
             # Should not raise
             await svc.send_password_reset_email("unknown@example.com", session=session)
 
-        svc._email.send_password_reset_email.assert_not_awaited()
+        email_mock.send_password_reset_email.assert_not_awaited()
 
 
 class TestResetPassword:
