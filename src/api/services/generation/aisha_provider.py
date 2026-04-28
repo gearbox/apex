@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -17,6 +18,37 @@ from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, ModelType, Provider
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
+from src.db.repositories.user_image import UserImageRepository
+
+# Sanitization for ComfyUI input filenames. ComfyUI writes uploaded files to
+# its `input/` folder by name; any path separators or shell-meta characters in
+# a user-supplied filename could escape that directory. We strip directory
+# components, restrict to a conservative ASCII charset, and cap length.
+_SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+_MAX_SAFE_FILENAME_LEN = 64
+
+
+def _sanitize_filename(name: str) -> str:
+    """Reduce ``name`` to a safe-for-filesystem leaf name.
+
+    - Strips directory components (``../``, ``foo/bar``) by taking the
+      basename only.
+    - Replaces any character outside ``[A-Za-z0-9._-]`` with ``_``.
+    - Caps length at 64 chars to bound disk-name reasonableness.
+    - Falls back to ``"image"`` if the input is empty or fully sanitized
+      to nothing (e.g. ``"///"``).
+
+    The job_id suffix added by the caller still guarantees uniqueness across
+    concurrent jobs; this helper just guards against malicious or malformed
+    input names propagating to the GPU node's filesystem.
+    """
+    # Take the basename — defeats absolute paths, ``../`` traversal, and
+    # OS-mismatched separators.
+    leaf = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    sanitized = _SAFE_FILENAME_CHARS.sub("_", leaf)[:_MAX_SAFE_FILENAME_LEN]
+    return sanitized or "image"
+
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,8 +110,18 @@ class AishaGenerationProvider:
         Source priority matches Grok:
         1. ``source_output_id`` — a prior generation's output
         2. ``input_image_id`` — a user-uploaded image
-        Mutual exclusion is already enforced at the orchestrator layer.
+
+        Mutual exclusion is also enforced at the orchestrator layer; the
+        defensive check here turns provider misuse (a future direct caller
+        bypassing the orchestrator) into a clear local error rather than a
+        silently-ignored field.
         """
+        # Defensive: orchestrator already rejects this combination, but a
+        # future direct caller of the provider deserves a clear local error
+        # rather than a silently-ignored input_image_id.
+        if request.source_output_id is not None and request.input_image_id is not None:
+            raise ValueError("source_output_id and input_image_id are mutually exclusive")
+
         # Fast path for T2I: no input image, no R2 dependency exercised.
         if request.source_output_id is None and request.input_image_id is None:
             return None
@@ -95,8 +137,6 @@ class AishaGenerationProvider:
             )
 
         if request.source_output_id is not None:
-            from src.db.repositories.output import OutputRepository
-
             output = await OutputRepository(session).get(request.source_output_id)
             if output is None:
                 raise ValueError(f"Source output {request.source_output_id} not found")
@@ -104,10 +144,8 @@ class AishaGenerationProvider:
             return image_bytes, output.storage_key.rsplit("/", 1)[-1]
 
         # input_image_id is not None at this point (mutual exclusion enforced
-        # upstream and the early-return above handled the both-None case).
+        # above and the early-return handled the both-None case).
         assert request.input_image_id is not None
-        from src.db.repositories.user_image import UserImageRepository
-
         user_image = await UserImageRepository(session).get(request.input_image_id)
         if user_image is None:
             raise ValueError(f"Input image {request.input_image_id} not found")
@@ -146,6 +184,14 @@ class AishaGenerationProvider:
                 f"No active GPU session for model {request.model.value}. "
                 "Start a session first via POST /v1/sessions."
             )
+
+        # I2I bridge: fetch input image bytes from R2 BEFORE billing.
+        # Resolution failures (missing row, mutually-exclusive inputs,
+        # missing R2 dependency) are user/config errors that should not
+        # leave a debit on the ledger requiring later refund. Validation
+        # via ValueError surfaces as a 4xx; ProviderResponseError surfaces
+        # as a 5xx. Either way: no reservation made, nothing to refund.
+        i2i_input = await self._resolve_input_image(request, session)
 
         # Map unified request -> legacy GenerationRequest for workflow_service
         legacy_request = GenerationRequest(
@@ -196,11 +242,6 @@ class AishaGenerationProvider:
             db_job.debit_transaction_id = txn.id
         await session.flush()
 
-        # I2I bridge: fetch input image bytes from R2 between reservation and
-        # upload. Any failure here propagates to the orchestrator's except path
-        # which refunds the reservation we just made.
-        i2i_input = await self._resolve_input_image(request, session)
-
         # 2. Build a session-scoped ComfyUI client.
         # SSRF guard: validate the tunnel hostname against the configured domain
         # before constructing an outbound URL. The write path always produces
@@ -240,7 +281,15 @@ class AishaGenerationProvider:
             uploaded_filename: str | None = None
             if i2i_input is not None:
                 image_bytes, source_filename = i2i_input
-                comfyui_filename = f"input_{source_filename}_{str(job_id)[:8]}"
+                # Sanitize the source filename: it derives from user-supplied
+                # original_filename or an R2 storage_key tail, neither of
+                # which is guaranteed safe for ComfyUI's input/ folder. We
+                # strip any directory components and restrict to a
+                # conservative ASCII charset before composing the upload
+                # name. The job_id suffix preserves uniqueness across
+                # concurrent jobs on the same node.
+                safe_source = _sanitize_filename(source_filename)
+                comfyui_filename = f"input_{safe_source}_{str(job_id)[:8]}"
                 upload_result = await client.upload_image(
                     image_data=image_bytes,
                     filename=comfyui_filename,

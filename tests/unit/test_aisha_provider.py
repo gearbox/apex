@@ -397,7 +397,9 @@ class TestAishaProviderI2IBridge:
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch("src.db.repositories.user_image.UserImageRepository") as MockUserImageRepo,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -474,10 +476,14 @@ class TestAishaProviderI2IBridge:
         output_row = MagicMock()
         output_row.storage_key = "outputs/job_xyz/result_001.jpg"
 
+        # Single ID flows through both the request body and the kwarg used
+        # for the source_jobs.source_output_id FK column on the GenerationJob row.
+        source_id = uuid4()
+
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch("src.db.repositories.output.OutputRepository") as MockOutputRepo,
+            patch("src.api.services.generation.aisha_provider.OutputRepository") as MockOutputRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -489,15 +495,19 @@ class TestAishaProviderI2IBridge:
             MockOutputRepo.return_value.get = AsyncMock(return_value=output_row)
 
             await provider.submit(
-                _make_i2i_request_with_source_output(uuid4()),
+                _make_i2i_request_with_source_output(source_id),
                 user_id=uuid4(),
                 session=session,
                 billing_service=billing,
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
-                source_output_id=uuid4(),  # passed to repo storage too
+                source_output_id=source_id,
             )
+
+        # Repo lookup used the request's source_output_id (the request body is
+        # authoritative; the submit kwarg is for the GenerationJob FK column).
+        MockOutputRepo.return_value.get.assert_awaited_once_with(source_id)
 
         # Filename derived from storage_key tail (not original_filename).
         upload_kwargs = mock_client.upload_image.await_args.kwargs
@@ -508,9 +518,11 @@ class TestAishaProviderI2IBridge:
         assert ap_kwargs["input_image_1"] == "input_result_001.jpg_aaaaaaaa"
 
     async def test_i2i_user_image_not_found_raises(self) -> None:
-        """A missing input_image_id row raises before billing reservation completes.
+        """A missing input_image_id row raises BEFORE billing — no debit, no refund needed.
 
-        The orchestrator's exception handler refunds the reservation on any raise.
+        Resolution happens before reservation so user-error inputs (missing
+        rows, mutually-exclusive IDs) don't leave a debit on the ledger
+        that requires later refund. This is a fail-fast contract.
         """
         workflow = MagicMock()
         workflow.load_workflow.return_value = {"3": {"inputs": {}}}
@@ -536,7 +548,9 @@ class TestAishaProviderI2IBridge:
 
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.db.repositories.user_image.UserImageRepository") as MockUserImageRepo,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             MockUserImageRepo.return_value.get = AsyncMock(return_value=None)
@@ -554,6 +568,13 @@ class TestAishaProviderI2IBridge:
 
         # R2 download was never reached because the row lookup returned None.
         r2.download.assert_not_called()
+        # Billing reservation must NOT have run — that's the whole point of
+        # resolving inputs before the ledger write. No debit means no refund
+        # responsibility on the orchestrator.
+        billing.check_and_reserve.assert_not_called()
+        # The DB job row also was never created (resolve runs even before
+        # JobRepository.create).
+        MockJobRepo.return_value.create.assert_not_called()
 
     async def test_i2i_without_r2_dependency_raises_provider_response_error(self) -> None:
         """Defensive: if a deployment forgets to wire R2, I2I requests get a
@@ -632,3 +653,151 @@ class TestAishaProviderI2IBridge:
         # Workflow received None for input_image_1.
         ap_kwargs = mocks["workflow"].apply_parameters.call_args.kwargs
         assert ap_kwargs["input_image_1"] is None
+
+
+class TestSanitizeFilename:
+    """Defense-in-depth: source filename derives from user-supplied
+    UserImage.original_filename or an R2 storage_key tail. Either could
+    contain path separators or hostile characters that would land verbatim
+    in ComfyUI's input/ folder. The sanitizer strips directory components
+    and restricts to a conservative ASCII charset.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected_pattern"),
+        [
+            # Path traversal — basename is taken first, so deep paths reduce
+            # to just the leaf.
+            ("../../etc/passwd", "passwd"),
+            ("../../../foo.png", "foo.png"),
+            ("/abs/path/file.jpg", "file.jpg"),
+            ("..\\..\\windows\\evil.exe", "evil.exe"),
+            # Slashes in the leaf — basename-style strip
+            ("user_uploads/cat.png", "cat.png"),
+            # Hostile characters get _'d
+            ("hello world.png", "hello_world.png"),
+            # Basename of "rm -rf /;.png" is ";.png" (after the last /),
+            # then ; is sanitized to _.
+            ("rm -rf /;.png", "_.png"),
+            ("name'with\"quotes.png", "name_with_quotes.png"),
+            # Empty / pathological inputs fall back to a stable default
+            ("", "image"),
+            ("///", "image"),
+            # Trailing slashes leave an empty basename → fallback to "image".
+            ("/...//", "image"),
+            # Long names get capped (cap is 64)
+            ("a" * 200 + ".png", "a" * 64),
+        ],
+    )
+    def test_sanitization_results(self, raw: str, expected_pattern: str) -> None:
+        from src.api.services.generation.aisha_provider import _sanitize_filename
+
+        result = _sanitize_filename(raw)
+        assert result == expected_pattern, (
+            f"input={raw!r}: expected {expected_pattern!r}, got {result!r}"
+        )
+
+    def test_sanitization_keeps_safe_chars_unchanged(self) -> None:
+        """The conservative charset preserves alphanumerics, dot, underscore, hyphen."""
+        from src.api.services.generation.aisha_provider import _sanitize_filename
+
+        safe = "Photo_2024-12-25.final.v3.png"
+        assert _sanitize_filename(safe) == safe
+
+
+class TestAishaProviderI2IDefensive:
+    """Provider-level defenses against misuse and hostile input."""
+
+    async def test_both_inputs_set_raises_value_error(self) -> None:
+        """Defensive guard: orchestrator already enforces mutual exclusion,
+        but a future direct caller of the provider deserves a clear local
+        error rather than a silently-ignored input_image_id."""
+        from src.api.schemas.unified_generation import UnifiedGenerationRequest
+
+        # Construct a request with BOTH set. Bypass the unified schema's own
+        # validator if it has one by using model_construct (msgspec equivalent).
+        req = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            n=1,
+            input_image_id=uuid4(),
+            source_output_id=uuid4(),
+        )
+
+        provider, _ = _make_provider_with_mocks()
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            await provider._resolve_input_image(req, AsyncMock())
+
+    async def test_filename_with_path_components_is_sanitized(self) -> None:
+        """End-to-end: a user image whose original_filename contains path
+        traversal yields a sanitized ComfyUI filename. The job_id suffix
+        is preserved for uniqueness.
+        """
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=b"\x89PNG[bytes]")
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        # Hostile filename: tries path traversal AND has shell metacharacters.
+        user_image_row = MagicMock()
+        user_image_row.storage_key = "users/u_1/uploads/legit.png"
+        user_image_row.original_filename = "../../../etc/passwd; rm -rf /.png"
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-x"})
+            MockComfyClient.return_value = mock_client
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
+
+            await provider.submit(
+                _make_i2i_request_with_user_image(uuid4()),
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        upload_kwargs = mock_client.upload_image.await_args.kwargs
+        # No slashes survived.
+        assert "/" not in upload_kwargs["filename"]
+        # No shell metacharacters survived (semicolon, space, exclamation etc).
+        assert ";" not in upload_kwargs["filename"]
+        assert " " not in upload_kwargs["filename"]
+        # The job_id suffix is preserved (8 hex chars after the trailing _).
+        suffix = upload_kwargs["filename"].rsplit("_", 1)[1]
+        assert len(suffix) == 8
+        # The "input_" prefix is preserved.
+        assert upload_kwargs["filename"].startswith("input_")
