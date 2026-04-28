@@ -12,6 +12,7 @@ from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationReques
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.generation.service import ProviderResponseError
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
+from src.api.services.storage import R2StorageService
 from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, ModelType, Provider
 from src.core.uid import new_id
@@ -40,10 +41,16 @@ class AishaGenerationProvider:
         self,
         workflow_service: WorkflowService,
         gpu_session_service: GpuSessionService | None,
+        r2_storage: R2StorageService | None = None,
         tunnel_domain: str = "",
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
+        # R2 is used to fetch source bytes for image-to-image: we download
+        # the user image / prior output, then upload it to ComfyUI's input
+        # folder via the per-session tunnel. Optional only because some
+        # test setups don't wire it; in production it must be configured.
+        self._r2 = r2_storage
         # Allowlist suffix for the tunnel hostname. Defense in depth: the write
         # path (CloudflareTunnelClient.create_session_tunnel) only ever produces
         # hostnames of the form ``{id_short}.{tunnel_domain}``, but we re-check
@@ -55,6 +62,57 @@ class AishaGenerationProvider:
         """Aisha-specific validation beyond what the enum provides."""
         if request.model == ModelType.AISHA_VIDEO:
             raise ValueError("Aisha video generation is not yet available via the unified endpoint")
+
+    async def _resolve_input_image(
+        self,
+        request: UnifiedGenerationRequest,
+        session: AsyncSession,
+    ) -> tuple[bytes, str] | None:
+        """Resolve the I2I input image to (bytes, original_filename).
+
+        Mirrors ``GrokGenerationProvider._resolve_input_url`` but downloads
+        the actual bytes (ComfyUI is behind our tunnel and cannot fetch a
+        presigned URL from R2 — we have to push the bytes through). Returns
+        None when the request has no input image (T2I path).
+
+        Source priority matches Grok:
+        1. ``source_output_id`` — a prior generation's output
+        2. ``input_image_id`` — a user-uploaded image
+        Mutual exclusion is already enforced at the orchestrator layer.
+        """
+        # Fast path for T2I: no input image, no R2 dependency exercised.
+        if request.source_output_id is None and request.input_image_id is None:
+            return None
+
+        if self._r2 is None:
+            # Should never happen in production (DI always wires R2), but
+            # if we got here for I2I without R2 it's a config error, not a
+            # user error. Surface as ProviderResponseError with an
+            # infrastructure-agnostic message.
+            raise ProviderResponseError(
+                "Image-to-image is unavailable on this deployment. "
+                "Please contact support if this persists."
+            )
+
+        if request.source_output_id is not None:
+            from src.db.repositories.output import OutputRepository
+
+            output = await OutputRepository(session).get(request.source_output_id)
+            if output is None:
+                raise ValueError(f"Source output {request.source_output_id} not found")
+            image_bytes = await self._r2.download(output.storage_key)
+            return image_bytes, output.storage_key.rsplit("/", 1)[-1]
+
+        # input_image_id is not None at this point (mutual exclusion enforced
+        # upstream and the early-return above handled the both-None case).
+        assert request.input_image_id is not None
+        from src.db.repositories.user_image import UserImageRepository
+
+        user_image = await UserImageRepository(session).get(request.input_image_id)
+        if user_image is None:
+            raise ValueError(f"Input image {request.input_image_id} not found")
+        image_bytes = await self._r2.download(user_image.storage_key)
+        return image_bytes, user_image.original_filename
 
     async def submit(
         self,
@@ -87,13 +145,6 @@ class AishaGenerationProvider:
             raise NoActiveSessionError(
                 f"No active GPU session for model {request.model.value}. "
                 "Start a session first via POST /v1/sessions."
-            )
-
-        if request.input_image_id is not None and request.model == ModelType.AISHA_IMAGE:
-            # TODO: Implement R2 -> ComfyUI image bridge for Aisha I2I via unified endpoint.
-            raise NotImplementedError(
-                "Image-to-image is not yet supported for Aisha via the unified endpoint. "
-                "See the R2 -> ComfyUI image bridge TODO."
             )
 
         # Map unified request -> legacy GenerationRequest for workflow_service
@@ -145,6 +196,11 @@ class AishaGenerationProvider:
             db_job.debit_transaction_id = txn.id
         await session.flush()
 
+        # I2I bridge: fetch input image bytes from R2 between reservation and
+        # upload. Any failure here propagates to the orchestrator's except path
+        # which refunds the reservation we just made.
+        i2i_input = await self._resolve_input_image(request, session)
+
         # 2. Build a session-scoped ComfyUI client.
         # SSRF guard: validate the tunnel hostname against the configured domain
         # before constructing an outbound URL. The write path always produces
@@ -176,12 +232,37 @@ class AishaGenerationProvider:
         try:
             await client.connect()
 
+            # If this is an I2I request, push the source bytes to ComfyUI's
+            # input folder before queuing the workflow. ComfyUI returns the
+            # filename it stored, which we wire into the LoadImage node via
+            # apply_parameters(input_image_1=...). Job-scoped prefix prevents
+            # concurrent jobs on the same node from clobbering each other.
+            uploaded_filename: str | None = None
+            if i2i_input is not None:
+                image_bytes, source_filename = i2i_input
+                comfyui_filename = f"input_{source_filename}_{str(job_id)[:8]}"
+                upload_result = await client.upload_image(
+                    image_data=image_bytes,
+                    filename=comfyui_filename,
+                )
+                # ComfyUI returns the actual stored name; trust it over our request.
+                uploaded_filename = upload_result.get("name", comfyui_filename)
+                logger.info(
+                    "aisha.i2i.image_uploaded",
+                    job_id=str(job_id),
+                    gpu_session_id=str(gpu_session.id),
+                    requested_name=comfyui_filename,
+                    stored_name=uploaded_filename,
+                    bytes=len(image_bytes),
+                )
+
             # Build and queue workflow
             workflow = self._workflow.load_workflow(request.model)
             self._workflow.validate_workflow(workflow)
             configured = self._workflow.apply_parameters(
                 workflow=workflow,
                 request=legacy_request,
+                input_image_1=uploaded_filename,
                 filename_prefix=f"gen_{str(job_id)[:8]}",
             )
 

@@ -11,7 +11,7 @@ and is not duplicated here — raising any exception triggers the same code path
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -326,3 +326,309 @@ class TestAishaProviderSSRFGuard:
                     token_cost=50,
                     product_id="vex",
                 )
+
+
+def _make_i2i_request_with_user_image(input_image_id: UUID) -> UnifiedGenerationRequest:
+    return UnifiedGenerationRequest(
+        prompt="a cat in a hat",
+        generation_type=GenerationType.I2I,
+        model=ModelType.AISHA_IMAGE,
+        aspect_ratio=AspectRatio.RATIO_1_1,
+        n=1,
+        input_image_id=input_image_id,
+    )
+
+
+def _make_i2i_request_with_source_output(source_output_id: UUID) -> UnifiedGenerationRequest:
+    return UnifiedGenerationRequest(
+        prompt="a cat in a hat",
+        generation_type=GenerationType.I2I,
+        model=ModelType.AISHA_IMAGE,
+        aspect_ratio=AspectRatio.RATIO_1_1,
+        n=1,
+        source_output_id=source_output_id,
+    )
+
+
+class TestAishaProviderI2IBridge:
+    """R2 ↔ ComfyUI image bridge for image-to-image generation.
+
+    The bridge resolves the source image (user upload OR prior generation
+    output), downloads bytes from R2, uploads them to ComfyUI's input
+    folder via the per-session tunnel, and threads the stored filename
+    into apply_parameters so the workflow's LoadImage node receives it.
+    """
+
+    async def test_i2i_with_user_image_uploads_bytes_to_comfyui(self) -> None:
+        """End-to-end: input_image_id → R2 download → ComfyUI upload → workflow wiring."""
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        # R2 returns the source bytes for the configured user image.
+        user_image_id = uuid4()
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n[fake-png-bytes]")
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        # User-image repo returns a row with a stable filename for the assertion.
+        user_image_row = MagicMock()
+        user_image_row.storage_key = "users/abc/uploads/cat.png"
+        user_image_row.original_filename = "cat.png"
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.db.repositories.user_image.UserImageRepository") as MockUserImageRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            # ComfyUI returns the actual stored filename — may differ from the
+            # one we requested (collision-resolution suffix etc).
+            mock_client.upload_image = AsyncMock(
+                return_value={"name": "input_cat.png_deadbeef", "subfolder": "", "type": "input"}
+            )
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-123"})
+            MockComfyClient.return_value = mock_client
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
+
+            await provider.submit(
+                _make_i2i_request_with_user_image(user_image_id),
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        # R2 was hit with the storage key from the user image row.
+        r2.download.assert_awaited_once_with("users/abc/uploads/cat.png")
+
+        # ComfyUI received the bytes with the agreed filename template:
+        # f"input_{source_filename}_{job_id_short}".
+        mock_client.upload_image.assert_awaited_once()
+        upload_kwargs = mock_client.upload_image.await_args.kwargs
+        assert upload_kwargs["image_data"] == b"\x89PNG\r\n\x1a\n[fake-png-bytes]"
+        # source_filename in template; suffix is the 8-char job_id prefix.
+        assert upload_kwargs["filename"].startswith("input_cat.png_")
+        # 8 hex chars after the underscore.
+        suffix = upload_kwargs["filename"].rsplit("_", 1)[1]
+        assert len(suffix) == 8
+
+        # Workflow received the ComfyUI-stored name (which may differ from the
+        # requested one) wired into LoadImage via input_image_1.
+        workflow.apply_parameters.assert_called_once()
+        ap_kwargs = workflow.apply_parameters.call_args.kwargs
+        assert ap_kwargs["input_image_1"] == "input_cat.png_deadbeef"
+
+        # Job persisted as QUEUED with the ComfyUI prompt_id.
+        assert db_job.status == JobStatus.QUEUED
+        assert db_job.external_request_id == "queued-123"
+
+    async def test_i2i_with_source_output_id_takes_precedence(self) -> None:
+        """source_output_id branch: filename derived from storage_key tail."""
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=b"\xff\xd8\xff[fake-jpg]")
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        output_row = MagicMock()
+        output_row.storage_key = "outputs/job_xyz/result_001.jpg"
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.db.repositories.output.OutputRepository") as MockOutputRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.upload_image = AsyncMock(
+                return_value={"name": "input_result_001.jpg_aaaaaaaa"}
+            )
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-456"})
+            MockComfyClient.return_value = mock_client
+            MockOutputRepo.return_value.get = AsyncMock(return_value=output_row)
+
+            await provider.submit(
+                _make_i2i_request_with_source_output(uuid4()),
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+                source_output_id=uuid4(),  # passed to repo storage too
+            )
+
+        # Filename derived from storage_key tail (not original_filename).
+        upload_kwargs = mock_client.upload_image.await_args.kwargs
+        assert upload_kwargs["filename"].startswith("input_result_001.jpg_")
+
+        # Workflow wired with the ComfyUI-returned name.
+        ap_kwargs = workflow.apply_parameters.call_args.kwargs
+        assert ap_kwargs["input_image_1"] == "input_result_001.jpg_aaaaaaaa"
+
+    async def test_i2i_user_image_not_found_raises(self) -> None:
+        """A missing input_image_id row raises before billing reservation completes.
+
+        The orchestrator's exception handler refunds the reservation on any raise.
+        """
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+        r2 = AsyncMock()
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.db.repositories.user_image.UserImageRepository") as MockUserImageRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=None)
+
+            with pytest.raises(ValueError, match="not found"):
+                await provider.submit(
+                    _make_i2i_request_with_user_image(uuid4()),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )
+
+        # R2 download was never reached because the row lookup returned None.
+        r2.download.assert_not_called()
+
+    async def test_i2i_without_r2_dependency_raises_provider_response_error(self) -> None:
+        """Defensive: if a deployment forgets to wire R2, I2I requests get a
+        clean infrastructure-agnostic error, not a NoneType AttributeError."""
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=None,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+
+            with pytest.raises(ProviderResponseError) as exc_info:
+                await provider.submit(
+                    _make_i2i_request_with_user_image(uuid4()),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )
+
+        # User-facing message stays infrastructure-agnostic.
+        msg = str(exc_info.value)
+        assert "ComfyUI" not in msg
+        assert "R2" not in msg
+        assert "tunnel" not in msg.lower()
+
+    async def test_t2i_skips_i2i_bridge(self) -> None:
+        """T2I requests don't trigger any R2 download or ComfyUI upload —
+        the bridge cleanly no-ops when neither input ID is set."""
+        provider, mocks = _make_provider_with_mocks()
+        # Provider has no r2_storage by default in _make_provider_with_mocks;
+        # this asserts the T2I path doesn't even check that field.
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-789"})
+            MockComfyClient.return_value = mock_client
+
+            await provider.submit(
+                _make_request(),  # T2I
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        # No upload to ComfyUI for T2I.
+        mock_client.upload_image.assert_not_called()
+        # Workflow received None for input_image_1.
+        ap_kwargs = mocks["workflow"].apply_parameters.call_args.kwargs
+        assert ap_kwargs["input_image_1"] is None
