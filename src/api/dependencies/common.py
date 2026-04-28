@@ -659,6 +659,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         Provider.AISHA: AishaGenerationProvider(
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,
+            r2_storage=_services.r2_storage,
             tunnel_domain=settings.cf_tunnel_domain,
         )
     }

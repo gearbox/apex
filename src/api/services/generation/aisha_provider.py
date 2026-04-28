@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -12,10 +13,60 @@ from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationReques
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.generation.service import ProviderResponseError
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
+from src.api.services.storage import R2StorageService
 from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, ModelType, Provider
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
+from src.db.repositories.output import OutputRepository
+from src.db.repositories.user_image import UserImageRepository
+
+# Sanitization for ComfyUI input filenames. ComfyUI writes uploaded files to
+# its `input/` folder by name; any path separators or shell-meta characters in
+# a user-supplied filename could escape that directory. We strip directory
+# components, restrict to a conservative ASCII charset, and cap length.
+_SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+_MAX_SAFE_FILENAME_LEN = 64
+
+# Tunnel hostname character set: standard DNS hostname rules.
+# Lowercase letters, digits, dot, hyphen. Must start with alnum.
+# Defeats embedded URL-meta characters that could weaponize a benign-
+# looking suffix match — e.g. ``evil.com?.gpu.test`` would slip past a
+# pure ``endswith(".gpu.test")`` check, but its ``?`` violates this
+# pattern. Lowercase-only because Cloudflare Tunnel always emits
+# lowercase; an uppercase letter in the column is itself a corruption
+# signal worth rejecting.
+_VALID_TUNNEL_HOSTNAME = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
+
+
+def _sanitize_filename(name: str | None) -> str:
+    """Reduce ``name`` to a safe-for-filesystem leaf name.
+
+    - Strips directory components (``../``, ``foo/bar``) by taking the
+      basename only.
+    - Replaces any character outside ``[A-Za-z0-9._-]`` with ``_``.
+    - Caps length at 64 chars to bound disk-name reasonableness.
+    - Falls back to ``"image"`` if the input is None, empty, or fully
+      sanitized to nothing (e.g. ``"///"``).
+
+    The schema currently declares ``UserImage.original_filename`` and
+    ``Output.storage_key`` NOT NULL, so ``None`` shouldn't be reachable
+    in production today — but accepting ``str | None`` costs one
+    falsy-check and defends against future schema relaxations or
+    code paths that might introduce nullable filename sources.
+
+    The job_id suffix added by the caller still guarantees uniqueness
+    across concurrent jobs; this helper just guards against malicious
+    or malformed input names propagating to the GPU node's filesystem.
+    """
+    if not name:
+        return "image"
+    # Take the basename — defeats absolute paths, ``../`` traversal, and
+    # OS-mismatched separators.
+    leaf = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    sanitized = _SAFE_FILENAME_CHARS.sub("_", leaf)[:_MAX_SAFE_FILENAME_LEN]
+    return sanitized or "image"
+
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,10 +91,16 @@ class AishaGenerationProvider:
         self,
         workflow_service: WorkflowService,
         gpu_session_service: GpuSessionService | None,
+        r2_storage: R2StorageService | None = None,
         tunnel_domain: str = "",
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
+        # R2 is used to fetch source bytes for image-to-image: we download
+        # the user image / prior output, then upload it to ComfyUI's input
+        # folder via the per-session tunnel. Optional only because some
+        # test setups don't wire it; in production it must be configured.
+        self._r2 = r2_storage
         # Allowlist suffix for the tunnel hostname. Defense in depth: the write
         # path (CloudflareTunnelClient.create_session_tunnel) only ever produces
         # hostnames of the form ``{id_short}.{tunnel_domain}``, but we re-check
@@ -55,6 +112,63 @@ class AishaGenerationProvider:
         """Aisha-specific validation beyond what the enum provides."""
         if request.model == ModelType.AISHA_VIDEO:
             raise ValueError("Aisha video generation is not yet available via the unified endpoint")
+
+    async def _resolve_input_image(
+        self,
+        request: UnifiedGenerationRequest,
+        session: AsyncSession,
+    ) -> tuple[bytes, str] | None:
+        """Resolve the I2I input image to (bytes, original_filename).
+
+        Mirrors ``GrokGenerationProvider._resolve_input_url`` but downloads
+        the actual bytes (ComfyUI is behind our tunnel and cannot fetch a
+        presigned URL from R2 — we have to push the bytes through). Returns
+        None when the request has no input image (T2I path).
+
+        Source priority matches Grok:
+        1. ``source_output_id`` — a prior generation's output
+        2. ``input_image_id`` — a user-uploaded image
+
+        Mutual exclusion is also enforced at the orchestrator layer; the
+        defensive check here turns provider misuse (a future direct caller
+        bypassing the orchestrator) into a clear local error rather than a
+        silently-ignored field.
+        """
+        # Defensive: orchestrator already rejects this combination, but a
+        # future direct caller of the provider deserves a clear local error
+        # rather than a silently-ignored input_image_id.
+        if request.source_output_id is not None and request.input_image_id is not None:
+            raise ValueError("source_output_id and input_image_id are mutually exclusive")
+
+        # Fast path for T2I: no input image, no R2 dependency exercised.
+        if request.source_output_id is None and request.input_image_id is None:
+            return None
+
+        if self._r2 is None:
+            # Should never happen in production (DI always wires R2), but
+            # if we got here for I2I without R2 it's a config error, not a
+            # user error. Surface as ProviderResponseError with an
+            # infrastructure-agnostic message.
+            raise ProviderResponseError(
+                "Image-to-image is unavailable on this deployment. "
+                "Please contact support if this persists."
+            )
+
+        if request.source_output_id is not None:
+            output = await OutputRepository(session).get(request.source_output_id)
+            if output is None:
+                raise ValueError(f"Source output {request.source_output_id} not found")
+            image_bytes = await self._r2.download(output.storage_key)
+            return image_bytes, output.storage_key.rsplit("/", 1)[-1]
+
+        # input_image_id is not None at this point (mutual exclusion enforced
+        # above and the early-return handled the both-None case).
+        assert request.input_image_id is not None
+        user_image = await UserImageRepository(session).get(request.input_image_id)
+        if user_image is None:
+            raise ValueError(f"Input image {request.input_image_id} not found")
+        image_bytes = await self._r2.download(user_image.storage_key)
+        return image_bytes, user_image.original_filename
 
     async def submit(
         self,
@@ -89,12 +203,13 @@ class AishaGenerationProvider:
                 "Start a session first via POST /v1/sessions."
             )
 
-        if request.input_image_id is not None and request.model == ModelType.AISHA_IMAGE:
-            # TODO: Implement R2 -> ComfyUI image bridge for Aisha I2I via unified endpoint.
-            raise NotImplementedError(
-                "Image-to-image is not yet supported for Aisha via the unified endpoint. "
-                "See the R2 -> ComfyUI image bridge TODO."
-            )
+        # I2I bridge: fetch input image bytes from R2 BEFORE billing.
+        # Resolution failures (missing row, mutually-exclusive inputs,
+        # missing R2 dependency) are user/config errors that should not
+        # leave a debit on the ledger requiring later refund. Validation
+        # via ValueError surfaces as a 4xx; ProviderResponseError surfaces
+        # as a 5xx. Either way: no reservation made, nothing to refund.
+        i2i_input = await self._resolve_input_image(request, session)
 
         # Map unified request -> legacy GenerationRequest for workflow_service
         legacy_request = GenerationRequest(
@@ -151,9 +266,22 @@ class AishaGenerationProvider:
         # hostnames of the form ``{id_short}.{tunnel_domain}``, but a corrupted
         # row, bad migration, or future code path could produce something else.
         # We only ever speak HTTPS to our own tunnel domain.
+        #
+        # Two checks, both required:
+        #   1. Charset — the value matches the DNS-hostname pattern. Defeats
+        #      embedded URL-meta characters (``?``, ``#``, ``@``, ``:``, ``/``)
+        #      that would let a benign-looking suffix smuggle a different host
+        #      through urllib (e.g. ``evil.com?.gpu.test`` ends in ``.gpu.test``
+        #      but parses as host=``evil.com``).
+        #   2. Suffix — the value ends in our configured tunnel domain.
         hostname = gpu_session.tunnel_hostname or ""
         expected_suffix = f".{self._tunnel_domain}" if self._tunnel_domain else ""
-        if not expected_suffix or not hostname.endswith(expected_suffix):
+        hostname_ok = (
+            bool(expected_suffix)
+            and bool(_VALID_TUNNEL_HOSTNAME.match(hostname))
+            and hostname.endswith(expected_suffix)
+        )
+        if not hostname_ok:
             logger.error(
                 "aisha.tunnel_hostname.allowlist_violation",
                 job_id=str(job_id),
@@ -165,9 +293,13 @@ class AishaGenerationProvider:
                 db_job.status = JobStatus.FAILED
                 db_job.error_message = "Generation backend session is misconfigured."
                 await session.flush()
+            # Note: do NOT claim "tokens refunded" here. Refund semantics are
+            # owned by the orchestrator's exception handler; provider error
+            # messages should describe the failure, not pre-bake billing
+            # outcomes that could become wrong if this code's call order
+            # changes.
             raise ProviderResponseError(
                 "Your generation session is misconfigured. "
-                "Your tokens have been refunded. "
                 "Please start a new session and try again."
             )
 
@@ -176,12 +308,45 @@ class AishaGenerationProvider:
         try:
             await client.connect()
 
+            # If this is an I2I request, push the source bytes to ComfyUI's
+            # input folder before queuing the workflow. ComfyUI returns the
+            # filename it stored, which we wire into the LoadImage node via
+            # apply_parameters(input_image_1=...). Job-scoped prefix prevents
+            # concurrent jobs on the same node from clobbering each other.
+            uploaded_filename: str | None = None
+            if i2i_input is not None:
+                image_bytes, source_filename = i2i_input
+                # Sanitize the source filename: it derives from user-supplied
+                # original_filename or an R2 storage_key tail, neither of
+                # which is guaranteed safe for ComfyUI's input/ folder. We
+                # strip any directory components and restrict to a
+                # conservative ASCII charset before composing the upload
+                # name. The job_id suffix preserves uniqueness across
+                # concurrent jobs on the same node.
+                safe_source = _sanitize_filename(source_filename)
+                comfyui_filename = f"input_{safe_source}_{str(job_id)[:8]}"
+                upload_result = await client.upload_image(
+                    image_data=image_bytes,
+                    filename=comfyui_filename,
+                )
+                # ComfyUI returns the actual stored name; trust it over our request.
+                uploaded_filename = upload_result.get("name", comfyui_filename)
+                logger.info(
+                    "aisha.i2i.image_uploaded",
+                    job_id=str(job_id),
+                    gpu_session_id=str(gpu_session.id),
+                    requested_name=comfyui_filename,
+                    stored_name=uploaded_filename,
+                    bytes=len(image_bytes),
+                )
+
             # Build and queue workflow
             workflow = self._workflow.load_workflow(request.model)
             self._workflow.validate_workflow(workflow)
             configured = self._workflow.apply_parameters(
                 workflow=workflow,
                 request=legacy_request,
+                input_image_1=uploaded_filename,
                 filename_prefix=f"gen_{str(job_id)[:8]}",
             )
 
