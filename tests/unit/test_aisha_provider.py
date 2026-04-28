@@ -237,7 +237,10 @@ class TestAishaProviderSSRFGuard:
         assert "tunnel" not in msg.lower()
         assert "attacker.com" not in msg
         assert "gpu.test" not in msg
-        assert "refunded" in msg.lower()
+        # Provider error messages do NOT claim refund — refund semantics
+        # are owned by the orchestrator's exception handler. The message
+        # describes the failure; the orchestrator handles the money.
+        assert "refund" not in msg.lower()
 
     async def test_rejects_empty_hostname(self) -> None:
         """A NULL/empty tunnel_hostname (race or schema corruption) must raise."""
@@ -310,6 +313,72 @@ class TestAishaProviderSSRFGuard:
         billing = AsyncMock()
         billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
 
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+
+            with pytest.raises(ProviderResponseError):
+                await provider.submit(
+                    _make_request(),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )
+
+    @pytest.mark.parametrize(
+        "hostname",
+        [
+            # URL-meta characters that would let an ``endswith`` check be
+            # smuggled past while urllib parses a different host. These
+            # all end in ``.gpu.test`` literally but contain forbidden
+            # chars that the charset check rejects.
+            "evil.com?.gpu.test",
+            "evil.com#.gpu.test",
+            "evil.com@host.gpu.test",
+            "evil.com:443.gpu.test",
+            "/etc/passwd.gpu.test",
+            "evil\\\\path.gpu.test",
+            # Uppercase: Cloudflare emits lowercase, anything else is corruption
+            "AB123.GPU.TEST",
+            # Leading dot or hyphen: invalid DNS shape
+            ".abc.gpu.test",
+            "-abc.gpu.test",
+            # Whitespace
+            "abc def.gpu.test",
+        ],
+    )
+    async def test_charset_check_rejects_url_meta_and_invalid_dns(self, hostname: str) -> None:
+        """Defense in depth: a hostname that ``endswith(".gpu.test")`` but
+        contains URL-meta characters (?, #, @, :, /, \\) or invalid DNS
+        characters must still be rejected. urllib's host parser would
+        otherwise interpret those characters and route the request to a
+        different host than the suffix suggests.
+        """
+        workflow = MagicMock()
+        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        sneaky_session = MagicMock()
+        sneaky_session.id = uuid4()
+        sneaky_session.tunnel_hostname = hostname
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=sneaky_session)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
@@ -682,6 +751,7 @@ class TestSanitizeFilename:
             ("name'with\"quotes.png", "name_with_quotes.png"),
             # Empty / pathological inputs fall back to a stable default
             ("", "image"),
+            (None, "image"),
             ("///", "image"),
             # Trailing slashes leave an empty basename → fallback to "image".
             ("/...//", "image"),
@@ -689,7 +759,7 @@ class TestSanitizeFilename:
             ("a" * 200 + ".png", "a" * 64),
         ],
     )
-    def test_sanitization_results(self, raw: str, expected_pattern: str) -> None:
+    def test_sanitization_results(self, raw: str | None, expected_pattern: str) -> None:
         from src.api.services.generation.aisha_provider import _sanitize_filename
 
         result = _sanitize_filename(raw)

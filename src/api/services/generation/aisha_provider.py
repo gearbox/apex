@@ -28,21 +28,39 @@ from src.db.repositories.user_image import UserImageRepository
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _MAX_SAFE_FILENAME_LEN = 64
 
+# Tunnel hostname character set: standard DNS hostname rules.
+# Lowercase letters, digits, dot, hyphen. Must start with alnum.
+# Defeats embedded URL-meta characters that could weaponize a benign-
+# looking suffix match — e.g. ``evil.com?.gpu.test`` would slip past a
+# pure ``endswith(".gpu.test")`` check, but its ``?`` violates this
+# pattern. Lowercase-only because Cloudflare Tunnel always emits
+# lowercase; an uppercase letter in the column is itself a corruption
+# signal worth rejecting.
+_VALID_TUNNEL_HOSTNAME = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
 
-def _sanitize_filename(name: str) -> str:
+
+def _sanitize_filename(name: str | None) -> str:
     """Reduce ``name`` to a safe-for-filesystem leaf name.
 
     - Strips directory components (``../``, ``foo/bar``) by taking the
       basename only.
     - Replaces any character outside ``[A-Za-z0-9._-]`` with ``_``.
     - Caps length at 64 chars to bound disk-name reasonableness.
-    - Falls back to ``"image"`` if the input is empty or fully sanitized
-      to nothing (e.g. ``"///"``).
+    - Falls back to ``"image"`` if the input is None, empty, or fully
+      sanitized to nothing (e.g. ``"///"``).
 
-    The job_id suffix added by the caller still guarantees uniqueness across
-    concurrent jobs; this helper just guards against malicious or malformed
-    input names propagating to the GPU node's filesystem.
+    The schema currently declares ``UserImage.original_filename`` and
+    ``Output.storage_key`` NOT NULL, so ``None`` shouldn't be reachable
+    in production today — but accepting ``str | None`` costs one
+    falsy-check and defends against future schema relaxations or
+    code paths that might introduce nullable filename sources.
+
+    The job_id suffix added by the caller still guarantees uniqueness
+    across concurrent jobs; this helper just guards against malicious
+    or malformed input names propagating to the GPU node's filesystem.
     """
+    if not name:
+        return "image"
     # Take the basename — defeats absolute paths, ``../`` traversal, and
     # OS-mismatched separators.
     leaf = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
@@ -248,9 +266,22 @@ class AishaGenerationProvider:
         # hostnames of the form ``{id_short}.{tunnel_domain}``, but a corrupted
         # row, bad migration, or future code path could produce something else.
         # We only ever speak HTTPS to our own tunnel domain.
+        #
+        # Two checks, both required:
+        #   1. Charset — the value matches the DNS-hostname pattern. Defeats
+        #      embedded URL-meta characters (``?``, ``#``, ``@``, ``:``, ``/``)
+        #      that would let a benign-looking suffix smuggle a different host
+        #      through urllib (e.g. ``evil.com?.gpu.test`` ends in ``.gpu.test``
+        #      but parses as host=``evil.com``).
+        #   2. Suffix — the value ends in our configured tunnel domain.
         hostname = gpu_session.tunnel_hostname or ""
         expected_suffix = f".{self._tunnel_domain}" if self._tunnel_domain else ""
-        if not expected_suffix or not hostname.endswith(expected_suffix):
+        hostname_ok = (
+            bool(expected_suffix)
+            and bool(_VALID_TUNNEL_HOSTNAME.match(hostname))
+            and hostname.endswith(expected_suffix)
+        )
+        if not hostname_ok:
             logger.error(
                 "aisha.tunnel_hostname.allowlist_violation",
                 job_id=str(job_id),
@@ -262,9 +293,13 @@ class AishaGenerationProvider:
                 db_job.status = JobStatus.FAILED
                 db_job.error_message = "Generation backend session is misconfigured."
                 await session.flush()
+            # Note: do NOT claim "tokens refunded" here. Refund semantics are
+            # owned by the orchestrator's exception handler; provider error
+            # messages should describe the failure, not pre-bake billing
+            # outcomes that could become wrong if this code's call order
+            # changes.
             raise ProviderResponseError(
                 "Your generation session is misconfigured. "
-                "Your tokens have been refunded. "
                 "Please start a new session and try again."
             )
 
