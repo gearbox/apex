@@ -204,18 +204,21 @@ class TestLifecycle:
         """A sweep that raises must not kill the loop — next iteration still runs."""
         worker, _ = _make_worker()
         call_count = 0
+        second_call = asyncio.Event()
 
         async def flaky_sweep() -> None:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise RuntimeError("transient error")
+            else:
+                second_call.set()
 
         worker._sweep_once = flaky_sweep  # type: ignore[method-assign]
-        worker._settings.gpu_provision_poll_interval_seconds = 0.01  # type: ignore[assignment]
+        worker._settings.gpu_provision_poll_interval_seconds = 0.001  # type: ignore[assignment]
 
         await worker.start()
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(second_call.wait(), timeout=2.0)
         await worker.stop()
 
         assert call_count >= 2

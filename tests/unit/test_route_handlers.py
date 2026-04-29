@@ -74,68 +74,6 @@ class TestGalleryRouteHandlers:
 
 
 # ---------------------------------------------------------------------------
-# ImageController (generation.py)
-# ---------------------------------------------------------------------------
-
-
-class TestImageRouteHandlers:
-    async def test_upload_image_success(self) -> None:
-        from src.api.routes.generation import ImageController
-
-        comfyui_client = AsyncMock()
-        comfyui_client.upload_image = AsyncMock(
-            return_value={"name": "upload_abc.png", "subfolder": "", "type": "input"}
-        )
-
-        mock_file = MagicMock()
-        mock_file.read = AsyncMock(return_value=b"image data")
-        mock_file.filename = "photo.png"
-
-        response = await ImageController.upload_image.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            comfyui_client=comfyui_client,
-            data=mock_file,
-        )
-        assert response.status_code == 201
-        assert response.content.filename == "upload_abc.png"
-
-    async def test_upload_image_returns_500_on_error(self) -> None:
-        from src.api.routes.generation import ImageController
-        from src.api.services.comfyui_client import ComfyUIClientError
-
-        comfyui_client = AsyncMock()
-        comfyui_client.upload_image = AsyncMock(side_effect=ComfyUIClientError("fail"))
-
-        mock_file = MagicMock()
-        mock_file.read = AsyncMock(return_value=b"image data")
-        mock_file.filename = "photo.png"
-
-        response = await ImageController.upload_image.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            comfyui_client=comfyui_client,
-            data=mock_file,
-        )
-        assert response.status_code == 500
-
-    async def test_upload_image_handles_no_extension(self) -> None:
-        from src.api.routes.generation import ImageController
-
-        comfyui_client = AsyncMock()
-        comfyui_client.upload_image = AsyncMock(return_value={})
-
-        mock_file = MagicMock()
-        mock_file.read = AsyncMock(return_value=b"data")
-        mock_file.filename = None  # no filename
-
-        response = await ImageController.upload_image.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            comfyui_client=comfyui_client,
-            data=mock_file,
-        )
-        assert response.status_code == 201
-
-
-# ---------------------------------------------------------------------------
 # UnifiedJobController (jobs.py)
 # ---------------------------------------------------------------------------
 
@@ -1347,8 +1285,8 @@ class TestAuthRouteHandlers:
         assert response.status_code == 400
 
     async def test_resend_verification_already_verified(self) -> None:
-        from unittest.mock import patch
         from datetime import UTC, datetime
+        from unittest.mock import patch
 
         from src.api.routes.auth import AuthController
 
@@ -1715,8 +1653,6 @@ class TestUnifiedGenerationRouteHandlers:
         assert response.status_code == 201
 
     async def test_generate_success(self) -> None:
-        from unittest.mock import patch
-
         from datetime import UTC, datetime
 
         from src.api.routes.unified_generation import UnifiedGenerationController
@@ -1776,7 +1712,6 @@ class TestUnifiedGenerationRouteHandlers:
     async def test_generate_rate_limited(self) -> None:
         from src.api.routes.unified_generation import UnifiedGenerationController
         from src.api.services.generation.rate_limiter import RateLimitExceededError
-
         from src.core.enums import ModelType
 
         err = RateLimitExceededError(ModelType.AISHA_IMAGE, retry_after=60)
@@ -2202,8 +2137,6 @@ class TestGpuSessionRouteHandlers:
         assert response.status_code == 201
 
     async def test_start_session_already_exists(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
         from src.api.services.gpu_session.exceptions import SessionAlreadyExistsError
 
@@ -2315,7 +2248,6 @@ class TestGpuSessionRouteHandlers:
 
     async def test_get_session_not_found(self) -> None:
         import pytest
-
         from litestar.exceptions import NotFoundException
 
         from src.api.routes.gpu_session import GpuSessionController
@@ -2448,8 +2380,6 @@ class TestGpuSessionRouteHandlers:
         assert response.status_code == 404
 
     async def test_stop_returns_confirmation(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
         from src.api.services.gpu_session.schemas import StopConfirmation
 

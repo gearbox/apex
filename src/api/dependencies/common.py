@@ -14,11 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.rate_limit import init_rate_limiter
 from src.api.security import JWTConfig, JWTService, PasswordService
-from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
 from src.api.services.bundle_index import BundleIndexService
-from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.content_proxy import ContentProxyService
 from src.api.services.email import EmailService, LogEmailService, ResendEmailService
 from src.api.services.email_verification import EmailVerificationService
@@ -47,6 +45,7 @@ from src.core.config import Settings, get_settings
 from src.core.product import ProductConfig
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
+from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.token_cleanup import TokenCleanupWorker
 
 logger = structlog.get_logger(__name__)
@@ -64,8 +63,7 @@ class ServiceContainer:
     multiple module-level globals and long `global` declarations.
     """
 
-    comfyui_client: ComfyUIClient | None = None
-    aisha_job_service: AishaJobService | None = None
+    aisha_job_poller: AishaJobPoller | None = None
     workflow_service: WorkflowService | None = None
     r2_storage: R2StorageService | None = None
     db_manager: DatabaseManager | None = None
@@ -97,20 +95,6 @@ _services = ServiceContainer()
 # -----------------------------------------------------------------------------
 # ComfyUI dependencies
 # -----------------------------------------------------------------------------
-
-
-def get_comfyui_client() -> ComfyUIClient:
-    """Provide ComfyUI client instance.
-
-    Returns:
-        Singleton ComfyUI client.
-
-    Raises:
-        RuntimeError: If client not initialized.
-    """
-    if _services.comfyui_client is None:
-        raise RuntimeError("ComfyUI client not initialized")
-    return _services.comfyui_client
 
 
 def get_workflow_service() -> WorkflowService:
@@ -475,11 +459,6 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     # Initialize rate limiter
     init_rate_limiter(settings)
 
-    # Initialize ComfyUI client
-    _services.comfyui_client = ComfyUIClient(settings.comfyui_base_url)
-    await _services.comfyui_client.connect()
-    logger.info("comfyui.connected", url=settings.comfyui_base_url)
-
     # Initialize workflow service
     _services.workflow_service = WorkflowService(base_path=base_path)
 
@@ -497,15 +476,6 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         logger.info("r2.initialized", bucket=settings.r2_bucket_name)
     else:
         logger.warning("r2.not_configured")
-
-    # Initialize Aisha job service (if R2 is configured)
-    if _services.r2_storage is not None and _services.comfyui_client is not None:
-        _services.aisha_job_service = AishaJobService(
-            comfyui_client=_services.comfyui_client,
-            storage=_services.r2_storage,
-            retention_days=settings.retention_days,
-        )
-        logger.info("aisha_job_service.initialized")
 
     # Initialize Grok provider (if configured)
     if settings.grok_configured and _services.r2_storage is not None:
@@ -575,9 +545,29 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     _services.unified_job_service = UnifiedJobService(
         storage=_services.r2_storage,
         grok_job_service=_services.grok_job_service,
-        aisha_job_service=_services.aisha_job_service,
     )
     logger.info("unified_job_service.initialized")
+
+    # Initialize and start Aisha job poller
+    poller_config = AishaPollerConfig(
+        enabled=settings.aisha_poller_enabled,
+        tick_interval_seconds=settings.aisha_poller_tick_interval_seconds,
+        max_concurrent_polls=settings.aisha_poller_max_concurrent_polls,
+        job_age_warning_seconds=settings.aisha_poller_job_age_warning_seconds,
+        job_age_timeout_seconds=settings.aisha_poller_job_age_timeout_seconds,
+        comfyui_request_timeout_seconds=settings.aisha_poller_comfyui_request_timeout_seconds,
+        tunnel_allowed_suffix=settings.cf_tunnel_domain or "",
+        retention_days=settings.retention_days,
+    )
+    _services.aisha_job_poller = AishaJobPoller(
+        session_factory=_services.db_manager.session_factory,
+        event_bus=_services.event_bus,
+        billing_service=BillingService(event_bus=_services.event_bus),
+        r2_storage=_services.r2_storage,
+        config=poller_config,
+    )
+    await _services.aisha_job_poller.start()
+    logger.info("aisha_job_poller.started", enabled=settings.aisha_poller_enabled)
 
     # Initialize GPU session stack (requires both Vast.ai + CF to be configured)
     if settings.vastai_configured and settings.cf_configured:
@@ -796,9 +786,9 @@ async def shutdown_services() -> None:
         await _services.gpu_session_http_client.aclose()
         logger.info("gpu_session_http_client.closed")
 
-    if _services.comfyui_client is not None:
-        await _services.comfyui_client.close()
-        logger.info("comfyui.closed")
+    if _services.aisha_job_poller is not None:
+        await _services.aisha_job_poller.stop()
+        logger.info("aisha_job_poller.stopped")
 
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
@@ -842,7 +832,6 @@ dependencies = {
     "auth_service": Provide(get_auth_service, sync_to_thread=False),
     "user_service": Provide(get_user_service, sync_to_thread=False),
     # Core services
-    "comfyui_client": Provide(get_comfyui_client, sync_to_thread=False),
     "workflow_service": Provide(get_workflow_service, sync_to_thread=False),
     "settings": Provide(provide_settings, sync_to_thread=False),
     # Storage services

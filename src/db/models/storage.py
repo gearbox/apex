@@ -31,6 +31,7 @@ from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.models.base import Base
 
 if TYPE_CHECKING:
+    from .gpu_session import GpuSession
     from .user import User
 
 
@@ -199,8 +200,19 @@ class GenerationJob(Base):
         nullable=True,
     )
 
+    # GPU session link (Aisha jobs only; NULL for Grok jobs)
+    # CHECK constraint `ck_generation_jobs_aisha_has_session` in migration 006
+    # enforces (provider != 'aisha') OR (gpu_session_id IS NOT NULL).
+    gpu_session_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("gpu_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=False,  # partial index defined in migration 006
+    )
+
     # External provider tracking
     # For Grok: stores request_id (for video polling)
+    # For Aisha: stores ComfyUI prompt_id
     external_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Timestamps
@@ -222,6 +234,12 @@ class GenerationJob(Base):
     user: Mapped[User] = relationship(
         "User",
         back_populates="generation_jobs",
+    )
+    gpu_session: Mapped[GpuSession | None] = relationship(
+        "GpuSession",
+        foreign_keys="GenerationJob.gpu_session_id",
+        lazy="raise_on_sql",  # force explicit eager loading — prevents async lazy-load bugs
+        uselist=False,
     )
     outputs: Mapped[list[GenerationOutput]] = relationship(
         "GenerationOutput",
@@ -249,6 +267,7 @@ class GenerationJob(Base):
     )
 
     __table_args__ = (
+        Index("ix_generation_jobs_gpu_session_id_status", "gpu_session_id", "status", postgresql_where=text("status IN ('queued', 'running')")),
         Index("ix_generation_jobs_user_status", "user_id", "status"),
         Index("ix_generation_jobs_user_created", "user_id", "created_at"),
         Index("ix_generation_jobs_provider_status", "provider", "status"),

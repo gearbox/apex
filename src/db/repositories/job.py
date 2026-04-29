@@ -8,7 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from src.core.enums import GenerationType, JobStatus, Provider
+from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
+from src.db.models.gpu_session import GpuSession
 from src.db.models.storage import GenerationJob
 from src.db.repositories.base import BaseRepository
 
@@ -43,12 +44,13 @@ class JobRepository(BaseRepository[GenerationJob]):
         product_id: str,
         generation_type: GenerationType = GenerationType.I2I,
         status: JobStatus = JobStatus.PENDING,
-        provider: Provider = Provider.AISHA,
+        provider: Provider = Provider.GROK,
         model: str | None = None,
         aspect_ratio: str | None = None,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
         input_image_id: UUID | None = None,
+        gpu_session_id: UUID | None = None,
     ) -> GenerationJob:
         """Create a new generation job.
 
@@ -66,6 +68,7 @@ class JobRepository(BaseRepository[GenerationJob]):
             source_job_id: ID of the source job for lineage tracking.
             source_output_id: ID of the source output used as input.
             input_image_id: ID of the uploaded image used as input.
+            gpu_session_id: GPU session this job will run on (Aisha only).
 
         Returns:
             Created GenerationJob instance.
@@ -84,6 +87,7 @@ class JobRepository(BaseRepository[GenerationJob]):
             source_job_id=source_job_id,
             source_output_id=source_output_id,
             input_image_id=input_image_id,
+            gpu_session_id=gpu_session_id,
         )
         self._session.add(job)
         await self._session.flush()
@@ -257,6 +261,38 @@ class JobRepository(BaseRepository[GenerationJob]):
         job.is_deleted = True
         await self._session.flush()
         return job
+
+    async def list_aisha_jobs_for_polling(
+        self,
+        *,
+        limit: int = 200,
+    ) -> Sequence[GenerationJob]:
+        """Return in-progress Aisha jobs whose GPU session is active.
+
+        Eager-loads ``gpu_session`` so the poller can read tunnel_hostname
+        on detached objects without triggering additional SQL.
+
+        Args:
+            limit: Maximum jobs to return per tick.
+
+        Returns:
+            GenerationJob instances ordered by ``created_at ASC`` (oldest first
+            so long-running jobs are not starved).
+        """
+        result = await self._session.execute(
+            select(GenerationJob)
+            .join(GpuSession, GenerationJob.gpu_session_id == GpuSession.id)
+            .where(
+                GenerationJob.provider == Provider.AISHA,
+                GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                GpuSession.status == GpuSessionStatus.active,
+                GenerationJob.is_deleted.is_(False),
+            )
+            .options(selectinload(GenerationJob.gpu_session))
+            .order_by(GenerationJob.created_at.asc())
+            .limit(limit)
+        )
+        return result.scalars().all()
 
     async def list_pending_video_jobs(
         self,

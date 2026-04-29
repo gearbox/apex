@@ -604,6 +604,46 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
+    # Aisha Job Poller
+    # -------------------------------------------------------------------------
+
+    aisha_poller_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable the Aisha job polling worker. Set to false to disable polling "
+            "(useful for tests and ops kill-switch)."
+        ),
+    )
+    aisha_poller_tick_interval_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60.0,
+        description="Seconds between poller ticks.",
+    )
+    aisha_poller_max_concurrent_polls: int = Field(
+        default=16,
+        ge=1,
+        le=256,
+        description="Maximum concurrent ComfyUI polls per tick.",
+    )
+    aisha_poller_job_age_warning_seconds: int = Field(
+        default=300,
+        ge=30,
+        description="Log a warning if a job has been running longer than this.",
+    )
+    aisha_poller_job_age_timeout_seconds: int = Field(
+        default=1800,
+        ge=60,
+        description="Mark a job FAILED if it has been running longer than this.",
+    )
+    aisha_poller_comfyui_request_timeout_seconds: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=30.0,
+        description="Per-request timeout for ComfyUI API calls from the poller.",
+    )
+
+    # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
 

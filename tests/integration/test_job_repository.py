@@ -160,7 +160,7 @@ async def test_list_by_user_filter_by_generation_type(
 
 
 async def test_list_pending_video_jobs_returns_matching(
-    job_repo: JobRepository, make_user, make_job
+    job_repo: JobRepository, make_user, make_job, make_gpu_session
 ) -> None:
     """list_pending_video_jobs returns queued/running video jobs with external_request_id."""
     user = await make_user(email=f"vidpoll-{uuid4().hex[:6]}@example.com")
@@ -183,13 +183,15 @@ async def test_list_pending_video_jobs_returns_matching(
         external_request_id="grok-req-002",
     )
 
-    # Non-matching: wrong provider
+    # Non-matching: wrong provider (aisha requires a gpu_session)
+    gpu_session = await make_gpu_session(user=user)
     await make_job(
         user=user,
         status="queued",
         generation_type="t2v",
         provider=Provider.AISHA.value,
         external_request_id="aisha-req-001",
+        gpu_session_id=gpu_session.id,
     )
 
     # Non-matching: completed status
@@ -367,17 +369,19 @@ async def test_soft_delete_idempotent(job_repo: JobRepository, make_user, make_j
 
 
 async def test_list_pending_video_jobs_custom_provider(
-    job_repo: JobRepository, make_user, make_job
+    job_repo: JobRepository, make_user, make_job, make_gpu_session
 ) -> None:
     """list_pending_video_jobs filters by the given provider enum."""
     user = await make_user(email=f"vidpoll-prov-{uuid4().hex[:6]}@example.com")
 
+    gpu_session = await make_gpu_session(user=user)
     aisha_job = await make_job(
         user=user,
         status="queued",
         generation_type="t2v",
         provider=Provider.AISHA.value,
         external_request_id="aisha-vid-001",
+        gpu_session_id=gpu_session.id,
     )
 
     # Grok job — should not appear when filtering by AISHA
