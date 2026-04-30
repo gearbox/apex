@@ -142,6 +142,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "settings": _make_settings(),
         "billing_service": None,
         "event_bus": None,
+        "job_sweep_service": None,
     } | overrides
     worker = GpuProvisioningWorker(
         session_factory=mocks["session_factory"],
@@ -152,6 +153,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         settings=mocks["settings"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
+        job_sweep_service=mocks["job_sweep_service"],
     )
     return worker, mocks
 
@@ -1063,3 +1065,112 @@ class TestMarkFailed:
             await worker._mark_failed(session, reason="test")  # must not raise
 
         mock_repo.update_status.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# TestMarkFailedWithJobSweep (Blocker B)
+# ---------------------------------------------------------------------------
+
+
+def _make_worker_with_sweep(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any]]:
+    sweep = MagicMock()
+    sweep.sweep_session_best_effort = AsyncMock(return_value=None)
+    worker, mocks = _make_worker(job_sweep_service=sweep, **overrides)
+    mocks["job_sweep"] = sweep
+    return worker, mocks
+
+
+class TestMarkFailedWithJobSweep:
+    async def test_mark_failed_sweeps_jobs_before_status_transition(self) -> None:
+        """sweep_session_best_effort is called before update_status(session_id, failed)."""
+        worker, mocks = _make_worker_with_sweep()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+        call_order: list[str] = []
+
+        async def record_sweep(**_kwargs: Any) -> None:
+            call_order.append("sweep")
+
+        mocks["job_sweep"].sweep_session_best_effort.side_effect = record_sweep
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+
+            async def record_update_status(*_args: Any, **_kwargs: Any) -> None:
+                call_order.append("update_status")
+
+            mock_repo.update_status.side_effect = record_update_status
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test reason")
+
+        assert "sweep" in call_order
+        assert "update_status" in call_order
+        assert call_order.index("sweep") < call_order.index("update_status")
+
+    async def test_mark_failed_completes_normally_after_sweep(self) -> None:
+        """Teardown + status transition complete after sweep_session_best_effort call."""
+        worker, mocks = _make_worker_with_sweep()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="provisioning timeout")
+
+        mock_repo.update_status.assert_awaited()
+        assert mock_repo.update_status.await_args.args[1] == GpuSessionStatus.failed
+
+    async def test_mark_failed_passes_session_product_id_to_sweep(self) -> None:
+        worker, mocks = _make_worker_with_sweep()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+            product_id="synthara",
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test")
+
+        mocks["job_sweep"].sweep_session_best_effort.assert_awaited_once()
+        call_kwargs = mocks["job_sweep"].sweep_session_best_effort.call_args.kwargs
+        assert call_kwargs["product_id"] == "synthara"
+
+    async def test_mark_failed_without_sweep_service_still_works(self) -> None:
+        """Worker with no sweep (job_sweep_service=None) behaves as before."""
+        worker, mocks = _make_worker()
+        assert worker._job_sweep is None
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=None,
+            cf_tunnel_id=None,
+            cf_dns_record_id=None,
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test")
+
+        mock_repo.update_status.assert_awaited()
+        assert mock_repo.update_status.await_args.args[1] == GpuSessionStatus.failed

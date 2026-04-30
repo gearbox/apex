@@ -37,6 +37,7 @@ from src.api.services.gpu_session.exceptions import (
     GpuSessionError,
     InvalidSessionStateError,
     SessionAlreadyExistsError,
+    SessionHasInFlightJobsError,
 )
 from src.api.services.gpu_session.schemas import StopConfirmation
 from src.api.services.gpu_session.service import (
@@ -45,7 +46,8 @@ from src.api.services.gpu_session.service import (
 )
 from src.api.services.vastai.exceptions import NoCapacityError, VastAIError
 from src.core.config import Settings
-from src.core.enums import UserRole
+from src.core.enums import GpuSessionStatus, UserRole
+from src.db.repositories.job import JobRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -133,6 +135,7 @@ class GpuSessionController(Controller):
         session_id: UUID,
         gpu_session_service: GpuSessionService,
         product_id: str,
+        session: AsyncSession,
     ) -> GpuSessionResponse:
         """Get a specific GPU session."""
         session_row = await gpu_session_service.get_session(
@@ -142,7 +145,15 @@ class GpuSessionController(Controller):
         )
         if session_row is None:
             raise NotFoundException(detail=f"Session {session_id} not found")
-        return GpuSessionResponse.from_model(session_row)
+
+        in_flight_count = 0
+        if session_row.status == GpuSessionStatus.active:
+            # Only meaningful for active sessions; non-active sessions can't
+            # have in-flight jobs by construction (sweeps already ran).
+            job_repo = JobRepository(session)
+            in_flight_count = await job_repo.count_in_flight_for_session(session_id)
+
+        return GpuSessionResponse.from_model(session_row, in_flight_job_count=in_flight_count)
 
     @post("/{session_id:uuid}/pause")
     async def pause(
@@ -158,6 +169,16 @@ class GpuSessionController(Controller):
                 session_id=session_id,
                 user_id=current_user_id,
                 product_id=product_id,
+            )
+        except SessionHasInFlightJobsError as exc:
+            return Response(
+                content=ErrorEnvelope(
+                    error="jobs_in_flight",
+                    message=str(exc),
+                    status_code=HTTP_409_CONFLICT,
+                    detail={"in_flight_count": exc.in_flight_count},
+                ),
+                status_code=HTTP_409_CONFLICT,
             )
         except InvalidSessionStateError as exc:
             return _error(HTTP_409_CONFLICT, "invalid_state", str(exc))

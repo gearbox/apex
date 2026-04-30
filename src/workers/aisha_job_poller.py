@@ -209,7 +209,7 @@ class AishaJobPoller:
                 hostname=hostname,
                 error=str(exc),
             )
-            await ts.transition_to_failed(
+            _, _ = await ts.transition_to_failed(
                 job.id,
                 error_message=f"Invalid tunnel hostname: {exc}"[:500],
                 refund=True,
@@ -280,7 +280,7 @@ class AishaJobPoller:
             status_info = history_entry.get("status", {})
             if isinstance(status_info, dict) and status_info.get("status_str") == "error":
                 messages = status_info.get("messages", [["Error", "Unknown"]])
-                await ts.transition_to_failed(
+                _, _ = await ts.transition_to_failed(
                     job.id,
                     error_message=f"ComfyUI reported error: {messages!r}"[:500],
                     refund=True,
@@ -296,7 +296,7 @@ class AishaJobPoller:
                     job_id=str(job.id),
                     status=status_info,
                 )
-                await ts.transition_to_failed(
+                _, _ = await ts.transition_to_failed(
                     job.id,
                     error_message=(
                         "ComfyUI history entry contained no outputs and no error; "
@@ -354,7 +354,7 @@ class AishaJobPoller:
         # Use started_at if set (job was observed running), fall back to
         # created_at so jobs that never reached RUNNING are still reaped.
         if self._is_job_past_timeout(job):
-            await ts.transition_to_failed(
+            _, _ = await ts.transition_to_failed(
                 job.id,
                 error_message="ComfyUI lost track of prompt — job timed out.",
                 refund=True,

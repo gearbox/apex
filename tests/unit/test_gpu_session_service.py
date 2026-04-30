@@ -35,6 +35,7 @@ from src.core.enums import GpuSessionStatus, ModelType
 from src.db.models.gpu_session import GpuSession
 
 _REPO_PATH = "src.api.services.gpu_session.service.GpuSessionRepository"
+_JOB_REPO_PATH = "src.api.services.gpu_session.service.JobRepository"
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +172,7 @@ def _make_service(
         "billing_service": _make_billing_mock(),
         "account_id": uuid4(),
         "event_bus": None,
+        "job_sweep_service": None,
     } | overrides
     service = GpuSessionService(
         vastai_client=mocks["vastai_client"],
@@ -180,6 +182,7 @@ def _make_service(
         settings=mocks["settings"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
+        job_sweep_service=mocks["job_sweep_service"],
     )
     return service, mocks
 
@@ -896,10 +899,14 @@ class TestPauseSession:
         session = _make_gpu_session(user_id=user_id, product_id=product_id)
         session_id = session.id
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_JOB_REPO_PATH) as MockJobRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
+
+            mock_job_repo = AsyncMock()
+            MockJobRepo.return_value = mock_job_repo
+            mock_job_repo.count_in_flight_for_session.return_value = 0
 
             result = await service.pause_session(
                 session_id=session_id,
@@ -916,10 +923,14 @@ class TestPauseSession:
         product_id = "vex"
         session = _make_gpu_session(user_id=user_id, product_id=product_id, paused_at=None)
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_JOB_REPO_PATH) as MockJobRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
+
+            mock_job_repo = AsyncMock()
+            MockJobRepo.return_value = mock_job_repo
+            mock_job_repo.count_in_flight_for_session.return_value = 0
 
             result = await service.pause_session(
                 session_id=session.id,
@@ -968,10 +979,14 @@ class TestPauseSession:
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
         mocks["vastai_client"].stop_instance.side_effect = VastAIError("timeout")
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_JOB_REPO_PATH) as MockJobRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
+
+            mock_job_repo = AsyncMock()
+            MockJobRepo.return_value = mock_job_repo
+            mock_job_repo.count_in_flight_for_session.return_value = 0
 
             with pytest.raises(VastAIError):
                 await service.pause_session(
@@ -2458,3 +2473,211 @@ class TestReadMethods:
             )
 
         mock_repo.list_by_user.assert_called_once_with(user_id, "vex", include_terminal=True)
+
+
+# ---------------------------------------------------------------------------
+# Stop flow integration with JobSweepService (Blocker B)
+# ---------------------------------------------------------------------------
+
+
+def _make_sweep_service_mock() -> MagicMock:
+    sweep = MagicMock()
+    sweep.sweep_session_best_effort = AsyncMock(return_value=None)
+    return sweep
+
+
+def _make_service_with_sweep(**overrides: Any) -> tuple[GpuSessionService, dict[str, Any]]:
+    sweep = _make_sweep_service_mock()
+    service, mocks = _make_service(job_sweep_service=sweep, **overrides)
+    mocks["job_sweep"] = sweep
+    return service, mocks
+
+
+class TestStopWithJobSweep:
+    async def test_stop_confirmed_calls_sweep_after_tx1(self) -> None:
+        """sweep_session_best_effort is called after TX1 commits status=stopping."""
+        service, mocks = _make_service_with_sweep()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        mocks["job_sweep"].sweep_session_best_effort.assert_awaited_once()
+        call_kwargs = mocks["job_sweep"].sweep_session_best_effort.call_args.kwargs
+        assert call_kwargs["session_id"] == session.id
+        assert call_kwargs["product_id"] == session.product_id
+
+    async def test_stop_confirmed_sweep_called_before_external_teardown(self) -> None:
+        """sweep_session_best_effort is called before destroy_instance."""
+        service, mocks = _make_service_with_sweep()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+        call_order: list[str] = []
+
+        async def record_sweep(**_kwargs: Any) -> None:
+            call_order.append("sweep")
+
+        async def record_destroy(*_args: Any, **_kwargs: Any) -> None:
+            call_order.append("destroy")
+
+        mocks["job_sweep"].sweep_session_best_effort.side_effect = record_sweep
+        mocks["vastai_client"].destroy_instance.side_effect = record_destroy
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert call_order.index("sweep") < call_order.index("destroy")
+
+    async def test_stop_confirmed_completes_normally_after_sweep(self) -> None:
+        """Stop completes and returns stopped session after sweep call."""
+        service, mocks = _make_service_with_sweep()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+        mocks["vastai_client"].destroy_instance.assert_called_once()
+
+    async def test_stop_without_sweep_service_still_works(self) -> None:
+        """Service with no sweep (job_sweep_service=None) stops normally."""
+        service, mocks = _make_service()
+        assert service._job_sweep is None
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+
+
+class TestPauseWithJobSweep:
+    async def test_pause_rejects_when_in_flight_jobs_present(self) -> None:
+        """pause_session raises SessionHasInFlightJobsError when count > 0."""
+        from src.api.services.gpu_session.exceptions import SessionHasInFlightJobsError
+
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch(_JOB_REPO_PATH) as MockJobRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            mock_job_repo = AsyncMock()
+            MockJobRepo.return_value = mock_job_repo
+            mock_job_repo.count_in_flight_for_session.return_value = 2
+
+            with pytest.raises(SessionHasInFlightJobsError) as exc_info:
+                await service.pause_session(
+                    session_id=session.id,
+                    user_id=user_id,
+                    product_id=session.product_id,
+                )
+
+        assert exc_info.value.in_flight_count == 2
+        # Pause was rejected — neither the VastAI client nor the repo update
+        # should have been called.
+        mocks["vastai_client"].stop_instance.assert_not_called()
+        mock_repo.update_status.assert_not_called()
+
+    async def test_pause_succeeds_when_zero_in_flight(self) -> None:
+        """pause_session proceeds when count_in_flight_for_session returns 0."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch(_JOB_REPO_PATH) as MockJobRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            mock_job_repo = AsyncMock()
+            MockJobRepo.return_value = mock_job_repo
+            mock_job_repo.count_in_flight_for_session.return_value = 0
+
+            result = await service.pause_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+            )
+
+        assert result.status == GpuSessionStatus.paused
+        mocks["vastai_client"].stop_instance.assert_called_once()
+
+    async def test_pause_in_flight_error_carries_correct_count(self) -> None:
+        from src.api.services.gpu_session.exceptions import SessionHasInFlightJobsError
+
+        service, _ = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch(_JOB_REPO_PATH) as MockJobRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            mock_job_repo = AsyncMock()
+            MockJobRepo.return_value = mock_job_repo
+            mock_job_repo.count_in_flight_for_session.return_value = 5
+
+            with pytest.raises(SessionHasInFlightJobsError) as exc_info:
+                await service.pause_session(
+                    session_id=session.id,
+                    user_id=user_id,
+                    product_id=session.product_id,
+                )
+
+        assert exc_info.value.in_flight_count == 5
+        assert exc_info.value.operation == "pause"

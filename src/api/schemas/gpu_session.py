@@ -39,9 +39,12 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
     resumed_at: datetime | None = None
     stopped_at: datetime | None = None
     error_message: str | None = None
+    in_flight_job_count: int = 0
+    """Number of QUEUED/RUNNING Aisha jobs on this session. Non-zero only for active
+    sessions. Used by the frontend to gate the Pause button."""
 
     @classmethod
-    def from_model(cls, m: GpuSession) -> GpuSessionResponse:
+    def from_model(cls, m: GpuSession, *, in_flight_job_count: int = 0) -> GpuSessionResponse:
         return cls(
             id=m.id,
             user_id=m.user_id,
@@ -59,6 +62,7 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
             resumed_at=m.resumed_at,
             stopped_at=m.stopped_at,
             error_message=m.error_message,
+            in_flight_job_count=in_flight_job_count,
         )
 
 
