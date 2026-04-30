@@ -405,38 +405,23 @@ class TestStorageControllerAuth:
 class TestGenerationControllersAuth:
     """Verify auth guards on generation controllers."""
 
-    def _create_gen_app(self, jwt_service: JWTService) -> Litestar:
-        from src.api.routes.generation import ImageController
+    def test_health_live_is_public(self, jwt_service: JWTService) -> None:
+        """HealthController /live should NOT require auth."""
         from src.api.routes.health import HealthController
         from src.api.services.health.registry import HealthCheckRegistry
         from src.api.services.health.service import HealthService
 
         health_service = HealthService(registry=HealthCheckRegistry())
-
         app = Litestar(
-            route_handlers=[
-                HealthController,
-                ImageController,
-            ],
+            route_handlers=[HealthController],
             dependencies={
                 "health_service": Provide(lambda: health_service, sync_to_thread=False),
             },
         )
         app.state["jwt_service"] = jwt_service
-        return app
-
-    def test_health_live_is_public(self, jwt_service: JWTService) -> None:
-        """HealthController /live should NOT require auth."""
-        app = self._create_gen_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.get("/health/live")
             assert resp.status_code == HTTP_200_OK
-
-    def test_image_upload_requires_auth(self, jwt_service: JWTService) -> None:
-        app = self._create_gen_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.post("/v1/images/upload")
-            assert resp.status_code == HTTP_401_UNAUTHORIZED
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +446,7 @@ class TestNoPlaceholderUserIds:
         assert f'user_id = UUID("{self.PLACEHOLDER}")' not in source
 
     def test_generation_routes_no_placeholder(self) -> None:
-        source = self._read_source("src.api.routes.generation")
+        source = self._read_source("src.api.routes.unified_generation")
         assert f'user_id = UUID("{self.PLACEHOLDER}")' not in source
 
 
@@ -477,13 +462,6 @@ class TestControllerGuardDeclarations:
         from src.api.routes.storage import StorageController
 
         guards = StorageController.guards
-        assert guards is not None
-        assert auth_guard in guards
-
-    def test_image_controller_has_guard(self) -> None:
-        from src.api.routes.generation import ImageController
-
-        guards = ImageController.guards
         assert guards is not None
         assert auth_guard in guards
 
@@ -561,8 +539,8 @@ class TestAuthGuardUncoveredBranches:
 
         conn = MagicMock()
         conn.headers.get.return_value = authorization
-        conn.state.__getitem__ = lambda self, k: state[k]
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.state.__getitem__ = lambda self, k: state[k]  # noqa: ARG005
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
         conn.state.get = state.get
 
         conn.app.state.get.return_value = None if jwt_service is None else jwt_service
@@ -641,8 +619,8 @@ class TestOptionalAuthGuard:
         state: dict[str, Any] = {}
         conn = MagicMock()
         conn.headers.get.return_value = authorization
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
-        conn.state.__getitem__ = lambda self, k: state[k]
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
+        conn.state.__getitem__ = lambda self, k: state[k]  # noqa: ARG005
         conn.state.get = state.get
 
         conn.app.state.get.return_value = jwt_service
@@ -659,7 +637,7 @@ class TestOptionalAuthGuard:
         state: dict[str, Any] = {}
         conn = MagicMock()
         conn.headers.get.return_value = None
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 
@@ -677,7 +655,7 @@ class TestOptionalAuthGuard:
         state: dict[str, Any] = {}
         conn = MagicMock()
         conn.headers.get.return_value = "Bearer sometoken"
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
         conn.app.state.get.return_value = None
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
@@ -698,7 +676,7 @@ class TestOptionalAuthGuard:
         state: dict[str, Any] = {}
         conn = MagicMock()
         conn.headers.get.return_value = f"Bearer {token}"
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
         conn.app.state.get.return_value = jwt_service
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
@@ -718,7 +696,7 @@ class TestOptionalAuthGuard:
         state: dict[str, Any] = {}
         conn = MagicMock()
         conn.headers.get.return_value = "Bearer bad.token.here"
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
         conn.app.state.get.return_value = jwt_service
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))

@@ -3,9 +3,8 @@
 Builds ``UnifiedJobResponse`` objects from ``GenerationJob`` DB records
 by fetching outputs and generating presigned R2 URLs.
 
-Replaces the in-memory ``JobManager`` for the user-facing jobs API.
-``JobManager`` / ``GrokJobService`` remain as *execution* services;
-this service is read-oriented (history, gallery, status polling).
+GET /v1/jobs/{id} is DB-only: no ComfyUI calls in the request path.
+Aisha job status is updated by AishaJobPoller (background worker).
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
-from src.api.services.aisha_job_service import AishaJobService
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus, Provider
@@ -46,11 +44,9 @@ class UnifiedJobService:
         *,
         storage: R2StorageService | None,
         grok_job_service: GrokJobService | None,
-        aisha_job_service: AishaJobService | None = None,
     ) -> None:
         self._storage = storage
         self._grok = grok_job_service
-        self._aisha = aisha_job_service
 
     # -------------------------------------------------------------------------
     # Public API
@@ -67,6 +63,9 @@ class UnifiedJobService:
 
         For queued/running Grok video jobs, this triggers a poll to xAI so
         the returned status is always fresh (poll-on-read pattern).
+
+        Aisha jobs are updated by the background AishaJobPoller; this method
+        reads from the DB only — no ComfyUI calls in the request path.
 
         Args:
             job_id: Job to fetch.
@@ -95,19 +94,6 @@ class UnifiedJobService:
                     job = updated
             except Exception:
                 logger.exception("unified_jobs.poll_on_read_failed", job_id=str(job_id))
-
-        # Poll Aisha image jobs on read — downloads outputs and transitions status.
-        if (
-            self._aisha is not None
-            and job.provider == Provider.AISHA.value
-            and job.status in (JobStatus.QUEUED.value, JobStatus.RUNNING.value)
-        ):
-            try:
-                updated = await self._aisha.poll_image_job(session, job_id)
-                if updated is not None:
-                    job = updated
-            except Exception:
-                logger.exception("unified_jobs.aisha_poll_on_read_failed", job_id=str(job_id))
 
         return await self._build_response(job, session=session)
 

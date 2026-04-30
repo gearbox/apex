@@ -12,6 +12,10 @@ import structlog
 from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationRequest
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.generation.service import ProviderResponseError
+from src.api.services.generation.tunnel_validation import (
+    InvalidTunnelHostnameError,
+    validate_tunnel_hostname,
+)
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.storage import R2StorageService
 from src.api.services.workflow_service import WorkflowService
@@ -27,16 +31,6 @@ from src.db.repositories.user_image import UserImageRepository
 # components, restrict to a conservative ASCII charset, and cap length.
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _MAX_SAFE_FILENAME_LEN = 64
-
-# Tunnel hostname character set: standard DNS hostname rules.
-# Lowercase letters, digits, dot, hyphen. Must start with alnum.
-# Defeats embedded URL-meta characters that could weaponize a benign-
-# looking suffix match — e.g. ``evil.com?.gpu.test`` would slip past a
-# pure ``endswith(".gpu.test")`` check, but its ``?`` violates this
-# pattern. Lowercase-only because Cloudflare Tunnel always emits
-# lowercase; an uppercase letter in the column is itself a corruption
-# signal worth rejecting.
-_VALID_TUNNEL_HOSTNAME = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
 
 
 def _sanitize_filename(name: str | None) -> str:
@@ -240,6 +234,7 @@ class AishaGenerationProvider:
             source_job_id=source_job_id,
             source_output_id=source_output_id,
             input_image_id=request.input_image_id,
+            gpu_session_id=gpu_session.id,
         )
 
         # Billing reservation
@@ -261,47 +256,25 @@ class AishaGenerationProvider:
         await session.flush()
 
         # 2. Build a session-scoped ComfyUI client.
-        # SSRF guard: validate the tunnel hostname against the configured domain
-        # before constructing an outbound URL. The write path always produces
-        # hostnames of the form ``{id_short}.{tunnel_domain}``, but a corrupted
-        # row, bad migration, or future code path could produce something else.
-        # We only ever speak HTTPS to our own tunnel domain.
-        #
-        # Two checks, both required:
-        #   1. Charset — the value matches the DNS-hostname pattern. Defeats
-        #      embedded URL-meta characters (``?``, ``#``, ``@``, ``:``, ``/``)
-        #      that would let a benign-looking suffix smuggle a different host
-        #      through urllib (e.g. ``evil.com?.gpu.test`` ends in ``.gpu.test``
-        #      but parses as host=``evil.com``).
-        #   2. Suffix — the value ends in our configured tunnel domain.
+        # SSRF guard: validate tunnel hostname against the configured domain.
         hostname = gpu_session.tunnel_hostname or ""
-        expected_suffix = f".{self._tunnel_domain}" if self._tunnel_domain else ""
-        hostname_ok = (
-            bool(expected_suffix)
-            and bool(_VALID_TUNNEL_HOSTNAME.match(hostname))
-            and hostname.endswith(expected_suffix)
-        )
-        if not hostname_ok:
+        try:
+            validate_tunnel_hostname(hostname, allowed_suffix=f".{self._tunnel_domain}")
+        except InvalidTunnelHostnameError as e:
             logger.error(
                 "aisha.tunnel_hostname.allowlist_violation",
                 job_id=str(job_id),
                 gpu_session_id=str(gpu_session.id),
                 tunnel_hostname=hostname,
-                expected_suffix=expected_suffix,
             )
             if db_job is not None:
                 db_job.status = JobStatus.FAILED
                 db_job.error_message = "Generation backend session is misconfigured."
                 await session.flush()
-            # Note: do NOT claim "tokens refunded" here. Refund semantics are
-            # owned by the orchestrator's exception handler; provider error
-            # messages should describe the failure, not pre-bake billing
-            # outcomes that could become wrong if this code's call order
-            # changes.
             raise ProviderResponseError(
                 "Your generation session is misconfigured. "
                 "Please start a new session and try again."
-            )
+            ) from e
 
         base_url = f"https://{hostname}"
         client = ComfyUIClient(base_url)

@@ -23,6 +23,7 @@ from sqlalchemy.pool import NullPool
 
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 from src.db.models.billing import Organization, TokenAccount
+from src.db.models.gpu_session import GpuSession
 from src.db.models.storage import GenerationJob, UserImage
 from src.db.models.user import User
 from src.db.repositories.auth_tokens import AuthTokenRepository
@@ -48,6 +49,7 @@ UserFactory = Callable[..., Coroutine[Any, Any, User]]
 OrgFactory = Callable[..., Coroutine[Any, Any, Organization]]
 TokenAccountFactory = Callable[..., Coroutine[Any, Any, TokenAccount]]
 JobFactory = Callable[..., Coroutine[Any, Any, GenerationJob]]
+GpuSessionFactory = Callable[..., Coroutine[Any, Any, GpuSession]]
 UserImageFactory = Callable[..., Coroutine[Any, Any, UserImage]]
 VerificationTokenFactory = Callable[..., Coroutine[Any, Any, tuple[EmailVerificationToken, str]]]
 ResetTokenFactory = Callable[..., Coroutine[Any, Any, tuple[PasswordResetToken, str]]]
@@ -283,11 +285,13 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
         generation_type: str = "t2i",
         prompt: str = "a test image",
         name: str = "Test Job",
-        provider: str = "aisha",
+        provider: str = "grok",
         model: str | None = None,
         job_id: UUID | None = None,
         product_id: str = "vex",
         external_request_id: str | None = None,
+        gpu_session_id: UUID | None = None,
+        is_deleted: bool = False,
     ) -> GenerationJob:
         if user is None:
             user = await make_user(email=f"jobuser-{uuid4().hex[:8]}@example.com")
@@ -302,10 +306,44 @@ async def make_job(db_session: AsyncSession, make_user: UserFactory) -> JobFacto
             model=model,
             product_id=product_id,
             external_request_id=external_request_id,
+            gpu_session_id=gpu_session_id,
+            is_deleted=is_deleted,
         )
         db_session.add(job)
         await db_session.flush()
         return job
+
+    return _factory
+
+
+@pytest_asyncio.fixture
+async def make_gpu_session(db_session: AsyncSession, make_user: UserFactory) -> GpuSessionFactory:
+    """Factory fixture: create a GpuSession row and flush it."""
+
+    async def _factory(
+        *,
+        user: User | None = None,
+        status: str = "active",
+        bundle_name: str = "wan_2.2_i2v",
+        model_type: str = "aisha-image",
+        tunnel_hostname: str | None = None,
+        session_id: UUID | None = None,
+        product_id: str = "vex",
+    ) -> GpuSession:
+        if user is None:
+            user = await make_user(email=f"gpuuser-{uuid4().hex[:8]}@example.com")
+        session = GpuSession(
+            id=session_id or uuid4(),
+            user_id=user.id,
+            product_id=product_id,
+            bundle_name=bundle_name,
+            model_type=model_type,
+            status=status,
+            tunnel_hostname=tunnel_hostname,
+        )
+        db_session.add(session)
+        await db_session.flush()
+        return session
 
     return _factory
 
