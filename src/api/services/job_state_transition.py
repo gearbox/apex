@@ -84,8 +84,6 @@ class JobStateTransitionService:
     async def transition_to_running(
         self,
         job_id: UUID,
-        *,
-        comfyui_prompt_id: str | None = None,
     ) -> GenerationJob:
         """QUEUED → RUNNING.
 
@@ -104,8 +102,6 @@ class JobStateTransitionService:
             "status": JobStatus.RUNNING.value,
             "started_at": func.now(),
         }
-        if comfyui_prompt_id is not None:
-            update_values["external_request_id"] = comfyui_prompt_id
 
         result = cast(
             CursorResult[Any],

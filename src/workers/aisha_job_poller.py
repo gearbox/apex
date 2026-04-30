@@ -20,8 +20,8 @@ import contextlib
 import dataclasses
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
+import httpx
 import structlog
 
 from src.api.services.comfyui_client import ComfyUIClient
@@ -34,8 +34,7 @@ from src.api.services.job_state_transition import (
     JobStateTransitionService,
 )
 from src.api.services.storage import R2StorageService, StorageType
-from src.core.enums import GpuSessionStatus, JobStatus
-from src.db.models.storage import GenerationJob as GenerationJobModel
+from src.core.enums import JobStatus
 from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
@@ -94,6 +93,17 @@ class AishaJobPoller:
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
+        if suffix := (config.tunnel_allowed_suffix or "").strip():
+            self._allowed_tunnel_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+        else:
+            raise ValueError(
+                "AishaPollerConfig.tunnel_allowed_suffix is empty. "
+                "If Aisha is intentionally disabled in this environment, "
+                "set AISHA_POLLER_ENABLED=false. Otherwise, set "
+                "CF_TUNNEL_DOMAIN to the GPU tunnel domain "
+                "(e.g. 'gpu.cloudin.space')."
+            )
+
     def _make_transition_service(self, session: AsyncSession) -> JobStateTransitionService:
         return JobStateTransitionService(
             session=session,
@@ -150,49 +160,27 @@ class AishaJobPoller:
 
         sem = asyncio.Semaphore(self._config.max_concurrent_polls)
 
-        async def guarded(job_id: UUID, gpu_session_id: UUID) -> None:
-            async with sem:
-                await self._poll_one_with_own_session(job_id, gpu_session_id)
-
-        await asyncio.gather(
-            *(guarded(j.id, j.gpu_session_id) for j in jobs if j.gpu_session_id is not None),
-            return_exceptions=True,
-        )
-
-    async def _poll_one_with_own_session(
-        self,
-        job_id: UUID,
-        gpu_session_id: UUID,
-    ) -> None:
-        try:
-            async with self._session_factory() as session:
-                from sqlalchemy import select as sa_select
-                from sqlalchemy.orm import selectinload
-
-                result = await session.execute(
-                    sa_select(GenerationJobModel)
-                    .where(GenerationJobModel.id == job_id)
-                    .options(selectinload(GenerationJobModel.gpu_session))
+        async def guarded(job: GenerationJob) -> None:
+            if job.gpu_session is None:
+                # Should not happen: the repo query joins gpu_session and the
+                # CHECK constraint guarantees Aisha jobs have a session.
+                logger.warning(
+                    "aisha_job_poller.no_gpu_session_for_aisha_job",
+                    job_id=str(job.id),
                 )
-                job = result.scalar_one_or_none()
-
-                if job is None:
-                    return
-
-                if job.gpu_session is None:
-                    logger.warning(
-                        "aisha_job_poller.no_gpu_session",
-                        job_id=str(job_id),
+                return
+            async with sem:
+                try:
+                    async with self._session_factory() as job_session:
+                        await self._poll_one(job, job.gpu_session, job_session)
+                except Exception:
+                    logger.exception(
+                        "aisha_job_poller.poll_one_failed",
+                        job_id=str(job.id),
+                        gpu_session_id=str(job.gpu_session.id),
                     )
-                    return
 
-                await self._poll_one(job, job.gpu_session, session)
-        except Exception:
-            logger.exception(
-                "aisha_job_poller.poll_error",
-                job_id=str(job_id),
-                gpu_session_id=str(gpu_session_id),
-            )
+        await asyncio.gather(*(guarded(j) for j in jobs))
 
     async def _poll_one(
         self,
@@ -206,63 +194,41 @@ class AishaJobPoller:
         JobStateTransitionService. Does NOT call BillingService — billing is
         settled inside the transition.
         """
-        job_id = job.id
+        ts = self._make_transition_service(session)
         product_id = str(job.product_id)
 
-        # 1. Check session status — skip if not active
-        if gpu_session.status != GpuSessionStatus.active.value:
-            logger.debug(
-                "aisha_job_poller.session_not_active",
-                job_id=str(job_id),
-                gpu_session_id=str(gpu_session.id),
-                status=gpu_session.status,
-            )
-            return
-
-        # 2. SSRF guard — validate tunnel hostname
-        hostname = gpu_session.tunnel_hostname or ""
-        allowed_suffix = (
-            f".{self._config.tunnel_allowed_suffix}" if self._config.tunnel_allowed_suffix else ""
-        )
+        # SSRF guard — validate tunnel hostname. Lowercase so Cloudflare
+        # mixed-case responses don't bypass the suffix check.
+        hostname = (gpu_session.tunnel_hostname or "").lower()
         try:
-            validate_tunnel_hostname(hostname, allowed_suffix=allowed_suffix)
+            validate_tunnel_hostname(hostname, allowed_suffix=self._allowed_tunnel_suffix)
         except InvalidTunnelHostnameError as exc:
             logger.error(
                 "aisha_job_poller.invalid_tunnel_hostname",
-                job_id=str(job_id),
-                gpu_session_id=str(gpu_session.id),
+                job_id=str(job.id),
                 hostname=hostname,
                 error=str(exc),
             )
-            ts = JobStateTransitionService(
-                session=session,
-                event_bus=self._event_bus,
-                billing_service=self._billing,
-            )
             await ts.transition_to_failed(
-                job_id,
-                error_message="Generation session has an invalid tunnel hostname.",
+                job.id,
+                error_message=f"Invalid tunnel hostname: {exc}"[:500],
                 refund=True,
                 product_id=product_id,
             )
             return
 
-        # 3. Build per-request ComfyUI client (cheap, do not cache)
         prompt_id = job.external_request_id
         if not prompt_id:
             logger.warning(
                 "aisha_job_poller.no_prompt_id",
-                job_id=str(job_id),
+                job_id=str(job.id),
             )
             return
 
-        base_url = f"https://{hostname}"
         client = ComfyUIClient(
-            base_url,
+            f"https://{hostname}",
             request_timeout=self._config.comfyui_request_timeout_seconds,
         )
-
-        # 4. Poll history + queue
         try:
             await client.connect()
             history = await client.get_history(prompt_id)
@@ -272,8 +238,8 @@ class AishaJobPoller:
                     client=client,
                     job=job,
                     history_entry=history[prompt_id],
-                    session=session,
                     product_id=product_id,
+                    ts=ts,
                 )
             else:
                 queue = await client.get_queue()
@@ -281,9 +247,18 @@ class AishaJobPoller:
                     job=job,
                     queue=queue,
                     prompt_id=prompt_id,
-                    session=session,
                     product_id=product_id,
+                    ts=ts,
                 )
+        except (TimeoutError, httpx.RequestError) as exc:
+            # Transient — log and let the next tick try again. Age-based
+            # timeout in _handle_queue_state will eventually mark FAILED.
+            logger.warning(
+                "aisha_job_poller.comfyui_transient_error",
+                job_id=str(job.id),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         finally:
             await client.close()
 
@@ -297,24 +272,44 @@ class AishaJobPoller:
         client: ComfyUIClient,
         job: GenerationJob,
         history_entry: dict[str, Any],
-        session: AsyncSession,
         product_id: str,
+        ts: JobStateTransitionService,
     ) -> None:
         if "outputs" not in history_entry:
-            # History entry exists but no outputs — check for error flag
+            # History entry exists but no outputs — check for error flag.
             status_info = history_entry.get("status", {})
             if isinstance(status_info, dict) and status_info.get("status_str") == "error":
                 messages = status_info.get("messages", [["Error", "Unknown"]])
-                ts = JobStateTransitionService(
-                    session=session,
-                    event_bus=self._event_bus,
-                    billing_service=self._billing,
-                )
                 await ts.transition_to_failed(
                     job.id,
                     error_message=f"ComfyUI reported error: {messages!r}"[:500],
                     refund=True,
                     product_id=product_id,
+                )
+                return
+
+            # Neither outputs nor explicit error — apply same age-based timeout
+            # as the queue path. Below threshold: log debug and let next tick retry.
+            if self._is_job_past_timeout(job):
+                logger.warning(
+                    "aisha_job_poller.history_without_outputs_timeout",
+                    job_id=str(job.id),
+                    status=status_info,
+                )
+                await ts.transition_to_failed(
+                    job.id,
+                    error_message=(
+                        "ComfyUI history entry contained no outputs and no error; "
+                        "job exceeded age timeout."
+                    ),
+                    refund=True,
+                    product_id=product_id,
+                )
+            else:
+                logger.debug(
+                    "aisha_job_poller.history_without_outputs_transient",
+                    job_id=str(job.id),
+                    status=status_info,
                 )
             return
 
@@ -333,11 +328,6 @@ class AishaJobPoller:
             if out_data is not None:
                 outputs.append(out_data)
 
-        ts = JobStateTransitionService(
-            session=session,
-            event_bus=self._event_bus,
-            billing_service=self._billing,
-        )
         await ts.transition_to_completed(
             job.id,
             outputs=outputs,
@@ -350,52 +340,64 @@ class AishaJobPoller:
         job: GenerationJob,
         queue: dict[str, Any],
         prompt_id: str,
-        session: AsyncSession,
         product_id: str,
+        ts: JobStateTransitionService,
     ) -> None:
         running = queue.get("queue_running", [])
         is_running = any(item[1] == prompt_id for item in running if len(item) > 1)
 
-        if is_running and str(job.status) == JobStatus.QUEUED.value:
-            ts = JobStateTransitionService(
-                session=session,
-                event_bus=self._event_bus,
-                billing_service=self._billing,
-            )
+        if is_running and job.status == JobStatus.QUEUED:
             await ts.transition_to_running(job.id)
             return
 
-        # Absent from both history and queue — check age-based timeout
-        if job.started_at is None:
-            return
-
-        age = datetime.now(UTC) - job.started_at.replace(tzinfo=UTC)
-
-        if age.total_seconds() >= self._config.job_age_warning_seconds:
-            logger.warning(
-                "aisha_job_poller.job_age_warning",
-                job_id=str(job.id),
-                age_seconds=int(age.total_seconds()),
-            )
-
-        if age.total_seconds() >= self._config.job_age_timeout_seconds:
-            ts = JobStateTransitionService(
-                session=session,
-                event_bus=self._event_bus,
-                billing_service=self._billing,
-            )
+        # Absent from both history and queue — check age-based timeout.
+        # Use started_at if set (job was observed running), fall back to
+        # created_at so jobs that never reached RUNNING are still reaped.
+        if self._is_job_past_timeout(job):
             await ts.transition_to_failed(
                 job.id,
                 error_message="ComfyUI lost track of prompt — job timed out.",
                 refund=True,
                 product_id=product_id,
             )
-        else:
-            logger.debug(
-                "aisha_job_poller.prompt_not_found_transient",
-                job_id=str(job.id),
-                age_seconds=int(age.total_seconds()),
-            )
+            return
+
+        # Below timeout threshold — emit warning if approaching it.
+        reference = job.started_at or job.created_at
+        if reference is not None:
+            if reference.tzinfo is None:
+                reference = reference.replace(tzinfo=UTC)
+            age_seconds = (datetime.now(UTC) - reference).total_seconds()
+            if age_seconds >= self._config.job_age_warning_seconds:
+                logger.warning(
+                    "aisha_job_poller.job_age_warning",
+                    job_id=str(job.id),
+                    age_seconds=int(age_seconds),
+                )
+
+        logger.debug(
+            "aisha_job_poller.prompt_not_found_transient",
+            job_id=str(job.id),
+        )
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    def _is_job_past_timeout(self, job: GenerationJob) -> bool:
+        """True if the job is older than job_age_timeout_seconds.
+
+        Uses started_at if set (job has been observed running), falling back to
+        created_at so jobs that never reached RUNNING are still eventually reaped.
+        Handles naive datetimes defensively by treating them as UTC.
+        """
+        reference = job.started_at or job.created_at
+        if reference is None:
+            return False
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=UTC)
+        age = datetime.now(UTC) - reference
+        return age.total_seconds() >= self._config.job_age_timeout_seconds
 
     # -------------------------------------------------------------------------
     # Image download + R2 upload
@@ -437,8 +439,7 @@ class AishaJobPoller:
             )
             return None
 
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
-        content_type = _CONTENT_TYPES.get(ext, "image/png")
+        ext, content_type = self._infer_image_format_and_content_type(filename)
 
         try:
             result = await self._r2.upload(
@@ -466,6 +467,12 @@ class AishaJobPoller:
             output_index=output_index,
             expires_at=expires_at,
         )
+
+    @staticmethod
+    def _infer_image_format_and_content_type(filename: str) -> tuple[str, str]:
+        """Return (format, content_type) inferred from filename. Defaults to png."""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
+        return ext, _CONTENT_TYPES.get(ext, "image/png")
 
     @staticmethod
     def _collect_image_infos(history_entry: dict[str, Any]) -> list[dict[str, Any]]:

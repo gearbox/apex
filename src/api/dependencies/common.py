@@ -549,25 +549,28 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     logger.info("unified_job_service.initialized")
 
     # Initialize and start Aisha job poller
-    poller_config = AishaPollerConfig(
-        enabled=settings.aisha_poller_enabled,
-        tick_interval_seconds=settings.aisha_poller_tick_interval_seconds,
-        max_concurrent_polls=settings.aisha_poller_max_concurrent_polls,
-        job_age_warning_seconds=settings.aisha_poller_job_age_warning_seconds,
-        job_age_timeout_seconds=settings.aisha_poller_job_age_timeout_seconds,
-        comfyui_request_timeout_seconds=settings.aisha_poller_comfyui_request_timeout_seconds,
-        tunnel_allowed_suffix=settings.cf_tunnel_domain or "",
-        retention_days=settings.retention_days,
-    )
-    _services.aisha_job_poller = AishaJobPoller(
-        session_factory=_services.db_manager.session_factory,
-        event_bus=_services.event_bus,
-        billing_service=BillingService(event_bus=_services.event_bus),
-        r2_storage=_services.r2_storage,
-        config=poller_config,
-    )
-    await _services.aisha_job_poller.start()
-    logger.info("aisha_job_poller.started", enabled=settings.aisha_poller_enabled)
+    if settings.aisha_poller_enabled:
+        poller_config = AishaPollerConfig(
+            enabled=True,
+            tick_interval_seconds=settings.aisha_poller_tick_interval_seconds,
+            max_concurrent_polls=settings.aisha_poller_max_concurrent_polls,
+            job_age_warning_seconds=settings.aisha_poller_job_age_warning_seconds,
+            job_age_timeout_seconds=settings.aisha_poller_job_age_timeout_seconds,
+            comfyui_request_timeout_seconds=settings.aisha_poller_comfyui_request_timeout_seconds,
+            tunnel_allowed_suffix=settings.cf_tunnel_domain or "",
+            retention_days=settings.retention_days,
+        )
+        _services.aisha_job_poller = AishaJobPoller(
+            session_factory=_services.db_manager.session_factory,
+            event_bus=_services.event_bus,
+            billing_service=get_billing_service(),
+            r2_storage=_services.r2_storage,
+            config=poller_config,
+        )
+        await _services.aisha_job_poller.start()
+        logger.info("aisha_job_poller.started")
+    else:
+        logger.info("aisha_job_poller.disabled")
 
     # Initialize GPU session stack (requires both Vast.ai + CF to be configured)
     if settings.vastai_configured and settings.cf_configured:

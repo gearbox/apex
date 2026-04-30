@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from src.core.enums import GenerationType, JobStatus, Provider
+from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
 from src.db.repositories.job import JobRepository
 
 
@@ -366,6 +366,115 @@ async def test_soft_delete_idempotent(job_repo: JobRepository, make_user, make_j
     assert first is not None
     assert second is not None
     assert second.is_deleted is True
+
+
+# -------------------------------------------------------------------------
+# list_aisha_jobs_for_polling
+# -------------------------------------------------------------------------
+
+
+async def test_list_aisha_jobs_for_polling_filters_correctly(
+    job_repo: JobRepository,
+    make_user,
+    make_job,
+    make_gpu_session,
+) -> None:
+    """Returns QUEUED/RUNNING Aisha jobs whose session is active and not deleted."""
+    user = await make_user(email=f"aisha-poll-{uuid4().hex[:6]}@example.com")
+    active = await make_gpu_session(user=user, status=GpuSessionStatus.active)
+    stopping = await make_gpu_session(
+        user=user, status=GpuSessionStatus.stopping, model_type="aisha-video"
+    )
+
+    matching_queued = await make_job(
+        user=user,
+        provider=Provider.AISHA.value,
+        status=JobStatus.QUEUED.value,
+        gpu_session_id=active.id,
+    )
+    matching_running = await make_job(
+        user=user,
+        provider=Provider.AISHA.value,
+        status=JobStatus.RUNNING.value,
+        gpu_session_id=active.id,
+    )
+
+    # Non-matching: terminal status
+    await make_job(
+        user=user,
+        provider=Provider.AISHA.value,
+        status=JobStatus.COMPLETED.value,
+        gpu_session_id=active.id,
+    )
+    # Non-matching: non-active session
+    await make_job(
+        user=user,
+        provider=Provider.AISHA.value,
+        status=JobStatus.QUEUED.value,
+        gpu_session_id=stopping.id,
+    )
+    # Non-matching: soft-deleted
+    await make_job(
+        user=user,
+        provider=Provider.AISHA.value,
+        status=JobStatus.QUEUED.value,
+        gpu_session_id=active.id,
+        is_deleted=True,
+    )
+    # Non-matching: Grok job (no gpu_session)
+    await make_job(
+        user=user,
+        provider=Provider.GROK.value,
+        status=JobStatus.QUEUED.value,
+        external_request_id="grok-1",
+    )
+
+    result = await job_repo.list_aisha_jobs_for_polling()
+    ids = {j.id for j in result}
+
+    assert matching_queued.id in ids
+    assert matching_running.id in ids
+    assert len(ids) == 2
+
+
+async def test_list_aisha_jobs_for_polling_eager_loads_gpu_session(
+    job_repo: JobRepository,
+    make_user,
+    make_job,
+    make_gpu_session,
+) -> None:
+    """gpu_session relationship is eagerly loaded; access does not lazy-load."""
+    user = await make_user(email=f"aisha-eager-{uuid4().hex[:6]}@example.com")
+    gpu_session = await make_gpu_session(
+        user=user,
+        status=GpuSessionStatus.active,
+        tunnel_hostname="node1.gpu.cloudin.space",
+    )
+    job = await make_job(
+        user=user,
+        provider=Provider.AISHA.value,
+        status=JobStatus.QUEUED.value,
+        gpu_session_id=gpu_session.id,
+    )
+
+    result = await job_repo.list_aisha_jobs_for_polling()
+    [polled] = [j for j in result if j.id == job.id]
+
+    # If selectinload is missing, this raises in async context because
+    # the relationship is configured with lazy="raise_on_sql".
+    assert polled.gpu_session is not None
+    assert polled.gpu_session.id == gpu_session.id
+    assert polled.gpu_session.tunnel_hostname == gpu_session.tunnel_hostname
+
+
+async def test_list_aisha_jobs_for_polling_empty(
+    job_repo: JobRepository,
+    make_user,
+) -> None:
+    """Returns empty list when no jobs match."""
+    await make_user(email=f"aisha-empty-{uuid4().hex[:6]}@example.com")
+    result = await job_repo.list_aisha_jobs_for_polling()
+    assert not list(result)
 
 
 async def test_list_pending_video_jobs_custom_provider(

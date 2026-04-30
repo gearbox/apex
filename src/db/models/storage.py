@@ -267,7 +267,12 @@ class GenerationJob(Base):
     )
 
     __table_args__ = (
-        Index("ix_generation_jobs_gpu_session_id_status", "gpu_session_id", "status", postgresql_where=text("status IN ('queued', 'running')")),
+        Index(
+            "ix_generation_jobs_gpu_session_id_status",
+            "gpu_session_id",
+            "status",
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
         Index("ix_generation_jobs_user_status", "user_id", "status"),
         Index("ix_generation_jobs_user_created", "user_id", "created_at"),
         Index("ix_generation_jobs_provider_status", "provider", "status"),
