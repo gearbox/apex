@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.job import JobRepository
 
 from ._events import publish_status_event
 from ._provisioning import provision_vastai_instance
@@ -30,6 +32,7 @@ from .exceptions import (
     GpuSessionError,
     InvalidSessionStateError,
     SessionAlreadyExistsError,
+    SessionHasInFlightJobsError,
 )
 from .schemas import StopConfirmation
 
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
 
     from src.api.services.billing import BillingService
     from src.api.services.event_bus import EventBus
+    from src.api.services.jobs.sweep import JobSweepService
     from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
@@ -170,6 +174,7 @@ class GpuSessionService:
         settings: Settings,
         billing_service: BillingService,
         event_bus: EventBus | None = None,
+        job_sweep_service: JobSweepService | None = None,
     ) -> None:
         self._vastai = vastai_client
         self._cf = cf_client
@@ -178,6 +183,7 @@ class GpuSessionService:
         self._settings = settings
         self._billing_service = billing_service
         self._event_bus = event_bus
+        self._job_sweep = job_sweep_service
 
     # ------------------------------------------------------------------ #
     # Public lifecycle methods                                             #
@@ -451,6 +457,19 @@ class GpuSessionService:
                 frozenset({GpuSessionStatus.active}),
                 "pause",
             )
+
+            # Reject pause if any Aisha jobs are in-flight on this session.
+            # Count is read with the row lock held to avoid TOCTOU — a job that
+            # is QUEUED at this moment can't transition to RUNNING via the poller
+            # because the poller would need its own DB session and would see
+            # whatever we set here (pausing → excluded from active-only filter).
+            job_repo = JobRepository(db)
+            in_flight = await job_repo.count_in_flight_for_session(session_row.id)
+            if in_flight > 0:
+                raise SessionHasInFlightJobsError(
+                    session_id=session_row.id,
+                    in_flight_count=in_flight,
+                )
 
             # VastAI call inside the transaction: if it fails, exception propagates,
             # transaction rolls back, and session stays 'active' (no partial state).
@@ -862,6 +881,34 @@ class GpuSessionService:
             await self._set_status(repo, session_row, GpuSessionStatus.stopping)
 
         await self._publish_status_event(session_row, previous_status=previous_status)
+
+        # Sweep in-flight jobs immediately after TX1 commits.
+        #
+        # Why here: TX1 committed status='stopping'; the poller's active-only
+        # filter now excludes this session, so no new poll completions succeed.
+        # Failing jobs early gives users clear feedback. If the poller races to
+        # complete a job before our sweep, the conditional UPDATE inside
+        # transition_to_failed is a no-op and the user keeps the result.
+        #
+        # Why best-effort: a sweep failure MUST NOT block external teardown.
+        # Worst case: jobs hit the 30-min age timeout in the poller.
+        if self._job_sweep is not None:
+            try:
+                sweep_result = await self._job_sweep.sweep_session(
+                    session_row.id,
+                    product_id=session_row.product_id,
+                    reason="GPU session stopped before job completed.",
+                )
+                logger.info(
+                    "gpu_session.stop.job_sweep",
+                    session_id=str(session_id),
+                    **dataclasses.asdict(sweep_result),
+                )
+            except Exception:
+                logger.exception(
+                    "gpu_session.stop.job_sweep_error",
+                    session_id=str(session_id),
+                )
 
         # External teardown — outside any DB transaction. Best-effort; errors are
         # logged but don't block the final 'stopped' transition. Orphaned resources

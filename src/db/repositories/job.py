@@ -294,6 +294,65 @@ class JobRepository(BaseRepository[GenerationJob]):
         )
         return result.scalars().all()
 
+    async def list_in_flight_for_session(
+        self,
+        gpu_session_id: UUID,
+    ) -> Sequence[GenerationJob]:
+        """Return Aisha jobs that are QUEUED/RUNNING for one GPU session.
+
+        Used by the session-termination sweep to identify jobs that need to be
+        transitioned to FAILED and refunded.
+
+        No JOIN on GpuSession.status — the caller is in a transactional context
+        where the session's status is being changed concurrently; filtering on
+        GpuSession.status here would create a TOCTOU window.
+
+        Args:
+            gpu_session_id: Session whose in-flight jobs to list.
+
+        Returns:
+            GenerationJob instances (no eager-loading needed; the sweep only
+            reads the id).
+        """
+        result = await self._session.execute(
+            select(GenerationJob).where(
+                GenerationJob.gpu_session_id == gpu_session_id,
+                GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                GenerationJob.is_deleted.is_(False),
+            )
+        )
+        return result.scalars().all()
+
+    async def count_in_flight_for_session(
+        self,
+        gpu_session_id: UUID,
+    ) -> int:
+        """Count Aisha jobs that are QUEUED/RUNNING for one GPU session.
+
+        Used by:
+        - pause_session precondition (reject if non-zero)
+        - GET /v1/sessions/{id} response (in_flight_job_count field for
+          frontend Pause-button gating)
+
+        Args:
+            gpu_session_id: Session whose in-flight jobs to count.
+
+        Returns:
+            Count of QUEUED/RUNNING non-deleted jobs for the session.
+        """
+        from sqlalchemy import func
+
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(GenerationJob)
+            .where(
+                GenerationJob.gpu_session_id == gpu_session_id,
+                GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                GenerationJob.is_deleted.is_(False),
+            )
+        )
+        return int(result.scalar_one())
+
     async def list_pending_video_jobs(
         self,
         provider: Provider = Provider.GROK,

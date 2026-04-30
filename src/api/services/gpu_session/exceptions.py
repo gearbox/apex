@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 if TYPE_CHECKING:
     from src.core.enums import GpuSessionStatus
@@ -49,3 +50,26 @@ class InvalidSessionStateError(GpuSessionError):
         # or the raw DB column value.
         self.current_status: str = str(current_status)
         self.operation = operation
+
+
+class SessionHasInFlightJobsError(InvalidSessionStateError):
+    """Pause was requested but the session has in-flight Aisha jobs.
+
+    The frontend should disable the Pause button when in_flight_job_count > 0;
+    this error is the backend safety net for a stale UI state.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: UUID,
+        in_flight_count: int,
+    ) -> None:
+        from src.core.enums import GpuSessionStatus
+
+        super().__init__(
+            f"Cannot pause session {session_id}: {in_flight_count} job(s) in flight.",
+            current_status=GpuSessionStatus.active,
+            operation="pause",
+        )
+        self.in_flight_count = in_flight_count

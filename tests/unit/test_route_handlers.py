@@ -2262,6 +2262,7 @@ class TestGpuSessionRouteHandlers:
                 session_id=uuid4(),
                 gpu_session_service=gpu_session_service,
                 product_id="vex",
+                session=AsyncMock(),
             )
 
     async def test_get_session_found(self) -> None:
@@ -2282,6 +2283,7 @@ class TestGpuSessionRouteHandlers:
                 session_id=uuid4(),
                 gpu_session_service=gpu_session_service,
                 product_id="vex",
+                session=AsyncMock(),
             )
         assert result is not None
 

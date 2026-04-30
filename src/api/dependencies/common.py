@@ -32,6 +32,7 @@ from src.api.services.grok.job_service import GrokJobService
 from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
+from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
@@ -599,6 +600,12 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
 
         billing_service_for_worker = BillingService(event_bus=_services.event_bus)
 
+        job_sweep_service = JobSweepService(
+            session_factory=_services.db_manager.session_factory,
+            event_bus=_services.event_bus,
+            billing_service=get_billing_service(),
+        )
+
         _services.gpu_session_service = GpuSessionService(
             vastai_client=vastai_client,
             cf_client=cf_client,
@@ -607,6 +614,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             settings=settings,
             billing_service=billing_service_for_worker,
             event_bus=_services.event_bus,
+            job_sweep_service=job_sweep_service,
         )
 
         _services.gpu_provisioning_worker = GpuProvisioningWorker(
@@ -618,6 +626,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             settings=settings,
             billing_service=billing_service_for_worker,
             event_bus=_services.event_bus,
+            job_sweep_service=job_sweep_service,
         )
         await _services.gpu_provisioning_worker.start()
 

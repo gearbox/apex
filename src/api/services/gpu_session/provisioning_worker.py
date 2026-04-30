@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
     from src.api.services.bundle_index import BundleIndexService
     from src.api.services.cloudflare.client import CloudflareTunnelClient
     from src.api.services.event_bus import EventBus
+    from src.api.services.jobs.sweep import JobSweepService
     from src.api.services.vastai.client import VastAIClient
     from src.core.config import Settings
     from src.db.models.gpu_session import GpuSession
@@ -71,6 +73,7 @@ class GpuProvisioningWorker:
         settings: Settings,
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
+        job_sweep_service: JobSweepService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._vastai = vastai_client
@@ -80,6 +83,7 @@ class GpuProvisioningWorker:
         self._settings = settings
         self._billing_service = billing_service
         self._event_bus = event_bus
+        self._job_sweep = job_sweep_service
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
@@ -482,6 +486,27 @@ class GpuProvisioningWorker:
 
     async def _mark_failed(self, session: GpuSession, reason: str) -> None:
         """Destroy instance + delete tunnel (best-effort), refund billing, transition to failed."""
+        # Sweep in-flight jobs before the status transition so the user-visible
+        # state stays consistent: jobs go FAILED, then session goes FAILED.
+        if self._job_sweep is not None:
+            try:
+                sweep_result = await self._job_sweep.sweep_session(
+                    session.id,
+                    product_id=session.product_id,
+                    reason=f"GPU session failed: {reason}"[:500],
+                )
+                logger.info(
+                    "gpu_session.provision.job_sweep",
+                    session_id=str(session.id),
+                    reason=reason[:200],
+                    **dataclasses.asdict(sweep_result),
+                )
+            except Exception:
+                logger.exception(
+                    "gpu_session.provision.job_sweep_error",
+                    session_id=str(session.id),
+                )
+
         if session.vastai_instance_id is not None:
             try:
                 await self._vastai.destroy_instance(session.vastai_instance_id)
