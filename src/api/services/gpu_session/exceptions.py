@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from uuid import UUID
 
-if TYPE_CHECKING:
-    from src.core.enums import GpuSessionStatus
+from src.core.enums import GpuSessionStatus
 
 
 class GpuSessionError(Exception):
@@ -65,8 +63,6 @@ class SessionHasInFlightJobsError(InvalidSessionStateError):
         session_id: UUID,
         in_flight_count: int,
     ) -> None:
-        from src.core.enums import GpuSessionStatus
-
         super().__init__(
             f"Cannot pause session {session_id}: {in_flight_count} job(s) in flight.",
             current_status=GpuSessionStatus.active,

@@ -172,6 +172,7 @@ def _make_service(
         "billing_service": _make_billing_mock(),
         "account_id": uuid4(),
         "event_bus": None,
+        "job_sweep_service": None,
     } | overrides
     service = GpuSessionService(
         vastai_client=mocks["vastai_client"],
@@ -181,6 +182,7 @@ def _make_service(
         settings=mocks["settings"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
+        job_sweep_service=mocks["job_sweep_service"],
     )
     return service, mocks
 
@@ -2480,25 +2482,20 @@ class TestReadMethods:
 
 def _make_sweep_service_mock() -> MagicMock:
     sweep = MagicMock()
-    from src.api.services.jobs.sweep import JobSweepResult
-
-    sweep.sweep_session = AsyncMock(
-        return_value=JobSweepResult(swept_count=1, error_count=0, skipped_count=0)
-    )
+    sweep.sweep_session_best_effort = AsyncMock(return_value=None)
     return sweep
 
 
 def _make_service_with_sweep(**overrides: Any) -> tuple[GpuSessionService, dict[str, Any]]:
     sweep = _make_sweep_service_mock()
-    service, mocks = _make_service(**overrides)
-    service._job_sweep = sweep  # type: ignore[assignment]
+    service, mocks = _make_service(job_sweep_service=sweep, **overrides)
     mocks["job_sweep"] = sweep
     return service, mocks
 
 
 class TestStopWithJobSweep:
     async def test_stop_confirmed_calls_sweep_after_tx1(self) -> None:
-        """sweep_session is called after TX1 commits status=stopping."""
+        """sweep_session_best_effort is called after TX1 commits status=stopping."""
         service, mocks = _make_service_with_sweep()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
@@ -2515,28 +2512,25 @@ class TestStopWithJobSweep:
                 confirmed=True,
             )
 
-        mocks["job_sweep"].sweep_session.assert_awaited_once()
-        call_kwargs = mocks["job_sweep"].sweep_session.call_args
-        assert call_kwargs.args[0] == session.id
-        assert call_kwargs.kwargs["product_id"] == session.product_id
+        mocks["job_sweep"].sweep_session_best_effort.assert_awaited_once()
+        call_kwargs = mocks["job_sweep"].sweep_session_best_effort.call_args.kwargs
+        assert call_kwargs["session_id"] == session.id
+        assert call_kwargs["product_id"] == session.product_id
 
     async def test_stop_confirmed_sweep_called_before_external_teardown(self) -> None:
-        """sweep_session is called before destroy_instance."""
+        """sweep_session_best_effort is called before destroy_instance."""
         service, mocks = _make_service_with_sweep()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
         call_order: list[str] = []
 
-        async def record_sweep(*args: Any, **kwargs: Any) -> Any:
+        async def record_sweep(**_kwargs: Any) -> None:
             call_order.append("sweep")
-            from src.api.services.jobs.sweep import JobSweepResult
 
-            return JobSweepResult(swept_count=1, error_count=0, skipped_count=0)
-
-        async def record_destroy(*args: Any, **kwargs: Any) -> None:
+        async def record_destroy(*_args: Any, **_kwargs: Any) -> None:
             call_order.append("destroy")
 
-        mocks["job_sweep"].sweep_session.side_effect = record_sweep
+        mocks["job_sweep"].sweep_session_best_effort.side_effect = record_sweep
         mocks["vastai_client"].destroy_instance.side_effect = record_destroy
 
         with patch(_REPO_PATH) as MockRepo:
@@ -2553,12 +2547,11 @@ class TestStopWithJobSweep:
 
         assert call_order.index("sweep") < call_order.index("destroy")
 
-    async def test_stop_confirmed_continues_when_sweep_raises(self) -> None:
-        """External teardown and TX2 proceed even if sweep raises unexpectedly."""
+    async def test_stop_confirmed_completes_normally_after_sweep(self) -> None:
+        """Stop completes and returns stopped session after sweep call."""
         service, mocks = _make_service_with_sweep()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
-        mocks["job_sweep"].sweep_session.side_effect = RuntimeError("sweep exploded")
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -2604,7 +2597,7 @@ class TestPauseWithJobSweep:
         """pause_session raises SessionHasInFlightJobsError when count > 0."""
         from src.api.services.gpu_session.exceptions import SessionHasInFlightJobsError
 
-        service, _ = _make_service()
+        service, mocks = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
 
@@ -2628,9 +2621,10 @@ class TestPauseWithJobSweep:
                 )
 
         assert exc_info.value.in_flight_count == 2
-        # VastAI stop_instance must NOT have been called
-        mocks_from_service = service
-        assert not any(True for _ in [None] if mock_repo.update_status.called)
+        # Pause was rejected — neither the VastAI client nor the repo update
+        # should have been called.
+        mocks["vastai_client"].stop_instance.assert_not_called()
+        mock_repo.update_status.assert_not_called()
 
     async def test_pause_succeeds_when_zero_in_flight(self) -> None:
         """pause_session proceeds when count_in_flight_for_session returns 0."""

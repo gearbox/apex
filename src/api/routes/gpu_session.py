@@ -46,7 +46,8 @@ from src.api.services.gpu_session.service import (
 )
 from src.api.services.vastai.exceptions import NoCapacityError, VastAIError
 from src.core.config import Settings
-from src.core.enums import UserRole
+from src.core.enums import GpuSessionStatus, UserRole
+from src.db.repositories.job import JobRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -137,9 +138,6 @@ class GpuSessionController(Controller):
         session: AsyncSession,
     ) -> GpuSessionResponse:
         """Get a specific GPU session."""
-        from src.core.enums import GpuSessionStatus
-        from src.db.repositories.job import JobRepository
-
         session_row = await gpu_session_service.get_session(
             session_id=session_id,
             user_id=current_user_id,

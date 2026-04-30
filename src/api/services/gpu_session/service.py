@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -893,22 +892,12 @@ class GpuSessionService:
         # Why best-effort: a sweep failure MUST NOT block external teardown.
         # Worst case: jobs hit the 30-min age timeout in the poller.
         if self._job_sweep is not None:
-            try:
-                sweep_result = await self._job_sweep.sweep_session(
-                    session_row.id,
-                    product_id=session_row.product_id,
-                    reason="GPU session stopped before job completed.",
-                )
-                logger.info(
-                    "gpu_session.stop.job_sweep",
-                    session_id=str(session_id),
-                    **dataclasses.asdict(sweep_result),
-                )
-            except Exception:
-                logger.exception(
-                    "gpu_session.stop.job_sweep_error",
-                    session_id=str(session_id),
-                )
+            await self._job_sweep.sweep_session_best_effort(
+                session_id=session_row.id,
+                product_id=session_row.product_id,
+                reason="GPU session stopped before job completed.",
+                log_event="gpu_session.stop.job_sweep",
+            )
 
         # External teardown — outside any DB transaction. Best-effort; errors are
         # logged but don't block the final 'stopped' transition. Orphaned resources

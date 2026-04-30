@@ -6,8 +6,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-import pytest
-
 from src.api.services.jobs.sweep import JobSweepResult, JobSweepService
 from src.core.enums import JobStatus
 from src.db.models.storage import GenerationJob
@@ -58,7 +56,7 @@ def _make_service(**overrides: Any) -> tuple[JobSweepService, dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests: sweep_session
 # ---------------------------------------------------------------------------
 
 
@@ -77,15 +75,8 @@ class TestSweepSession:
 
     async def test_sweep_two_jobs_both_transitioned_swept_count_2(self) -> None:
         svc, _ = _make_service()
-        reason = "GPU session stopped before job completed."
         job1 = _make_job()
         job2 = _make_job()
-        failed_row1 = MagicMock()
-        failed_row1.status = JobStatus.FAILED.value
-        failed_row1.error_message = reason[:500]
-        failed_row2 = MagicMock()
-        failed_row2.status = JobStatus.FAILED.value
-        failed_row2.error_message = reason[:500]
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -97,21 +88,25 @@ class TestSweepSession:
 
             mock_ts = AsyncMock()
             MockTS.return_value = mock_ts
-            mock_ts.transition_to_failed.side_effect = [failed_row1, failed_row2]
+            mock_ts.transition_to_failed.side_effect = [
+                (job1, True),
+                (job2, True),
+            ]
 
-            result = await svc.sweep_session(uuid4(), product_id="vex", reason=reason)
+            result = await svc.sweep_session(
+                uuid4(),
+                product_id="vex",
+                reason="GPU session stopped before job completed.",
+            )
 
         assert result.swept_count == 2
         assert result.error_count == 0
         assert result.skipped_count == 0
 
-    async def test_sweep_already_failed_job_skipped_count_1(self) -> None:
-        """Job already FAILED with a different message → counted as skipped."""
+    async def test_already_terminal_job_counted_as_skipped(self) -> None:
+        """transition_to_failed returning did=False → counted as skipped."""
         svc, _ = _make_service()
         job = _make_job()
-        already_failed = MagicMock()
-        already_failed.status = JobStatus.FAILED.value
-        already_failed.error_message = "some other reason"
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -123,7 +118,7 @@ class TestSweepSession:
 
             mock_ts = AsyncMock()
             MockTS.return_value = mock_ts
-            mock_ts.transition_to_failed.return_value = already_failed
+            mock_ts.transition_to_failed.return_value = (job, False)
 
             result = await svc.sweep_session(
                 uuid4(), product_id="vex", reason="GPU session stopped before job completed."
@@ -133,24 +128,46 @@ class TestSweepSession:
         assert result.skipped_count == 1
         assert result.error_count == 0
 
+    async def test_mixed_did_true_and_false_counted_correctly(self) -> None:
+        svc, _ = _make_service()
+        job1 = _make_job()
+        job2 = _make_job()
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch(_TRANSITION_PATH) as MockTS,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_in_flight_for_session.return_value = [job1, job2]
+
+            mock_ts = AsyncMock()
+            MockTS.return_value = mock_ts
+            mock_ts.transition_to_failed.side_effect = [
+                (job1, True),
+                (job2, False),
+            ]
+
+            result = await svc.sweep_session(uuid4(), product_id="vex", reason="stopped")
+
+        assert result.swept_count == 1
+        assert result.skipped_count == 1
+        assert result.error_count == 0
+
     async def test_sweep_one_job_errors_other_succeeds_isolated(self) -> None:
         """Per-job exception is isolated; the other job still transitions."""
         svc, _ = _make_service()
-        reason = "GPU session stopped before job completed."
         job1 = _make_job()
         job2 = _make_job()
-        failed_row = MagicMock()
-        failed_row.status = JobStatus.FAILED.value
-        failed_row.error_message = reason[:500]
 
         call_count = 0
 
-        async def side_effect(job_id: object, **kwargs: object) -> object:
+        async def side_effect(*_args: object, **_kwargs: object) -> object:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise RuntimeError("transient DB error")
-            return failed_row
+            return (job2, True)
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -164,19 +181,19 @@ class TestSweepSession:
             MockTS.return_value = mock_ts
             mock_ts.transition_to_failed.side_effect = side_effect
 
-            result = await svc.sweep_session(uuid4(), product_id="vex", reason=reason)
+            result = await svc.sweep_session(
+                uuid4(),
+                product_id="vex",
+                reason="GPU session stopped before job completed.",
+            )
 
         assert result.error_count == 1
         assert result.swept_count == 1
 
-    async def test_sweep_each_job_uses_own_session(self) -> None:
-        """session_factory() is called once for the snapshot + once per job."""
+    async def test_sweep_uses_single_session_for_all_jobs(self) -> None:
+        """session_factory() is called exactly once for the entire sweep."""
         svc, mocks = _make_service()
         jobs = [_make_job(), _make_job()]
-        reason = "stopped"
-        failed_row = MagicMock()
-        failed_row.status = JobStatus.FAILED.value
-        failed_row.error_message = reason[:500]
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -188,20 +205,16 @@ class TestSweepSession:
 
             mock_ts = AsyncMock()
             MockTS.return_value = mock_ts
-            mock_ts.transition_to_failed.return_value = failed_row
+            mock_ts.transition_to_failed.side_effect = [(j, True) for j in jobs]
 
-            await svc.sweep_session(uuid4(), product_id="vex", reason=reason)
+            await svc.sweep_session(uuid4(), product_id="vex", reason="stopped")
 
-        # 1 call for snapshot + 1 call per job = 3 total
-        assert mocks["session_factory"].call_count == 1 + len(jobs)
+        # Single session for the whole sweep
+        assert mocks["session_factory"].call_count == 1
 
     async def test_sweep_passes_correct_product_id_to_transition_to_failed(self) -> None:
         svc, _ = _make_service()
         job = _make_job()
-        reason = "GPU session stopped before job completed."
-        failed_row = MagicMock()
-        failed_row.status = JobStatus.FAILED.value
-        failed_row.error_message = reason[:500]
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -213,9 +226,9 @@ class TestSweepSession:
 
             mock_ts = AsyncMock()
             MockTS.return_value = mock_ts
-            mock_ts.transition_to_failed.return_value = failed_row
+            mock_ts.transition_to_failed.return_value = (job, True)
 
-            await svc.sweep_session(uuid4(), product_id="synthara", reason=reason)
+            await svc.sweep_session(uuid4(), product_id="synthara", reason="stopped")
 
             mock_ts.transition_to_failed.assert_awaited_once()
             call_kwargs = mock_ts.transition_to_failed.call_args.kwargs
@@ -225,9 +238,6 @@ class TestSweepSession:
         svc, _ = _make_service()
         job = _make_job()
         long_reason = "x" * 600
-        failed_row = MagicMock()
-        failed_row.status = JobStatus.FAILED.value
-        failed_row.error_message = ("x" * 600)[:500]
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -239,7 +249,7 @@ class TestSweepSession:
 
             mock_ts = AsyncMock()
             MockTS.return_value = mock_ts
-            mock_ts.transition_to_failed.return_value = failed_row
+            mock_ts.transition_to_failed.return_value = (job, True)
 
             await svc.sweep_session(uuid4(), product_id="vex", reason=long_reason)
 
@@ -250,10 +260,6 @@ class TestSweepSession:
         """Sweep always passes refund=True to transition_to_failed."""
         svc, _ = _make_service()
         job = _make_job()
-        reason = "stopped"
-        failed_row = MagicMock()
-        failed_row.status = JobStatus.FAILED.value
-        failed_row.error_message = reason[:500]
 
         with (
             patch(_REPO_PATH) as MockRepo,
@@ -265,9 +271,84 @@ class TestSweepSession:
 
             mock_ts = AsyncMock()
             MockTS.return_value = mock_ts
-            mock_ts.transition_to_failed.return_value = failed_row
+            mock_ts.transition_to_failed.return_value = (job, True)
 
-            await svc.sweep_session(uuid4(), product_id="vex", reason=reason)
+            await svc.sweep_session(uuid4(), product_id="vex", reason="stopped")
 
             call_kwargs = mock_ts.transition_to_failed.call_args.kwargs
             assert call_kwargs["refund"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: sweep_session_best_effort
+# ---------------------------------------------------------------------------
+
+
+class TestSweepSessionBestEffort:
+    async def test_logs_on_success(self) -> None:
+        svc, _ = _make_service()
+        session_id = uuid4()
+
+        with (
+            patch.object(
+                svc,
+                "sweep_session",
+                new_callable=AsyncMock,
+                return_value=JobSweepResult(swept_count=2, error_count=0, skipped_count=1),
+            ),
+            patch("src.api.services.jobs.sweep.logger") as mock_logger,
+        ):
+            await svc.sweep_session_best_effort(
+                session_id=session_id,
+                product_id="vex",
+                reason="stopped",
+                log_event="gpu_session.stop.job_sweep",
+            )
+
+        mock_logger.info.assert_called_once_with(
+            "gpu_session.stop.job_sweep",
+            session_id=str(session_id),
+            swept_count=2,
+            error_count=0,
+            skipped_count=1,
+        )
+
+    async def test_swallows_exception_and_logs(self) -> None:
+        svc, _ = _make_service()
+
+        with patch.object(
+            svc,
+            "sweep_session",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("DB exploded"),
+        ):
+            # Must not raise
+            await svc.sweep_session_best_effort(
+                session_id=uuid4(),
+                product_id="vex",
+                reason="stopped",
+                log_event="gpu_session.stop.job_sweep",
+            )
+
+    async def test_passes_args_through_to_sweep_session(self) -> None:
+        svc, _ = _make_service()
+        session_id = uuid4()
+
+        with patch.object(
+            svc,
+            "sweep_session",
+            new_callable=AsyncMock,
+            return_value=JobSweepResult(swept_count=0, error_count=0, skipped_count=0),
+        ) as mock_sweep:
+            await svc.sweep_session_best_effort(
+                session_id=session_id,
+                product_id="synthara",
+                reason="provisioning failed",
+                log_event="gpu_session.provision.job_sweep",
+            )
+
+        mock_sweep.assert_awaited_once_with(
+            session_id,
+            product_id="synthara",
+            reason="provisioning failed",
+        )

@@ -318,13 +318,14 @@ class TestTransitionToFailedInSweepPath:
             event_bus=None,
             billing_service=billing,
         )
-        result = await ts.transition_to_failed(
+        result, did = await ts.transition_to_failed(
             job.id,
             error_message="GPU session stopped before job completed.",
             refund=False,  # skip billing — not the focus here
             product_id="vex",
         )
 
+        assert did is True
         assert str(result.status) == JobStatus.FAILED.value
         assert result.error_message is not None
         assert "stopped" in result.error_message
@@ -342,13 +343,14 @@ class TestTransitionToFailedInSweepPath:
             event_bus=None,
             billing_service=billing,
         )
-        result = await ts.transition_to_failed(
+        result, did = await ts.transition_to_failed(
             job.id,
             error_message="GPU session stopped before job completed.",
             refund=False,
             product_id="vex",
         )
 
+        assert did is True
         assert str(result.status) == JobStatus.FAILED.value
 
     async def test_transition_is_noop_for_completed_job(self, db_session: AsyncSession) -> None:
@@ -364,14 +366,15 @@ class TestTransitionToFailedInSweepPath:
             event_bus=None,
             billing_service=billing,
         )
-        result = await ts.transition_to_failed(
+        result, did = await ts.transition_to_failed(
             job.id,
             error_message="GPU session stopped before job completed.",
             refund=False,
             product_id="vex",
         )
 
-        # Already terminal — returns the row unchanged.
+        # Already terminal — returns the row unchanged, did_transition=False.
+        assert did is False
         assert str(result.status) == JobStatus.COMPLETED.value
 
     async def test_grok_job_not_found_in_session_sweep(self, db_session: AsyncSession) -> None:

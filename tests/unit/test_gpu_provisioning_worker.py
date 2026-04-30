@@ -142,6 +142,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "settings": _make_settings(),
         "billing_service": None,
         "event_bus": None,
+        "job_sweep_service": None,
     } | overrides
     worker = GpuProvisioningWorker(
         session_factory=mocks["session_factory"],
@@ -152,6 +153,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         settings=mocks["settings"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
+        job_sweep_service=mocks["job_sweep_service"],
     )
     return worker, mocks
 
@@ -1071,21 +1073,16 @@ class TestMarkFailed:
 
 
 def _make_worker_with_sweep(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any]]:
-    from src.api.services.jobs.sweep import JobSweepResult
-
     sweep = MagicMock()
-    sweep.sweep_session = AsyncMock(
-        return_value=JobSweepResult(swept_count=1, error_count=0, skipped_count=0)
-    )
-    worker, mocks = _make_worker(**overrides)
-    worker._job_sweep = sweep  # type: ignore[assignment]
+    sweep.sweep_session_best_effort = AsyncMock(return_value=None)
+    worker, mocks = _make_worker(job_sweep_service=sweep, **overrides)
     mocks["job_sweep"] = sweep
     return worker, mocks
 
 
 class TestMarkFailedWithJobSweep:
     async def test_mark_failed_sweeps_jobs_before_status_transition(self) -> None:
-        """sweep_session is called before update_status(session_id, failed)."""
+        """sweep_session_best_effort is called before update_status(session_id, failed)."""
         worker, mocks = _make_worker_with_sweep()
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
@@ -1095,18 +1092,15 @@ class TestMarkFailedWithJobSweep:
         )
         call_order: list[str] = []
 
-        async def record_sweep(*args: Any, **kwargs: Any) -> Any:
+        async def record_sweep(**_kwargs: Any) -> None:
             call_order.append("sweep")
-            from src.api.services.jobs.sweep import JobSweepResult
 
-            return JobSweepResult(swept_count=1, error_count=0, skipped_count=0)
-
-        mocks["job_sweep"].sweep_session.side_effect = record_sweep
+        mocks["job_sweep"].sweep_session_best_effort.side_effect = record_sweep
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
 
-            async def record_update_status(*args: Any, **kwargs: Any) -> None:
+            async def record_update_status(*_args: Any, **_kwargs: Any) -> None:
                 call_order.append("update_status")
 
             mock_repo.update_status.side_effect = record_update_status
@@ -1119,8 +1113,8 @@ class TestMarkFailedWithJobSweep:
         assert "update_status" in call_order
         assert call_order.index("sweep") < call_order.index("update_status")
 
-    async def test_mark_failed_continues_when_sweep_raises_unexpectedly(self) -> None:
-        """If sweep_session raises, teardown + status transition still complete."""
+    async def test_mark_failed_completes_normally_after_sweep(self) -> None:
+        """Teardown + status transition complete after sweep_session_best_effort call."""
         worker, mocks = _make_worker_with_sweep()
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
@@ -1128,7 +1122,6 @@ class TestMarkFailedWithJobSweep:
             cf_tunnel_id=None,
             cf_dns_record_id=None,
         )
-        mocks["job_sweep"].sweep_session.side_effect = RuntimeError("sweep exploded")
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -1157,8 +1150,8 @@ class TestMarkFailedWithJobSweep:
 
             await worker._mark_failed(session, reason="test")
 
-        mocks["job_sweep"].sweep_session.assert_awaited_once()
-        call_kwargs = mocks["job_sweep"].sweep_session.call_args.kwargs
+        mocks["job_sweep"].sweep_session_best_effort.assert_awaited_once()
+        call_kwargs = mocks["job_sweep"].sweep_session_best_effort.call_args.kwargs
         assert call_kwargs["product_id"] == "synthara"
 
     async def test_mark_failed_without_sweep_service_still_works(self) -> None:

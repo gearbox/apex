@@ -266,6 +266,7 @@ class TestPollOne:
         session = AsyncMock()
 
         ts = AsyncMock()
+        ts.transition_to_failed.return_value = (MagicMock(), True)
         with patch.object(poller, "_make_transition_service", return_value=ts):
             await poller._poll_one(job, job.gpu_session, session)
             ts.transition_to_failed.assert_awaited_once()
@@ -362,6 +363,7 @@ class TestHandleQueueState:
         job = _make_job(started_at=old_started)
 
         ts = AsyncMock()
+        ts.transition_to_failed.return_value = (MagicMock(), True)
         await poller._handle_queue_state(
             job=job,
             queue={"queue_running": []},
@@ -381,6 +383,7 @@ class TestHandleQueueState:
         job.started_at = None
 
         ts = AsyncMock()
+        ts.transition_to_failed.return_value = (MagicMock(), True)
         await poller._handle_queue_state(
             job=job,
             queue={"queue_running": []},
@@ -435,6 +438,7 @@ class TestHandleHistoryComplete:
         client = AsyncMock()
 
         ts = AsyncMock()
+        ts.transition_to_failed.return_value = (MagicMock(), True)
         history_entry = {
             "status": {"status_str": "error", "messages": [["Error", "OOM"]]},
         }
@@ -473,6 +477,7 @@ class TestHandleHistoryComplete:
         client = AsyncMock()
 
         ts = AsyncMock()
+        ts.transition_to_failed.return_value = (MagicMock(), True)
         history_entry: dict = {}  # no "outputs" key
         await poller._handle_history_complete(
             client=client,
@@ -493,6 +498,7 @@ class TestHandleHistoryComplete:
         client = AsyncMock()
 
         ts = AsyncMock()
+        ts.transition_to_failed.return_value = (MagicMock(), True)
         history_entry = {"status": {"status_str": "error", "messages": [["Error", "CUDA OOM"]]}}
         await poller._handle_history_complete(
             client=client,

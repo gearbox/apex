@@ -198,12 +198,17 @@ class JobStateTransitionService:
         error_message: str,
         refund: bool = True,
         product_id: str,
-    ) -> GenerationJob:
+    ) -> tuple[GenerationJob, bool]:
         """QUEUED|RUNNING → FAILED.
 
         Issues a billing refund when ``refund=True`` and a debit reservation
         exists. Refund failures are logged but do not roll back the status
         transition — the DB reflects FAILED even if the refund can't be processed.
+
+        Returns:
+            (job, did_transition) where did_transition is True if THIS call moved
+            the job from QUEUED|RUNNING to FAILED. False if the job was already
+            terminal (idempotent no-op — no publish, no refund).
         """
         job = await self._session.get(GenerationJob, job_id)
         if job is None:
@@ -211,7 +216,7 @@ class JobStateTransitionService:
 
         old_status = str(job.status)
         if old_status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
-            return job
+            return job, False
 
         result = cast(
             CursorResult[Any],
@@ -231,8 +236,9 @@ class JobStateTransitionService:
         )
 
         if result.rowcount == 0:
+            # Concurrent update won the race — already terminal.
             await self._session.refresh(job)
-            return job
+            return job, False
 
         await self._session.commit()
         await self._session.refresh(job)
@@ -246,7 +252,7 @@ class JobStateTransitionService:
         if refund:
             await self._try_refund(job_id, product_id=product_id)
 
-        return job
+        return job, True
 
     # -------------------------------------------------------------------------
     # Internals

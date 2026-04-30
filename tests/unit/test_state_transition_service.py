@@ -175,25 +175,66 @@ class TestTransitionToFailed:
         job = _make_job(JobStatus.QUEUED.value)
         svc, session, billing = _make_service(job)
 
-        await svc.transition_to_failed(job.id, error_message="boom", product_id="vex")
+        _, did = await svc.transition_to_failed(job.id, error_message="boom", product_id="vex")
 
+        assert did is True
         session.commit.assert_awaited()
         billing.refund.assert_awaited_once()
 
-    async def test_already_failed_is_noop(self) -> None:
+    async def test_running_to_failed_returns_did_true(self) -> None:
+        job = _make_job(JobStatus.RUNNING.value)
+        svc, _, _ = _make_service(job)
+
+        _, did = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+
+        assert did is True
+
+    async def test_already_failed_returns_did_false(self) -> None:
         job = _make_job(JobStatus.FAILED.value)
         svc, session, billing = _make_service(job)
 
-        await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+        _, did = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
 
+        assert did is False
         session.execute.assert_not_awaited()
+        billing.refund.assert_not_awaited()
+
+    async def test_already_completed_returns_did_false(self) -> None:
+        job = _make_job(JobStatus.COMPLETED.value)
+        svc, session, billing = _make_service(job)
+
+        _, did = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+
+        assert did is False
+        session.execute.assert_not_awaited()
+        billing.refund.assert_not_awaited()
+
+    async def test_did_false_does_not_publish(self) -> None:
+        job = _make_job(JobStatus.FAILED.value)
+        bus = AsyncMock()
+        svc, _, _ = _make_service(job, event_bus=bus)
+
+        _, did = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+
+        assert did is False
+        bus.publish.assert_not_awaited()
+
+    async def test_did_false_does_not_refund(self) -> None:
+        job = _make_job(JobStatus.COMPLETED.value)
+        svc, _, billing = _make_service(job)
+
+        _, did = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+
+        assert did is False
         billing.refund.assert_not_awaited()
 
     async def test_no_refund_when_flag_false(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
         svc, _, billing = _make_service(job)
 
-        await svc.transition_to_failed(job.id, error_message="x", refund=False, product_id="vex")
+        _, _ = await svc.transition_to_failed(
+            job.id, error_message="x", refund=False, product_id="vex"
+        )
 
         billing.refund.assert_not_awaited()
 
@@ -202,7 +243,7 @@ class TestTransitionToFailed:
         svc, session, billing = _make_service(job)
         billing.refund.side_effect = RuntimeError("billing down")
 
-        await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+        _, _ = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
 
         # Job is still transitioned; rollback was called
         session.rollback.assert_awaited()

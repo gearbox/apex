@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -489,23 +488,12 @@ class GpuProvisioningWorker:
         # Sweep in-flight jobs before the status transition so the user-visible
         # state stays consistent: jobs go FAILED, then session goes FAILED.
         if self._job_sweep is not None:
-            try:
-                sweep_result = await self._job_sweep.sweep_session(
-                    session.id,
-                    product_id=session.product_id,
-                    reason=f"GPU session failed: {reason}"[:500],
-                )
-                logger.info(
-                    "gpu_session.provision.job_sweep",
-                    session_id=str(session.id),
-                    reason=reason[:200],
-                    **dataclasses.asdict(sweep_result),
-                )
-            except Exception:
-                logger.exception(
-                    "gpu_session.provision.job_sweep_error",
-                    session_id=str(session.id),
-                )
+            await self._job_sweep.sweep_session_best_effort(
+                session_id=session.id,
+                product_id=session.product_id,
+                reason=f"GPU session failed: {reason}",
+                log_event="gpu_session.provision.job_sweep",
+            )
 
         if session.vastai_instance_id is not None:
             try:
