@@ -121,6 +121,35 @@ class Settings(BaseSettings):
         default="",
         description="Civitai API token for model downloads on GPU nodes",
     )
+    ai_bundles_branch: str = Field(
+        default="master",
+        description="Git branch for ai-bundles repository (forwarded to the Aisha CLI as ACS_BUNDLES_BRANCH)",
+    )
+
+    # --- Aisha CLI runtime ---
+    aisha_repo_url: str = Field(
+        default="https://github.com/gearbox/aisha.git",
+        description="Git URL for the Aisha CLI repository (forwarded to the CLI as ACS_AISHA_REPO)",
+    )
+    aisha_branch: str = Field(
+        default="master",
+        description="Git branch for the Aisha CLI repository (forwarded to the CLI as ACS_AISHA_BRANCH)",
+    )
+    aisha_comfyui_host: str = Field(
+        default="0.0.0.0",  # noqa: S104
+        description=(
+            "ComfyUI bind address on Aisha GPU nodes (forwarded as ACS_COMFYUI_HOST). "
+            "Must be 0.0.0.0 in production so cloudflared can reach ComfyUI; deviating "
+            "from this default will break the tunnel."
+        ),
+    )
+    aisha_comfyui_extra_args: str = Field(
+        default="",
+        description=(
+            "Extra args appended to ComfyUI launch on Aisha GPU nodes "
+            "(forwarded as ACS_COMFYUI_EXTRA_ARGS). Example: '--preview-method auto'."
+        ),
+    )
 
     # --- Cloudflare Tunnel ---
     cf_api_token: str = Field(

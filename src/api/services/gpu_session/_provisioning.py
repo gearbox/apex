@@ -21,8 +21,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _VASTAI_IMAGE = "vastai/comfy:latest"
+# Branch in URL must match ACS_AISHA_BRANCH default in Settings.aisha_branch — keep them in sync.
 _ONSTART_CMD = (
-    "curl -sL https://raw.githubusercontent.com/gearbox/aisha/main/scripts/onstart.sh | bash"
+    "curl -sL https://raw.githubusercontent.com/gearbox/aisha/master/scripts/onstart.sh | bash"
 )
 
 
