@@ -28,7 +28,7 @@ from src.db.repositories.gpu_session import GpuSessionRepository
 
 from ._env_builder import build_acs_env
 from ._events import publish_status_event
-from ._provisioning import provision_vastai_instance
+from ._provisioning import make_onstart_cmd, provision_vastai_instance
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -402,6 +402,7 @@ class GpuProvisioningWorker:
                 offers=offers,
                 disk_gb=bundle.hardware.min_disk_gb,
                 env=env,
+                onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
                 max_retries=self._settings.max_node_provisioning_retries,
             )
         except Exception:

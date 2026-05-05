@@ -21,10 +21,16 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _VASTAI_IMAGE = "vastai/comfy:latest"
-# Branch in URL must match ACS_AISHA_BRANCH default in Settings.aisha_branch — keep them in sync.
-_ONSTART_CMD = (
-    "curl -sL https://raw.githubusercontent.com/gearbox/aisha/master/scripts/onstart.sh | bash"
-)
+
+
+def make_onstart_cmd(branch: str) -> str:
+    """Build the onstart shell command for a given Aisha branch.
+
+    The URL template lives here — single source of truth — so callers only
+    need to pass the branch (from Settings.aisha_branch). This prevents the
+    curl URL from drifting out of sync with ACS_AISHA_BRANCH.
+    """
+    return f"curl -sL https://raw.githubusercontent.com/gearbox/aisha/{branch}/scripts/onstart.sh | bash"
 
 
 async def provision_vastai_instance(
@@ -34,7 +40,7 @@ async def provision_vastai_instance(
     disk_gb: int,
     env: dict[str, str],
     image: str = _VASTAI_IMAGE,
-    onstart_cmd: str = _ONSTART_CMD,
+    onstart_cmd: str,
     max_retries: int,
 ) -> tuple[int, VastAIOffer]:
     """Try to create a Vast.ai instance, walking down cheapest offers on OfferTakenError.

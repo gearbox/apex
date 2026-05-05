@@ -27,7 +27,7 @@ from src.db.repositories.job import JobRepository
 
 from ._env_builder import build_acs_env
 from ._events import publish_status_event
-from ._provisioning import provision_vastai_instance
+from ._provisioning import make_onstart_cmd, provision_vastai_instance
 from .exceptions import (
     GpuSessionError,
     InvalidSessionStateError,
@@ -1167,5 +1167,6 @@ class GpuSessionService:
             offers=offers,
             disk_gb=disk_gb,
             env=env,
+            onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
             max_retries=self._settings.max_node_provisioning_retries,
         )
