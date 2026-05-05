@@ -140,6 +140,13 @@ def _make_settings(*, max_retries: int = 3) -> MagicMock:
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
     settings.gpu_session_tokens_per_minute = 100
+    settings.ai_bundles_github_token = "ghp_test_token"
+    settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
+    settings.ai_bundles_branch = "master"
+    settings.aisha_repo_url = "https://github.com/gearbox/aisha.git"
+    settings.aisha_branch = "master"
+    settings.aisha_comfyui_host = "0.0.0.0"  # noqa: S104
+    settings.aisha_comfyui_extra_args = ""
     return settings
 
 
@@ -664,6 +671,16 @@ class TestStartSession:
         assert "ACS_CIVITAI_API_TOKEN" in env
         assert "-p 18188:18188" in env
         assert env["-p 18188:18188"] == "1"
+        # New contract keys
+        assert env["ACS_GITHUB_TOKEN"] == "ghp_test_token"
+        assert env["ACS_BUNDLES_REPO"] == "https://github.com/gearbox/ai-bundles.git"
+        assert env["ACS_BUNDLES_BRANCH"] == "master"
+        assert env["ACS_AISHA_REPO"] == "https://github.com/gearbox/aisha.git"
+        assert env["ACS_AISHA_BRANCH"] == "master"
+        assert env["ACS_COMFYUI_PORT"] == "18188"
+        assert env["ACS_COMFYUI_PORT"] == str(bundle.hardware.comfyui_port)
+        assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
+        assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
 
     async def test_callback_token_is_random_per_call(self) -> None:
         service, mocks = _make_service()
@@ -884,6 +901,36 @@ class TestStartSession:
             )
 
         assert result is expected_session
+
+    async def test_start_session_fails_fast_on_empty_github_token(self) -> None:
+        """If ai_bundles_github_token is empty, raise before offer search; clean up tunnel."""
+        from src.api.services.vastai.exceptions import NoCapacityError
+
+        service, mocks = _make_service()
+        mocks["settings"].ai_bundles_github_token = ""
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+
+            with pytest.raises(NoCapacityError, match="ai_bundles_github_token"):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                )
+
+        # Tunnel must have been cleaned up
+        mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
+            _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
+        )
+        # No Vast.ai API calls
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

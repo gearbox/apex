@@ -26,8 +26,9 @@ from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.core.enums import GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
 
+from ._env_builder import build_acs_env
 from ._events import publish_status_event
-from ._provisioning import provision_vastai_instance
+from ._provisioning import make_onstart_cmd, provision_vastai_instance
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -374,18 +375,26 @@ class GpuProvisioningWorker:
             await self._mark_failed(session, "retry_get_token_failed")
             return
 
-        comfyui_port = bundle.hardware.comfyui_port
-        env: dict[str, str] = {
-            "ACS_BUNDLE": session.bundle_name,
-            "ACS_BUNDLE_VERSION": session.bundle_version or "current",
-            "ACS_CF_TUNNEL_TOKEN": tunnel_token,
-            "ACS_APEX_SESSION_ID": str(session.id),
-            "ACS_APEX_CALLBACK_URL": self._settings.apex_callback_url,
-            "ACS_APEX_CALLBACK_TOKEN": session.callback_token or "",
-            "ACS_HF_TOKEN": self._settings.hf_token,
-            "ACS_CIVITAI_API_TOKEN": self._settings.civitai_api_token,
-            f"-p {comfyui_port}:{comfyui_port}": "1",
-        }
+        if not self._settings.ai_bundles_github_token:
+            logger.error(
+                "gpu_session.provision.retry_config_error",
+                session_id=str(session.id),
+                reason="ai_bundles_github_token is empty; CLI clone will fail",
+            )
+            await self._mark_failed(session, "misconfigured: ai_bundles_github_token is empty")
+            return
+
+        # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
+        # civitai_api_token, and ACS_GITHUB_TOKEN.
+        env = build_acs_env(
+            settings=self._settings,
+            session_id=session.id,
+            bundle_name=session.bundle_name,
+            bundle_version=session.bundle_version,
+            comfyui_port=bundle.hardware.comfyui_port,
+            tunnel_token=tunnel_token,
+            callback_token=session.callback_token or "",
+        )
 
         try:
             instance_id, selected_offer = await provision_vastai_instance(
@@ -393,6 +402,7 @@ class GpuProvisioningWorker:
                 offers=offers,
                 disk_gb=bundle.hardware.min_disk_gb,
                 env=env,
+                onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
                 max_retries=self._settings.max_node_provisioning_retries,
             )
         except Exception:

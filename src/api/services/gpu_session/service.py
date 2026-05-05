@@ -25,8 +25,9 @@ from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.db.repositories.job import JobRepository
 
+from ._env_builder import build_acs_env
 from ._events import publish_status_event
-from ._provisioning import provision_vastai_instance
+from ._provisioning import make_onstart_cmd, provision_vastai_instance
 from .exceptions import (
     GpuSessionError,
     InvalidSessionStateError,
@@ -286,6 +287,23 @@ class GpuSessionService:
             hostname=hostname,
         )
 
+        # Validate config before any Vast.ai API calls (fail fast on deployment misconfiguration)
+        if not self._settings.ai_bundles_github_token:
+            logger.error(
+                "gpu_session.start.failed",
+                user_id=str(user_id),
+                model_type=model_type.value,
+                error_class="ConfigurationError",
+                phase="env_validation",
+                reason="ai_bundles_github_token is empty; ai-bundles is private and CLI clone will fail",
+            )
+            await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
+            raise NoCapacityError(
+                "Apex is misconfigured: ai_bundles_github_token is empty. "
+                "Set AI_BUNDLES_GITHUB_TOKEN (pydantic-settings maps this to the field automatically) "
+                "to a GitHub PAT with read access to gearbox/ai-bundles."
+            )
+
         # Step 5: search Vast.ai offers
         try:
             offers = await self._vastai.search_offers(hardware)
@@ -320,21 +338,17 @@ class GpuSessionService:
             cheapest_dph_micros=offers[0].dph_total_micros,
         )
 
-        # Build env dict (SECURITY: never log this dict — contains tunnel_token, callback_token,
-        # hf_token, civitai_api_token)
-        comfyui_port = hardware.comfyui_port
-        env: dict[str, str] = {
-            "ACS_BUNDLE": bundle.bundle_name,
-            "ACS_BUNDLE_VERSION": bundle.bundle_version or "current",
-            "ACS_CF_TUNNEL_TOKEN": tunnel_token,
-            "ACS_APEX_SESSION_ID": str(session_id),
-            "ACS_APEX_CALLBACK_URL": self._settings.apex_callback_url,
-            "ACS_APEX_CALLBACK_TOKEN": callback_token,
-            "ACS_HF_TOKEN": self._settings.hf_token,
-            "ACS_CIVITAI_API_TOKEN": self._settings.civitai_api_token,
-            # Port mapping for ComfyUI (derived from bundle.yaml — no hardcoded drift).
-            f"-p {comfyui_port}:{comfyui_port}": "1",
-        }
+        # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
+        # civitai_api_token, and ACS_GITHUB_TOKEN.
+        env = build_acs_env(
+            settings=self._settings,
+            session_id=session_id,
+            bundle_name=bundle.bundle_name,
+            bundle_version=bundle.bundle_version,
+            comfyui_port=hardware.comfyui_port,
+            tunnel_token=tunnel_token,
+            callback_token=callback_token,
+        )
 
         # Step 6: create Vast.ai instance with retry loop
         try:
@@ -1153,5 +1167,6 @@ class GpuSessionService:
             offers=offers,
             disk_gb=disk_gb,
             env=env,
+            onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
             max_retries=self._settings.max_node_provisioning_retries,
         )

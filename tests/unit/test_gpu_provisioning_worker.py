@@ -110,6 +110,13 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
     settings.cf_tunnel_domain = "gpu.cloudin.space"
+    settings.ai_bundles_github_token = "ghp_test_token"
+    settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
+    settings.ai_bundles_branch = "master"
+    settings.aisha_repo_url = "https://github.com/gearbox/aisha.git"
+    settings.aisha_branch = "master"
+    settings.aisha_comfyui_host = "0.0.0.0"  # noqa: S104
+    settings.aisha_comfyui_extra_args = ""
     for k, v in overrides.items():
         setattr(settings, k, v)
     return settings
@@ -560,6 +567,48 @@ class TestAdvanceProvisioning:
         assert env["ACS_APEX_CALLBACK_TOKEN"] == "cb-tok"
         assert "ACS_HF_TOKEN" in env
         assert "ACS_CIVITAI_API_TOKEN" in env
+        # New contract keys
+        assert env["ACS_GITHUB_TOKEN"] == "ghp_test_token"
+        assert env["ACS_BUNDLES_REPO"] == "https://github.com/gearbox/ai-bundles.git"
+        assert env["ACS_BUNDLES_BRANCH"] == "master"
+        assert env["ACS_AISHA_REPO"] == "https://github.com/gearbox/aisha.git"
+        assert env["ACS_AISHA_BRANCH"] == "master"
+        assert env["ACS_COMFYUI_PORT"] == "18188"
+        assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
+        assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
+        assert "-p 18188:18188" in env
+
+    async def test_retry_fails_fast_on_empty_github_token(self) -> None:
+        """If ai_bundles_github_token is empty, mark session failed before create_instance."""
+        worker, mocks = _make_worker()
+        mocks["settings"].ai_bundles_github_token = ""
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            bundle_name="wan_2.2_i2v",
+            bundle_version="260105-01",
+            callback_token="cb-tok",
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "fetched-tunnel-token"
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="timeout")
+
+        # No instance creation attempted
+        mocks["vastai_client"].create_instance.assert_not_called()
+        # Session must be marked failed
+        mock_repo.update_status.assert_called()
+        failed_call = mock_repo.update_status.call_args_list[-1]
+        assert failed_call[0][1] == GpuSessionStatus.failed
 
 
 # ---------------------------------------------------------------------------
