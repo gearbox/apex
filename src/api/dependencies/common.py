@@ -594,6 +594,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         _services.bundle_index = BundleIndexService(
             repo_url=settings.ai_bundles_repo_url,
             github_token=settings.ai_bundles_github_token,
+            branch=settings.ai_bundles_branch,
             sync_interval_minutes=settings.ai_bundles_sync_interval_minutes,
         )
         await _services.bundle_index.start()
