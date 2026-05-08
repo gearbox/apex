@@ -1,13 +1,13 @@
 [project]
 name = "apex"
-version = "0.15.3"
+version = "0.15.4"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
 dependencies = [
     # Web framework
     "litestar>=2.21.0",
-    "granian>=2.7.2",
+    "granian>=2.7.4",
     "msgspec>=0.20.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
@@ -24,7 +24,7 @@ dependencies = [
     "structlog>=24.4.0",
     # Utilities
     "httpx>=0.28.1",
-    "python-multipart>=0.0.26",
+    "python-multipart>=0.0.27",
     "rich>=14.2.0",
     # Authentication
     "argon2-cffi>=25.1.0",
