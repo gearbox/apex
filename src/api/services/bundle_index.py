@@ -229,12 +229,13 @@ class BundleIndexService:
         atomically swaps it with cache_dir, and updates self._etag.
         """
         url = f"https://api.github.com/repos/{self._owner}/{self._repo}/tarball/{self._branch}"
-        headers = {
-            "Authorization": f"Bearer {self._github_token}",
+        headers: dict[str, str] = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "apex-bundle-index/1.0",
         }
+        if self._github_token:
+            headers["Authorization"] = f"Bearer {self._github_token}"
         if self._etag is not None:
             headers["If-None-Match"] = self._etag
 
@@ -265,6 +266,7 @@ class BundleIndexService:
 
                 # Stream into a temp file on the same filesystem as cache_dir
                 # (required for the intra-filesystem rename in _extract_to_cache).
+                self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
                 fd, tmp_name = tempfile.mkstemp(suffix=".tar.gz", dir=self._cache_dir.parent)
                 os.close(fd)
                 tmp_path = Path(tmp_name)

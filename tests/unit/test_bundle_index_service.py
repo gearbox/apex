@@ -732,6 +732,37 @@ class TestFetchAndExtract:
         assert not (tmp_path / "escape.txt").exists()
         assert (tmp_path / "bundle-index.yaml").exists()
 
+    async def test_unsafe_tarball_symlink_filtered(self, tmp_path: Path) -> None:
+        """Symlink entries whose target escapes cache_dir are rejected; not created."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            # Well-formed top-level dir
+            dir_info = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123")
+            dir_info.type = tarfile_module.DIRTYPE
+            tf.addfile(dir_info)
+            # Normal file inside top-level
+            data = b"bundles: []"
+            normal = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/bundle-index.yaml")
+            normal.size = len(data)
+            tf.addfile(normal, io.BytesIO(data))
+            # Symlink whose target escapes the destination directory
+            unsafe_symlink = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/unsafe-symlink")
+            unsafe_symlink.type = tarfile_module.SYMTYPE
+            unsafe_symlink.linkname = "../../outside-cache-dir-target"
+            tf.addfile(unsafe_symlink)
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        # The symlink must not appear in cache_dir (as file or symlink)
+        symlink_path = tmp_path / "unsafe-symlink"
+        assert not symlink_path.exists()
+        assert not symlink_path.is_symlink()
+        # Normal content is still present
+        assert (tmp_path / "bundle-index.yaml").exists()
+
     async def test_malformed_tarball_layout_raises(self, tmp_path: Path) -> None:
         """Tarball with two top-level dirs raises RuntimeError."""
         buf = io.BytesIO()
