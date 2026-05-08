@@ -100,7 +100,7 @@ class AishaJobPoller:
                 "AishaPollerConfig.tunnel_allowed_suffix is empty. "
                 "If Aisha is intentionally disabled in this environment, "
                 "set AISHA_POLLER_ENABLED=false. Otherwise, set "
-                "CF_TUNNEL_DOMAIN to the GPU tunnel domain "
+                "AISHA_CF_TUNNEL_DOMAIN to the GPU tunnel domain "
                 "(e.g. 'gpu.cloudin.space')."
             )
 

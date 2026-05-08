@@ -151,22 +151,34 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Cloudflare Tunnel ---
-    cf_api_token: str = Field(
+    # --- Cloudflare API (per-session GPU node tunnels — NOT the apex API's own cloudflared sidecar) ---
+    aisha_cf_api_token: str = Field(
         default="",
-        description="Cloudflare API token with Tunnel:Edit permission",
+        description=(
+            "Cloudflare API token with Tunnel:Edit permission for per-session GPU node tunnels "
+            "(NOT the staging API's own cloudflared sidecar — that uses CLOUDFLARE_TUNNEL_TOKEN)."
+        ),
     )
-    cf_account_id: str = Field(
+    aisha_cf_account_id: str = Field(
         default="",
-        description="Cloudflare account ID",
+        description=(
+            "Cloudflare account ID for per-session GPU node tunnels "
+            "(NOT the staging API's own cloudflared sidecar — that uses CLOUDFLARE_TUNNEL_TOKEN)."
+        ),
     )
-    cf_zone_id: str = Field(
+    aisha_cf_zone_id: str = Field(
         default="",
-        description="Cloudflare zone ID for the tunnel domain (cloudin.space)",
+        description=(
+            "Cloudflare zone ID for the GPU tunnel domain for per-session GPU node tunnels "
+            "(NOT the staging API's own cloudflared sidecar — that uses CLOUDFLARE_TUNNEL_TOKEN)."
+        ),
     )
-    cf_tunnel_domain: str = Field(
+    aisha_cf_tunnel_domain: str = Field(
         default="gpu.cloudin.space",
-        description="Base domain for GPU session tunnel hostnames",
+        description=(
+            "Base domain for GPU session tunnel hostnames for per-session GPU node tunnels "
+            "(NOT the staging API's own cloudflared sidecar — that uses CLOUDFLARE_TUNNEL_TOKEN)."
+        ),
     )
 
     # --- GPU Provisioning Worker ---
@@ -746,9 +758,9 @@ class Settings(BaseSettings):
         return bool(self.vastai_api_key)
 
     @property
-    def cf_configured(self) -> bool:
-        """Check if Cloudflare Tunnel is configured."""
-        return bool(self.cf_api_token and self.cf_account_id and self.cf_zone_id)
+    def aisha_cf_configured(self) -> bool:
+        """Check if Cloudflare API is configured for per-session GPU node tunnels."""
+        return bool(self.aisha_cf_api_token and self.aisha_cf_account_id and self.aisha_cf_zone_id)
 
     @property
     def grok_billing(self) -> GrokBillingConfig:

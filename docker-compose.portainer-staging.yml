@@ -137,6 +137,39 @@ services:
       COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
       COMFYUI_PORT: ${COMFYUI_PORT:-18188}
 
+      # --- Vast.ai (GPU node provisioning) ---
+      VASTAI_API_KEY: ${VASTAI_API_KEY:?VASTAI_API_KEY is required for GPU sessions}
+
+      # --- Cloudflare API (per-session GPU node tunnels — distinct from CLOUDFLARE_TUNNEL_TOKEN) ---
+      AISHA_CF_API_TOKEN: ${AISHA_CF_API_TOKEN:?AISHA_CF_API_TOKEN is required for per-session GPU tunnels}
+      AISHA_CF_ACCOUNT_ID: ${AISHA_CF_ACCOUNT_ID:?AISHA_CF_ACCOUNT_ID is required}
+      AISHA_CF_ZONE_ID: ${AISHA_CF_ZONE_ID:?AISHA_CF_ZONE_ID is required}
+      AISHA_CF_TUNNEL_DOMAIN: ${AISHA_CF_TUNNEL_DOMAIN:?AISHA_CF_TUNNEL_DOMAIN is required (e.g. gpu.cloudin.space)}
+
+      # --- Aisha CLI runtime (forwarded to GPU nodes via vastai_client.create_instance) ---
+      AI_BUNDLES_GITHUB_TOKEN: ${AI_BUNDLES_GITHUB_TOKEN:?AI_BUNDLES_GITHUB_TOKEN is required (PAT for private gearbox/ai-bundles)}
+      AI_BUNDLES_REPO_URL: ${AI_BUNDLES_REPO_URL:-https://github.com/gearbox/ai-bundles.git}
+      AI_BUNDLES_BRANCH: ${AI_BUNDLES_BRANCH:-master}
+      AISHA_REPO_URL: ${AISHA_REPO_URL:-https://github.com/gearbox/aisha.git}
+      AISHA_BRANCH: ${AISHA_BRANCH:-master}
+      AISHA_COMFYUI_HOST: ${AISHA_COMFYUI_HOST:-0.0.0.0}
+      AISHA_COMFYUI_EXTRA_ARGS: ${AISHA_COMFYUI_EXTRA_ARGS:-}
+
+      # --- Model-download tokens (forwarded to GPU nodes; most bundles need HF_TOKEN) ---
+      HF_TOKEN: ${HF_TOKEN:-}
+      CIVITAI_API_TOKEN: ${CIVITAI_API_TOKEN:-}
+
+      # --- Apex callback URL (phase-2; must be the public staging URL) ---
+      APEX_CALLBACK_URL: ${APEX_CALLBACK_URL:?APEX_CALLBACK_URL is required (e.g. https://staging.your-domain.com)}
+
+      # --- Aisha poller (background worker for ComfyUI job state) ---
+      AISHA_POLLER_ENABLED: ${AISHA_POLLER_ENABLED:-true}
+      AISHA_POLLER_TICK_INTERVAL_SECONDS: ${AISHA_POLLER_TICK_INTERVAL_SECONDS:-1.0}
+      AISHA_POLLER_MAX_CONCURRENT_POLLS: ${AISHA_POLLER_MAX_CONCURRENT_POLLS:-16}
+      AISHA_POLLER_JOB_AGE_WARNING_SECONDS: ${AISHA_POLLER_JOB_AGE_WARNING_SECONDS:-300}
+      AISHA_POLLER_JOB_AGE_TIMEOUT_SECONDS: ${AISHA_POLLER_JOB_AGE_TIMEOUT_SECONDS:-1800}
+      AISHA_POLLER_COMFYUI_REQUEST_TIMEOUT_SECONDS: ${AISHA_POLLER_COMFYUI_REQUEST_TIMEOUT_SECONDS:-5.0}
+
     # No host port binding — cloudflared connects to api:8100 inside the network
     ports: []
     deploy:

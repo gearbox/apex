@@ -558,7 +558,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             job_age_warning_seconds=settings.aisha_poller_job_age_warning_seconds,
             job_age_timeout_seconds=settings.aisha_poller_job_age_timeout_seconds,
             comfyui_request_timeout_seconds=settings.aisha_poller_comfyui_request_timeout_seconds,
-            tunnel_allowed_suffix=settings.cf_tunnel_domain or "",
+            tunnel_allowed_suffix=settings.aisha_cf_tunnel_domain or "",
             retention_days=settings.retention_days,
         )
         _services.aisha_job_poller = AishaJobPoller(
@@ -574,7 +574,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         logger.info("aisha_job_poller.disabled")
 
     # Initialize GPU session stack (requires both Vast.ai + CF to be configured)
-    if settings.vastai_configured and settings.cf_configured:
+    if settings.vastai_configured and settings.aisha_cf_configured:
         from src.api.services.cloudflare.client import CloudflareTunnelClient
         from src.api.services.vastai.client import VastAIClient
 
@@ -586,10 +586,10 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         )
         cf_client = CloudflareTunnelClient(
             http_client=_services.gpu_session_http_client,
-            api_token=settings.cf_api_token,
-            account_id=settings.cf_account_id,
-            zone_id=settings.cf_zone_id,
-            tunnel_domain=settings.cf_tunnel_domain,
+            api_token=settings.aisha_cf_api_token,
+            account_id=settings.aisha_cf_account_id,
+            zone_id=settings.aisha_cf_zone_id,
+            tunnel_domain=settings.aisha_cf_tunnel_domain,
         )
         _services.bundle_index = BundleIndexService(
             repo_url=settings.ai_bundles_repo_url,
@@ -649,7 +649,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     else:
         logger.warning(
             "gpu_session_stack.not_configured",
-            hint="Set VASTAI_API_KEY and CF_API_TOKEN/CF_ACCOUNT_ID/CF_ZONE_ID to enable GPU sessions",
+            hint="Set VASTAI_API_KEY and AISHA_CF_API_TOKEN/AISHA_CF_ACCOUNT_ID/AISHA_CF_ZONE_ID to enable GPU sessions",
         )
 
     # Initialize unified generation service
@@ -662,7 +662,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,
             r2_storage=_services.r2_storage,
-            tunnel_domain=settings.cf_tunnel_domain,
+            tunnel_domain=settings.aisha_cf_tunnel_domain,
         )
     }
 

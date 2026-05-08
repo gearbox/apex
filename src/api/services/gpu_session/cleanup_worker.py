@@ -163,10 +163,10 @@ class OrphanedTunnelCleanupWorker:
 
         If DNS record is not found, deletes the tunnel only and logs a warning.
         Hostname is reconstructed from the tunnel name:
-        "gpu-session-{short_id}" → "{short_id}.{cf_tunnel_domain}".
+        "gpu-session-{short_id}" → "{short_id}.{aisha_cf_tunnel_domain}".
         """
         short_id = tunnel.name[len(self._TUNNEL_NAME_PREFIX) :]
-        hostname = f"{short_id}.{self._settings.cf_tunnel_domain}"
+        hostname = f"{short_id}.{self._settings.aisha_cf_tunnel_domain}"
 
         dns_record_id = await self._cf.find_dns_record_by_hostname(hostname)
 
