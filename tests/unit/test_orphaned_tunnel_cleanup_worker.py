@@ -80,7 +80,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings = MagicMock()
     settings.orphaned_tunnel_cleanup_interval_minutes = 60
     settings.orphaned_tunnel_cleanup_grace_period_minutes = 10
-    settings.cf_tunnel_domain = "gpu.cloudin.space"
+    settings.aisha_cf_tunnel_domain = "gpu.cloudin.space"
     for k, v in overrides.items():
         setattr(settings, k, v)
     return settings

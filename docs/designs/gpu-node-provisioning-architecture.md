@@ -986,13 +986,13 @@ ai_bundles_sync_interval_minutes: int = Field(
 hf_token: str = Field(default="", description="HuggingFace token for private model downloads")
 civitai_api_token: str = Field(default="", description="Civitai API token for model downloads")
 
-# --- Cloudflare Tunnel ---
-cf_api_token: str = Field(default="", description="Cloudflare API token (Tunnel:Edit permission)")
-cf_account_id: str = Field(default="", description="Cloudflare account ID")
-cf_zone_id: str = Field(default="", description="Cloudflare zone ID for cloudin.space")
-cf_tunnel_domain: str = Field(
+# --- Cloudflare API (per-session GPU node tunnels — NOT the apex API's own cloudflared sidecar) ---
+aisha_cf_api_token: str = Field(default="", description="Cloudflare API token (Tunnel:Edit permission) for per-session GPU node tunnels")
+aisha_cf_account_id: str = Field(default="", description="Cloudflare account ID for per-session GPU node tunnels")
+aisha_cf_zone_id: str = Field(default="", description="Cloudflare zone ID for the GPU tunnel domain")
+aisha_cf_tunnel_domain: str = Field(
     default="gpu.cloudin.space",
-    description="Base domain for GPU tunnel hostnames",
+    description="Base domain for GPU session tunnel hostnames",
 )
 
 # --- Provisioning Worker ---

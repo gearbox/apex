@@ -109,7 +109,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
-    settings.cf_tunnel_domain = "gpu.cloudin.space"
+    settings.aisha_cf_tunnel_domain = "gpu.cloudin.space"
     settings.ai_bundles_github_token = "ghp_test_token"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
