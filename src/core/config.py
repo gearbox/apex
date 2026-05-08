@@ -125,6 +125,40 @@ class Settings(BaseSettings):
         default="master",
         description="Git branch for ai-bundles repository (forwarded to the Aisha CLI as ACS_BUNDLES_BRANCH)",
     )
+    ai_bundles_max_download_bytes: int = Field(
+        default=50 * 1024 * 1024,  # 50 MB
+        ge=1024,
+        description=(
+            "Maximum compressed tarball size (bytes) accepted from the GitHub "
+            "tarball API. The legitimate ai-bundles repo is <1 MB; 50 MB is "
+            "1000x headroom. Aborts download mid-stream if exceeded."
+        ),
+    )
+    ai_bundles_max_member_count: int = Field(
+        default=5000,
+        ge=1,
+        description=(
+            "Maximum number of entries (files+dirs) accepted in the tarball. "
+            "Defends against million-tiny-files inode-exhaustion bombs."
+        ),
+    )
+    ai_bundles_max_member_size_bytes: int = Field(
+        default=10 * 1024 * 1024,  # 10 MB
+        ge=1024,
+        description=(
+            "Maximum decompressed size (bytes) for any single tarball member. "
+            "Enforced both against TarInfo.size (metadata) and against actual "
+            "bytes read during extraction (defends against lying-size headers)."
+        ),
+    )
+    ai_bundles_max_uncompressed_bytes: int = Field(
+        default=100 * 1024 * 1024,  # 100 MB
+        ge=1024,
+        description=(
+            "Maximum total decompressed size (bytes) across all tarball members. "
+            "Defends against many-medium-files compression-ratio bombs."
+        ),
+    )
 
     # --- Aisha CLI runtime ---
     aisha_repo_url: str = Field(

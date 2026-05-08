@@ -78,12 +78,24 @@ class BundleIndexService:
         sync_interval_minutes: int,
         cache_dir: Path | None = None,
         *,
+        max_download_bytes: int,
+        max_member_count: int,
+        max_member_size_bytes: int,
+        max_uncompressed_bytes: int,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if sync_interval_minutes <= 0:
             raise ValueError(
                 f"sync_interval_minutes must be a positive integer, got {sync_interval_minutes!r}"
             )
+        for name, val in (
+            ("max_download_bytes", max_download_bytes),
+            ("max_member_count", max_member_count),
+            ("max_member_size_bytes", max_member_size_bytes),
+            ("max_uncompressed_bytes", max_uncompressed_bytes),
+        ):
+            if val <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {val!r}")
         self._owner, self._repo = _parse_github_url(repo_url)
         self._github_token = github_token
         self._branch = branch
@@ -98,6 +110,11 @@ class BundleIndexService:
         self._sync_lock = asyncio.Lock()
         # ETag for change detection; in-memory only (reset on pod restart).
         self._etag: str | None = None
+        # Decompression-bomb defense caps.
+        self._max_download_bytes = max_download_bytes
+        self._max_member_count = max_member_count
+        self._max_member_size_bytes = max_member_size_bytes
+        self._max_uncompressed_bytes = max_uncompressed_bytes
         # HTTP client ownership: borrowed clients are not closed by stop().
         self._http_client = http_client
         self._owned_client: httpx.AsyncClient | None = None
@@ -264,14 +281,30 @@ class BundleIndexService:
 
                 new_etag = response.headers.get("ETag")
 
+                # Early-exit if Content-Length header exceeds the cap.
+                declared_length = response.headers.get("Content-Length")
+                if declared_length is not None:
+                    with contextlib.suppress(ValueError):
+                        if int(declared_length) > self._max_download_bytes:
+                            raise RuntimeError(
+                                f"github tarball Content-Length ({declared_length}) exceeds "
+                                f"max download size ({self._max_download_bytes})"
+                            )
                 # Stream into a temp file on the same filesystem as cache_dir
                 # (required for the intra-filesystem rename in _extract_to_cache).
                 self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
                 fd, tmp_name = tempfile.mkstemp(suffix=".tar.gz", dir=self._cache_dir.parent)
                 os.close(fd)
                 tmp_path = Path(tmp_name)
+                total_bytes = 0
                 async with await anyio.open_file(tmp_path, "wb") as tmp_file:
                     async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                        total_bytes += len(chunk)
+                        if total_bytes > self._max_download_bytes:
+                            raise RuntimeError(
+                                f"github tarball exceeds max download size "
+                                f"({self._max_download_bytes} bytes); aborted at {total_bytes} bytes"
+                            )
                         await tmp_file.write(chunk)
 
         except httpx.TimeoutException as exc:
@@ -309,9 +342,64 @@ class BundleIndexService:
             shutil.rmtree(staging)
         staging.mkdir(parents=True, exist_ok=False)
 
-        with tarfile.open(tarball_path, mode="r:gz") as tf:
-            members = self._safe_members(tf, staging)
-            tf.extractall(staging, members=members)  # noqa: S202  # filtered
+        extracted_count = 0
+        extracted_total_bytes = 0
+
+        try:
+            with tarfile.open(tarball_path, mode="r|gz") as tf:
+                for member in tf:
+                    # --- Cap #2: member count ---
+                    if extracted_count >= self._max_member_count:
+                        raise RuntimeError(
+                            f"tarball member count exceeds limit "
+                            f"({self._max_member_count}); aborted"
+                        )
+
+                    # --- Path-traversal / symlink-escape filter ---
+                    try:
+                        filtered = tarfile.data_filter(member, str(staging))
+                    except tarfile.FilterError as exc:
+                        logger.warning(
+                            "bundle_index.tarball_member_rejected",
+                            member=member.name,
+                            reason=str(exc),
+                        )
+                        continue
+                    if filtered is None:
+                        continue
+                    member = filtered
+
+                    # --- Cap #3: per-member declared size ---
+                    if member.size > self._max_member_size_bytes:
+                        raise RuntimeError(
+                            f"tarball member {member.name!r} declares size "
+                            f"{member.size} > limit {self._max_member_size_bytes}"
+                        )
+
+                    # --- Cap #4: total declared uncompressed size ---
+                    if extracted_total_bytes + member.size > self._max_uncompressed_bytes:
+                        raise RuntimeError(
+                            f"tarball total uncompressed size exceeds limit "
+                            f"({self._max_uncompressed_bytes}); aborted at "
+                            f"{extracted_total_bytes + member.size} bytes"
+                        )
+
+                    # --- Cap #5: actual extracted bytes per file (lying-size defense) ---
+                    actual_bytes = self._extract_member_capped(tf, member, staging)
+
+                    extracted_total_bytes += actual_bytes
+                    extracted_count += 1
+        except Exception:
+            # Clean up partial staging on any failure so next sync starts fresh.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+        logger.info(
+            "bundle_index.extracted",
+            member_count=extracted_count,
+            total_bytes=extracted_total_bytes,
+        )
 
         # Find the top-level <owner>-<repo>-<sha>/ directory and promote its
         # contents to the staging root.
@@ -338,28 +426,63 @@ class BundleIndexService:
         if trash is not None:
             shutil.rmtree(trash)
 
-    def _safe_members(self, tf: tarfile.TarFile, dest: Path) -> list[tarfile.TarInfo]:
-        """Return tarfile members filtered through the 'data' filter.
+    def _extract_member_capped(
+        self,
+        tf: tarfile.TarFile,
+        member: tarfile.TarInfo,
+        dest: Path,
+    ) -> int:
+        """Extract one tar member with a per-member byte cap on actual reads.
 
-        The 'data' filter (Python 3.12+) rejects absolute paths, paths
-        containing '..', symlinks pointing outside the destination, and
-        other dodgy entries. GitHub-generated tarballs are well-formed
-        in practice, but defense in depth is cheap here.
+        Returns the number of bytes actually written. For non-regular members
+        (directories, symlinks), returns 0.
+
+        Why we don't just use tf.extract(member, dest):
+          tf.extract trusts member.size and reads exactly that many bytes from
+          the stream. A malicious tarball can declare size=1024 but encode 10 GB
+          of payload; reading "exactly 1024 bytes" still consumes the full
+          bomb on the underlying gzip stream because tarfile reads the entire
+          block. We need to bound the actual decompressed read.
         """
-        safe: list[tarfile.TarInfo] = []
-        for member in tf.getmembers():
-            try:
-                filtered = tarfile.data_filter(member, str(dest))
-            except tarfile.FilterError as exc:
-                logger.warning(
-                    "bundle_index.tarball_member_rejected",
-                    member=member.name,
-                    reason=str(exc),
-                )
-                continue
-            if filtered is not None:
-                safe.append(filtered)
-        return safe
+        # Directories, symlinks, hardlinks, devices: no body. Use built-in extract.
+        if not member.isreg():
+            tf.extract(member, dest, set_attrs=False)  # noqa: S202  # filter applied above
+            return 0
+
+        target = dest / member.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        src = tf.extractfile(member)
+        if src is None:
+            # extractfile returns None for non-regular members; defensive guard.
+            return 0
+
+        cap = self._max_member_size_bytes
+        written = 0
+        with target.open("wb") as out:
+            while True:
+                # cap+1 lets us detect overflow on the last chunk without off-by-one.
+                remaining = cap - written + 1
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"tarball member {member.name!r} exceeds per-member "
+                        f"size cap ({cap} bytes) during extraction"
+                    )
+                chunk = src.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > cap:
+                    raise RuntimeError(
+                        f"tarball member {member.name!r} exceeds per-member "
+                        f"size cap ({cap} bytes) during extraction "
+                        f"(declared size was {member.size})"
+                    )
+                out.write(chunk)
+
+        if member.mode is not None:
+            target.chmod(member.mode & 0o777)
+        return written
 
     def _redact_token(self, text: str) -> str:
         """Replace any occurrence of the PAT in `text` with '***'.

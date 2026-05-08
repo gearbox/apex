@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from src.api.services.bundle_index import (
     BundleIndexService,
@@ -17,6 +18,7 @@ from src.api.services.bundle_index import (
     _parse_github_url,
 )
 from src.core.bundle_config import BundleMapping, HardwareRequirements
+from src.core.config import Settings
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,6 +35,14 @@ _HW_YAML: dict[str, object] = {
 }
 
 
+_TEST_CAPS: dict[str, Any] = {
+    "max_download_bytes": 10 * 1024 * 1024,  # 10 MB
+    "max_member_count": 1000,
+    "max_member_size_bytes": 5 * 1024 * 1024,
+    "max_uncompressed_bytes": 50 * 1024 * 1024,
+}
+
+
 def _make_service(cache_dir: Path, **kwargs: Any) -> BundleIndexService:
     defaults: dict[str, Any] = {
         "repo_url": "https://github.com/gearbox/ai-bundles.git",
@@ -40,6 +50,7 @@ def _make_service(cache_dir: Path, **kwargs: Any) -> BundleIndexService:
         "branch": "master",
         "sync_interval_minutes": 15,
         "cache_dir": cache_dir,
+        **_TEST_CAPS,
     } | kwargs
     return BundleIndexService(**defaults)
 
@@ -823,6 +834,291 @@ class TestFetchAndExtract:
 
 
 # ---------------------------------------------------------------------------
+# Malicious tarball fixture helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_oversized_member_tarball(top_dir: str, member_size: int) -> bytes:
+    """Build a tarball with one member of `member_size` zero bytes."""
+    buf = io.BytesIO()
+    with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile_module.TarInfo(name=f"{top_dir}/big.bin")
+        info.size = member_size
+        tf.addfile(info, io.BytesIO(b"\x00" * member_size))
+    return buf.getvalue()
+
+
+def _make_many_members_tarball(top_dir: str, count: int) -> bytes:
+    """Build a tarball with `count` empty members."""
+    buf = io.BytesIO()
+    with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+        for i in range(count):
+            info = tarfile_module.TarInfo(name=f"{top_dir}/file_{i}.txt")
+            info.size = 0
+            tf.addfile(info, io.BytesIO(b""))
+    return buf.getvalue()
+
+
+def _make_lying_size_tarball(top_dir: str, claimed_size: int, actual_size: int) -> bytes:
+    """Build a tarball where TarInfo.size lies about the body size.
+
+    Standard tarfile.addfile won't produce this directly (it pads/truncates to
+    the declared size). We construct the tar manually: write the header with
+    claimed_size, then write actual_size bytes of body, padded to 512-byte blocks.
+    """
+    import gzip
+
+    # Build TarInfo header with claimed_size
+    info = tarfile_module.TarInfo(name=f"{top_dir}/lying.bin")
+    info.size = claimed_size
+    header_bytes = info.tobuf()
+
+    raw = io.BytesIO()
+    raw.write(header_bytes)
+    raw.write(b"\x00" * actual_size)
+    # Pad body to 512-byte block boundary
+    padding = (-actual_size) % 512
+    raw.write(b"\x00" * padding)
+    # End-of-archive: two zero blocks
+    raw.write(b"\x00" * 1024)
+
+    return gzip.compress(raw.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# Tarball decompression-bomb hardening tests
+# ---------------------------------------------------------------------------
+
+
+class TestTarballHardening:
+    """Tests for the five-layer decompression-bomb defense."""
+
+    def _svc_with_transport(
+        self,
+        tmp_path: Path,
+        transport: httpx.MockTransport,
+        **cap_overrides: Any,
+    ) -> BundleIndexService:
+        client = httpx.AsyncClient(transport=transport)
+        caps = {**_TEST_CAPS, **cap_overrides}
+        return _make_service(tmp_path, http_client=client, **caps)
+
+    # --- Cap #1: HTTP download size ---
+
+    async def test_download_size_cap_aborts_stream(self, tmp_path: Path) -> None:
+        """Tarball larger than max_download_bytes raises mid-stream."""
+        # Use a cap small enough that our tiny tarball still exceeds it
+        big_tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123", {"bundle-index.yaml": "bundles: []"}
+        )
+        transport = _make_mock_transport(200, big_tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_download_bytes=len(big_tarball) - 1)
+
+        with pytest.raises(RuntimeError, match="max download size"):
+            await svc._fetch_and_extract()
+
+        assert not tmp_path.exists() or not (tmp_path / "bundle-index.yaml").exists()
+
+    async def test_content_length_header_exceeds_cap_short_circuits(self, tmp_path: Path) -> None:
+        """Content-Length header above cap raises before stream is fully consumed."""
+        body_consumed: list[bool] = [False]
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            body_consumed[0] = True
+            return httpx.Response(
+                200,
+                content=b"x" * 10,
+                headers={"Content-Length": "100000000", "ETag": '"v1"'},
+            )
+
+        transport = httpx.MockTransport(handler)
+        svc = self._svc_with_transport(tmp_path, transport, max_download_bytes=1024)
+
+        with pytest.raises(RuntimeError, match="Content-Length"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #2: member count ---
+
+    async def test_member_count_cap_rejects_many_files_tarball(self, tmp_path: Path) -> None:
+        """Tarball with more members than max_member_count raises."""
+        cap = 10
+        tarball = _make_many_members_tarball("gearbox-ai-bundles-abc123", count=cap + 1)
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_member_count=cap)
+
+        with pytest.raises(RuntimeError, match="member count"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #3: per-member declared size ---
+
+    async def test_per_member_declared_size_cap_rejects_oversized_member(
+        self, tmp_path: Path
+    ) -> None:
+        """Member with TarInfo.size > max_member_size_bytes raises before extraction."""
+        cap = 1024
+        tarball = _make_oversized_member_tarball("gearbox-ai-bundles-abc123", member_size=cap + 1)
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_member_size_bytes=cap)
+
+        with pytest.raises(RuntimeError, match="declares size"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #4: total uncompressed size ---
+
+    async def test_total_uncompressed_size_cap_rejects_combined_overflow(
+        self, tmp_path: Path
+    ) -> None:
+        """Multiple members each under per-member cap but combined over total cap raise."""
+        per_member_cap = 2048
+        total_cap = 3000  # less than 2 * per_member_cap
+
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            for i in range(2):
+                data = b"\x00" * per_member_cap
+                info = tarfile_module.TarInfo(name=f"gearbox-ai-bundles-abc123/file_{i}.bin")
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(
+            tmp_path,
+            transport,
+            max_member_size_bytes=per_member_cap,
+            max_uncompressed_bytes=total_cap,
+        )
+
+        with pytest.raises(RuntimeError, match="total uncompressed size"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #5: lying-size defense ---
+
+    def test_lying_size_tarball_caught_during_extraction(self, tmp_path: Path) -> None:
+        """_extract_member_capped raises when actual bytes read exceed the cap.
+
+        Python's tarfile.extractfile() is itself bounded by TarInfo.size, so a
+        tarball-level lying-size bomb is neutralised by Python before we even see
+        it. This unit test bypasses that layer to verify that _extract_member_capped
+        independently enforces the cap on actual reads — defence in depth against
+        future CPython changes or other callers.
+        """
+        from unittest.mock import MagicMock
+
+        cap = 512
+        svc = _make_service(tmp_path, max_member_size_bytes=cap)
+
+        # Member with a small declared size that passes the metadata check (cap #3).
+        member = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/lying.bin")
+        member.size = 100  # declared 100 < cap 512 → metadata check passes
+
+        # Inject a stream that has more data than the cap (simulating a lying body).
+        fake_tf = MagicMock()
+        fake_tf.extractfile.return_value = io.BytesIO(b"\x00" * (cap + 100))
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        with pytest.raises(RuntimeError, match="during extraction"):
+            svc._extract_member_capped(fake_tf, member, staging)
+
+    # --- Legitimate bundle should pass ---
+
+    async def test_caps_at_defaults_dont_reject_legitimate_bundle(self, tmp_path: Path) -> None:
+        """Default caps pass a small, realistic tarball without error."""
+        from src.core.config import Settings
+
+        settings = Settings()
+        tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123",
+            {"bundle-index.yaml": "bundles: []", "README.md": "hello"},
+        )
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        client = httpx.AsyncClient(transport=transport)
+        svc = BundleIndexService(
+            repo_url="https://github.com/gearbox/ai-bundles.git",
+            github_token="ghp_test",
+            branch="master",
+            sync_interval_minutes=15,
+            cache_dir=tmp_path,
+            max_download_bytes=settings.ai_bundles_max_download_bytes,
+            max_member_count=settings.ai_bundles_max_member_count,
+            max_member_size_bytes=settings.ai_bundles_max_member_size_bytes,
+            max_uncompressed_bytes=settings.ai_bundles_max_uncompressed_bytes,
+            http_client=client,
+        )
+        await svc._fetch_and_extract()
+        assert (tmp_path / "bundle-index.yaml").exists()
+
+    # --- Cleanup on failure ---
+
+    async def test_partial_extraction_cleaned_up_on_cap_breach(self, tmp_path: Path) -> None:
+        """Staging dir is removed when a cap is breached mid-extraction."""
+        cap = 10
+        tarball = _make_many_members_tarball("gearbox-ai-bundles-abc123", count=cap + 1)
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_member_count=cap)
+
+        with pytest.raises(RuntimeError):
+            await svc._fetch_and_extract()
+
+        staging = tmp_path.with_name(f"{tmp_path.name}.staging")
+        assert not staging.exists()
+
+    # --- Path traversal still rejected after refactor ---
+
+    async def test_path_traversal_member_still_rejected_after_refactor(
+        self, tmp_path: Path
+    ) -> None:
+        """data_filter still rejects ../escape members in streaming mode."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            dir_info = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123")
+            dir_info.type = tarfile_module.DIRTYPE
+            tf.addfile(dir_info)
+            data = b"bundles: []"
+            normal = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/bundle-index.yaml")
+            normal.size = len(data)
+            tf.addfile(normal, io.BytesIO(data))
+            evil_data = b"evil"
+            evil = tarfile_module.TarInfo(name="../escape.txt")
+            evil.size = len(evil_data)
+            tf.addfile(evil, io.BytesIO(evil_data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        assert not (tmp_path.parent / "escape.txt").exists()
+        assert (tmp_path / "bundle-index.yaml").exists()
+
+    # --- Directory members ---
+
+    async def test_streaming_mode_handles_directory_members(self, tmp_path: Path) -> None:
+        """Directories inside the tarball are created correctly in streaming mode."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            top = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123")
+            top.type = tarfile_module.DIRTYPE
+            tf.addfile(top)
+            subdir = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/subdir")
+            subdir.type = tarfile_module.DIRTYPE
+            tf.addfile(subdir)
+            data = b"bundles: []"
+            f = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/bundle-index.yaml")
+            f.size = len(data)
+            tf.addfile(f, io.BytesIO(data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        assert (tmp_path / "bundle-index.yaml").exists()
+
+
+# ---------------------------------------------------------------------------
 # __init__ validation
 # ---------------------------------------------------------------------------
 
@@ -837,6 +1133,7 @@ class TestInitValidation:
                 branch="master",
                 sync_interval_minutes=0,
                 cache_dir=tmp_path,
+                **_TEST_CAPS,
             )
 
     def test_rejects_negative_sync_interval(self, tmp_path: Path) -> None:
@@ -848,6 +1145,7 @@ class TestInitValidation:
                 branch="master",
                 sync_interval_minutes=-5,
                 cache_dir=tmp_path,
+                **_TEST_CAPS,
             )
 
     def test_branch_is_required(self, tmp_path: Path) -> None:
@@ -858,6 +1156,7 @@ class TestInitValidation:
                 github_token="",
                 sync_interval_minutes=15,
                 cache_dir=tmp_path,
+                **_TEST_CAPS,
             )
 
     def test_invalid_url_raises_at_construction(self, tmp_path: Path) -> None:
@@ -869,4 +1168,29 @@ class TestInitValidation:
                 branch="master",
                 sync_interval_minutes=15,
                 cache_dir=tmp_path,
+                **_TEST_CAPS,
             )
+
+    def test_rejects_zero_cap_values(self, tmp_path: Path) -> None:
+        """Cap fields must be positive; zero or negative raise ValueError."""
+        for bad_field in (
+            "max_download_bytes",
+            "max_member_count",
+            "max_member_size_bytes",
+            "max_uncompressed_bytes",
+        ):
+            caps = {**_TEST_CAPS, bad_field: 0}
+            with pytest.raises(ValueError, match=bad_field):
+                BundleIndexService(
+                    repo_url="https://github.com/x/y.git",
+                    github_token="",
+                    branch="master",
+                    sync_interval_minutes=15,
+                    cache_dir=tmp_path,
+                    **caps,
+                )
+
+    def test_settings_caps_validation_rejects_below_minimum(self) -> None:
+        """Settings ge=1024 / ge=1 constraints reject values below the minimum."""
+        with pytest.raises(ValidationError):
+            Settings(ai_bundles_max_download_bytes=0)
