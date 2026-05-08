@@ -7,7 +7,7 @@ authors = [{ name = "Apex Team" }]
 dependencies = [
     # Web framework
     "litestar>=2.21.0",
-    "granian>=2.7.2",
+    "granian>=2.7.4",
     "msgspec>=0.20.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
