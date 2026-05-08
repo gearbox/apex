@@ -32,6 +32,7 @@ services:
       - ./config:/app/config:ro
       - ./alembic:/app/alembic:ro
       - ./tests:/app/tests:ro
+      - ./.env.staging.example:/app/.env.staging.example:ro
       # Pass through coverage report to local filesystem
       - ./htmlcov:/app/htmlcov
     

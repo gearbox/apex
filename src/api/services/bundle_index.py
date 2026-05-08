@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import subprocess
+import os
+import shutil
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import anyio
+import httpx
 import structlog
 import yaml
 
@@ -30,35 +34,71 @@ class _BundleIndexEntry:
     mapping: BundleMapping
 
 
-class BundleIndexService:
-    """Reads the ai-bundles git repository to resolve ModelType → bundle mappings.
+def _parse_github_url(url: str) -> tuple[str, str]:
+    """Parse a GitHub HTTPS URL into (owner, repo).
 
-    Syncs the ai-bundles repo on startup (shallow clone) and periodically (git pull).
-    Parses bundle-index.yaml for model_type mappings and individual bundle.yaml
-    files for hardware requirements.
+    Raises ValueError for URLs that are not parseable as a GitHub
+    HTTPS repo URL — including git@... SSH forms, which are no
+    longer supported now that we use the REST API.
+    """
+    if not url.startswith("https://github.com/"):
+        raise ValueError(
+            f"ai_bundles_repo_url must be an https://github.com/ URL "
+            f"(SSH form is no longer supported), got: {url!r}"
+        )
+    path = url.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    parts = path.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(
+            f"ai_bundles_repo_url must be of the form "
+            f"https://github.com/<owner>/<repo>, got: {url!r}"
+        )
+    return parts[0], parts[1]
+
+
+class BundleIndexService:
+    """Reads the ai-bundles repo to resolve ModelType → bundle mappings.
+
+    Fetches the ai-bundles tree from GitHub's tarball API on startup and
+    periodically thereafter. Parses bundle-index.yaml for model_type mappings
+    and individual bundle.yaml files for hardware requirements.
 
     Thread-safety: reads are from an in-memory cache; writes (sync) are infrequent
     and serialized by an asyncio.Lock so concurrent sync() calls don't race on
     the on-disk cache directory.
     """
 
-    # Max wall time for any single git invocation. Prevents a hung/prompting
-    # git process from blocking the thread pool indefinitely.
-    _GIT_TIMEOUT_SECONDS = 120
+    _FETCH_TIMEOUT_SECONDS = 60
 
     def __init__(
         self,
         repo_url: str,
         github_token: str,
+        branch: str,
         sync_interval_minutes: int,
         cache_dir: Path | None = None,
+        *,
+        max_download_bytes: int,
+        max_member_count: int,
+        max_member_size_bytes: int,
+        max_uncompressed_bytes: int,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if sync_interval_minutes <= 0:
             raise ValueError(
                 f"sync_interval_minutes must be a positive integer, got {sync_interval_minutes!r}"
             )
-        self._repo_url = repo_url
+        for name, val in (
+            ("max_download_bytes", max_download_bytes),
+            ("max_member_count", max_member_count),
+            ("max_member_size_bytes", max_member_size_bytes),
+            ("max_uncompressed_bytes", max_uncompressed_bytes),
+        ):
+            if val <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {val!r}")
+        self._owner, self._repo = _parse_github_url(repo_url)
         self._github_token = github_token
+        self._branch = branch
         self._sync_interval = sync_interval_minutes
         self._cache_dir = cache_dir or Path("/tmp/apex-bundle-cache")
         # model_type -> entry (only default_bundle=true entries)
@@ -68,12 +108,24 @@ class BundleIndexService:
         self._running = False
         self._sync_task: asyncio.Task[None] | None = None
         self._sync_lock = asyncio.Lock()
+        # ETag for change detection; in-memory only (reset on pod restart).
+        self._etag: str | None = None
+        # Decompression-bomb defense caps.
+        self._max_download_bytes = max_download_bytes
+        self._max_member_count = max_member_count
+        self._max_member_size_bytes = max_member_size_bytes
+        self._max_uncompressed_bytes = max_uncompressed_bytes
+        # HTTP client ownership: borrowed clients are not closed by stop().
+        self._http_client = http_client
+        self._owned_client: httpx.AsyncClient | None = None
+        if http_client is None:
+            self._owned_client = httpx.AsyncClient()
 
     async def start(self) -> None:
         """Initial sync + start periodic background sync.
 
         Raises:
-            Exception: If the initial clone or index parse fails. The service
+            Exception: If the initial fetch or index parse fails. The service
                 must have a usable index after start() returns; subsequent
                 background sync failures are logged but do not stop the loop.
         """
@@ -103,10 +155,13 @@ class BundleIndexService:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._sync_task
             self._sync_task = None
+        if self._owned_client is not None:
+            await self._owned_client.aclose()
+            self._owned_client = None
         logger.info("bundle_index.stopped")
 
     async def sync(self) -> None:
-        """Clone or pull the ai-bundles repo and rebuild the in-memory index.
+        """Fetch the ai-bundles tree from GitHub and rebuild the in-memory index.
 
         Errors are logged but not raised — use this for background/manual
         refreshes where stale data is preferable to crashing. For startup,
@@ -115,15 +170,10 @@ class BundleIndexService:
         await self._sync_once(raise_on_error=False)
 
     async def _sync_once(self, *, raise_on_error: bool) -> None:
-        """Single sync pass. Raises when raise_on_error=True, else logs and swallows.
-
-        Runs git operations in a thread executor to avoid blocking the event loop.
-        Serialized by an asyncio.Lock so concurrent callers don't race on the
-        shared on-disk cache.
-        """
+        """Single sync pass. Raises when raise_on_error=True, else logs and swallows."""
         async with self._sync_lock:
             try:
-                await asyncio.to_thread(self._git_sync)
+                await self._fetch_and_extract()
                 self._parse_index()
                 logger.info(
                     "bundle_index.synced",
@@ -187,6 +237,263 @@ class BundleIndexService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _fetch_and_extract(self) -> None:
+        """Fetch the ai-bundles tree from GitHub's tarball API and extract.
+
+        On 304 Not Modified, returns early without touching the cache dir.
+        On 200 OK, downloads the tarball, extracts to a staging dir,
+        atomically swaps it with cache_dir, and updates self._etag.
+        """
+        url = f"https://api.github.com/repos/{self._owner}/{self._repo}/tarball/{self._branch}"
+        headers: dict[str, str] = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "apex-bundle-index/1.0",
+        }
+        if self._github_token:
+            headers["Authorization"] = f"Bearer {self._github_token}"
+        if self._etag is not None:
+            headers["If-None-Match"] = self._etag
+
+        client = self._http_client if self._http_client is not None else self._owned_client
+        assert client is not None  # guaranteed by __init__
+
+        tmp_path: Path | None = None
+        new_etag: str | None = None
+        try:
+            async with client.stream(
+                "GET",
+                url,
+                headers=headers,
+                follow_redirects=True,
+                timeout=self._FETCH_TIMEOUT_SECONDS,
+            ) as response:
+                if response.status_code == 304:
+                    logger.debug("bundle_index.unchanged", etag=self._etag)
+                    return
+                if response.status_code != 200:
+                    body = await response.aread()
+                    raise RuntimeError(
+                        f"github tarball fetch failed (status {response.status_code}): "
+                        f"{self._redact_token(body.decode('utf-8', errors='replace'))[:500]}"
+                    )
+
+                new_etag = response.headers.get("ETag")
+
+                # Early-exit if Content-Length header exceeds the cap.
+                declared_length = response.headers.get("Content-Length")
+                if declared_length is not None:
+                    with contextlib.suppress(ValueError):
+                        if int(declared_length) > self._max_download_bytes:
+                            raise RuntimeError(
+                                f"github tarball Content-Length ({declared_length}) exceeds "
+                                f"max download size ({self._max_download_bytes})"
+                            )
+                # Stream into a temp file on the same filesystem as cache_dir
+                # (required for the intra-filesystem rename in _extract_to_cache).
+                self._cache_dir.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp_name = tempfile.mkstemp(suffix=".tar.gz", dir=self._cache_dir.parent)
+                os.close(fd)
+                tmp_path = Path(tmp_name)
+                total_bytes = 0
+                async with await anyio.open_file(tmp_path, "wb") as tmp_file:
+                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                        total_bytes += len(chunk)
+                        if total_bytes > self._max_download_bytes:
+                            raise RuntimeError(
+                                f"github tarball exceeds max download size "
+                                f"({self._max_download_bytes} bytes); aborted at {total_bytes} bytes"
+                            )
+                        await tmp_file.write(chunk)
+
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                f"github tarball fetch timed out after {self._FETCH_TIMEOUT_SECONDS}s"
+            ) from exc
+
+        # tmp_path is always set here: 304 returned above, !200 raised above.
+        if tmp_path is None:  # appease mypy — unreachable at runtime
+            return
+
+        try:
+            await asyncio.to_thread(self._extract_to_cache, tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        self._etag = new_etag
+        logger.info("bundle_index.fetched", etag=new_etag)
+
+    def _extract_to_cache(self, tarball_path: Path) -> None:
+        """Extract `tarball_path` into self._cache_dir atomically.
+
+        The tarball's top-level entry is a single `<owner>-<repo>-<sha>/`
+        directory; we strip that prefix so the extracted tree matches
+        what `git clone` produced (bundle-index.yaml at the cache_dir
+        root, etc.).
+
+        Atomic strategy: extract to `<cache_dir>.staging/`, then rename it
+        onto `<cache_dir>`. The old version is moved aside first and removed
+        after the swap. Concurrent `_parse_index` callers serialized by
+        `_sync_lock` (see `_sync_once`) never observe a partial tree.
+        """
+        staging = self._cache_dir.with_name(f"{self._cache_dir.name}.staging")
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True, exist_ok=False)
+
+        extracted_count = 0
+        extracted_total_bytes = 0
+
+        try:
+            with tarfile.open(tarball_path, mode="r|gz") as tf:
+                for member in tf:
+                    # --- Cap #2: member count ---
+                    if extracted_count >= self._max_member_count:
+                        raise RuntimeError(
+                            f"tarball member count exceeds limit "
+                            f"({self._max_member_count}); aborted"
+                        )
+
+                    # --- Path-traversal / symlink-escape filter ---
+                    try:
+                        filtered = tarfile.data_filter(member, str(staging))
+                    except tarfile.FilterError as exc:
+                        logger.warning(
+                            "bundle_index.tarball_member_rejected",
+                            member=member.name,
+                            reason=str(exc),
+                        )
+                        continue
+                    if filtered is None:
+                        continue
+                    member = filtered
+
+                    # --- Cap #3: per-member declared size ---
+                    if member.size > self._max_member_size_bytes:
+                        raise RuntimeError(
+                            f"tarball member {member.name!r} declares size "
+                            f"{member.size} > limit {self._max_member_size_bytes}"
+                        )
+
+                    # --- Cap #4: total declared uncompressed size ---
+                    if extracted_total_bytes + member.size > self._max_uncompressed_bytes:
+                        raise RuntimeError(
+                            f"tarball total uncompressed size exceeds limit "
+                            f"({self._max_uncompressed_bytes}); aborted at "
+                            f"{extracted_total_bytes + member.size} bytes"
+                        )
+
+                    # --- Cap #5: actual extracted bytes per file (lying-size defense) ---
+                    actual_bytes = self._extract_member_capped(tf, member, staging)
+
+                    extracted_total_bytes += actual_bytes
+                    extracted_count += 1
+        except Exception:
+            # Clean up partial staging on any failure so next sync starts fresh.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+        logger.info(
+            "bundle_index.extracted",
+            member_count=extracted_count,
+            total_bytes=extracted_total_bytes,
+        )
+
+        # Find the top-level <owner>-<repo>-<sha>/ directory and promote its
+        # contents to the staging root.
+        children = list(staging.iterdir())
+        if len(children) != 1 or not children[0].is_dir():
+            raise RuntimeError(
+                f"unexpected tarball layout: top level had {len(children)} entries, "
+                f"expected exactly 1 directory"
+            )
+        inner = children[0]
+        for item in inner.iterdir():
+            item.rename(staging / item.name)
+        inner.rmdir()
+
+        # Atomic swap: rename old → trash, new → cache_dir, rmtree(trash).
+        trash: Path | None = None
+        if self._cache_dir.exists():
+            trash = self._cache_dir.with_name(f"{self._cache_dir.name}.old")
+            if trash.exists():
+                shutil.rmtree(trash)
+            self._cache_dir.rename(trash)
+
+        staging.rename(self._cache_dir)
+        if trash is not None:
+            shutil.rmtree(trash)
+
+    def _extract_member_capped(
+        self,
+        tf: tarfile.TarFile,
+        member: tarfile.TarInfo,
+        dest: Path,
+    ) -> int:
+        """Extract one tar member with a per-member byte cap on actual reads.
+
+        Returns the number of bytes actually written. For non-regular members
+        (directories, symlinks), returns 0.
+
+        Why we don't just use tf.extract(member, dest):
+          tf.extract trusts member.size and reads exactly that many bytes from
+          the stream. A malicious tarball can declare size=1024 but encode 10 GB
+          of payload; reading "exactly 1024 bytes" still consumes the full
+          bomb on the underlying gzip stream because tarfile reads the entire
+          block. We need to bound the actual decompressed read.
+        """
+        # Directories, symlinks, hardlinks, devices: no body. Use built-in extract.
+        if not member.isreg():
+            tf.extract(member, dest, set_attrs=False)  # noqa: S202  # filter applied above
+            return 0
+
+        target = dest / member.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        src = tf.extractfile(member)
+        if src is None:
+            # extractfile returns None for non-regular members; defensive guard.
+            return 0
+
+        cap = self._max_member_size_bytes
+        written = 0
+        with target.open("wb") as out:
+            while True:
+                # cap+1 lets us detect overflow on the last chunk without off-by-one.
+                remaining = cap - written + 1
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"tarball member {member.name!r} exceeds per-member "
+                        f"size cap ({cap} bytes) during extraction"
+                    )
+                chunk = src.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > cap:
+                    raise RuntimeError(
+                        f"tarball member {member.name!r} exceeds per-member "
+                        f"size cap ({cap} bytes) during extraction "
+                        f"(declared size was {member.size})"
+                    )
+                out.write(chunk)
+
+        if member.mode is not None:
+            target.chmod(member.mode & 0o777)
+        return written
+
+    def _redact_token(self, text: str) -> str:
+        """Replace any occurrence of the PAT in `text` with '***'.
+
+        Defensive: GitHub's API does not echo the Authorization header
+        in error bodies, but a misconfigured proxy or future API change
+        could. Redact unconditionally before logging.
+        """
+        if not text or not self._github_token:
+            return text
+        return text.replace(self._github_token, "***")
 
     def _parse_index(self) -> None:
         """Parse bundle-index.yaml and build the in-memory index.
@@ -387,139 +694,6 @@ class BundleIndexService:
             num_gpus=_require_int("num_gpus"),
             comfyui_port=_require_int("comfyui_port"),
         )
-
-    def _auth_extra_header(self) -> list[str]:
-        """Return git `-c http.extraHeader=...` args for PAT auth, or empty list.
-
-        Uses the GitHub-recommended pattern — same as ``actions/checkout`` —
-        which authenticates via HTTP header instead of URL embedding. This avoids:
-
-        - Persisting the token to ``.git/config`` (URL embedding does this on clone)
-        - Leaking the token if git echoes the remote URL in errors
-
-        The token is still passed in argv (visible to ``ps`` on the local host
-        during the brief window of the subprocess), but it is never written to
-        disk and the clone URL remains clean.
-        """
-        if not self._github_token or not self._repo_url.startswith("https://"):
-            return []
-        # GitHub accepts x-access-token:<PAT> as HTTP Basic; the token itself
-        # is the password, and x-access-token is a recognized sentinel username.
-        credentials = f"x-access-token:{self._github_token}".encode()
-        encoded = base64.b64encode(credentials).decode()
-        return ["-c", f"http.extraHeader=Authorization: Basic {encoded}"]
-
-    def _validate_repo_url(self) -> None:
-        """Reject repo URLs that would be interpreted as CLI options by git.
-
-        Defense-in-depth: repo_url comes from operator-controlled settings, but
-        a URL starting with ``-`` (or ``--``) would be parsed as an option flag
-        rather than a positional URL argument, potentially triggering unintended
-        git behavior. Accept only HTTPS and SSH forms.
-        """
-        url = self._repo_url
-        if url.startswith("-"):
-            raise ValueError(f"repo_url must not start with '-': {url!r}")
-        if not (url.startswith("https://") or url.startswith("git@") or url.startswith("ssh://")):
-            raise ValueError(f"repo_url must be an https://, git@, or ssh:// URL, got {url!r}")
-
-    def _git_sync(self) -> None:
-        """Perform the actual git clone or pull (runs in thread executor).
-
-        Security notes:
-        - ``shell=False`` (default) + list argv: no shell metacharacters can
-          trigger command injection; each argv element is passed as-is to
-          execve(). This is why Semgrep's ``dangerous-subprocess-use-audit``
-          warning is a false positive here — but we still validate inputs.
-        - ``self._repo_url`` is operator-controlled (env var), validated via
-          ``_validate_repo_url`` to reject leading-dash argument injection.
-        - ``self._cache_dir`` is operator-controlled.
-        - ``auth_args`` is either empty or a ``-c http.extraHeader=...`` pair
-          with a base64-encoded token (never raw user input).
-        - ``--`` separator ensures subsequent positional args are parsed as
-          URLs/paths even if git adds new option flags in future versions.
-        - Bounded timeout prevents a hung/prompting git process from blocking
-          the thread pool indefinitely.
-        - ``shlex.escape()`` does NOT apply here: it's for shell-string
-          construction (``shell=True``), not for list argv. Using it would
-          corrupt arguments containing special characters.
-        """
-        self._validate_repo_url()
-        repo_dir = self._cache_dir
-        auth_args = self._auth_extra_header()
-
-        if (repo_dir / ".git").exists():
-            cmd = [
-                "git",
-                *auth_args,
-                "-C",
-                str(repo_dir),
-                "pull",
-                "--ff-only",
-            ]
-        else:
-            repo_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                "git",
-                *auth_args,
-                "clone",
-                "--depth=1",
-                "--",  # lock down positional args against future git option additions
-                self._repo_url,
-                str(repo_dir),
-            ]
-
-        try:
-            result = self._run_git(cmd)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"git operation timed out after {self._GIT_TIMEOUT_SECONDS}s"
-            ) from exc
-
-        if result.returncode != 0:
-            # Scrub stderr of any accidental token echo before raising/logging
-            stderr = self._scrub_token(result.stderr.strip())
-            raise RuntimeError(f"git operation failed (exit {result.returncode}): {stderr}")
-
-    def _run_git(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
-        """Execute ``git`` with a pre-validated argv list.
-
-        Isolated in its own method so the ``# nosemgrep`` annotation stays
-        adjacent to the call and survives code reformatting. See ``_git_sync``
-        docstring for the full safety argument. Do NOT call this with unvalidated
-        input — callers must ensure ``cmd[0] == "git"`` and positional args were
-        validated by ``_validate_repo_url``.
-        """
-        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-        return subprocess.run(  # noqa: S603  # shell=False + validated argv; see docstring
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=self._GIT_TIMEOUT_SECONDS,
-            check=False,
-        )
-
-    def _scrub_token(self, text: str) -> str:
-        """Best-effort removal of the PAT (raw + base64-encoded) from text.
-
-        Redacts both forms because git surfaces output from multiple layers:
-        - HTTP error messages may contain the raw token if it slipped into a URL
-        - Verbose / debug output (GIT_CURL_VERBOSE, etc.) may echo the
-          ``Authorization: Basic <base64>`` header, which contains the encoded
-          form of ``x-access-token:<PAT>``
-        """
-        if not text or not self._github_token:
-            return text
-
-        scrubbed = text
-        if self._github_token in scrubbed:
-            scrubbed = scrubbed.replace(self._github_token, "***")
-
-        encoded = base64.b64encode(f"x-access-token:{self._github_token}".encode()).decode()
-        if encoded in scrubbed:
-            scrubbed = scrubbed.replace(encoded, "***")
-
-        return scrubbed
 
     async def _sync_loop(self) -> None:
         """Periodic background sync loop."""

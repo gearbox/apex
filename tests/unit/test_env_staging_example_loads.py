@@ -10,10 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from src.core.config import Settings
-
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
 _ENV_STAGING_EXAMPLE = _REPO_ROOT / ".env.staging.example"

@@ -1,24 +1,30 @@
-"""Unit tests for BundleIndexService — parsing and resolution logic only.
-
-Git operations (clone/pull) require network access and are NOT tested here.
-"""
+"""Unit tests for BundleIndexService — parsing, resolution, and HTTP fetch logic."""
 
 from __future__ import annotations
 
-import base64
+import io
+import tarfile as tarfile_module
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
+from src.api.services.bundle_index import (
+    BundleIndexService,
+    BundleNotFoundError,
+    _parse_github_url,
+)
 from src.core.bundle_config import BundleMapping, HardwareRequirements
+from src.core.config import Settings
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_HW_YAML: dict = {
+_HW_YAML: dict[str, object] = {
     "gpu_whitelist": ["RTX_4090", "A100_SXM4"],
     "min_disk_gb": 150,
     "min_network_upload_mbps": 100,
@@ -29,25 +35,48 @@ _HW_YAML: dict = {
 }
 
 
-def _make_service(cache_dir: Path) -> BundleIndexService:
-    return BundleIndexService(
-        repo_url="https://github.com/gearbox/ai-bundles.git",
-        github_token="ghp_test",
-        sync_interval_minutes=15,
-        cache_dir=cache_dir,
-    )
+_TEST_CAPS: dict[str, Any] = {
+    "max_download_bytes": 10 * 1024 * 1024,  # 10 MB
+    "max_member_count": 1000,
+    "max_member_size_bytes": 5 * 1024 * 1024,
+    "max_uncompressed_bytes": 50 * 1024 * 1024,
+}
 
 
-def _write_bundle_yaml(bundle_path: Path, hw: dict | None = None) -> None:
+def _make_service(cache_dir: Path, **kwargs: Any) -> BundleIndexService:
+    defaults: dict[str, Any] = {
+        "repo_url": "https://github.com/gearbox/ai-bundles.git",
+        "github_token": "ghp_test",
+        "branch": "master",
+        "sync_interval_minutes": 15,
+        "cache_dir": cache_dir,
+        **_TEST_CAPS,
+    } | kwargs
+    return BundleIndexService(**defaults)
+
+
+def _write_bundle_yaml(bundle_path: Path, hw: dict[str, object] | None = None) -> None:
     """Create {bundle_path}/current/bundle.yaml with the given hardware section."""
     current_dir = bundle_path / "current"
     current_dir.mkdir(parents=True, exist_ok=True)
-    data: dict = {"hardware": hw if hw is not None else _HW_YAML}
+    data: dict[str, object] = {"hardware": hw if hw is not None else _HW_YAML}
     (current_dir / "bundle.yaml").write_text(yaml.dump(data))
 
 
-def _write_index(cache_dir: Path, entries: list[dict]) -> None:
+def _write_index(cache_dir: Path, entries: list[dict[str, object]]) -> None:
     (cache_dir / "bundle-index.yaml").write_text(yaml.dump({"bundles": entries}))
+
+
+def _make_test_tarball(top_dir: str, files: dict[str, str]) -> bytes:
+    """Build an in-memory .tar.gz containing `files` under `top_dir/`."""
+    buf = io.BytesIO()
+    with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+        for path, content in files.items():
+            data = content.encode()
+            info = tarfile_module.TarInfo(name=f"{top_dir}/{path}")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +107,51 @@ def fake_repo(tmp_path: Path) -> Path:
         ],
     )
     return tmp_path
+
+
+# ---------------------------------------------------------------------------
+# _parse_github_url
+# ---------------------------------------------------------------------------
+
+
+class TestParseGithubUrl:
+    def test_https_with_git_suffix(self) -> None:
+        assert _parse_github_url("https://github.com/gearbox/ai-bundles.git") == (
+            "gearbox",
+            "ai-bundles",
+        )
+
+    def test_https_without_git_suffix(self) -> None:
+        assert _parse_github_url("https://github.com/gearbox/ai-bundles") == (
+            "gearbox",
+            "ai-bundles",
+        )
+
+    def test_https_with_trailing_slash(self) -> None:
+        assert _parse_github_url("https://github.com/gearbox/ai-bundles/") == (
+            "gearbox",
+            "ai-bundles",
+        )
+
+    def test_ssh_form_rejected(self) -> None:
+        with pytest.raises(ValueError, match="SSH form is no longer supported"):
+            _parse_github_url("git@github.com:gearbox/ai-bundles.git")
+
+    def test_gitlab_rejected(self) -> None:
+        with pytest.raises(ValueError, match="https://github.com/"):
+            _parse_github_url("https://gitlab.com/gearbox/ai-bundles.git")
+
+    def test_single_segment_rejected(self) -> None:
+        with pytest.raises(ValueError, match="<owner>/<repo>"):
+            _parse_github_url("https://github.com/just-one-segment")
+
+    def test_empty_owner_rejected(self) -> None:
+        with pytest.raises(ValueError, match="<owner>/<repo>"):
+            _parse_github_url("https://github.com//empty-owner")
+
+    def test_dash_prefix_rejected(self) -> None:
+        with pytest.raises(ValueError, match="https://github.com/"):
+            _parse_github_url("-not-a-url")
 
 
 # ---------------------------------------------------------------------------
@@ -457,62 +531,6 @@ class TestParseHardware:
 
 
 # ---------------------------------------------------------------------------
-# _auth_extra_header
-# ---------------------------------------------------------------------------
-
-
-class TestAuthExtraHeader:
-    def _decoded_header(self, args: list[str]) -> str:
-        """Extract and base64-decode the Authorization header from git -c args."""
-        # args look like ["-c", "http.extraHeader=Authorization: Basic <b64>"]
-        assert len(args) == 2
-        assert args[0] == "-c"
-        prefix = "http.extraHeader=Authorization: Basic "
-        assert args[1].startswith(prefix)
-        b64 = args[1][len(prefix) :]
-        return base64.b64decode(b64).decode()
-
-    def test_injects_header_for_https_url(self) -> None:
-        svc = BundleIndexService(
-            repo_url="https://github.com/gearbox/ai-bundles.git",
-            github_token="ghp_abc123",
-            sync_interval_minutes=15,
-        )
-        args = svc._auth_extra_header()
-        assert self._decoded_header(args) == "x-access-token:ghp_abc123"
-
-    def test_empty_token_returns_no_args(self) -> None:
-        svc = BundleIndexService(
-            repo_url="https://github.com/gearbox/ai-bundles.git",
-            github_token="",
-            sync_interval_minutes=15,
-        )
-        assert svc._auth_extra_header() == []
-
-    def test_non_https_url_with_token_returns_no_args(self) -> None:
-        """Non-HTTPS URLs (e.g. SSH) can't use HTTP Basic auth; no header injected."""
-        svc = BundleIndexService(
-            repo_url="git@github.com:gearbox/ai-bundles.git",
-            github_token="ghp_abc123",
-            sync_interval_minutes=15,
-        )
-        assert svc._auth_extra_header() == []
-
-    def test_token_not_in_plaintext_args(self) -> None:
-        """The raw PAT must not appear verbatim in the argv."""
-        svc = BundleIndexService(
-            repo_url="https://github.com/gearbox/ai-bundles.git",
-            github_token="ghp_secret_value_xyz",
-            sync_interval_minutes=15,
-        )
-        args = svc._auth_extra_header()
-        joined = " ".join(args)
-        assert "ghp_secret_value_xyz" not in joined
-        # But it should be recoverable via base64 decode
-        assert "ghp_secret_value_xyz" in self._decoded_header(args)
-
-
-# ---------------------------------------------------------------------------
 # start() / sync() error behavior
 # ---------------------------------------------------------------------------
 
@@ -522,15 +540,14 @@ class TestSyncErrorBehavior:
         """If initial sync fails, start() must re-raise and not leave the service running."""
         svc = _make_service(tmp_path)
 
-        def boom() -> None:
-            raise RuntimeError("git clone failed")
+        async def boom() -> None:
+            raise RuntimeError("fetch failed")
 
-        svc._git_sync = boom  # type: ignore[method-assign]
+        svc._fetch_and_extract = boom  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeError, match="git clone failed"):
+        with pytest.raises(RuntimeError, match="fetch failed"):
             await svc.start()
 
-        # Service must not be marked as running and no background task should exist
         assert svc._running is False
         assert svc._sync_task is None
 
@@ -538,105 +555,567 @@ class TestSyncErrorBehavior:
         """The public sync() method logs errors but does not raise (background-safe)."""
         svc = _make_service(tmp_path)
 
-        def boom() -> None:
-            raise RuntimeError("transient git pull failure")
+        async def boom() -> None:
+            raise RuntimeError("transient fetch failure")
 
-        svc._git_sync = boom  # type: ignore[method-assign]
+        svc._fetch_and_extract = boom  # type: ignore[method-assign]
 
         # Must not raise — background loop depends on this
         await svc.sync()
 
-    async def test_scrub_token_removes_pat(self, tmp_path: Path) -> None:
-        """If git echoes the PAT in stderr, _scrub_token must redact it."""
-        svc = BundleIndexService(
-            repo_url="https://github.com/gearbox/ai-bundles.git",
-            github_token="ghp_secret_abc",
-            sync_interval_minutes=15,
-            cache_dir=tmp_path,
-        )
-        scrubbed = svc._scrub_token("fatal: unable to access 'https://ghp_secret_abc@github.com/'")
-        assert "ghp_secret_abc" not in scrubbed
-        assert "***" in scrubbed
+    async def test_redact_token_removes_pat(self, tmp_path: Path) -> None:
+        """If the PAT appears in an error body, _redact_token must remove it."""
+        svc = _make_service(tmp_path, github_token="ghp_secret_abc")
+        redacted = svc._redact_token("fatal: unable to access 'https://ghp_secret_abc@github.com/'")
+        assert "ghp_secret_abc" not in redacted
+        assert "***" in redacted
 
-    async def test_scrub_token_removes_base64_encoded_credentials(self, tmp_path: Path) -> None:
-        """If verbose git output leaks the base64 Authorization header, redact it too."""
-        token = "ghp_verbose_leak_xyz"
-        svc = BundleIndexService(
-            repo_url="https://github.com/gearbox/ai-bundles.git",
-            github_token=token,
-            sync_interval_minutes=15,
-            cache_dir=tmp_path,
-        )
-        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        # Simulate what GIT_CURL_VERBOSE might emit
-        noisy_stderr = f"> Authorization: Basic {encoded}\n< HTTP/1.1 200 OK"
-
-        scrubbed = svc._scrub_token(noisy_stderr)
-
-        assert encoded not in scrubbed
-        assert token not in scrubbed
-        assert "***" in scrubbed
-
-    async def test_scrub_token_handles_empty_or_missing_token(self, tmp_path: Path) -> None:
-        """Empty token or empty text must be a noop (no-op, no traceback)."""
-        svc = BundleIndexService(
-            repo_url="https://github.com/gearbox/ai-bundles.git",
-            github_token="",
-            sync_interval_minutes=15,
-            cache_dir=tmp_path,
-        )
-        assert svc._scrub_token("any text") == "any text"
-        assert svc._scrub_token("") == ""
+    async def test_redact_token_handles_empty_or_missing_token(self, tmp_path: Path) -> None:
+        """Empty token or empty text must be a noop (no traceback)."""
+        svc = _make_service(tmp_path, github_token="")
+        assert svc._redact_token("any text") == "any text"
+        assert svc._redact_token("") == ""
 
 
 # ---------------------------------------------------------------------------
-# _validate_repo_url
+# _fetch_and_extract
 # ---------------------------------------------------------------------------
 
 
-class TestValidateRepoUrl:
-    def test_accepts_https_url(self, tmp_path: Path) -> None:
+def _make_mock_transport(
+    status_code: int,
+    body: bytes = b"",
+    headers: dict[str, str] | None = None,
+) -> httpx.MockTransport:
+    """Build an httpx.MockTransport that returns a single fixed response."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=status_code,
+            content=body,
+            headers=headers or {},
+        )
+
+    return httpx.MockTransport(handler)
+
+
+class TestFetchAndExtract:
+    def _svc_with_transport(
+        self, tmp_path: Path, transport: httpx.MockTransport
+    ) -> BundleIndexService:
+        client = httpx.AsyncClient(transport=transport)
+        return _make_service(tmp_path, http_client=client)
+
+    async def test_fetches_and_extracts_on_first_sync(self, tmp_path: Path) -> None:
+        """200 response: cache_dir populated, etag set, auth header sent."""
+        tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123",
+            {"bundle-index.yaml": "bundles: []"},
+        )
+        received_headers: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            received_headers.update(dict(request.headers))
+            return httpx.Response(200, content=tarball, headers={"ETag": '"v1"'})
+
+        transport = httpx.MockTransport(handler)
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        assert (tmp_path / "bundle-index.yaml").exists()
+        assert svc._etag == '"v1"'
+        assert received_headers.get("authorization") == "Bearer ghp_test"
+
+    async def test_304_short_circuits_extraction(self, tmp_path: Path) -> None:
+        """Second call with same ETag returns 304; cache_dir is untouched."""
+        tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123",
+            {"bundle-index.yaml": "bundles: []"},
+        )
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if_none_match = request.headers.get("if-none-match")
+            if if_none_match == '"v1"':
+                return httpx.Response(304)
+            return httpx.Response(200, content=tarball, headers={"ETag": '"v1"'})
+
+        transport = httpx.MockTransport(handler)
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        # First call: 200
+        await svc._fetch_and_extract()
+        assert svc._etag == '"v1"'
+        first_mtime = (tmp_path / "bundle-index.yaml").stat().st_mtime
+
+        # Second call: 304
+        await svc._fetch_and_extract()
+        assert call_count == 2
+        assert (tmp_path / "bundle-index.yaml").stat().st_mtime == first_mtime
+
+    async def test_strips_top_level_owner_repo_sha_directory(self, tmp_path: Path) -> None:
+        """Files under gearbox-ai-bundles-abc123/ land at cache_dir root."""
+        tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123",
+            {"bundle-index.yaml": "bundles: []", "extra.txt": "hello"},
+        )
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        assert (tmp_path / "bundle-index.yaml").exists()
+        assert (tmp_path / "extra.txt").exists()
+        # No nested prefix directory
+        nested = tmp_path / "gearbox-ai-bundles-abc123"
+        assert not nested.exists()
+
+    async def test_atomic_swap_on_extraction(self, tmp_path: Path) -> None:
+        """Stale cache_dir content is replaced; staging and old dirs are cleaned up."""
+        # Pre-populate cache_dir with stale content
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "stale.txt").write_text("old")
+
+        tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123",
+            {"bundle-index.yaml": "bundles: []"},
+        )
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        assert not (tmp_path / "stale.txt").exists()
+        assert (tmp_path / "bundle-index.yaml").exists()
+        # Staging and old dirs must be cleaned up
+        assert not tmp_path.with_name(f"{tmp_path.name}.staging").exists()
+        assert not tmp_path.with_name(f"{tmp_path.name}.old").exists()
+
+    async def test_404_raises_with_clear_message(self, tmp_path: Path) -> None:
+        """404 response raises RuntimeError mentioning the status code."""
+        transport = _make_mock_transport(404, b'{"message":"Not Found"}')
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        with pytest.raises(RuntimeError, match="404"):
+            await svc._fetch_and_extract()
+
+    async def test_401_raises_with_redacted_token(self, tmp_path: Path) -> None:
+        """401 response body containing the token must have the token redacted."""
+        token = "ghp_secret_xyz"
+        body = f'{{"message":"Bad credentials","token":"{token}"}}'.encode()
+        transport = _make_mock_transport(401, body)
+
+        client = httpx.AsyncClient(transport=transport)
+        svc = _make_service(tmp_path, github_token=token, http_client=client)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await svc._fetch_and_extract()
+
+        assert token not in str(exc_info.value)
+        assert "401" in str(exc_info.value)
+
+    async def test_unsafe_tarball_member_filtered(self, tmp_path: Path) -> None:
+        """Members with path traversal are rejected; file not written to cache_dir."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            # Well-formed top-level dir
+            dir_info = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123")
+            dir_info.type = tarfile_module.DIRTYPE
+            tf.addfile(dir_info)
+            # Normal file inside top-level
+            data = b"bundles: []"
+            normal = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/bundle-index.yaml")
+            normal.size = len(data)
+            tf.addfile(normal, io.BytesIO(data))
+            # Escape attempt
+            evil_data = b"evil"
+            evil = tarfile_module.TarInfo(name="../escape.txt")
+            evil.size = len(evil_data)
+            tf.addfile(evil, io.BytesIO(evil_data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        # The evil file must not appear anywhere under cache_dir's parent
+        assert not (tmp_path.parent / "escape.txt").exists()
+        assert not (tmp_path / "escape.txt").exists()
+        assert (tmp_path / "bundle-index.yaml").exists()
+
+    async def test_unsafe_tarball_symlink_filtered(self, tmp_path: Path) -> None:
+        """Symlink entries whose target escapes cache_dir are rejected; not created."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            # Well-formed top-level dir
+            dir_info = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123")
+            dir_info.type = tarfile_module.DIRTYPE
+            tf.addfile(dir_info)
+            # Normal file inside top-level
+            data = b"bundles: []"
+            normal = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/bundle-index.yaml")
+            normal.size = len(data)
+            tf.addfile(normal, io.BytesIO(data))
+            # Symlink whose target escapes the destination directory
+            unsafe_symlink = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/unsafe-symlink")
+            unsafe_symlink.type = tarfile_module.SYMTYPE
+            unsafe_symlink.linkname = "../../outside-cache-dir-target"
+            tf.addfile(unsafe_symlink)
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        # The symlink must not appear in cache_dir (as file or symlink)
+        symlink_path = tmp_path / "unsafe-symlink"
+        assert not symlink_path.exists()
+        assert not symlink_path.is_symlink()
+        # Normal content is still present
+        assert (tmp_path / "bundle-index.yaml").exists()
+
+    async def test_malformed_tarball_layout_raises(self, tmp_path: Path) -> None:
+        """Tarball with two top-level dirs raises RuntimeError."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            data = b"x"
+            for name in ("dir_one/file.txt", "dir_two/file.txt"):
+                info = tarfile_module.TarInfo(name=name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        with pytest.raises(RuntimeError, match="unexpected tarball layout"):
+            await svc._fetch_and_extract()
+
+    async def test_owns_http_client_when_not_provided(self, tmp_path: Path) -> None:
+        """Without http_client, service creates and closes its own client."""
         svc = _make_service(tmp_path)
-        svc._validate_repo_url()  # must not raise
+        assert svc._owned_client is not None
+        svc._running = True  # simulate started state so stop() proceeds
+        await svc.stop()
+        assert svc._owned_client is None
 
-    def test_accepts_ssh_url(self, tmp_path: Path) -> None:
+    async def test_borrows_http_client_when_provided(self, tmp_path: Path) -> None:
+        """With http_client, stop() does not close the provided client."""
+        external_client = httpx.AsyncClient()
+        svc = _make_service(tmp_path, http_client=external_client)
+        assert svc._owned_client is None
+
+        svc._running = True  # simulate started state so stop() proceeds
+        await svc.stop()
+
+        # External client is still usable
+        assert not external_client.is_closed
+        await external_client.aclose()
+
+    async def test_branch_used_in_url(self, tmp_path: Path) -> None:
+        """The branch parameter appears in the tarball API URL."""
+        tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123",
+            {"bundle-index.yaml": "bundles: []"},
+        )
+        captured_url: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_url.append(str(request.url))
+            return httpx.Response(200, content=tarball, headers={"ETag": '"v1"'})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.AsyncClient(transport=transport)
+        svc = _make_service(tmp_path, branch="develop", http_client=client)
+        await svc._fetch_and_extract()
+
+        assert captured_url, "No request was made"
+        assert "/tarball/develop" in captured_url[0]
+
+
+# ---------------------------------------------------------------------------
+# Malicious tarball fixture helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_oversized_member_tarball(top_dir: str, member_size: int) -> bytes:
+    """Build a tarball with one member of `member_size` zero bytes."""
+    buf = io.BytesIO()
+    with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile_module.TarInfo(name=f"{top_dir}/big.bin")
+        info.size = member_size
+        tf.addfile(info, io.BytesIO(b"\x00" * member_size))
+    return buf.getvalue()
+
+
+def _make_many_members_tarball(top_dir: str, count: int) -> bytes:
+    """Build a tarball with `count` empty members."""
+    buf = io.BytesIO()
+    with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+        for i in range(count):
+            info = tarfile_module.TarInfo(name=f"{top_dir}/file_{i}.txt")
+            info.size = 0
+            tf.addfile(info, io.BytesIO(b""))
+    return buf.getvalue()
+
+
+def _make_lying_size_tarball(top_dir: str, claimed_size: int, actual_size: int) -> bytes:
+    """Build a tarball where TarInfo.size lies about the body size.
+
+    Standard tarfile.addfile won't produce this directly (it pads/truncates to
+    the declared size). We construct the tar manually: write the header with
+    claimed_size, then write actual_size bytes of body, padded to 512-byte blocks.
+    """
+    import gzip
+
+    # Build TarInfo header with claimed_size
+    info = tarfile_module.TarInfo(name=f"{top_dir}/lying.bin")
+    info.size = claimed_size
+    header_bytes = info.tobuf()
+
+    raw = io.BytesIO()
+    raw.write(header_bytes)
+    raw.write(b"\x00" * actual_size)
+    # Pad body to 512-byte block boundary
+    padding = (-actual_size) % 512
+    raw.write(b"\x00" * padding)
+    # End-of-archive: two zero blocks
+    raw.write(b"\x00" * 1024)
+
+    return gzip.compress(raw.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# Tarball decompression-bomb hardening tests
+# ---------------------------------------------------------------------------
+
+
+class TestTarballHardening:
+    """Tests for the five-layer decompression-bomb defense."""
+
+    def _svc_with_transport(
+        self,
+        tmp_path: Path,
+        transport: httpx.MockTransport,
+        **cap_overrides: Any,
+    ) -> BundleIndexService:
+        client = httpx.AsyncClient(transport=transport)
+        caps = {**_TEST_CAPS, **cap_overrides}
+        return _make_service(tmp_path, http_client=client, **caps)
+
+    # --- Cap #1: HTTP download size ---
+
+    async def test_download_size_cap_aborts_stream(self, tmp_path: Path) -> None:
+        """Tarball larger than max_download_bytes raises mid-stream."""
+        # Use a cap small enough that our tiny tarball still exceeds it
+        big_tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123", {"bundle-index.yaml": "bundles: []"}
+        )
+        transport = _make_mock_transport(200, big_tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_download_bytes=len(big_tarball) - 1)
+
+        with pytest.raises(RuntimeError, match="max download size"):
+            await svc._fetch_and_extract()
+
+        assert not tmp_path.exists() or not (tmp_path / "bundle-index.yaml").exists()
+
+    async def test_content_length_header_exceeds_cap_short_circuits(self, tmp_path: Path) -> None:
+        """Content-Length header above cap raises before stream is fully consumed."""
+        body_consumed: list[bool] = [False]
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            body_consumed[0] = True
+            return httpx.Response(
+                200,
+                content=b"x" * 10,
+                headers={"Content-Length": "100000000", "ETag": '"v1"'},
+            )
+
+        transport = httpx.MockTransport(handler)
+        svc = self._svc_with_transport(tmp_path, transport, max_download_bytes=1024)
+
+        with pytest.raises(RuntimeError, match="Content-Length"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #2: member count ---
+
+    async def test_member_count_cap_rejects_many_files_tarball(self, tmp_path: Path) -> None:
+        """Tarball with more members than max_member_count raises."""
+        cap = 10
+        tarball = _make_many_members_tarball("gearbox-ai-bundles-abc123", count=cap + 1)
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_member_count=cap)
+
+        with pytest.raises(RuntimeError, match="member count"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #3: per-member declared size ---
+
+    async def test_per_member_declared_size_cap_rejects_oversized_member(
+        self, tmp_path: Path
+    ) -> None:
+        """Member with TarInfo.size > max_member_size_bytes raises before extraction."""
+        cap = 1024
+        tarball = _make_oversized_member_tarball("gearbox-ai-bundles-abc123", member_size=cap + 1)
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_member_size_bytes=cap)
+
+        with pytest.raises(RuntimeError, match="declares size"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #4: total uncompressed size ---
+
+    async def test_total_uncompressed_size_cap_rejects_combined_overflow(
+        self, tmp_path: Path
+    ) -> None:
+        """Multiple members each under per-member cap but combined over total cap raise."""
+        per_member_cap = 2048
+        total_cap = 3000  # less than 2 * per_member_cap
+
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            for i in range(2):
+                data = b"\x00" * per_member_cap
+                info = tarfile_module.TarInfo(name=f"gearbox-ai-bundles-abc123/file_{i}.bin")
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(
+            tmp_path,
+            transport,
+            max_member_size_bytes=per_member_cap,
+            max_uncompressed_bytes=total_cap,
+        )
+
+        with pytest.raises(RuntimeError, match="total uncompressed size"):
+            await svc._fetch_and_extract()
+
+    # --- Cap #5: lying-size defense ---
+
+    def test_lying_size_tarball_caught_during_extraction(self, tmp_path: Path) -> None:
+        """_extract_member_capped raises when actual bytes read exceed the cap.
+
+        Python's tarfile.extractfile() is itself bounded by TarInfo.size, so a
+        tarball-level lying-size bomb is neutralised by Python before we even see
+        it. This unit test bypasses that layer to verify that _extract_member_capped
+        independently enforces the cap on actual reads — defence in depth against
+        future CPython changes or other callers.
+        """
+        from unittest.mock import MagicMock
+
+        cap = 512
+        svc = _make_service(tmp_path, max_member_size_bytes=cap)
+
+        # Member with a small declared size that passes the metadata check (cap #3).
+        member = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/lying.bin")
+        member.size = 100  # declared 100 < cap 512 → metadata check passes
+
+        # Inject a stream that has more data than the cap (simulating a lying body).
+        fake_tf = MagicMock()
+        fake_tf.extractfile.return_value = io.BytesIO(b"\x00" * (cap + 100))
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        with pytest.raises(RuntimeError, match="during extraction"):
+            svc._extract_member_capped(fake_tf, member, staging)
+
+    # --- Legitimate bundle should pass ---
+
+    async def test_caps_at_defaults_dont_reject_legitimate_bundle(self, tmp_path: Path) -> None:
+        """Default caps pass a small, realistic tarball without error."""
+        from src.core.config import Settings
+
+        settings = Settings()
+        tarball = _make_test_tarball(
+            "gearbox-ai-bundles-abc123",
+            {"bundle-index.yaml": "bundles: []", "README.md": "hello"},
+        )
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        client = httpx.AsyncClient(transport=transport)
         svc = BundleIndexService(
-            repo_url="git@github.com:gearbox/ai-bundles.git",
-            github_token="",
+            repo_url="https://github.com/gearbox/ai-bundles.git",
+            github_token="ghp_test",
+            branch="master",
             sync_interval_minutes=15,
             cache_dir=tmp_path,
+            max_download_bytes=settings.ai_bundles_max_download_bytes,
+            max_member_count=settings.ai_bundles_max_member_count,
+            max_member_size_bytes=settings.ai_bundles_max_member_size_bytes,
+            max_uncompressed_bytes=settings.ai_bundles_max_uncompressed_bytes,
+            http_client=client,
         )
-        svc._validate_repo_url()
+        await svc._fetch_and_extract()
+        assert (tmp_path / "bundle-index.yaml").exists()
 
-    def test_accepts_ssh_scheme_url(self, tmp_path: Path) -> None:
-        svc = BundleIndexService(
-            repo_url="ssh://git@github.com/gearbox/ai-bundles.git",
-            github_token="",
-            sync_interval_minutes=15,
-            cache_dir=tmp_path,
-        )
-        svc._validate_repo_url()
+    # --- Cleanup on failure ---
 
-    def test_rejects_dash_prefix_argument_injection(self, tmp_path: Path) -> None:
-        """Leading '-' would be parsed as a git option flag, not a URL."""
-        svc = BundleIndexService(
-            repo_url="--upload-pack=malicious",
-            github_token="",
-            sync_interval_minutes=15,
-            cache_dir=tmp_path,
-        )
-        with pytest.raises(ValueError, match="must not start with '-'"):
-            svc._validate_repo_url()
+    async def test_partial_extraction_cleaned_up_on_cap_breach(self, tmp_path: Path) -> None:
+        """Staging dir is removed when a cap is breached mid-extraction."""
+        cap = 10
+        tarball = _make_many_members_tarball("gearbox-ai-bundles-abc123", count=cap + 1)
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport, max_member_count=cap)
 
-    def test_rejects_unsupported_scheme(self, tmp_path: Path) -> None:
-        svc = BundleIndexService(
-            repo_url="file:///etc/passwd",
-            github_token="",
-            sync_interval_minutes=15,
-            cache_dir=tmp_path,
-        )
-        with pytest.raises(ValueError, match="https://.*git@.*ssh://"):
-            svc._validate_repo_url()
+        with pytest.raises(RuntimeError):
+            await svc._fetch_and_extract()
+
+        staging = tmp_path.with_name(f"{tmp_path.name}.staging")
+        assert not staging.exists()
+
+    # --- Path traversal still rejected after refactor ---
+
+    async def test_path_traversal_member_still_rejected_after_refactor(
+        self, tmp_path: Path
+    ) -> None:
+        """data_filter still rejects ../escape members in streaming mode."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            dir_info = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123")
+            dir_info.type = tarfile_module.DIRTYPE
+            tf.addfile(dir_info)
+            data = b"bundles: []"
+            normal = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/bundle-index.yaml")
+            normal.size = len(data)
+            tf.addfile(normal, io.BytesIO(data))
+            evil_data = b"evil"
+            evil = tarfile_module.TarInfo(name="../escape.txt")
+            evil.size = len(evil_data)
+            tf.addfile(evil, io.BytesIO(evil_data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        assert not (tmp_path.parent / "escape.txt").exists()
+        assert (tmp_path / "bundle-index.yaml").exists()
+
+    # --- Directory members ---
+
+    async def test_streaming_mode_handles_directory_members(self, tmp_path: Path) -> None:
+        """Directories inside the tarball are created correctly in streaming mode."""
+        buf = io.BytesIO()
+        with tarfile_module.open(fileobj=buf, mode="w:gz") as tf:
+            top = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123")
+            top.type = tarfile_module.DIRTYPE
+            tf.addfile(top)
+            subdir = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/subdir")
+            subdir.type = tarfile_module.DIRTYPE
+            tf.addfile(subdir)
+            data = b"bundles: []"
+            f = tarfile_module.TarInfo(name="gearbox-ai-bundles-abc123/bundle-index.yaml")
+            f.size = len(data)
+            tf.addfile(f, io.BytesIO(data))
+        tarball = buf.getvalue()
+
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+        await svc._fetch_and_extract()
+
+        assert (tmp_path / "bundle-index.yaml").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -651,8 +1130,10 @@ class TestInitValidation:
             BundleIndexService(
                 repo_url="https://github.com/x/y.git",
                 github_token="",
+                branch="master",
                 sync_interval_minutes=0,
                 cache_dir=tmp_path,
+                **_TEST_CAPS,
             )
 
     def test_rejects_negative_sync_interval(self, tmp_path: Path) -> None:
@@ -661,6 +1142,55 @@ class TestInitValidation:
             BundleIndexService(
                 repo_url="https://github.com/x/y.git",
                 github_token="",
+                branch="master",
                 sync_interval_minutes=-5,
                 cache_dir=tmp_path,
+                **_TEST_CAPS,
             )
+
+    def test_branch_is_required(self, tmp_path: Path) -> None:
+        """Omitting branch raises TypeError (required parameter)."""
+        with pytest.raises(TypeError):
+            BundleIndexService(  # type: ignore[call-arg]
+                repo_url="https://github.com/x/y.git",
+                github_token="",
+                sync_interval_minutes=15,
+                cache_dir=tmp_path,
+                **_TEST_CAPS,
+            )
+
+    def test_invalid_url_raises_at_construction(self, tmp_path: Path) -> None:
+        """URL validation fires in __init__, not lazily at first sync."""
+        with pytest.raises(ValueError, match="SSH form is no longer supported"):
+            BundleIndexService(
+                repo_url="git@github.com:gearbox/ai-bundles.git",
+                github_token="",
+                branch="master",
+                sync_interval_minutes=15,
+                cache_dir=tmp_path,
+                **_TEST_CAPS,
+            )
+
+    def test_rejects_zero_cap_values(self, tmp_path: Path) -> None:
+        """Cap fields must be positive; zero or negative raise ValueError."""
+        for bad_field in (
+            "max_download_bytes",
+            "max_member_count",
+            "max_member_size_bytes",
+            "max_uncompressed_bytes",
+        ):
+            caps = {**_TEST_CAPS, bad_field: 0}
+            with pytest.raises(ValueError, match=bad_field):
+                BundleIndexService(
+                    repo_url="https://github.com/x/y.git",
+                    github_token="",
+                    branch="master",
+                    sync_interval_minutes=15,
+                    cache_dir=tmp_path,
+                    **caps,
+                )
+
+    def test_settings_caps_validation_rejects_below_minimum(self) -> None:
+        """Settings ge=1024 / ge=1 constraints reject values below the minimum."""
+        with pytest.raises(ValidationError):
+            Settings(ai_bundles_max_download_bytes=0)
