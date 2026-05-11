@@ -49,8 +49,12 @@ async def main() -> int:
         branch=settings.ai_bundles_branch,
         max_download_bytes=50 * 1024 * 1024,  # 50 MiB should be more than enough for index parsing
         max_member_count=100,  # sanity check to avoid OOM parsing malformed entries
-        max_member_size_bytes=10 * 1024 * 1024,  # 10 MiB per file should be more than enough for index parsing
-        max_uncompressed_bytes=100 * 1024 * 1024,  # 100 MiB total uncompressed size should be more than enough for index parsing
+        max_member_size_bytes=10
+        * 1024
+        * 1024,  # 10 MiB per file should be more than enough for index parsing
+        max_uncompressed_bytes=100
+        * 1024
+        * 1024,  # 100 MiB total uncompressed size should be more than enough for index parsing
         sync_interval_minutes=60,
         cache_dir=cache_dir,
     )
