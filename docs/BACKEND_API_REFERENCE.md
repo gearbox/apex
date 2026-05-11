@@ -1,5 +1,8 @@
 # Backend API Reference — Apex REST API
 
+> _Last updated: 2026-05-09 — adds GPU Sessions API (§7), `gpu_session.status_changed` SSE event, and related enums/error codes._
+
+
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
@@ -296,11 +299,13 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 model_not_allowed (model unavailable on this product), 409 idempotency_conflict, 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 model_not_allowed (model unavailable on this product), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from gallery" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
           Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
+          Aisha (ComfyUI) models require an active GPU session — start one via
+          POST /v1/sessions before submitting an Aisha generation, otherwise 409 no_active_gpu_session is returned.
 ```
 
 ### JobCreatedResponse Schema
@@ -452,7 +457,208 @@ JobOutputItem: {
 
 ---
 
-## 7. Storage *(authenticated)*
+## 7. GPU Sessions *(authenticated)*
+
+Aisha (ComfyUI) models run on per-user, per-model GPU instances provisioned on Vast.ai. Before submitting an Aisha generation, the user must start a session for that model; sessions are billed by uptime (active + minimum-session floor) and can be paused (storage-only) or stopped (full teardown).
+
+> **Grok models do not require a GPU session** — they run on xAI's hosted API and are billed per-generation.
+
+### Lifecycle
+
+```
+            ┌─────────┐
+            │ pending │ — request accepted, Vast.ai not yet provisioning
+            └────┬────┘
+                 ▼
+         ┌──────────────┐
+         │ provisioning │ — instance starting, ComfyUI not yet reachable
+         └──────┬───────┘
+                ▼
+            ┌────────┐                     ┌────────┐
+            │ active │ ◄─── resuming ◄──── │ paused │
+            └───┬────┘                     └────────┘
+                │                              ▲
+                │   ┌─────────────────────┐    │
+                ├──►│ stale (unreachable) │────┘ (auto-recovers if probe succeeds)
+                │   └─────────────────────┘
+                ▼
+           ┌──────────┐
+           │ stopping │ — teardown in progress
+           └────┬─────┘
+                ▼
+           ┌─────────┐                     ┌────────┐
+           │ stopped │                     │ failed │ (terminal — provisioning error)
+           └─────────┘                     └────────┘
+```
+
+Lifecycle events are pushed in real time via SSE — see [§15 Real-Time Events](#15-real-time-events-sse--pubsub) (`gpu_session.status_changed`).
+
+### Schemas
+
+```typescript
+GpuSessionResponse: {
+  id: UUID,
+  user_id: UUID,
+  product_id: string,                          // "vex" | "synthara"
+  status: GpuSessionStatus,                    // see Enums
+  model_type: ModelType,                       // e.g. "aisha-image"
+  bundle_name: string,                         // ComfyUI bundle identifier
+  bundle_version: string | null,
+  tunnel_hostname: string | null,              // Cloudflare tunnel — set once active
+  vastai_gpu_name: string | null,              // e.g. "RTX 4090"
+  vastai_cost_per_hour_micros: int | null,     // cost in millionths of USD per hour
+  created_at: datetime,
+  started_at: datetime | null,                 // first transition to active
+  paused_at: datetime | null,
+  resumed_at: datetime | null,
+  stopped_at: datetime | null,
+  error_message: string | null,                // populated when status == "failed"
+  in_flight_job_count: int                     // queued+running Aisha jobs on this session
+                                               // — non-zero only for active sessions; 0 otherwise
+}
+
+ListSessionsResponse: { sessions: GpuSessionResponse[] }
+
+StopConfirmationResponse: {
+  session_id: UUID,
+  model_type: ModelType,
+  bundle_name: string,
+  vastai_gpu_name: string | null,
+  vastai_cost_per_hour_micros: int | null,
+  active_duration_seconds: int,
+  paused_duration_seconds: int,                // billed at storage rate (future)
+  estimated_final_tokens: int,                 // total token cost if stopped now
+  message: string
+}
+```
+
+### Endpoints
+
+#### `POST /v1/sessions/`
+
+Start a new GPU session for a model. The session begins in `pending` and transitions to `provisioning` → `active` over ~30–90 seconds. Only one active session per `(user_id, product_id, model_type)` is allowed.
+
+```
+Request: {
+  model: ModelType,            // "aisha-image" | "aisha-video"
+  bundle_override?: string     // ADMIN-only — pin a specific bundle "name" or "name:version".
+                               // Non-admins receive 403; ignored otherwise.
+}
+Response: GpuSessionResponse
+Status:   201 Created
+Errors:   402 insufficient_balance,
+          403 (bundle_override is admin-only),
+          409 session_already_exists (active session for same user+product+model),
+          503 (no_gpu_capacity | provisioning_failed)
+Note:     `in_flight_job_count` is always 0 in the creation response.
+```
+
+#### `GET /v1/sessions/`
+
+List the current user's sessions for the active product.
+
+```
+Query:    include_terminal? (bool, default false)  — include stopped/failed sessions
+Response: ListSessionsResponse
+Note:     Sessions are scoped to the resolved product. Default behavior is "show only live" — pass
+          include_terminal=true for history views.
+```
+
+#### `GET /v1/sessions/{session_id}`
+
+Fetch a single session, including the up-to-date `in_flight_job_count` for active sessions.
+
+```
+Response: GpuSessionResponse
+Errors:   404 (session not found or not owned by current user)
+Note:     `in_flight_job_count` reflects the live count of QUEUED+RUNNING Aisha jobs on this session.
+          Frontends should disable the Pause button when `in_flight_job_count > 0`.
+          For non-active statuses the value is always 0 (sweeps run on transition out of active).
+```
+
+#### `POST /v1/sessions/{session_id}/pause`
+
+Pause an active session — Vast.ai instance is stopped, persistent disk is retained. Refused if any in-flight jobs exist; the user must wait for them to complete or cancel them first.
+
+```
+Response: GpuSessionResponse                    (status -> "paused")
+Errors:   404 session_not_found,
+          409 invalid_state (session is not in 'active' status),
+          409 jobs_in_flight (one or more queued/running jobs)
+
+// 409 jobs_in_flight error body:
+{
+  "error": "jobs_in_flight",
+  "message": "Cannot pause: 2 in-flight job(s) on this session",
+  "status_code": 409,
+  "detail": { "in_flight_count": 2 }
+}
+```
+
+#### `POST /v1/sessions/{session_id}/resume`
+
+Resume a paused session — restart the Vast.ai instance with retained disk. Transitions through `resuming` → `active`.
+
+```
+Response: GpuSessionResponse                    (status -> "resuming" then "active" via SSE)
+Errors:   404 session_not_found,
+          409 invalid_state (session is not in 'paused' status)
+```
+
+#### `POST /v1/sessions/{session_id}/stop`
+
+Two-call stop flow — the first call returns a cost confirmation, the second call (with `confirmed: true`) executes the stop. This prevents accidental teardown and lets the user see the final billable amount before committing.
+
+```
+Request: { confirmed: bool }    // false (or omitted) -> dry-run / preview;
+                                // true -> execute teardown
+
+// First call (confirmed: false) — preview:
+Response: StopConfirmationResponse
+Status:   200 OK
+
+// Second call (confirmed: true) — execute:
+Response: GpuSessionResponse                    (status -> "stopping" then "stopped")
+Status:   200 OK
+
+Errors:   404 session_not_found,
+          409 invalid_state (session is in a terminal status)
+
+Note:     The two-call pattern is stateless on the server — the first call does NOT lock state.
+          The frontend should display StopConfirmationResponse, then issue the second call
+          with `confirmed: true` to actually stop.
+```
+
+### Frontend Usage Pattern
+
+```typescript
+// 1. Start a session for an Aisha model:
+const session = await api.post<GpuSessionResponse>('/v1/sessions/', {
+  model: 'aisha-image',
+});
+
+// 2. Subscribe to gpu_session.status_changed via SSE.
+//    Wait for status === 'active' before submitting generations.
+
+// 3. Submit generations against /v1/generate (the backend routes Aisha
+//    requests to the user's active session for that model automatically).
+
+// 4. Pause / resume / stop as needed:
+await api.post(`/v1/sessions/${session.id}/pause`);
+await api.post(`/v1/sessions/${session.id}/resume`);
+
+// Two-call stop:
+const preview = await api.post<StopConfirmationResponse>(
+  `/v1/sessions/${session.id}/stop`,
+  { confirmed: false },
+);
+// ...show preview to user, get confirmation...
+await api.post(`/v1/sessions/${session.id}/stop`, { confirmed: true });
+```
+
+---
+
+## 8. Storage *(authenticated)*
 
 ### Uploads
 
@@ -568,7 +774,7 @@ Response: {
 
 ---
 
-## 8. Content Proxy *(authenticated)*
+## 9. Content Proxy *(authenticated)*
 
 Provides stable, non-expiring authenticated URLs for user content. The server resolves ownership, checks product scoping, then streams bytes directly from R2. **No presigned URLs are exposed** — the client only ever sees `/v1/content/...` paths.
 
@@ -616,7 +822,7 @@ Note:     Permanently deletes the file from R2 and removes the DB record.
 
 ---
 
-## 9. Gallery *(authenticated)*
+## 10. Gallery *(authenticated)*
 
 Gallery presents completed generation jobs as a visual grid. Each **gallery item** is one `GenerationJob` (a "group") with its cover image/video, metadata, and output list.
 
@@ -724,7 +930,7 @@ interface GalleryLineage {
 
 ---
 
-## 10. Billing *(authenticated)*
+## 11. Billing *(authenticated)*
 
 #### `GET /v1/billing/balance`
 
@@ -866,7 +1072,7 @@ Note:     Internal endpoint for NowPayments events
 
 ---
 
-## 11. Organizations *(authenticated)*
+## 12. Organizations *(authenticated)*
 
 #### `POST /v1/organizations/`
 
@@ -957,7 +1163,7 @@ MemberResponse: {
 
 ---
 
-## 12. Admin *(authenticated — ADMIN or SUPERADMIN role)*
+## 13. Admin *(authenticated — ADMIN or SUPERADMIN role)*
 
 ### Role Hierarchy
 
@@ -1158,7 +1364,7 @@ Errors:   404
 
 ---
 
-## 13. Admin Management *(authenticated — SUPERADMIN only)*
+## 14. Admin Management *(authenticated — SUPERADMIN only)*
 
 All endpoints under `/v1/admin/manage` require the **SUPERADMIN** role. An ADMIN attempting to call these endpoints receives `401 Unauthorized`.
 
@@ -1249,7 +1455,7 @@ Note:     Entries are returned newest-first. Optionally filter to a specific tar
 
 ---
 
-## 14. Real-Time Events (SSE + Pub/Sub)
+## 15. Real-Time Events (SSE + Pub/Sub)
 
 The backend supports real-time event streaming via **Server-Sent Events (SSE)** backed by Redis Pub/Sub. Because `EventSource` cannot send custom headers, authentication uses a short-lived **one-time ticket** pattern.
 
@@ -1311,6 +1517,7 @@ data: <JSON-encoded inner payload>
 |---------------|-------------|--------------|
 | `job.status_changed` | Job moved to a new status | `JobStatusPayload` |
 | `job.progress` | Job progress update | `JobProgressPayload` |
+| `gpu_session.status_changed` | GPU session moved to a new status (e.g. provisioning → active, active → paused, paused → resuming → active, → stopped) | `GpuSessionStatusPayload` |
 | `balance.updated` | Token balance changed (debit, credit, refund) | `BalanceUpdatedPayload` |
 | `system.notification` | Broadcast system message (maintenance, outage) | `SystemNotificationPayload` |
 
@@ -1331,6 +1538,17 @@ interface JobProgressPayload {
   job_id: string;
   progress_pct: number;     // 0–100
   generation_type: string;
+}
+
+// gpu_session.status_changed
+interface GpuSessionStatusPayload {
+  session_id: string;            // UUID
+  status: GpuSessionStatus;      // new status
+  previous_status: string;       // previous status
+  model_type: string;            // e.g. "aisha-image"
+  bundle_name: string;
+  tunnel_hostname: string | null;
+  error_message: string | null;  // populated when status == "failed"
 }
 
 // balance.updated
@@ -1354,7 +1572,7 @@ interface SystemNotificationPayload {
 
 | Channel | Subscribers | Events |
 |---------|-------------|--------|
-| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `balance.updated` |
+| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `balance.updated` |
 | `system:broadcast` | All connected clients | `system.notification` |
 
 Each SSE connection subscribes to both the per-user channel and `system:broadcast`.
@@ -1368,6 +1586,7 @@ Events are automatically published by the backend at:
 | `job.status_changed` | Generation request submitted (status → `pending`) |
 | `job.status_changed` | Grok video job completes, fails, or times out |
 | `job.progress` | Grok video job enters `running` state |
+| `gpu_session.status_changed` | GPU session transitions between any two states (start/provision/active/pause/resume/stop/fail) |
 | `balance.updated` | `check_and_reserve` (debit), `refund`, `credit`, `admin_adjustment` |
 | `system.notification` | Admin calls `POST /v1/admin/broadcast` |
 
@@ -1428,7 +1647,7 @@ async function openEventStream(apiFetch: Fetcher) {
 
 ---
 
-## 15. Product Reference
+## 16. Product Reference
 
 ### Products
 
@@ -1447,7 +1666,7 @@ Values: `"sfw"`, `"permissive"`
 
 ---
 
-## 16. Enums Reference
+## 17. Enums Reference
 
 ### ModelType
 
@@ -1484,7 +1703,23 @@ Values: `"sfw"`, `"permissive"`
 | `cancelled` | Yes | User or system cancelled |
 | `moderated` | Yes | Content moderated by provider |
 
-**Polling strategy:** Poll `GET /v1/jobs/{id}` every 2s while status is `pending`, `queued`, or `running`. Stop on any terminal status.
+**Polling strategy:** Poll `GET /v1/jobs/{id}` every 2s while status is `pending`, `queued`, or `running`. Stop on any terminal status. For real-time updates without polling, subscribe to the SSE `job.status_changed` event (see [§15 Real-Time Events](#15-real-time-events-sse--pubsub)).
+
+### GpuSessionStatus
+
+| Value | Terminal? | Description |
+|-------|----------|-------------|
+| `pending` | No | Session requested, Vast.ai node not yet provisioning |
+| `provisioning` | No | Vast.ai node is starting up; ComfyUI not yet reachable |
+| `active` | No | Node is up, ComfyUI is reachable — generations can be submitted |
+| `stale` | No | Node was active but the latest health probe failed; auto-recovers if a subsequent probe succeeds |
+| `paused` | No | User paused — Vast.ai instance stopped, persistent disk retained |
+| `resuming` | No | User resumed — Vast.ai instance restarting |
+| `stopping` | No | User-requested stop — teardown in progress |
+| `stopped` | Yes | Session ended normally |
+| `failed` | Yes | Provisioning or runtime failure (`error_message` populated) |
+
+> Use the `gpu_session.status_changed` SSE event for real-time UI updates rather than polling.
 
 ### AspectRatio
 
@@ -1512,7 +1747,7 @@ Values: `"superadmin"`, `"admin"`, `"user"`
 
 > `"system"` is an internal sentinel role — never returned by any API endpoint.
 >
-> `"superadmin"` has all admin capabilities plus the ability to manage roles and permissions. See [§13 Admin Management](#13-admin-management-authenticated--superadmin-only).
+> `"superadmin"` has all admin capabilities plus the ability to manage roles and permissions. See [§14 Admin Management](#14-admin-management-authenticated--superadmin-only).
 
 ### AdminPermission
 
@@ -1554,7 +1789,7 @@ Used in `GalleryLineage.source_type` to indicate whether the input came from a d
 
 ---
 
-## 17. Error Response Format
+## 18. Error Response Format
 
 All non-2xx responses use a single unified envelope:
 
@@ -1576,10 +1811,10 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 402 | `insufficient_balance` | `balance`, `required` |
 | 403 | `forbidden`, `account_inactive`, `permission_denied`, `age_verification_required`, `model_not_allowed` | — |
 | 404 | `not_found`, `account_not_found`, `price_not_found` | — |
-| 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero` | `balance` |
+| 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero`, `no_active_gpu_session`, `session_already_exists`, `invalid_state`, `jobs_in_flight` | `balance`, `in_flight_count` |
 | 422 | `validation_error`, `moderation` | `provider`, `policy` |
 | 429 | `too_many_requests`, `rate_limited` | `retry_after` |
-| 503 | `service_unavailable` | — |
+| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed` | — |
 
 **Example responses:**
 
@@ -1612,7 +1847,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ---
 
-## 18. Content URLs
+## 19. Content URLs
 
 ### Content Proxy URLs (preferred for Gallery / persistent UI)
 
@@ -1640,7 +1875,7 @@ These URLs:
 
 ---
 
-## 19. Rate Limits
+## 20. Rate Limits
 
 | Endpoint | Limit |
 |----------|-------|
@@ -1654,7 +1889,7 @@ Rate limit headers are **not currently exposed** in responses. The frontend shou
 
 ---
 
-## 20. Health Check
+## 21. Health Check
 
 Three-tier health monitoring system. Use the appropriate endpoint for each consumer:
 
@@ -1801,7 +2036,7 @@ The registry timeout for this checker is 15 s (increased from the 5 s default fo
 
 ---
 
-## 21. OpenAPI Documentation Endpoints
+## 22. OpenAPI Documentation Endpoints
 
 The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
 
