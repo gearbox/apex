@@ -77,9 +77,8 @@ class VastAIClient:
             "verified": {"eq": True},
             "rentable": {"eq": True},
             "rented": {"eq": False},
-            "type": "on-demand",
-            "order": "dph_total",
-            "order_dir": "asc",
+            "type": "ondemand",
+            "order": [["dph_total", "asc"]],
             "limit": limit,
         }
         resp = await self._client.post(

@@ -108,9 +108,31 @@ async def test_search_offers_builds_correct_filters() -> None:
     assert payload["verified"] == {"eq": True}
     assert payload["rentable"] == {"eq": True}
     assert payload["rented"] == {"eq": False}
-    assert payload["type"] == "on-demand"
-    assert payload["order"] == "dph_total"
+    assert payload["type"] == "ondemand"
+    assert payload["order"] == [["dph_total", "asc"]]
+    assert "order_dir" not in payload, "order_dir was removed from the Vast.ai API; do not send it"
     assert payload["limit"] == 5
+
+
+async def test_search_offers_order_is_nested_array() -> None:
+    """Vast.ai API requires order as an array of [field, direction] pairs."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(return_value=_mock_response(200, {"offers": [_make_offer(1)]}))
+    client = _make_client(mock_http)
+    await client.search_offers(_HARDWARE)
+
+    payload = mock_http.post.await_args.kwargs["json"]
+    order = payload["order"]
+    assert isinstance(order, list), f"order must be a list, got {type(order).__name__}"
+    assert len(order) >= 1, "order must have at least one sort key"
+    for entry in order:
+        assert isinstance(entry, list), f"each order entry must be a list, got {entry!r}"
+        assert len(entry) == 2, (
+            f"each order entry must have 2 elements (field, direction), got {entry!r}"
+        )
+        field, direction = entry
+        assert isinstance(field, str)
+        assert direction in ("asc", "desc"), f"direction must be 'asc' or 'desc', got {direction!r}"
 
 
 async def test_search_offers_api_error() -> None:
