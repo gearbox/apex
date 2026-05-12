@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 import msgspec
@@ -19,13 +19,15 @@ from .exceptions import (
 )
 from .schemas import (
     CreateInstanceResponse,
+    GetInstanceResponse,
     SearchOffersResponse,
     VastAIInstance,
     VastAIOffer,
-    _GetInstanceEnvelope,
 )
 
 logger = structlog.get_logger(__name__)
+
+_T = TypeVar("_T", bound=msgspec.Struct)
 
 
 class VastAIClient:
@@ -42,6 +44,24 @@ class VastAIClient:
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
+
+    def _decode_response(self, resp: httpx.Response, schema: type[_T], context: str) -> _T:
+        """Decode response body via msgspec, wrapping ValidationError as VastAIError.
+
+        Callers should only encounter domain exceptions from this client.
+        msgspec.ValidationError leaking out exposes an internal parsing detail
+        and breaks the invariant that ``except VastAIError`` catches everything
+        this client can raise.
+        """
+        try:
+            return msgspec.json.decode(resp.content, type=schema)
+        except msgspec.ValidationError as exc:
+            body_preview = resp.text[:200].replace("\n", " ")
+            raise VastAIError(
+                f"{context}: response did not match {schema.__name__} schema — {exc}; "
+                f"body preview: {body_preview!r}",
+                status_code=resp.status_code,
+            ) from exc
 
     def _raise_for_status(self, resp: httpx.Response, context: str) -> None:
         if resp.status_code < 400:
@@ -93,7 +113,7 @@ class VastAIClient:
             headers=self._auth_headers(),
         )
         self._raise_for_status(resp, "search_offers")
-        result = msgspec.json.decode(resp.content, type=SearchOffersResponse)
+        result = self._decode_response(resp, SearchOffersResponse, "search_offers")
         if not result.offers:
             logger.warning("vastai.search_offers.no_capacity", hardware=str(hardware))
             raise NoCapacityError("No GPU offers match the requested hardware requirements")
@@ -153,7 +173,9 @@ class VastAIClient:
                 "Vast.ai account has insufficient credits", status_code=resp.status_code
             )
         self._raise_for_status(resp, f"create_instance(offer_id={offer_id})")
-        result = msgspec.json.decode(resp.content, type=CreateInstanceResponse)
+        result = self._decode_response(
+            resp, CreateInstanceResponse, f"create_instance(offer_id={offer_id})"
+        )
         instance_id = result.new_contract
         logger.info(
             "vastai.create_instance.success",
@@ -179,7 +201,9 @@ class VastAIClient:
         # The /instances/{id}/ endpoint wraps the instance in an "instances" key (despite
         # being a single-instance lookup). See https://docs.vast.ai/api/show-instance and
         # vastai/async_/client.py:190-204 in the official SDK.
-        envelope = msgspec.json.decode(resp.content, type=_GetInstanceEnvelope)
+        envelope = self._decode_response(
+            resp, GetInstanceResponse, f"get_instance(instance_id={instance_id})"
+        )
         logger.info(
             "vastai.get_instance.success",
             instance_id=instance_id,
