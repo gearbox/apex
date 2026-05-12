@@ -23,6 +23,7 @@ import httpx
 import structlog
 
 from src.api.services.vastai.exceptions import InstanceNotFoundError
+from src.api.services.vastai.schemas import VastAIInstance
 from src.core.enums import GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
 
@@ -201,6 +202,7 @@ class GpuProvisioningWorker:
             await self._mark_failed(session, "pending without vastai_instance_id")
             return
 
+        instance: VastAIInstance | None
         try:
             instance = await self._vastai.get_instance(session.vastai_instance_id)
         except InstanceNotFoundError:
@@ -217,9 +219,17 @@ class GpuProvisioningWorker:
                 session_id=str(session.id),
                 instance_id=session.vastai_instance_id,
             )
-            return  # transient — try again next sweep
+            # Transient error — fall through to timeout check rather than
+            # silently swallowing so a stuck session eventually terminates.
+            if self._provision_timeout_exceeded(session):
+                logger.warning(
+                    "gpu_session.provision.pending_timeout_after_errors",
+                    session_id=str(session.id),
+                )
+                await self._retry_or_fail(session, reason="pending_timeout_after_errors")
+            return
 
-        if instance.actual_status != "running":
+        if instance is None or instance.actual_status != "running":
             if self._provision_timeout_exceeded(session):
                 logger.warning(
                     "gpu_session.provision.pending_timeout",
@@ -301,7 +311,13 @@ class GpuProvisioningWorker:
     # ------------------------------------------------------------------
 
     async def _retry_or_fail(self, session: GpuSession, *, reason: str) -> None:
-        """Try provisioning a new Vast.ai node; mark failed if retries exhausted."""
+        """Attempt to provision a fresh Vast.ai node, OR mark failed if budget exhausted.
+
+        With provisioning_recreation_attempts=1 (default), the first failure is terminal —
+        no autonomous recreation. The user starts a new session if they want to try again.
+        This prevents 'sessions waking up at midnight and burning credits' after the user
+        has given up.
+        """
         # Step 1: destroy the failed instance best-effort
         if session.vastai_instance_id is not None:
             try:
@@ -320,14 +336,20 @@ class GpuProvisioningWorker:
             repo = GpuSessionRepository(db)
             new_attempt = await repo.increment_provision_attempt(session.id)
 
-        if new_attempt > self._settings.max_node_provisioning_retries:
+        # Attempts are 1-indexed: attempt=1 is the original; attempt=2 would be the
+        # first recreation. With provisioning_recreation_attempts=1 (default), the
+        # original attempt's failure is terminal — no recreation ever fires.
+        if new_attempt >= self._settings.provisioning_recreation_attempts + 1:
             logger.warning(
-                "gpu_session.provision.retry_exhausted",
+                "gpu_session.provision.attempts_exhausted",
                 session_id=str(session.id),
-                provision_attempt=new_attempt,
+                attempt=new_attempt,
+                limit=self._settings.provisioning_recreation_attempts,
                 reason=reason,
             )
-            await self._mark_failed(session, f"retry_exhausted after {new_attempt} attempts")
+            await self._mark_failed(
+                session, f"attempts_exhausted after {new_attempt} attempts ({reason})"
+            )
             return
 
         # Step 3: search for a new offer with the same hardware requirements
@@ -403,7 +425,7 @@ class GpuProvisioningWorker:
                 disk_gb=bundle.hardware.min_disk_gb,
                 env=env,
                 onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
-                max_retries=self._settings.max_node_provisioning_retries,
+                offer_walk_depth=self._settings.provisioning_offer_walk_depth,
             )
         except Exception:
             logger.exception(

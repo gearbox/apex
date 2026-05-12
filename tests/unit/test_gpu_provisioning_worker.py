@@ -93,7 +93,8 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.gpu_provision_poll_interval_seconds = 15
     settings.gpu_provision_timeout_minutes = 20
     settings.gpu_resume_timeout_minutes = 5
-    settings.max_node_provisioning_retries = 3
+    settings.provisioning_offer_walk_depth = 10
+    settings.provisioning_recreation_attempts = 1
     settings.gpu_provision_worker_concurrency = 10
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "hf-tok"
@@ -470,7 +471,8 @@ class TestAdvanceProvisioning:
 
     async def test_retry_preserves_tunnel(self) -> None:
         """After retry, the session's tunnel ID and hostname must NOT change."""
-        worker, mocks = _make_worker()
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         original_tunnel_id = "tunnel-abc"
         original_hostname = "01234567.gpu.cloudin.space"
         old_created = datetime.now(UTC) - timedelta(minutes=25)
@@ -505,27 +507,27 @@ class TestAdvanceProvisioning:
         mocks["cf_client"].create_session_tunnel.assert_not_called()
 
     async def test_retry_exhausted_marks_failed(self) -> None:
-        worker, mocks = _make_worker(settings=_make_settings(max_node_provisioning_retries=2))
+        # provisioning_recreation_attempts=2 → new_attempt=3 >= 2+1=3 → exhausted
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=2))
         session = _make_gpu_session(status=GpuSessionStatus.pending)
         mocks["vastai_client"].destroy_instance = AsyncMock()
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            # new_attempt = 3 > max_retries=2 → exhausted
             mock_repo.increment_provision_attempt.return_value = 3
             reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
             mock_repo.get_by_id.return_value = reloaded
 
             await worker._retry_or_fail(session, reason="timeout")
 
-        # Should mark failed after exhausting retries
         mock_repo.update_status.assert_called_once()
         assert mock_repo.update_status.call_args[0][1] == GpuSessionStatus.failed
 
     async def test_retry_reconstructs_env_vars_from_session_row(self) -> None:
         """The env dict passed to create_instance must contain all required vars."""
-        worker, mocks = _make_worker()
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
@@ -569,7 +571,9 @@ class TestAdvanceProvisioning:
 
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
         """If ai_bundles_github_token is empty, mark session failed before create_instance."""
-        worker, mocks = _make_worker()
+        # provisioning_recreation_attempts=3 so new_attempt=2 allows recreation to proceed
+        # far enough to hit the github_token check
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         mocks["settings"].ai_bundles_github_token = ""
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
@@ -702,7 +706,8 @@ class TestStaleTransitionGuard:
 
 class TestEnvReconstruction:
     async def test_rebuild_env_includes_tunnel_token_fetched_from_cf(self) -> None:
-        worker, mocks = _make_worker()
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         session = _make_gpu_session(status=GpuSessionStatus.pending, cf_tunnel_id="tun-xyz")
         mocks["vastai_client"].destroy_instance = AsyncMock()
         mocks["cf_client"].get_tunnel_token.return_value = "fetched-token-secret"
@@ -724,7 +729,8 @@ class TestEnvReconstruction:
         assert env["ACS_CF_TUNNEL_TOKEN"] == "fetched-token-secret"
 
     async def test_rebuild_env_uses_bundle_version_current_when_none(self) -> None:
-        worker, mocks = _make_worker()
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_version=None,
@@ -748,7 +754,8 @@ class TestEnvReconstruction:
         assert env["ACS_BUNDLE_VERSION"] == "current"
 
     async def test_rebuild_env_includes_port_mapping_from_hardware(self) -> None:
-        worker, mocks = _make_worker()
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         session = _make_gpu_session(status=GpuSessionStatus.pending)
         mocks["vastai_client"].destroy_instance = AsyncMock()
         mocks["cf_client"].get_tunnel_token.return_value = "tok"
@@ -1212,3 +1219,129 @@ class TestMarkFailedWithJobSweep:
 
         mock_repo.update_status.assert_awaited()
         assert mock_repo.update_status.await_args.args[1] == GpuSessionStatus.failed
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for 2026-05-12 incident fixes
+# ---------------------------------------------------------------------------
+
+
+class TestAdvancePendingNullInstance:
+    async def test_none_instance_is_noop_before_timeout(self) -> None:
+        """get_instance returns None → fall through without transition (no infinite loop)."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].get_instance.return_value = None
+
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            await worker._advance_pending(session)
+
+        mock_repo.update_status.assert_not_called()
+        worker._retry_or_fail.assert_not_called()
+
+    async def test_none_instance_triggers_retry_on_timeout(self) -> None:
+        """get_instance returns None + timeout exceeded → _retry_or_fail fires."""
+        worker, mocks = _make_worker()
+        old_created = datetime.now(UTC) - timedelta(minutes=25)
+        session = _make_gpu_session(status=GpuSessionStatus.pending, created_at=old_created)
+        mocks["vastai_client"].get_instance.return_value = None
+
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_called_once_with(session, reason="pending_timeout")
+
+    async def test_transient_error_triggers_retry_on_timeout(self) -> None:
+        """Exception from get_instance + timeout exceeded → _retry_or_fail fires."""
+        worker, mocks = _make_worker()
+        old_created = datetime.now(UTC) - timedelta(minutes=25)
+        session = _make_gpu_session(status=GpuSessionStatus.pending, created_at=old_created)
+        mocks["vastai_client"].get_instance.side_effect = VastAIError("schema", status_code=200)
+
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_called_once_with(
+            session, reason="pending_timeout_after_errors"
+        )
+
+    async def test_transient_error_before_timeout_is_noop(self) -> None:
+        """Exception from get_instance before timeout → no transition, no retry."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].get_instance.side_effect = VastAIError("timeout", status_code=503)
+
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            await worker._advance_pending(session)
+
+        mock_repo.update_status.assert_not_called()
+        worker._retry_or_fail.assert_not_called()
+
+
+class TestRetryOrFailOneAttemptPolicy:
+    async def test_default_one_attempt_fails_terminally(self) -> None:
+        """With provisioning_recreation_attempts=1 (default), attempt=2 >= 1+1=2 → terminal."""
+        worker, mocks = _make_worker()  # default: provisioning_recreation_attempts=1
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2  # first retry = attempt 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="test")
+
+        mock_repo.update_status.assert_called_once()
+        assert mock_repo.update_status.call_args[0][1] == GpuSessionStatus.failed
+        # No new instance created — recreation was not attempted
+        mocks["vastai_client"].create_instance.assert_not_called()
+
+    async def test_recreation_attempts_3_allows_second_attempt(self) -> None:
+        """With provisioning_recreation_attempts=3, attempt=2 < 3+1=4 → recreation fires."""
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            bundle_name="wan_2.2_i2v",
+            bundle_version="260105-01",
+            callback_token="cb-tok",
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "tunnel-token"
+        mocks["vastai_client"].create_instance.return_value = 77777
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2  # attempt 2 < max+1=4
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="timeout")
+
+        # Recreation must have fired — create_instance should be called
+        mocks["vastai_client"].create_instance.assert_called_once()
+        # Session must NOT be marked failed
+        failed_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
+        ]
+        assert not failed_calls

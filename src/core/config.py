@@ -234,11 +234,30 @@ class Settings(BaseSettings):
         le=15,
         description="Max time to wait for a paused session to resume",
     )
-    max_node_provisioning_retries: int = Field(
-        default=3,
+    provisioning_offer_walk_depth: int = Field(
+        default=10,
         ge=1,
-        le=10,
-        description="Max provisioning attempts before marking session as failed",
+        le=20,
+        description=(
+            "Within a single provisioning attempt, how many cheapest offers "
+            "to walk past on OfferTakenError before declaring this attempt "
+            "failed. Cheap — each attempt is a quick API call. Default 10 "
+            "balances 'try a few backup offers' against 'don't waste tokens "
+            "on a dead inventory'."
+        ),
+    )
+    provisioning_recreation_attempts: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        description=(
+            "Total provisioning attempts before the session transitions to "
+            "'failed' terminally. Each attempt creates a new Vast.ai node "
+            "with fresh offers. Default 1 means 'no autonomous retry' — "
+            "if the first attempt fails, the user must start a new session. "
+            "This prevents unattended retries from racking up GPU billing "
+            "after the user has given up."
+        ),
     )
 
     # --- Orphaned Tunnel Cleanup Worker ---

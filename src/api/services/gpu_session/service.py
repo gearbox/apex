@@ -46,11 +46,30 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Stop is a destructive operator-safety action — must always succeed for any
+# session that hasn't already terminated. Terminal states are handled idempotently
+# by stop_session itself (return the existing row, no work).
+#
+# Mirrors Vast.ai's own destroy semantics: destroying a non-existent instance is
+# a no-op (404 treated as success).
 _STOPPABLE_STATUSES = frozenset(
     {
+        GpuSessionStatus.pending,
+        GpuSessionStatus.provisioning,
+        GpuSessionStatus.resuming,
         GpuSessionStatus.active,
         GpuSessionStatus.stale,
         GpuSessionStatus.paused,
+    }
+)
+
+# Terminal statuses: stop is idempotent here, returns the existing session row.
+# `stopping` is already on the path to terminal — re-stopping risks double-cleanup.
+_TERMINAL_STATUSES = frozenset(
+    {
+        GpuSessionStatus.stopping,
+        GpuSessionStatus.stopped,
+        GpuSessionStatus.failed,
     }
 )
 
@@ -210,7 +229,7 @@ class GpuSessionService:
         5. Search Vast.ai for offers matching hardware requirements
            → on failure (NoCapacityError): delete tunnel, re-raise
         6. Pick cheapest offer, create Vast.ai instance with env dict
-           → on OfferTakenError: try next offer up to max_node_provisioning_retries
+           → on OfferTakenError: try next offer up to offer_walk_depth candidates
            → on persistent failure: destroy any partially-created instance,
              delete tunnel, re-raise
         7. Persist GpuSession row with status='pending' and all populated fields
@@ -573,37 +592,56 @@ class GpuSessionService:
         product_id: str,
         confirmed: bool = False,
     ) -> GpuSession | StopConfirmation:
-        """Stop a session permanently (two-call confirmation flow).
+        """Stop a session permanently. Always succeeds for any non-terminal state;
+        idempotent for terminal states.
 
-        Allowed from status in {'active', 'stale', 'paused'}.
+        Pre-active sessions (pending/provisioning — started_at IS NULL) are stopped
+        immediately without the confirmation dialog and receive a full refund.
 
-        First call (confirmed=False):
-            Returns a StopConfirmation with cost summary. No state changes.
-            Caller should display this to the user and re-invoke with
-            confirmed=True to proceed.
+        Active/stale/paused/resuming sessions with started_at IS NOT NULL go through
+        the two-call confirmation flow (confirmed=False → StopConfirmation preview;
+        confirmed=True → execute stop with finalize-billing).
 
-        Second call (confirmed=True):
-            1. Load session (for_update=True) and verify stoppable state
-            2. Update status → 'stopping'
-            3. Destroy Vast.ai instance (best-effort: logs + continues on errors)
-            4. Delete CF tunnel + DNS (best-effort: logs + continues on errors)
-            5. Update status → 'stopped', set stopped_at = now()
+        Terminal states (stopping/stopped/failed) return the existing row immediately
+        as a no-op; no work is performed.
 
         Args:
             session_id: Session to stop.
             user_id: Requesting user (ownership check).
             product_id: Product scope.
             confirmed: When False, return cost confirmation; when True, execute stop.
+                       Ignored for pre-active and terminal sessions.
 
         Returns:
-            StopConfirmation when confirmed=False.
-            GpuSession (stopped) when confirmed=True.
+            StopConfirmation when confirmed=False for an active/stale/paused session.
+            GpuSession (stopped or already-terminal) in all other cases.
 
         Raises:
-            GpuSessionError: Session not found or not owned.
-            InvalidSessionStateError: Session is in a non-stoppable state
-                ('pending', 'provisioning', 'resuming', 'stopping', 'stopped', 'failed').
+            GpuSessionError: Session not found or not accessible.
         """
+        # Initial load (no lock) for state-based routing.
+        async with self._session_factory() as db:
+            repo = GpuSessionRepository(db)
+            session_row = await repo.get_by_id_for_user(session_id, user_id, product_id)
+        if session_row is None:
+            raise GpuSessionError(f"Session {session_id} not found or not accessible")
+
+        # Terminal states: idempotent return — no work needed.
+        if session_row.status in _TERMINAL_STATUSES:
+            logger.info(
+                "gpu_session.stop.idempotent_terminal",
+                session_id=str(session_id),
+                status=str(session_row.status),
+            )
+            return session_row
+
+        # Pre-active sessions never reached 'active', so started_at is NULL.
+        # Skip the confirmation dialog — no billable usage occurred — and refund fully.
+        if session_row.started_at is None:
+            return await self._stop_pre_active(session_id, user_id, product_id)
+
+        # Active/stale/paused/resuming with started_at IS NOT NULL: normal
+        # two-call confirmation flow.
         if not confirmed:
             return await self._stop_confirmation(session_id, user_id, product_id)
         return await self._stop_confirmed(session_id, user_id, product_id)
@@ -841,6 +879,99 @@ class GpuSessionService:
             ),
         )
 
+    async def _stop_pre_active(
+        self,
+        session_id: UUID,
+        user_id: UUID,
+        product_id: str,
+    ) -> GpuSession:
+        """Stop a session that never became active (started_at IS NULL).
+
+        No billable usage occurred. The base reservation is fully refunded.
+        Any infrastructure provisioned so far (Vast.ai instance, CF tunnel)
+        is torn down best-effort. Idempotent w.r.t. infrastructure: missing
+        resources (Vast.ai 404, missing tunnel ID) are silently OK.
+
+        Concurrency note: if the provisioning worker races to mark the session
+        active between our initial load and the lock here, we fall through to
+        the normal _stop_confirmed path (started_at will be non-NULL under lock).
+        """
+        logger.info("gpu_session.stop_pre_active.start", session_id=str(session_id))
+
+        previous_status: str = ""  # set in TX1 unless we race-return early
+
+        # TX1: verify + transition to 'stopping' (mutex against concurrent stops).
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionRepository(db)
+            session_row = self._verify_ownership(
+                await repo.get_by_id(session_id, for_update=True),
+                session_id,
+                user_id,
+                product_id,
+            )
+            # Re-check status under lock — another stop may have beaten us.
+            if session_row.status in _TERMINAL_STATUSES:
+                return session_row
+            # Race: provisioning worker promoted session to active between initial
+            # load and this lock. Fall through to normal stop path.
+            if session_row.started_at is not None:
+                logger.info(
+                    "gpu_session.stop_pre_active.raced_to_active",
+                    session_id=str(session_id),
+                )
+            else:
+                previous_status = str(session_row.status)
+                await self._set_status(repo, session_row, GpuSessionStatus.stopping)
+
+        # If the session raced to active under the lock, use the normal stop path.
+        if session_row.started_at is not None:
+            return await self._stop_confirmed(session_id, user_id, product_id)
+
+        await self._publish_status_event(session_row, previous_status=previous_status)
+
+        # Teardown — best-effort, errors logged not raised.
+        await self._teardown_external_resources(
+            session_row, log_prefix="gpu_session.stop_pre_active"
+        )
+
+        # Refund the base reservation in full — the user never got a working session.
+        if session_row.account_id is not None:
+            try:
+                async with self._session_factory() as db, db.begin():
+                    await self._billing_service.refund(
+                        session_row.id,
+                        description="GPU session pre-active stop: session never became active",
+                        session=db,
+                        product_id=session_row.product_id,
+                        user_id=session_row.user_id,
+                    )
+                logger.info(
+                    "gpu_session.stop_pre_active.refunded",
+                    session_id=str(session_id),
+                )
+            except Exception:
+                # Don't block the session transition on a refund failure — the
+                # billing reconciler will catch up.
+                logger.exception(
+                    "gpu_session.stop_pre_active.refund_failed",
+                    session_id=str(session_id),
+                )
+
+        # TX2: finalize to 'stopped'.
+        stop_now = datetime.now(UTC)
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionRepository(db)
+            reloaded = await repo.get_by_id(session_id, for_update=True)
+            if reloaded is None:  # pragma: no cover
+                raise GpuSessionError(f"Session {session_id} disappeared during pre-active stop")
+            session_row = reloaded
+            await self._set_status(repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now)
+            await repo.mark_billing_finalized(session_id, stop_now)
+
+        logger.info("gpu_session.stop_pre_active.success", session_id=str(session_id))
+        await self._publish_status_event(session_row, previous_status="stopping")
+        return session_row
+
     async def _stop_confirmed(
         self,
         session_id: UUID,
@@ -872,6 +1003,12 @@ class GpuSessionService:
             repo = GpuSessionRepository(db)
             session_row = await self._load_session_for_update(
                 repo, session_id, user_id, product_id, _STOPPABLE_STATUSES, "stop"
+            )
+            # Programming-error guard: _stop_confirmed is only reachable via
+            # stop_session for sessions with started_at IS NOT NULL. If this fires
+            # in production, something bypassed the public API.
+            assert session_row.started_at is not None, (
+                "_stop_confirmed reached with started_at=NULL — caller bypassed stop_session"
             )
             previous_status = str(session_row.status)
 
@@ -1168,5 +1305,5 @@ class GpuSessionService:
             disk_gb=disk_gb,
             env=env,
             onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
-            max_retries=self._settings.max_node_provisioning_retries,
+            offer_walk_depth=self._settings.provisioning_offer_walk_depth,
         )

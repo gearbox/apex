@@ -122,9 +122,14 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     return session
 
 
-def _make_settings(*, max_retries: int = 3) -> MagicMock:
+def _make_settings(
+    *,
+    offer_walk_depth: int = 10,
+    recreation_attempts: int = 1,
+) -> MagicMock:
     settings = MagicMock()
-    settings.max_node_provisioning_retries = max_retries
+    settings.provisioning_offer_walk_depth = offer_walk_depth
+    settings.provisioning_recreation_attempts = recreation_attempts
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
@@ -431,7 +436,7 @@ class TestStartSession:
         mocks["cf_client"].create_session_tunnel.assert_called_once_with(ANY, 9999)
 
     async def test_offer_taken_retries_with_next_offer(self) -> None:
-        service, mocks = _make_service(settings=_make_settings(max_retries=3))
+        service, mocks = _make_service(settings=_make_settings(offer_walk_depth=3))
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
         mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
         offer1 = _make_offer(offer_id=1001)
@@ -462,7 +467,7 @@ class TestStartSession:
         assert second_call_offer_id == offer2.id
 
     async def test_retries_bounded_by_settings(self) -> None:
-        service, mocks = _make_service(settings=_make_settings(max_retries=2))
+        service, mocks = _make_service(settings=_make_settings(offer_walk_depth=2))
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
         mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
         offer1 = _make_offer(offer_id=1001)
@@ -485,7 +490,7 @@ class TestStartSession:
                     account_id=mocks["account_id"],
                 )
 
-        # Exhausted 2 retries (max_retries=2, 2 offers)
+        # Exhausted 2 offers (offer_walk_depth=2, 2 offers)
         assert mocks["vastai_client"].create_instance.call_count == 2
         # Tunnel was cleaned up
         mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
@@ -530,13 +535,13 @@ class TestStartSession:
         # No DB session row was persisted
         mock_repo.create.assert_not_called()
 
-    async def test_zero_max_retries_raises_config_error(self) -> None:
-        """max_node_provisioning_retries=0 is a misconfiguration, not 'all taken'.
+    async def test_zero_offer_walk_depth_raises_config_error(self) -> None:
+        """offer_walk_depth=0 is a misconfiguration, not 'all taken'.
 
-        Settings enforces ge=1 via Pydantic, but defense-in-depth in the service
-        gives a clearer error if a misconstructed Settings slips through.
+        Settings enforces ge=1 via Pydantic, but defense-in-depth in the provisioning
+        helper gives a clearer error if a misconstructed Settings slips through.
         """
-        service, mocks = _make_service(settings=_make_settings(max_retries=0))
+        service, mocks = _make_service(settings=_make_settings(offer_walk_depth=0))
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
         mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
         mocks["vastai_client"].search_offers.return_value = [_make_offer()]
@@ -546,7 +551,7 @@ class TestStartSession:
             MockRepo.return_value = mock_repo
             mock_repo.get_non_terminal_for_model.return_value = None
 
-            with pytest.raises(VastAIError, match="max_node_provisioning_retries must be >= 1"):
+            with pytest.raises(VastAIError, match="offer_walk_depth must be >= 1"):
                 await service.start_session(
                     user_id=uuid4(),
                     product_id="vex",
@@ -738,7 +743,7 @@ class TestStartSession:
 
         service, mocks = _make_service()
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
-        mocks["billing_service"].assert_sufficient_balance.side_effect = InsufficientBalanceError(  # type: ignore[union-attr]
+        mocks["billing_service"].assert_sufficient_balance.side_effect = InsufficientBalanceError(
             balance=100, required=500
         )
 
@@ -1198,16 +1203,15 @@ class TestStopSession:
         # Duration should be ~2 hours
         assert result.active_duration_seconds >= 2 * 3600 - 5  # allow 5s skew
 
-    async def test_unconfirmed_duration_uses_created_at_when_no_started_at(self) -> None:
+    async def test_unconfirmed_for_active_shows_correct_duration(self) -> None:
         service, _ = _make_service()
         user_id = uuid4()
         now = datetime.now(UTC)
-        created = now - timedelta(hours=3)
+        started = now - timedelta(hours=3)
         session = _make_gpu_session(
             user_id=user_id,
             status=GpuSessionStatus.active,
-            started_at=None,
-            created_at=created,
+            started_at=started,
         )
 
         with patch(_REPO_PATH) as MockRepo:
@@ -1369,37 +1373,37 @@ class TestStopSession:
         assert result.status == GpuSessionStatus.stopped
 
     @pytest.mark.parametrize(
-        "bad_status",
+        "terminal_status",
         [
-            GpuSessionStatus.pending,
-            GpuSessionStatus.provisioning,
-            GpuSessionStatus.resuming,
             GpuSessionStatus.stopping,
             GpuSessionStatus.stopped,
             GpuSessionStatus.failed,
         ],
     )
-    async def test_from_non_stoppable_raises(self, bad_status: GpuSessionStatus) -> None:
-        service, _ = _make_service()
+    async def test_from_terminal_state_is_idempotent(
+        self, terminal_status: GpuSessionStatus
+    ) -> None:
+        """Regression for 2026-05-12: stop on a terminal session must not raise."""
+        service, mocks = _make_service()
         user_id = uuid4()
-        session = _make_gpu_session(user_id=user_id, status=bad_status)
+        session = _make_gpu_session(user_id=user_id, status=terminal_status)
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            # unconfirmed call uses get_by_id_for_user
             mock_repo.get_by_id_for_user.return_value = session
 
-            with pytest.raises(InvalidSessionStateError) as exc_info:
-                await service.stop_session(
-                    session_id=session.id,
-                    user_id=user_id,
-                    product_id=session.product_id,
-                    confirmed=False,
-                )
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
 
-        assert exc_info.value.current_status == bad_status
-        assert exc_info.value.operation == "stop"
+        assert result is session  # same row returned, no work done
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mock_repo.update_status.assert_not_called()
 
 
 class TestBillableMinutesHelper:
@@ -2717,3 +2721,269 @@ class TestPauseWithJobSweep:
 
         assert exc_info.value.in_flight_count == 5
         assert exc_info.value.operation == "pause"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for 2026-05-12: always-stoppable + refund on pre-active
+# ---------------------------------------------------------------------------
+
+
+class TestStopSessionLifecyclePolicy:
+    """Regression for 2026-05-12 incident: stop must always succeed; pre-active → full refund."""
+
+    async def test_stop_from_pending_destroys_instance_and_refunds(self) -> None:
+        """Operator can stop a stuck pending session and gets a full refund."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.pending,
+            started_at=None,
+            vastai_instance_id=12345,
+        )
+        session.account_id = uuid4()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+        # Vast.ai instance must be destroyed
+        mocks["vastai_client"].destroy_instance.assert_called_once_with(12345)
+        # Full refund (NOT finalize_billing which would charge the 5-min floor)
+        mocks["billing_service"].refund.assert_called_once()
+        # billing_finalized immediately (no outstanding amount)
+        mock_repo.mark_billing_finalized.assert_called_once()
+
+    async def test_stop_from_provisioning_also_refunds(self) -> None:
+        """Provisioning sessions are also pre-active — same refund path."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=12345,
+        )
+        session.account_id = uuid4()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+        mocks["billing_service"].refund.assert_called_once()
+
+    async def test_stop_from_pending_without_account_skips_refund(self) -> None:
+        """If no account_id (reservation never made), refund is skipped silently."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.pending,
+            started_at=None,
+        )
+        session.account_id = None  # no billing reservation
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+        mocks["billing_service"].refund.assert_not_called()
+
+    async def test_stop_from_active_uses_finalize_billing_not_refund(self) -> None:
+        """Sessions that reached active pay usage-based bill, not full refund."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.active,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        # Full refund must NOT fire for active sessions
+        mocks["billing_service"].refund.assert_not_called()
+
+    async def test_stop_from_stopped_is_idempotent_no_work(self) -> None:
+        """Stopping an already-stopped session returns the row without any teardown."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.stopped)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert result is session
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mocks["billing_service"].refund.assert_not_called()
+        mock_repo.update_status.assert_not_called()
+
+    async def test_stop_from_failed_is_idempotent(self) -> None:
+        """Failed sessions also accept stop as a no-op."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.failed)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        assert result is session
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mock_repo.update_status.assert_not_called()
+
+    async def test_stop_pre_active_refund_failure_does_not_block_transition(self) -> None:
+        """Billing refund failure must not prevent the session from being marked stopped."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.pending,
+            started_at=None,
+        )
+        session.account_id = uuid4()
+        mocks["billing_service"].refund.side_effect = Exception("billing down")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        # Session must be stopped even though refund failed
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+
+    async def test_stop_pre_active_race_to_active_falls_through_to_normal_stop(self) -> None:
+        """If provisioning worker promotes session to active between initial load and lock,
+        fall through to the normal _stop_confirmed path — no double-refund."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        # Initial load: started_at=None → routes to _stop_pre_active
+        session_initial = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.pending,
+            started_at=None,
+        )
+        # Under lock: session raced to active (started_at now set)
+        session_locked = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.active,
+            started_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+        session_locked.id = session_initial.id
+
+        call_count = 0
+
+        def get_by_id_side_effect(*_args: Any, **_kwargs: Any) -> GpuSession:
+            nonlocal call_count
+            call_count += 1
+            # First call (in _stop_pre_active TX1 for_update) → locked version
+            return session_locked
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = session_initial
+            mock_repo.get_by_id.side_effect = get_by_id_side_effect
+
+            result = await service.stop_session(
+                session_id=session_initial.id,
+                user_id=user_id,
+                product_id=session_initial.product_id,
+                confirmed=True,
+            )
+
+        # Must end up stopped — no error, no double refund
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+        # Full refund must NOT fire — session DID become active
+        mocks["billing_service"].refund.assert_not_called()
+
+    async def test_stop_not_found_raises_gpu_session_error(self) -> None:
+        """Session not found → GpuSessionError (not unhandled None)."""
+        from src.api.services.gpu_session.exceptions import GpuSessionError
+
+        service, _ = _make_service()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = None
+
+            with pytest.raises(GpuSessionError):
+                await service.stop_session(
+                    session_id=uuid4(),
+                    user_id=uuid4(),
+                    product_id="vex",
+                    confirmed=True,
+                )
