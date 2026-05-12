@@ -44,11 +44,11 @@ async def provision_vastai_instance(
     env: dict[str, str],
     image: str = _VASTAI_IMAGE,
     onstart_cmd: str,
-    max_retries: int,
+    offer_walk_depth: int,
 ) -> tuple[int, VastAIOffer]:
     """Try to create a Vast.ai instance, walking down cheapest offers on OfferTakenError.
 
-    Bounded by ``max_retries``. Returns ``(instance_id, selected_offer)`` on success.
+    Bounded by ``offer_walk_depth``. Returns ``(instance_id, selected_offer)`` on success.
     On persistent failure, raises either the last non-OfferTaken exception or a
     generic ``VastAIError`` if every candidate offer was taken.
 
@@ -61,18 +61,18 @@ async def provision_vastai_instance(
         env: Environment variables dict (SECURITY: never log this — contains tokens).
         image: Docker image to use.
         onstart_cmd: Shell command to run on instance start.
-        max_retries: Max number of offers to try.
+        offer_walk_depth: Max number of offers to try within a single provisioning attempt.
 
     Returns:
         Tuple of (instance_id, selected_offer).
 
     Raises:
-        VastAIError: If max_retries <= 0 or all offers were taken/errored.
+        VastAIError: If offer_walk_depth <= 0 or all offers were taken/errored.
     """
-    if max_retries <= 0:
-        raise VastAIError(f"max_node_provisioning_retries must be >= 1, got {max_retries}")
+    if offer_walk_depth <= 0:
+        raise VastAIError(f"offer_walk_depth must be >= 1, got {offer_walk_depth}")
 
-    candidates = offers[:max_retries]
+    candidates = offers[:offer_walk_depth]
     last_exc: Exception | None = None
 
     for attempt, offer in enumerate(candidates):

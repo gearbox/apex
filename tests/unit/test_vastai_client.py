@@ -278,28 +278,37 @@ async def test_get_instance_unwraps_envelope() -> None:
     )
     client = _make_client(mock_http)
     instance = await client.get_instance(36610640)
+    assert instance is not None
     assert instance.id == 36610640
     assert instance.actual_status == "running"
     assert instance.cur_state == "running"
 
 
-async def test_get_instance_raises_when_envelope_missing() -> None:
-    """If Vast.ai changes the response to root-level instance (unlikely
-    but possible drift), apex must raise a domain VastAIError so callers
-    can handle it consistently with other client errors."""
+async def test_get_instance_returns_none_when_instances_is_null() -> None:
+    """Regression for 2026-05-12: Vast.ai returns {"instances": null} during
+    transient states (image pulling, scheduling). apex must return None, not raise."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.get = AsyncMock(return_value=_mock_response(200, {"instances": None}))
+    client = _make_client(mock_http)
+    result = await client.get_instance(36610640)
+    assert result is None
+
+
+async def test_get_instance_returns_none_when_instances_key_absent() -> None:
+    """If the 'instances' key is missing entirely (rare API drift), treat as None."""
     mock_http = AsyncMock(spec=httpx.AsyncClient)
     mock_http.get = AsyncMock(
         return_value=_mock_response(
             200,
             {
-                "id": 36610640,  # root-level, no envelope
+                "id": 36610640,  # root-level, no envelope — GetInstanceResponse.instances defaults None
                 "actual_status": "running",
             },
         )
     )
     client = _make_client(mock_http)
-    with pytest.raises(VastAIError, match="GetInstanceResponse"):
-        await client.get_instance(36610640)
+    result = await client.get_instance(36610640)
+    assert result is None
 
 
 async def test_get_instance_not_found() -> None:

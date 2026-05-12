@@ -184,12 +184,17 @@ class VastAIClient:
         )
         return instance_id
 
-    async def get_instance(self, instance_id: int) -> VastAIInstance:
-        """Get current state of an instance.
+    async def get_instance(self, instance_id: int) -> VastAIInstance | None:
+        """Get current state of an instance, or ``None`` if Vast.ai has no detail yet.
+
+        Returns ``None`` when Vast.ai responds with ``{"instances": null}`` — observed
+        transiently when an instance is mid-creation, the container image is still
+        pulling, or as a tombstone for recently-destroyed instances. Callers should
+        treat ``None`` as "not ready yet" and fall through to their timeout logic.
 
         Raises:
-            InstanceNotFoundError: If instance doesn't exist.
-            VastAIError: On API errors.
+            InstanceNotFoundError: If instance doesn't exist (HTTP 404).
+            VastAIError: On other API errors.
         """
         resp = await self._client.get(
             f"{self._VASTAI_API_BASE}/instances/{instance_id}/",
@@ -204,6 +209,12 @@ class VastAIClient:
         envelope = self._decode_response(
             resp, GetInstanceResponse, f"get_instance(instance_id={instance_id})"
         )
+        if envelope.instances is None:
+            logger.info(
+                "vastai.get_instance.no_detail_yet",
+                instance_id=instance_id,
+            )
+            return None
         logger.info(
             "vastai.get_instance.success",
             instance_id=instance_id,

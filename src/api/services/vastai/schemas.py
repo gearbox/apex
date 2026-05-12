@@ -58,7 +58,10 @@ class GetInstanceResponse(msgspec.Struct, forbid_unknown_fields=False):
     """Envelope for GET /api/v0/instances/{id}/ (show-instance) response.
 
     Despite being a single-instance endpoint, Vast.ai wraps the instance
-    under an 'instances' key. See https://docs.vast.ai/api/show-instance.
+    under an 'instances' key. The instance can be ``None`` when Vast.ai
+    has no detail to return — observed when the container failed to start
+    (e.g. image pull error), when the instance is mid-creation, or as a
+    tombstone for recently-destroyed instances.
     """
 
-    instances: VastAIInstance
+    instances: VastAIInstance | None = None
