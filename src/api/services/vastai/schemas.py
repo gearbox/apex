@@ -6,19 +6,20 @@ import msgspec
 
 
 class VastAIOffer(msgspec.Struct, forbid_unknown_fields=False):
-    """A GPU rental offer from Vast.ai search results."""
+    """A GPU rental offer from Vast.ai search results.
+
+    Only fields apex actively consumes are declared. Other fields Vast.ai
+    returns are silently ignored via forbid_unknown_fields=False.
+
+    This insulates apex from Vast.ai's frequent API field-shape changes —
+    including the 2026-05 incident where apex declared 'verified: bool' but
+    the live response has no 'verified' field at all (only 'verification: str').
+    """
 
     id: int
     gpu_name: str
-    num_gpus: int
-    gpu_ram: int
-    disk_space: float
     dph_total: float
-    inet_up: float
-    inet_down: float
-    cuda_max_good: float
-    verified: bool
-    geolocation: str | None = None
+    num_gpus: int | None = None  # not read downstream; kept for diagnostics
 
     @property
     def dph_total_micros(self) -> int:
@@ -37,13 +38,7 @@ class VastAIInstance(msgspec.Struct, forbid_unknown_fields=False):
 
     id: int
     actual_status: str | None = None
-    status_msg: str | None = None
-    ssh_host: str | None = None
-    ssh_port: int | None = None
-    public_ipaddr: str | None = None
-    ports: dict[str, object] | None = None
     cur_state: str | None = None
-    dph_total: float | None = None
 
 
 class SearchOffersResponse(msgspec.Struct, forbid_unknown_fields=False):

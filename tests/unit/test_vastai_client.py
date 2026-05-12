@@ -38,14 +38,7 @@ def _make_offer(id: int, dph_total: float = 0.5) -> dict[str, object]:
         "id": id,
         "gpu_name": "RTX_4090",
         "num_gpus": 1,
-        "gpu_ram": 24,
-        "disk_space": 200.0,
         "dph_total": dph_total,
-        "inet_up": 1000.0,
-        "inet_down": 2000.0,
-        "cuda_max_good": 12.4,
-        "verified": True,
-        "geolocation": "US",
     }
 
 
@@ -260,8 +253,7 @@ async def test_get_instance_success() -> None:
     assert isinstance(instance, VastAIInstance)
     assert instance.id == 123
     assert instance.actual_status == "running"
-    assert instance.ssh_host == "1.2.3.4"
-    assert instance.ssh_port == 22022
+    assert instance.cur_state == "running"
 
 
 async def test_get_instance_not_found() -> None:
@@ -337,18 +329,7 @@ async def test_auth_header_sent_on_search() -> None:
 
 
 def test_dph_total_micros_conversion() -> None:
-    offer = VastAIOffer(
-        id=1,
-        gpu_name="RTX_4090",
-        num_gpus=1,
-        gpu_ram=24,
-        disk_space=200.0,
-        dph_total=0.234567,
-        inet_up=1000.0,
-        inet_down=2000.0,
-        cuda_max_good=12.4,
-        verified=True,
-    )
+    offer = VastAIOffer(id=1, gpu_name="RTX_4090", dph_total=0.234567)
     assert offer.dph_total_micros == 234567
 
 
@@ -358,7 +339,6 @@ def test_dph_total_micros_handles_float_precision_edge_cases() -> None:
     E.g. ``0.258607 * 1_000_000 == 258606.99999999997`` — truncation via
     ``int()`` would yield ``258606`` (wrong). ``round()`` yields ``258607``.
     """
-    # These values all suffer from float representation issues when multiplied by 1M
     cases = [
         (0.258607, 258607),
         (0.517488, 517488),
@@ -367,18 +347,95 @@ def test_dph_total_micros_handles_float_precision_edge_cases() -> None:
         (0.261941, 261941),
     ]
     for dph, expected_micros in cases:
-        offer = VastAIOffer(
-            id=1,
-            gpu_name="RTX_4090",
-            num_gpus=1,
-            gpu_ram=24,
-            disk_space=200.0,
-            dph_total=dph,
-            inet_up=1000.0,
-            inet_down=2000.0,
-            cuda_max_good=12.4,
-            verified=True,
-        )
+        offer = VastAIOffer(id=1, gpu_name="RTX_4090", dph_total=dph)
         assert offer.dph_total_micros == expected_micros, (
             f"dph={dph}: expected {expected_micros}, got {offer.dph_total_micros}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Schema regression: live API response shape
+# ---------------------------------------------------------------------------
+
+
+async def test_search_offers_accepts_live_response_shape() -> None:
+    """Regression: live API returns verification:str, not verified:bool.
+
+    apex's old schema crashed with msgspec.ValidationError. After the trim,
+    this response parses cleanly because the schema no longer declares
+    'verified' at all.
+    """
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                "offers": [
+                    {
+                        "id": 35689141,
+                        "gpu_name": "RTX 4090",
+                        "dph_total": 0.2688888888888889,
+                        "num_gpus": 1,
+                        # Live response uses verification:str — apex doesn't read it
+                        # but it's in the payload; forbid_unknown_fields=False ignores it.
+                        "verification": "verified",
+                        "gpu_ram": 24564,
+                        "disk_space": 360.57,
+                        "inet_up": 1270.6,
+                        "inet_down": 1282.9,
+                        "cuda_max_good": 13.0,
+                        "geolocation": "California, US",
+                        "machine_id": 87355,
+                        "reliability": 0.9749691,
+                    }
+                ]
+            },
+        )
+    )
+    client = _make_client(mock_http)
+    offers = await client.search_offers(_HARDWARE)
+    assert len(offers) == 1
+    assert offers[0].id == 35689141
+    assert offers[0].gpu_name == "RTX 4090"
+    assert offers[0].dph_total == pytest.approx(0.2688888888888889)
+    assert offers[0].dph_total_micros == 268889
+    assert offers[0].num_gpus == 1
+
+
+async def test_search_offers_accepts_minimal_response_shape() -> None:
+    """Regression: schema tolerates absence of all optional fields."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                "offers": [
+                    {
+                        "id": 99999,
+                        "gpu_name": "RTX 4090",
+                        "dph_total": 0.30,
+                        # no num_gpus, no other fields
+                    }
+                ]
+            },
+        )
+    )
+    client = _make_client(mock_http)
+    offers = await client.search_offers(_HARDWARE)
+    assert len(offers) == 1
+    assert offers[0].num_gpus is None  # optional, defaulted
+
+
+async def test_search_offers_rejects_missing_dph_total() -> None:
+    """dph_total is required — apex billing depends on it. Missing dph_total
+    must crash loudly, not silently provision at unknown cost."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {"offers": [{"id": 1, "gpu_name": "RTX 4090"}]},  # no dph_total
+        )
+    )
+    client = _make_client(mock_http)
+    with pytest.raises(msgspec.ValidationError, match="dph_total"):
+        await client.search_offers(_HARDWARE)
