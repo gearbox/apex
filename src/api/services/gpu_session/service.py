@@ -618,6 +618,26 @@ class GpuSessionService:
 
         Raises:
             GpuSessionError: Session not found or not accessible.
+
+        Concurrency model:
+            This method does an initial unlocked read for state-based routing
+            (terminal / pre-active / active), then dispatches to a helper that
+            takes its own row lock. The race window between the unlocked read
+            and the lock is intentional and handled:
+
+            - Terminal-race: the appropriate helper detects the row is terminal
+              under lock and returns idempotently (see
+              ``gpu_session.stop.raced_to_terminal`` and
+              ``gpu_session.stop_pre_active.raced_to_terminal`` log events).
+            - Active-race (pre-active → active): ``_stop_pre_active`` falls
+              through to ``_stop_confirmed`` under its lock (see
+              ``gpu_session.stop_pre_active.raced_to_active``).
+
+            Holding a lock across the routing decision would force
+            ``SELECT FOR UPDATE`` on idempotent terminal reads and on the
+            dry-run ``confirmed=False`` preview, both of which are read-only
+            paths that don't need a lock. The two-round-trip pattern is the
+            right trade-off for this workload.
         """
         # Initial load (no lock) for state-based routing.
         async with self._session_factory() as db:
@@ -911,6 +931,11 @@ class GpuSessionService:
             )
             # Re-check status under lock — another stop may have beaten us.
             if session_row.status in _TERMINAL_STATUSES:
+                logger.info(
+                    "gpu_session.stop_pre_active.raced_to_terminal",
+                    session_id=str(session_id),
+                    status=str(session_row.status),
+                )
                 return session_row
             # Race: provisioning worker promoted session to active between initial
             # load and this lock. Fall through to normal stop path.
@@ -1001,9 +1026,25 @@ class GpuSessionService:
         # would bill the idle pause interval as active GPU time.
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
-            session_row = await self._load_session_for_update(
-                repo, session_id, user_id, product_id, _STOPPABLE_STATUSES, "stop"
+            # Lock without status filter — terminal-race handled below as an
+            # idempotent return; the pre-active race ("started_at became NULL")
+            # cannot happen for sessions routed here via stop_session.
+            session_row = self._verify_ownership(
+                await repo.get_by_id(session_id, for_update=True),
+                session_id,
+                user_id,
+                product_id,
             )
+            # If the row raced to terminal between routing-read and this lock,
+            # return idempotently. Matches stop_session's contract: stop always
+            # succeeds; terminal states are no-ops.
+            if session_row.status in _TERMINAL_STATUSES:
+                logger.info(
+                    "gpu_session.stop.raced_to_terminal",
+                    session_id=str(session_id),
+                    status=str(session_row.status),
+                )
+                return session_row
             # Programming-error guard: _stop_confirmed is only reachable via
             # stop_session for sessions with started_at IS NOT NULL. If this fires
             # in production, something bypassed the public API.

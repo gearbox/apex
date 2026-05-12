@@ -2987,3 +2987,120 @@ class TestStopSessionLifecyclePolicy:
                     product_id="vex",
                     confirmed=True,
                 )
+
+    async def test_stop_confirmed_raced_to_failed_returns_idempotently(self) -> None:
+        """If the session transitions to 'failed' between stop_session's routing read
+        and _stop_confirmed's lock acquisition, return the failed row idempotently
+        rather than raising InvalidSessionStateError.
+
+        Regression for Sourcery review: 'stop always succeeds' must hold even
+        when an unrelated worker terminates the session during the race window."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        routing_state = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.active,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+        )
+        terminal_state = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.failed,
+            started_at=routing_state.started_at,
+        )
+        terminal_state.id = routing_state.id
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            # Routing read returns active; locked read returns failed.
+            mock_repo.get_by_id_for_user.return_value = routing_state
+            mock_repo.get_by_id.return_value = terminal_state
+
+            result = await service.stop_session(
+                session_id=routing_state.id,
+                user_id=user_id,
+                product_id=routing_state.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.failed
+        # No teardown: the row was already terminal under lock.
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mocks["billing_service"].refund.assert_not_called()
+        mocks["billing_service"].partial_refund.assert_not_called()
+
+    async def test_stop_confirmed_raced_to_stopped_returns_idempotently(self) -> None:
+        """Symmetric to the failed case: a concurrent stop completed before our lock.
+        Return the already-stopped row; do no teardown and no billing."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        routing_state = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.active,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+        )
+        terminal_state = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.stopped,
+            started_at=routing_state.started_at,
+        )
+        terminal_state.id = routing_state.id
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = routing_state
+            mock_repo.get_by_id.return_value = terminal_state
+
+            result = await service.stop_session(
+                session_id=routing_state.id,
+                user_id=user_id,
+                product_id=routing_state.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.stopped
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mocks["billing_service"].refund.assert_not_called()
+        mocks["billing_service"].partial_refund.assert_not_called()
+
+    async def test_stop_pre_active_raced_to_terminal_returns_idempotently(self) -> None:
+        """If the provisioning worker marks a pending session 'failed' between
+        stop_session's routing read and _stop_pre_active's lock, return the
+        failed row idempotently — no refund, no TX2."""
+        service, mocks = _make_service()
+        user_id = uuid4()
+        routing_state = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.pending,
+            started_at=None,
+        )
+        terminal_state = _make_gpu_session(
+            user_id=user_id,
+            status=GpuSessionStatus.failed,
+            started_at=None,
+        )
+        terminal_state.id = routing_state.id
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id_for_user.return_value = routing_state
+            mock_repo.get_by_id.return_value = terminal_state
+
+            result = await service.stop_session(
+                session_id=routing_state.id,
+                user_id=user_id,
+                product_id=routing_state.product_id,
+                confirmed=True,
+            )
+
+        assert isinstance(result, GpuSession)
+        assert result.status == GpuSessionStatus.failed
+        # Pre-active terminal race: no refund, no external teardown.
+        mocks["billing_service"].refund.assert_not_called()
+        mocks["vastai_client"].destroy_instance.assert_not_called()
