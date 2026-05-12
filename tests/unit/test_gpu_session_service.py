@@ -83,18 +83,7 @@ def _make_bundle_mapping(
 
 
 def _make_offer(*, offer_id: int = 1001, dph_total: float = 0.5) -> VastAIOffer:
-    return VastAIOffer(
-        id=offer_id,
-        gpu_name="RTX_4090",
-        num_gpus=1,
-        gpu_ram=24,
-        disk_space=100.0,
-        dph_total=dph_total,
-        inet_up=100.0,
-        inet_down=500.0,
-        cuda_max_good=12.1,
-        verified=True,
-    )
+    return VastAIOffer(id=offer_id, gpu_name="RTX_4090", num_gpus=1, dph_total=dph_total)
 
 
 def _make_gpu_session(**kwargs: Any) -> GpuSession:
