@@ -20,7 +20,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-_VASTAI_IMAGE = "vastai/comfy:latest"
+# No :latest tag exists. Pin to a specific version; bumping requires deliberate review
+# because it changes CUDA/PyTorch/Python versions. Check hub.docker.com/r/vastai/comfy/tags.
+# TODO: move to bundle.yaml so each bundle pins its own image (bundle-driven docker image).
+_VASTAI_IMAGE = "vastai/comfy:v0.15.1-cuda-12.9-py312"
 
 
 def make_onstart_cmd(branch: str) -> str:

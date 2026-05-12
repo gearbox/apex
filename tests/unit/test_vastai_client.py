@@ -235,25 +235,71 @@ async def test_create_instance_generic_server_error() -> None:
 
 
 async def test_get_instance_success() -> None:
-    instance_data = {
-        "id": 123,
-        "actual_status": "running",
-        "status_msg": "all good",
-        "ssh_host": "1.2.3.4",
-        "ssh_port": 22022,
-        "public_ipaddr": "1.2.3.4",
-        "ports": {"18188/tcp": [{"HostPort": "18188"}]},
-        "cur_state": "running",
-        "dph_total": 0.234567,
-    }
     mock_http = AsyncMock(spec=httpx.AsyncClient)
-    mock_http.get = AsyncMock(return_value=_mock_response(200, instance_data))
+    mock_http.get = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                "instances": {
+                    "id": 123,
+                    "actual_status": "running",
+                    "cur_state": "running",
+                    "status_msg": "all good",
+                    "dph_total": 0.234567,
+                }
+            },
+        )
+    )
     client = _make_client(mock_http)
     instance = await client.get_instance(123)
     assert isinstance(instance, VastAIInstance)
     assert instance.id == 123
     assert instance.actual_status == "running"
     assert instance.cur_state == "running"
+
+
+async def test_get_instance_unwraps_envelope() -> None:
+    """Regression: /instances/{id}/ returns the instance wrapped in an
+    'instances' key. apex must unwrap before returning to callers."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.get = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                "instances": {
+                    "id": 36610640,
+                    "actual_status": "running",
+                    "cur_state": "running",
+                    "machine_id": 87355,
+                    "gpu_name": "RTX 4090",
+                }
+            },
+        )
+    )
+    client = _make_client(mock_http)
+    instance = await client.get_instance(36610640)
+    assert instance.id == 36610640
+    assert instance.actual_status == "running"
+    assert instance.cur_state == "running"
+
+
+async def test_get_instance_raises_when_envelope_missing() -> None:
+    """If Vast.ai changes the response to root-level instance (unlikely
+    but possible drift), apex must raise a domain VastAIError so callers
+    can handle it consistently with other client errors."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.get = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                "id": 36610640,  # root-level, no envelope
+                "actual_status": "running",
+            },
+        )
+    )
+    client = _make_client(mock_http)
+    with pytest.raises(VastAIError, match="GetInstanceResponse"):
+        await client.get_instance(36610640)
 
 
 async def test_get_instance_not_found() -> None:
@@ -428,7 +474,7 @@ async def test_search_offers_accepts_minimal_response_shape() -> None:
 
 async def test_search_offers_rejects_missing_dph_total() -> None:
     """dph_total is required — apex billing depends on it. Missing dph_total
-    must crash loudly, not silently provision at unknown cost."""
+    must crash loudly as VastAIError, not silently provision at unknown cost."""
     mock_http = AsyncMock(spec=httpx.AsyncClient)
     mock_http.post = AsyncMock(
         return_value=_mock_response(
@@ -437,5 +483,43 @@ async def test_search_offers_rejects_missing_dph_total() -> None:
         )
     )
     client = _make_client(mock_http)
-    with pytest.raises(msgspec.ValidationError, match="dph_total"):
+    with pytest.raises(VastAIError, match="SearchOffersResponse"):
         await client.search_offers(_HARDWARE)
+
+
+async def test_search_offers_raises_vastaierror_on_malformed_response() -> None:
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                # missing "offers" key
+                "something_else": [],
+            },
+        )
+    )
+    client = _make_client(mock_http)
+    with pytest.raises(VastAIError, match="SearchOffersResponse"):
+        await client.search_offers(_HARDWARE)
+
+
+async def test_create_instance_raises_vastaierror_on_malformed_response() -> None:
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.put = AsyncMock(
+        return_value=_mock_response(
+            200,
+            {
+                # missing required new_contract / success
+                "weird": "shape",
+            },
+        )
+    )
+    client = _make_client(mock_http)
+    with pytest.raises(VastAIError, match="CreateInstanceResponse"):
+        await client.create_instance(
+            offer_id=1,
+            image="vastai/comfy:test",
+            disk_gb=80,
+            env={},
+            onstart_cmd="echo hi",
+        )

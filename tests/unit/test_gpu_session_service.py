@@ -227,7 +227,7 @@ class TestStartSession:
         mocks["vastai_client"].search_offers.assert_called_once_with(bundle.hardware)
         mocks["vastai_client"].create_instance.assert_called_once_with(
             offer.id,
-            image="vastai/comfy:latest",
+            image="vastai/comfy:v0.15.1-cuda-12.9-py312",
             disk_gb=bundle.hardware.min_disk_gb,
             env=ANY,
             onstart_cmd=ANY,
