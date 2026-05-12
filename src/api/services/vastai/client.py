@@ -17,7 +17,13 @@ from .exceptions import (
     VastAIError,
     VastAIPaymentError,
 )
-from .schemas import CreateInstanceResponse, SearchOffersResponse, VastAIInstance, VastAIOffer
+from .schemas import (
+    CreateInstanceResponse,
+    SearchOffersResponse,
+    VastAIInstance,
+    VastAIOffer,
+    _GetInstanceEnvelope,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -170,14 +176,17 @@ class VastAIClient:
         if resp.status_code == 404:
             raise InstanceNotFoundError(f"Instance {instance_id} not found", status_code=404)
         self._raise_for_status(resp, f"get_instance(instance_id={instance_id})")
-        instance = msgspec.json.decode(resp.content, type=VastAIInstance)
+        # The /instances/{id}/ endpoint wraps the instance in an "instances" key (despite
+        # being a single-instance lookup). See https://docs.vast.ai/api/show-instance and
+        # vastai/async_/client.py:190-204 in the official SDK.
+        envelope = msgspec.json.decode(resp.content, type=_GetInstanceEnvelope)
         logger.info(
             "vastai.get_instance.success",
             instance_id=instance_id,
-            actual_status=instance.actual_status,
-            cur_state=instance.cur_state,
+            actual_status=envelope.instances.actual_status,
+            cur_state=envelope.instances.cur_state,
         )
-        return instance
+        return envelope.instances
 
     async def stop_instance(self, instance_id: int) -> None:
         """Stop (pause) an instance — retains disk, stops GPU billing.

@@ -52,3 +52,13 @@ class CreateInstanceResponse(msgspec.Struct, forbid_unknown_fields=False):
 
     new_contract: int
     success: bool
+
+
+class _GetInstanceEnvelope(msgspec.Struct, forbid_unknown_fields=False):
+    """Envelope around a single instance returned by GET /instances/{id}/.
+
+    Despite being a single-instance endpoint, Vast.ai wraps the instance
+    under an 'instances' key. See https://docs.vast.ai/api/show-instance.
+    """
+
+    instances: VastAIInstance
