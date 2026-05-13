@@ -186,7 +186,7 @@ async def test_stop_cancels_task_and_clears_state() -> None:
 
     await worker.stop()
 
-    assert worker._running is False
+    assert not worker._running
     assert worker._task is None
 
 
@@ -201,8 +201,6 @@ async def test_stop_noop_when_not_running() -> None:
 
 @pytest.mark.asyncio
 async def test_run_loop_stops_when_running_set_false() -> None:
-    import asyncio
-
     db_manager_mock = MagicMock(spec=DatabaseManager)
     worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=9999)
     worker._running = True

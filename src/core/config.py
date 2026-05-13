@@ -97,6 +97,43 @@ class Settings(BaseSettings):
         default="",
         description="Vast.ai API key for GPU node management. Required for Aisha on-demand sessions.",
     )
+    vastai_max_429_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description=(
+            "Number of times to retry a Vast.ai API call on HTTP 429 "
+            "(rate limit), honoring the Retry-After header. After exhaustion, "
+            "raises VastAIRateLimitError. Each retry waits Retry-After seconds, "
+            "or 1.0s fallback if absent. Zero disables retry."
+        ),
+    )
+    vastai_max_retry_after_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        le=60.0,
+        description=(
+            "Cap on the Retry-After value apex will honor. Defends against a "
+            "pathological Retry-After: 300 that would block request handlers "
+            "for minutes. If Vast.ai asks for longer than this, retry budget "
+            "is consumed immediately at this cap."
+        ),
+    )
+    vastai_destroy_retry_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description=(
+            "Total destroy_instance attempts in _teardown_external_resources "
+            "before marking the stop as 'teardown failed' and relying on the "
+            "orphan sweeper to recover later. Exponential backoff between attempts: "
+            "1s, 2s, 4s, capped at 5s (so 5 attempts wait at most 1+2+4+5 = 12s "
+            "in addition to actual API call durations). Each attempt itself may "
+            "wait further under HTTP 429 (see vastai_max_429_retries). "
+            "Above this attempt count, the orphan sweeper recovers within "
+            "orphaned_tunnel_cleanup_interval_minutes."
+        ),
+    )
 
     # --- GPU Session Provisioning (ai-bundles) ---
     ai_bundles_github_token: str = Field(
@@ -272,6 +309,26 @@ class Settings(BaseSettings):
         ge=1,
         le=120,
         description="Tunnels younger than this are skipped by the orphan cleanup worker",
+    )
+    orphaned_instance_cleanup_grace_period_minutes: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        description=(
+            "Skip sessions stopped/failed within this window — gives the in-flow "
+            "stop logic time to complete naturally before the sweeper interferes."
+        ),
+    )
+    orphaned_instance_cleanup_horizon_minutes: int = Field(
+        default=1440,
+        ge=60,
+        le=10080,
+        description=(
+            "Don't query Vast.ai for orphan candidates older than this. After "
+            "24h, an instance that wasn't destroyed has almost certainly been "
+            "garbage-collected by Vast.ai. Bounded to keep the orphan sweep cost "
+            "constant as the gpu_sessions table grows."
+        ),
     )
     gpu_provision_worker_concurrency: int = Field(
         default=10,

@@ -831,20 +831,21 @@ class GpuSessionService:
     ) -> bool:
         """Best-effort teardown of Vast.ai instance + CF tunnel for a session.
 
-        Always continues on failure so the DB status transition can proceed.
+        Always continues on failure so the DB status transition can proceed,
+        but RETRIES the destroy call before giving up. The orphan sweeper
+        is the long-tail recovery for whatever still slips through.
+
         Returns True if any teardown step failed (caller may want to log it).
         """
         had_errors = False
         if session_row.vastai_instance_id is not None:
-            try:
-                await self._vastai.destroy_instance(session_row.vastai_instance_id)
-            except Exception:
+            if not await self._destroy_with_retry(
+                session_row.vastai_instance_id, log_prefix=log_prefix, session_id=session_row.id
+            ):
                 had_errors = True
-                logger.warning(
-                    f"{log_prefix}.teardown_instance_failed",
-                    session_id=str(session_row.id),
-                    instance_id=session_row.vastai_instance_id,
-                )
+            else:
+                await self._mark_instance_destroyed(session_row.id)
+
         if session_row.cf_tunnel_id is not None and session_row.cf_dns_record_id is not None:
             try:
                 await self._cf.delete_session_tunnel(
@@ -859,6 +860,56 @@ class GpuSessionService:
                     tunnel_id=session_row.cf_tunnel_id,
                 )
         return had_errors
+
+    async def _destroy_with_retry(
+        self, instance_id: int, *, log_prefix: str, session_id: UUID
+    ) -> bool:
+        """Try destroy_instance up to N times with exponential backoff.
+
+        Returns True on success, False after exhausting retries.
+        """
+        attempts = self._settings.vastai_destroy_retry_attempts
+        backoff_seconds = 1.0
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._vastai.destroy_instance(instance_id)
+                if attempt > 1:
+                    logger.info(
+                        f"{log_prefix}.teardown_instance_recovered",
+                        session_id=str(session_id),
+                        instance_id=instance_id,
+                        attempt=attempt,
+                    )
+                return True
+            except Exception as exc:
+                if attempt == attempts:
+                    logger.exception(
+                        f"{log_prefix}.teardown_instance_failed",
+                        session_id=str(session_id),
+                        instance_id=instance_id,
+                        attempts=attempts,
+                    )
+                    return False
+                logger.info(
+                    f"{log_prefix}.teardown_instance_retry",
+                    session_id=str(session_id),
+                    instance_id=instance_id,
+                    attempt=attempt,
+                    backoff_seconds=backoff_seconds,
+                    error=str(exc),
+                )
+                await asyncio.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, 5.0)
+        return False  # unreachable, satisfies mypy
+
+    async def _mark_instance_destroyed(self, session_id: UUID) -> None:
+        """Record that destroy_instance succeeded for this session.
+
+        The orphan sweeper uses this to skip sessions whose instance is confirmed gone.
+        """
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionRepository(db)
+            await repo.mark_instance_destroyed(session_id, datetime.now(UTC))
 
     async def _stop_confirmation(
         self,

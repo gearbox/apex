@@ -226,6 +226,18 @@ class GpuSession(Base):
             "phase-2 reconciler worker should retry."
         ),
     )
+    vastai_instance_destroyed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "When destroy_instance returned success for this session's Vast.ai "
+            "instance. NULL if destroy was never attempted, or attempted but "
+            "failed. Used by the orphan sweeper to identify sessions where the "
+            "instance may still be running despite the session being in a "
+            "terminal state."
+        ),
+    )
+
     billing_finalization_attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

@@ -25,3 +25,16 @@ class InstanceNotFoundError(VastAIError):
 
 class OfferTakenError(VastAIError):
     """The selected offer was rented by someone else between search and create."""
+
+
+class VastAIRateLimitError(VastAIError):
+    """Raised when Vast.ai returns 429 and our retry budget is exhausted.
+
+    The retry handler in VastAIClient honors Retry-After up to
+    settings.vastai_max_429_retries. If that's exceeded, this error
+    surfaces to callers so they can decide their own policy.
+    """
+
+    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message, status_code=429)
+        self.retry_after_seconds = retry_after_seconds

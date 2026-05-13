@@ -126,10 +126,12 @@ def _make_settings(
     *,
     offer_walk_depth: int = 10,
     recreation_attempts: int = 1,
+    destroy_retry_attempts: int = 3,
 ) -> MagicMock:
     settings = MagicMock()
     settings.provisioning_offer_walk_depth = offer_walk_depth
     settings.provisioning_recreation_attempts = recreation_attempts
+    settings.vastai_destroy_retry_attempts = destroy_retry_attempts
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
@@ -3104,3 +3106,102 @@ class TestStopSessionLifecyclePolicy:
         # Pre-active terminal race: no refund, no external teardown.
         mocks["billing_service"].refund.assert_not_called()
         mocks["vastai_client"].destroy_instance.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _destroy_with_retry — regression for 2026-05-13 incident
+# ---------------------------------------------------------------------------
+
+
+class TestDestroyWithRetry:
+    async def test_succeeds_on_first_attempt(self) -> None:
+        service, mocks = _make_service()
+        mocks["settings"].vastai_destroy_retry_attempts = 3
+        mocks["vastai_client"].destroy_instance = AsyncMock(return_value=None)
+
+        with patch(_REPO_PATH):
+            result = await service._destroy_with_retry(12345, log_prefix="test", session_id=uuid4())
+
+        assert result is True
+        assert mocks["vastai_client"].destroy_instance.call_count == 1
+
+    async def test_recovers_on_second_attempt(self) -> None:
+        """Transient failure on first attempt recovers via in-flow retry."""
+        service, mocks = _make_service()
+        mocks["settings"].vastai_destroy_retry_attempts = 3
+        mocks["vastai_client"].destroy_instance = AsyncMock(
+            side_effect=[VastAIError("transient", status_code=500), None]
+        )
+
+        with patch("src.api.services.gpu_session.service.asyncio.sleep", new_callable=AsyncMock):
+            result = await service._destroy_with_retry(12345, log_prefix="test", session_id=uuid4())
+
+        assert result is True
+        assert mocks["vastai_client"].destroy_instance.call_count == 2
+
+    async def test_exhausts_retries_returns_false(self) -> None:
+        """Sustained failure exhausts all attempts and returns False."""
+        service, mocks = _make_service()
+        mocks["settings"].vastai_destroy_retry_attempts = 3
+        mocks["vastai_client"].destroy_instance = AsyncMock(
+            side_effect=VastAIError("persistent", status_code=500)
+        )
+
+        with patch("src.api.services.gpu_session.service.asyncio.sleep", new_callable=AsyncMock):
+            result = await service._destroy_with_retry(12345, log_prefix="test", session_id=uuid4())
+
+        assert result is False
+        assert mocks["vastai_client"].destroy_instance.call_count == 3
+
+    async def test_teardown_marks_destroyed_on_success(self) -> None:
+        """On successful destroy, vastai_instance_destroyed_at is stamped in DB."""
+        service, mocks = _make_service()
+        mocks["settings"].vastai_destroy_retry_attempts = 3
+        session = _make_gpu_session(status=GpuSessionStatus.active)
+        mocks["vastai_client"].destroy_instance = AsyncMock(return_value=None)
+        mocks["cf_client"].delete_session_tunnel = AsyncMock(return_value=None)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.mark_instance_destroyed = AsyncMock(return_value=None)
+
+            had_errors = await service._teardown_external_resources(session, log_prefix="test")
+
+        assert had_errors is False
+        mock_repo.mark_instance_destroyed.assert_called_once()
+
+    async def test_teardown_does_not_mark_on_failure(self) -> None:
+        """When destroy exhausts retries, DB is NOT stamped — orphan sweeper will retry."""
+        service, mocks = _make_service()
+        mocks["settings"].vastai_destroy_retry_attempts = 3
+        session = _make_gpu_session(status=GpuSessionStatus.active)
+        mocks["vastai_client"].destroy_instance = AsyncMock(
+            side_effect=VastAIError("persistent", status_code=500)
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.mark_instance_destroyed = AsyncMock(return_value=None)
+
+            with patch(
+                "src.api.services.gpu_session.service.asyncio.sleep", new_callable=AsyncMock
+            ):
+                had_errors = await service._teardown_external_resources(session, log_prefix="test")
+
+        assert had_errors is True
+        mock_repo.mark_instance_destroyed.assert_not_called()
+
+    async def test_retry_exception_binding_does_not_suppress_return_false(self) -> None:
+        """Binding `except Exception as exc` must not change the return value on exhaustion."""
+        service, mocks = _make_service()
+        mocks["settings"].vastai_destroy_retry_attempts = 2
+        error = VastAIError("auth failed", status_code=401)
+        mocks["vastai_client"].destroy_instance = AsyncMock(side_effect=error)
+
+        with patch("src.api.services.gpu_session.service.asyncio.sleep", new_callable=AsyncMock):
+            result = await service._destroy_with_retry(12345, log_prefix="test", session_id=uuid4())
+
+        assert result is False
+        assert mocks["vastai_client"].destroy_instance.call_count == 2

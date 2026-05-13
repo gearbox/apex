@@ -90,7 +90,7 @@ def test_no_unprefixed_cf_in_source() -> None:
 
     src_root = _REPO_ROOT / "src"
     for needle in forbidden + forbidden_env:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603
             [
                 "grep",
                 "-r",

@@ -7,11 +7,13 @@ from .exceptions import (
     OfferTakenError,
     VastAIError,
     VastAIPaymentError,
+    VastAIRateLimitError,
 )
 
 __all__ = [
     "VastAIClient",
     "VastAIError",
+    "VastAIRateLimitError",
     "NoCapacityError",
     "VastAIPaymentError",
     "InstanceNotFoundError",

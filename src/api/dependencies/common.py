@@ -583,6 +583,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         vastai_client = VastAIClient(
             http_client=_services.gpu_session_http_client,
             api_key=settings.vastai_api_key,
+            settings=settings,
         )
         cf_client = CloudflareTunnelClient(
             http_client=_services.gpu_session_http_client,
@@ -638,6 +639,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
         _services.orphaned_tunnel_cleanup_worker = OrphanedTunnelCleanupWorker(
             session_factory=_services.db_manager.session_factory,
             cf_client=cf_client,
+            vastai_client=vastai_client,
             settings=settings,
         )
         await _services.orphaned_tunnel_cleanup_worker.start()
