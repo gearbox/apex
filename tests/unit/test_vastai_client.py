@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import msgspec
@@ -15,6 +16,7 @@ from src.api.services.vastai.exceptions import (
     OfferTakenError,
     VastAIError,
     VastAIPaymentError,
+    VastAIRateLimitError,
 )
 from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
 from src.core.bundle_config import HardwareRequirements
@@ -42,17 +44,34 @@ def _make_offer(id: int, dph_total: float = 0.5) -> dict[str, object]:
     }
 
 
-def _mock_response(status_code: int, body: object) -> MagicMock:
+def _mock_response(
+    status_code: int,
+    body: object,
+    *,
+    headers: dict[str, str] | None = None,
+) -> MagicMock:
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = status_code
     content = msgspec.json.encode(body)
     resp.content = content
     resp.text = content.decode()
+    resp.headers = headers or {}
     return resp
 
 
-def _make_client(mock_http: AsyncMock) -> VastAIClient:
-    return VastAIClient(http_client=mock_http, api_key="test-api-key")
+def _make_settings(**overrides: Any) -> MagicMock:
+    settings = MagicMock()
+    settings.vastai_max_429_retries = overrides.get("max_429_retries", 3)
+    settings.vastai_max_retry_after_seconds = overrides.get("max_retry_after_seconds", 10.0)
+    return settings
+
+
+def _make_client(mock_http: AsyncMock, **settings_overrides: Any) -> VastAIClient:
+    return VastAIClient(
+        http_client=mock_http,
+        api_key="test-api-key",
+        settings=_make_settings(**settings_overrides),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +391,7 @@ async def test_destroy_instance_idempotent_on_404() -> None:
 async def test_auth_header_sent_on_search() -> None:
     mock_http = AsyncMock(spec=httpx.AsyncClient)
     mock_http.post = AsyncMock(return_value=_mock_response(200, {"offers": [_make_offer(1)]}))
-    client = VastAIClient(http_client=mock_http, api_key="my-secret-key")
+    client = VastAIClient(http_client=mock_http, api_key="my-secret-key", settings=_make_settings())
     await client.search_offers(_HARDWARE)
     headers = mock_http.post.call_args.kwargs["headers"]
     assert headers["Authorization"] == "Bearer my-secret-key"
@@ -532,3 +551,108 @@ async def test_create_instance_raises_vastaierror_on_malformed_response() -> Non
             env={},
             onstart_cmd="echo hi",
         )
+
+
+# ---------------------------------------------------------------------------
+# 429 retry — regression for 2026-05-13 incident
+# ---------------------------------------------------------------------------
+
+
+async def test_destroy_instance_retries_on_429() -> None:
+    """Regression for 2026-05-13: 429 must be retried, not raised immediately."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.delete = AsyncMock(
+        side_effect=[
+            _mock_response(429, "", headers={"Retry-After": "1"}),
+            _mock_response(200, ""),
+        ]
+    )
+    with patch("src.api.services.vastai.client.asyncio.sleep", new_callable=AsyncMock):
+        client = _make_client(mock_http, max_429_retries=3)
+        await client.destroy_instance(12345)
+    assert mock_http.delete.await_count == 2
+
+
+async def test_request_with_retry_exhausts_budget_then_raises() -> None:
+    """After max_429_retries, surface VastAIRateLimitError."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.delete = AsyncMock(return_value=_mock_response(429, "", headers={"Retry-After": "1"}))
+    with patch("src.api.services.vastai.client.asyncio.sleep", new_callable=AsyncMock):
+        client = _make_client(mock_http, max_429_retries=2)
+        with pytest.raises(VastAIRateLimitError) as exc_info:
+            await client.destroy_instance(12345)
+    # 1 initial + 2 retries = 3 calls total
+    assert mock_http.delete.await_count == 3
+    assert exc_info.value.retry_after_seconds == pytest.approx(1.0)
+    assert exc_info.value.status_code == 429
+
+
+async def test_retry_after_capped_at_max() -> None:
+    """A pathological Retry-After is clamped to vastai_max_retry_after_seconds."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.delete = AsyncMock(
+        side_effect=[
+            _mock_response(429, "", headers={"Retry-After": "999"}),
+            _mock_response(200, ""),
+        ]
+    )
+    with patch(
+        "src.api.services.vastai.client.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep_mock:
+        client = _make_client(mock_http, max_429_retries=3, max_retry_after_seconds=10.0)
+        await client.destroy_instance(12345)
+    sleep_mock.assert_awaited_once_with(10.0)
+
+
+async def test_retry_after_missing_uses_default_one_second() -> None:
+    """Missing Retry-After header defaults to 1.0s wait."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.delete = AsyncMock(
+        side_effect=[
+            _mock_response(429, ""),  # no Retry-After header
+            _mock_response(200, ""),
+        ]
+    )
+    with patch(
+        "src.api.services.vastai.client.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep_mock:
+        client = _make_client(mock_http, max_429_retries=3)
+        await client.destroy_instance(12345)
+    sleep_mock.assert_awaited_once_with(1.0)
+
+
+async def test_vastaierror_is_base_of_vastaieratelimiterror() -> None:
+    """VastAIRateLimitError must be catchable as VastAIError."""
+    err = VastAIRateLimitError("exhausted", retry_after_seconds=5.0)
+    assert isinstance(err, VastAIError)
+    assert err.status_code == 429
+    assert err.retry_after_seconds == pytest.approx(5.0)
+
+
+async def test_retry_applies_to_get_instance() -> None:
+    """Smoke-test: 429 retry is wired into get_instance, not just destroy."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.get = AsyncMock(
+        side_effect=[
+            _mock_response(429, "", headers={"Retry-After": "1"}),
+            _mock_response(
+                200,
+                {"instances": {"id": 1, "actual_status": "running", "cur_state": "running"}},
+            ),
+        ]
+    )
+    with patch("src.api.services.vastai.client.asyncio.sleep", new_callable=AsyncMock):
+        client = _make_client(mock_http, max_429_retries=3)
+        result = await client.get_instance(1)
+    assert result is not None
+    assert mock_http.get.await_count == 2
+
+
+async def test_zero_retries_raises_immediately_on_429() -> None:
+    """vastai_max_429_retries=0 disables retry; raises VastAIRateLimitError on first 429."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.delete = AsyncMock(return_value=_mock_response(429, "", headers={"Retry-After": "5"}))
+    client = _make_client(mock_http, max_429_retries=0)
+    with pytest.raises(VastAIRateLimitError):
+        await client.destroy_instance(12345)
+    assert mock_http.delete.await_count == 1

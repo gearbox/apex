@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, TypeVar
+import asyncio
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import httpx
 import msgspec
@@ -16,6 +17,7 @@ from .exceptions import (
     OfferTakenError,
     VastAIError,
     VastAIPaymentError,
+    VastAIRateLimitError,
 )
 from .schemas import (
     CreateInstanceResponse,
@@ -24,6 +26,9 @@ from .schemas import (
     VastAIInstance,
     VastAIOffer,
 )
+
+if TYPE_CHECKING:
+    from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
 
@@ -38,9 +43,10 @@ class VastAIClient:
 
     _VASTAI_API_BASE = "https://console.vast.ai/api/v0"
 
-    def __init__(self, http_client: httpx.AsyncClient, api_key: str) -> None:
+    def __init__(self, http_client: httpx.AsyncClient, api_key: str, settings: Settings) -> None:
         self._client = http_client
         self._api_key = api_key
+        self._settings = settings
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
@@ -70,6 +76,69 @@ class VastAIClient:
             f"{context}: HTTP {resp.status_code} — {resp.text[:256]}",
             status_code=resp.status_code,
         )
+
+    def _parse_retry_after(self, resp: httpx.Response) -> float:
+        """Parse Retry-After header; cap to settings.vastai_max_retry_after_seconds.
+
+        Vast.ai sends Retry-After as an integer second count. Fall back to
+        1.0s if the header is missing or malformed.
+        """
+        raw = resp.headers.get("Retry-After")
+        if raw is None:
+            return 1.0
+        try:
+            seconds = float(raw)
+        except ValueError:
+            logger.warning(
+                "vastai.retry_after_unparseable",
+                raw_value=raw[:64],
+            )
+            return 1.0
+        return min(max(seconds, 0.0), self._settings.vastai_max_retry_after_seconds)
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        context: str,
+        json_body: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Issue an HTTP request, retrying on 429 with Retry-After.
+
+        Handles 429 consistently across all Vast.ai endpoints. Non-429
+        responses are returned as-is; callers do their own status checks.
+        """
+        attempts_remaining = self._settings.vastai_max_429_retries
+        while True:
+            kwargs: dict[str, Any] = {"headers": self._auth_headers()}
+            if json_body is not None:
+                kwargs["json"] = json_body
+            resp = cast(httpx.Response, await getattr(self._client, method)(url, **kwargs))
+
+            if resp.status_code != 429:
+                return resp
+
+            retry_after = self._parse_retry_after(resp)
+            if attempts_remaining <= 0:
+                logger.warning(
+                    "vastai.rate_limit_exhausted",
+                    context=context,
+                    retry_after_seconds=retry_after,
+                )
+                raise VastAIRateLimitError(
+                    f"{context}: rate limit retries exhausted (last Retry-After={retry_after}s)",
+                    retry_after_seconds=retry_after,
+                )
+
+            logger.info(
+                "vastai.rate_limit_retry",
+                context=context,
+                retry_after_seconds=retry_after,
+                attempts_remaining=attempts_remaining,
+            )
+            await asyncio.sleep(retry_after)
+            attempts_remaining -= 1
 
     async def search_offers(
         self, hardware: HardwareRequirements, *, limit: int = 10
@@ -107,10 +176,11 @@ class VastAIClient:
             "order": [["dph_total", "asc"]],
             "limit": limit,
         }
-        resp = await self._client.post(
+        resp = await self._request_with_retry(
+            "post",
             f"{self._VASTAI_API_BASE}/bundles/",
-            json=payload,
-            headers=self._auth_headers(),
+            context="search_offers",
+            json_body=payload,
         )
         self._raise_for_status(resp, "search_offers")
         result = self._decode_response(resp, SearchOffersResponse, "search_offers")
@@ -157,10 +227,11 @@ class VastAIClient:
             "env": env,
             "onstart": onstart_cmd,
         }
-        resp = await self._client.put(
+        resp = await self._request_with_retry(
+            "put",
             f"{self._VASTAI_API_BASE}/asks/{offer_id}/",
-            json=payload,
-            headers=self._auth_headers(),
+            context=f"create_instance(offer_id={offer_id})",
+            json_body=payload,
         )
         if resp.status_code == 409:
             logger.warning("vastai.create_instance.offer_taken", offer_id=offer_id)
@@ -196,9 +267,10 @@ class VastAIClient:
             InstanceNotFoundError: If instance doesn't exist (HTTP 404).
             VastAIError: On other API errors.
         """
-        resp = await self._client.get(
+        resp = await self._request_with_retry(
+            "get",
             f"{self._VASTAI_API_BASE}/instances/{instance_id}/",
-            headers=self._auth_headers(),
+            context=f"get_instance(instance_id={instance_id})",
         )
         if resp.status_code == 404:
             raise InstanceNotFoundError(f"Instance {instance_id} not found", status_code=404)
@@ -229,10 +301,11 @@ class VastAIClient:
         Raises:
             VastAIError: On API errors.
         """
-        resp = await self._client.put(
+        resp = await self._request_with_retry(
+            "put",
             f"{self._VASTAI_API_BASE}/instances/{instance_id}/",
-            json={"state": "stopped"},
-            headers=self._auth_headers(),
+            context=f"stop_instance(instance_id={instance_id})",
+            json_body={"state": "stopped"},
         )
         self._raise_for_status(resp, f"stop_instance(instance_id={instance_id})")
         logger.info("vastai.stop_instance.success", instance_id=instance_id)
@@ -243,10 +316,11 @@ class VastAIClient:
         Raises:
             VastAIError: On API errors.
         """
-        resp = await self._client.put(
+        resp = await self._request_with_retry(
+            "put",
             f"{self._VASTAI_API_BASE}/instances/{instance_id}/",
-            json={"state": "running"},
-            headers=self._auth_headers(),
+            context=f"start_instance(instance_id={instance_id})",
+            json_body={"state": "running"},
         )
         self._raise_for_status(resp, f"start_instance(instance_id={instance_id})")
         logger.info("vastai.start_instance.success", instance_id=instance_id)
@@ -257,9 +331,10 @@ class VastAIClient:
         Raises:
             VastAIError: On non-404 API errors.
         """
-        resp = await self._client.delete(
+        resp = await self._request_with_retry(
+            "delete",
             f"{self._VASTAI_API_BASE}/instances/{instance_id}/",
-            headers=self._auth_headers(),
+            context=f"destroy_instance(instance_id={instance_id})",
         )
         if resp.status_code == 404:
             logger.info("vastai.destroy_instance.already_gone", instance_id=instance_id)

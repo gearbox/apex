@@ -370,6 +370,52 @@ class GpuSessionRepository:
         )
         await self._session.flush()
 
+    async def list_orphaned_instance_candidates(
+        self,
+        *,
+        terminal_statuses: list[GpuSessionStatus],
+        stopped_before: datetime,
+        created_after: datetime,
+        limit: int = 50,
+    ) -> Sequence[GpuSession]:
+        """Sessions in terminal state where we may have failed to destroy the instance.
+
+        Filter: status IN terminal_statuses
+            AND vastai_instance_id IS NOT NULL
+            AND vastai_instance_destroyed_at IS NULL
+            AND (stopped_at IS NULL OR stopped_at < stopped_before)  -- grace period
+            AND created_at > created_after                           -- horizon cap
+
+        ``limit`` caps per-sweep work so a backlog doesn't blow the sweep budget.
+        """
+        stmt = (
+            select(GpuSession)
+            .where(
+                GpuSession.status.in_(terminal_statuses),
+                GpuSession.vastai_instance_id.isnot(None),
+                GpuSession.vastai_instance_destroyed_at.is_(None),
+                or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < stopped_before),
+                GpuSession.created_at > created_after,
+            )
+            .order_by(GpuSession.created_at.asc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
+    async def mark_instance_destroyed(self, session_id: UUID, destroyed_at: datetime) -> None:
+        """Stamp vastai_instance_destroyed_at to record confirmed instance destruction.
+
+        Called on successful destroy_instance() — both from in-flow teardown and
+        the orphan sweeper. A NULL value means the instance may still be running.
+        """
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(vastai_instance_destroyed_at=destroyed_at)
+        )
+        await self._session.flush()
+
     async def update_status(
         self,
         session_id: UUID,
