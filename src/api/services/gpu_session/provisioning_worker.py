@@ -48,6 +48,33 @@ logger = structlog.get_logger(__name__)
 _PROBE_TIMEOUT_SECONDS = 10.0
 _TERMINAL_STATUSES = frozenset({GpuSessionStatus.stopped, GpuSessionStatus.failed})
 
+# Vast.ai actual_status values that mean the container is dead and will never reach 'running'.
+# Sourced from Vast.ai docs: https://docs.vast.ai/sdk/python/quickstart — "if actual_status
+# becomes 'exited' (container crashed), 'unknown' (no heartbeat from host), or 'offline'
+# (host disconnected), it will never reach 'running'."
+_TERMINAL_ACTUAL_STATUSES = frozenset({"exited", "unknown", "offline"})
+
+# Vast.ai cur_state values that, combined with a non-'running' actual_status, mean the
+# instance is dead. Observed empirically when a container fails to start (port allocation
+# error etc.): actual_status='created' with cur_state='stopped'.
+_TERMINAL_CUR_STATES = frozenset({"stopped", "exited"})
+
+
+def _classify_terminal_state(instance: VastAIInstance) -> str | None:
+    """Return a short reason string if the instance can never reach 'running', else None.
+
+    Reasons are stable strings suitable for log filtering:
+    'exited', 'unknown', 'offline', 'stopped_before_running'.
+
+    actual_status takes precedence over cur_state — it's the more authoritative signal.
+    """
+    if instance.actual_status in _TERMINAL_ACTUAL_STATUSES:
+        return instance.actual_status  # 'exited' | 'unknown' | 'offline'
+    # Guard: if actual_status == 'running', trust it even if cur_state lags behind.
+    if instance.actual_status != "running" and instance.cur_state in _TERMINAL_CUR_STATES:
+        return "stopped_before_running"
+    return None
+
 
 class GpuProvisioningWorker:
     """Advances non-terminal GPU sessions toward their terminal states.
@@ -229,6 +256,23 @@ class GpuProvisioningWorker:
                 await self._retry_or_fail(session, reason="pending_timeout_after_errors")
             return
 
+        # Fast-fail on terminal Vast.ai states — no 20-min timeout wait.
+        if instance is not None:
+            terminal_reason = _classify_terminal_state(instance)
+            if terminal_reason is not None:
+                logger.warning(
+                    "gpu_session.provision.vastai_terminal_state",
+                    session_id=str(session.id),
+                    instance_id=session.vastai_instance_id,
+                    actual_status=instance.actual_status,
+                    cur_state=instance.cur_state,
+                    reason=terminal_reason,
+                )
+                await self._retry_or_fail(
+                    session, reason=f"vastai_terminal_state:{terminal_reason}"
+                )
+                return
+
         if instance is None or instance.actual_status != "running":
             if self._provision_timeout_exceeded(session):
                 logger.warning(
@@ -245,7 +289,34 @@ class GpuProvisioningWorker:
         )
 
     async def _advance_provisioning(self, session: GpuSession) -> None:
-        """Probe ComfyUI; on success → active; on timeout → retry or fail."""
+        """Probe ComfyUI; on success → active; on terminal state → fail; on timeout → retry or fail."""
+        if session.vastai_instance_id is None:
+            await self._mark_failed(session, "provisioning without vastai_instance_id")
+            return
+
+        # Defensive fast-fail: did the container die after reaching 'running'?
+        # Swallow get_instance errors — the ComfyUI probe is the primary signal here.
+        instance: VastAIInstance | None
+        try:
+            instance = await self._vastai.get_instance(session.vastai_instance_id)
+        except Exception:
+            instance = None
+        if instance is not None:
+            terminal_reason = _classify_terminal_state(instance)
+            if terminal_reason is not None:
+                logger.warning(
+                    "gpu_session.provisioning.vastai_terminal_state",
+                    session_id=str(session.id),
+                    instance_id=session.vastai_instance_id,
+                    actual_status=instance.actual_status,
+                    cur_state=instance.cur_state,
+                    reason=terminal_reason,
+                )
+                await self._retry_or_fail(
+                    session, reason=f"vastai_terminal_state:{terminal_reason}"
+                )
+                return
+
         if self._provision_timeout_exceeded(session):
             logger.warning(
                 "gpu_session.provision.provisioning_timeout",

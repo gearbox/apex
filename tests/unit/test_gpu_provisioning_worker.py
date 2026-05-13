@@ -13,10 +13,13 @@ import httpx
 from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
-from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
+from src.api.services.gpu_session.provisioning_worker import (
+    GpuProvisioningWorker,
+    _classify_terminal_state,
+)
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
-from src.api.services.vastai.schemas import VastAIOffer
+from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
 from src.core.enums import GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
@@ -1345,3 +1348,197 @@ class TestRetryOrFailOneAttemptPolicy:
             if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
         ]
         assert not failed_calls
+
+
+# ---------------------------------------------------------------------------
+# TestClassifyTerminalState
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyTerminalState:
+    """Pure-function tests for the terminal-state classifier."""
+
+    def test_exited_is_terminal(self) -> None:
+        instance = VastAIInstance(id=1, actual_status="exited", cur_state="exited")
+        assert _classify_terminal_state(instance) == "exited"
+
+    def test_unknown_is_terminal(self) -> None:
+        instance = VastAIInstance(id=1, actual_status="unknown", cur_state="running")
+        assert _classify_terminal_state(instance) == "unknown"
+
+    def test_offline_is_terminal(self) -> None:
+        instance = VastAIInstance(id=1, actual_status="offline", cur_state="running")
+        assert _classify_terminal_state(instance) == "offline"
+
+    def test_created_with_stopped_is_terminal(self) -> None:
+        """Regression for 2026-05-12 incident: container failed to start on host."""
+        instance = VastAIInstance(id=1, actual_status="created", cur_state="stopped")
+        assert _classify_terminal_state(instance) == "stopped_before_running"
+
+    def test_running_is_not_terminal(self) -> None:
+        instance = VastAIInstance(id=1, actual_status="running", cur_state="running")
+        assert _classify_terminal_state(instance) is None
+
+    def test_created_with_running_is_not_terminal(self) -> None:
+        """Still in normal provisioning — container is being scheduled."""
+        instance = VastAIInstance(id=1, actual_status="created", cur_state="running")
+        assert _classify_terminal_state(instance) is None
+
+    def test_none_actual_status_is_not_terminal(self) -> None:
+        """Pre-detail Vast.ai responses must NOT be terminal — keep waiting."""
+        instance = VastAIInstance(id=1, actual_status=None, cur_state=None)
+        assert _classify_terminal_state(instance) is None
+
+    def test_actual_status_running_with_cur_state_stopped_is_not_terminal(self) -> None:
+        """Trust actual_status='running'; Vast.ai may not have propagated cur_state yet."""
+        instance = VastAIInstance(id=1, actual_status="running", cur_state="stopped")
+        assert _classify_terminal_state(instance) is None
+
+
+# ---------------------------------------------------------------------------
+# TestAdvancePendingFastFail
+# ---------------------------------------------------------------------------
+
+
+class TestAdvancePendingFastFail:
+    async def test_fast_fails_on_exited(self) -> None:
+        """Container exited → mark failed immediately, don't wait for timeout."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="exited", cur_state="exited"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_called_once_with(
+            session, reason="vastai_terminal_state:exited"
+        )
+
+    async def test_fast_fails_on_unknown(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="unknown", cur_state="running"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_called_once_with(
+            session, reason="vastai_terminal_state:unknown"
+        )
+
+    async def test_fast_fails_on_offline(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="offline", cur_state="running"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_called_once_with(
+            session, reason="vastai_terminal_state:offline"
+        )
+
+    async def test_fast_fails_on_created_stopped(self) -> None:
+        """Regression for 2026-05-12: container failed to start on host (port collision)."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="created", cur_state="stopped"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_called_once_with(
+            session, reason="vastai_terminal_state:stopped_before_running"
+        )
+
+    async def test_keeps_waiting_on_normal_provisioning(self) -> None:
+        """actual_status='created' with cur_state='running' is normal — keep polling."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="created", cur_state="running"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+        worker._transition = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_not_called()
+        worker._transition.assert_not_called()
+
+    async def test_fast_fail_does_not_wait_for_timeout(self) -> None:
+        """Terminal state fires even when well within the 20-minute timeout window."""
+        worker, mocks = _make_worker()
+        # Session just created — nowhere near the 20-minute timeout
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            created_at=datetime.now(UTC) - timedelta(seconds=30),
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="exited", cur_state="exited"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_pending(session)
+
+        worker._retry_or_fail.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestAdvanceProvisioningFastFail
+# ---------------------------------------------------------------------------
+
+
+class TestAdvanceProvisioningFastFail:
+    def _mock_ok_response(self) -> MagicMock:
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        return resp
+
+    async def test_fast_fails_on_terminal_state_mid_provisioning(self) -> None:
+        """Container dies after reaching 'running' → fail fast, skip ComfyUI probe."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="exited", cur_state="exited"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._retry_or_fail.assert_called_once_with(
+            session, reason="vastai_terminal_state:exited"
+        )
+        mocks["http_client"].get.assert_not_called()
+
+    async def test_get_instance_error_does_not_abort_probe(self) -> None:
+        """If get_instance fails during provisioning, proceed with the ComfyUI probe."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.side_effect = VastAIError("timeout", status_code=503)
+        mocks["http_client"].get.return_value = self._mock_ok_response()
+        worker._mark_active = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._mark_active.assert_called_once()
+
+    async def test_provisioning_without_instance_id_marks_failed(self) -> None:
+        """vastai_instance_id=None at provisioning stage → fail immediately."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, vastai_instance_id=None)
+        worker._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._mark_failed.assert_called_once()
+        args = worker._mark_failed.call_args[0]
+        assert args[0] is session
