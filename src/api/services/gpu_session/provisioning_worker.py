@@ -257,21 +257,8 @@ class GpuProvisioningWorker:
             return
 
         # Fast-fail on terminal Vast.ai states — no 20-min timeout wait.
-        if instance is not None:
-            terminal_reason = _classify_terminal_state(instance)
-            if terminal_reason is not None:
-                logger.warning(
-                    "gpu_session.provision.vastai_terminal_state",
-                    session_id=str(session.id),
-                    instance_id=session.vastai_instance_id,
-                    actual_status=instance.actual_status,
-                    cur_state=instance.cur_state,
-                    reason=terminal_reason,
-                )
-                await self._retry_or_fail(
-                    session, reason=f"vastai_terminal_state:{terminal_reason}"
-                )
-                return
+        if await self._handle_terminal_state_if_any(session, instance, stage="pending"):
+            return
 
         if instance is None or instance.actual_status != "running":
             if self._provision_timeout_exceeded(session):
@@ -295,27 +282,23 @@ class GpuProvisioningWorker:
             return
 
         # Defensive fast-fail: did the container die after reaching 'running'?
-        # Swallow get_instance errors — the ComfyUI probe is the primary signal here.
+        # get_instance errors are logged but don't break the probe path — the
+        # ComfyUI probe is the authoritative health signal at this stage.
         instance: VastAIInstance | None
         try:
             instance = await self._vastai.get_instance(session.vastai_instance_id)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "gpu_session.provision.vastai_get_instance_failed",
+                session_id=str(session.id),
+                instance_id=session.vastai_instance_id,
+                stage="provisioning",
+                error=str(exc),
+            )
             instance = None
-        if instance is not None:
-            terminal_reason = _classify_terminal_state(instance)
-            if terminal_reason is not None:
-                logger.warning(
-                    "gpu_session.provisioning.vastai_terminal_state",
-                    session_id=str(session.id),
-                    instance_id=session.vastai_instance_id,
-                    actual_status=instance.actual_status,
-                    cur_state=instance.cur_state,
-                    reason=terminal_reason,
-                )
-                await self._retry_or_fail(
-                    session, reason=f"vastai_terminal_state:{terminal_reason}"
-                )
-                return
+
+        if await self._handle_terminal_state_if_any(session, instance, stage="provisioning"):
+            return
 
         if self._provision_timeout_exceeded(session):
             logger.warning(
@@ -342,6 +325,44 @@ class GpuProvisioningWorker:
         reachable = await self._probe_comfyui(session)
         if reachable:
             await self._mark_active(session)
+
+    # ------------------------------------------------------------------
+    # Terminal-state helper
+    # ------------------------------------------------------------------
+
+    async def _handle_terminal_state_if_any(
+        self,
+        session: GpuSession,
+        instance: VastAIInstance | None,
+        *,
+        stage: str,
+    ) -> bool:
+        """If the instance is in a terminal Vast.ai state, log and fast-fail via _retry_or_fail.
+
+        Returns True if the session was failed, False if the caller should continue.
+
+        Args:
+            session: The session being advanced.
+            instance: Result of get_instance, or None on transient errors.
+            stage: Lifecycle stage ('pending' or 'provisioning') — included as a structured
+                log field to distinguish callers without splitting the event name.
+        """
+        if instance is None:
+            return False
+        terminal_reason = _classify_terminal_state(instance)
+        if terminal_reason is None:
+            return False
+        logger.warning(
+            "gpu_session.provision.vastai_terminal_state",
+            session_id=str(session.id),
+            instance_id=session.vastai_instance_id,
+            stage=stage,
+            actual_status=instance.actual_status,
+            cur_state=instance.cur_state,
+            reason=terminal_reason,
+        )
+        await self._retry_or_fail(session, reason=f"vastai_terminal_state:{terminal_reason}")
+        return True
 
     # ------------------------------------------------------------------
     # ComfyUI probe

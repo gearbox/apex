@@ -1542,3 +1542,80 @@ class TestAdvanceProvisioningFastFail:
         worker._mark_failed.assert_called_once()
         args = worker._mark_failed.call_args[0]
         assert args[0] is session
+
+    async def test_advance_provisioning_logs_when_get_instance_raises(self) -> None:
+        """Defensive get_instance call must log a warning on exception, not swallow silently.
+
+        Regression for Sourcery review on PR #51: bare except at line 302 used to
+        silently set instance=None. The probe must still run after the exception.
+        """
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.side_effect = VastAIError("transient", status_code=500)
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+
+        with capture_logs() as logs:
+            await worker._advance_provisioning(session)
+
+        warning_logs = [log for log in logs if "vastai_get_instance_failed" in log.get("event", "")]
+        assert warning_logs, "expected gpu_session.provision.vastai_get_instance_failed log"
+        # Probe still ran — broad catch did not abort the flow
+        mocks["http_client"].get.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestHandleTerminalStateIfAny
+# ---------------------------------------------------------------------------
+
+
+class TestHandleTerminalStateIfAny:
+    async def test_none_instance_returns_false(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        result = await worker._handle_terminal_state_if_any(session, None, stage="pending")
+
+        assert result is False
+        worker._retry_or_fail.assert_not_called()
+
+    async def test_non_terminal_instance_returns_false(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        instance = VastAIInstance(id=1, actual_status="running", cur_state="running")
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        result = await worker._handle_terminal_state_if_any(session, instance, stage="pending")
+
+        assert result is False
+        worker._retry_or_fail.assert_not_called()
+
+    async def test_terminal_instance_returns_true_and_calls_retry_or_fail(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_instance_id=1)
+        instance = VastAIInstance(id=1, actual_status="exited", cur_state="exited")
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        result = await worker._handle_terminal_state_if_any(session, instance, stage="pending")
+
+        assert result is True
+        worker._retry_or_fail.assert_called_once_with(
+            session, reason="vastai_terminal_state:exited"
+        )
+
+    async def test_stage_field_present_in_log(self) -> None:
+        """The stage kwarg must appear as a structured field in the warning log."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, vastai_instance_id=1)
+        instance = VastAIInstance(id=1, actual_status="exited", cur_state="exited")
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            await worker._handle_terminal_state_if_any(session, instance, stage="provisioning")
+
+        matching = [log for log in logs if log.get("stage") == "provisioning"]
+        assert matching, "expected stage='provisioning' as a structured log field"
