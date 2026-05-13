@@ -232,8 +232,19 @@ class OrphanedTunnelCleanupWorker:
             count=len(candidates),
         )
 
-        for session in candidates:
-            await self._cleanup_orphan_instance(session)
+        processed = 0
+        try:
+            for session in candidates:
+                await self._cleanup_orphan_instance(session)
+                processed += 1
+        except VastAIRateLimitError:
+            logger.warning(
+                "gpu_session.orphan_instance_cleanup.sweep_aborted_rate_limited",
+                processed=processed,
+                remaining=len(candidates) - processed,
+            )
+            # Don't re-raise — the run-loop should continue scheduling.
+            # Next sweep cycle will pick up the remaining candidates.
 
     async def _cleanup_orphan_instance(self, session: GpuSession) -> None:
         """Verify and destroy one orphaned instance candidate."""
@@ -253,7 +264,7 @@ class OrphanedTunnelCleanupWorker:
                 session_id=str(session.id),
                 instance_id=session.vastai_instance_id,
             )
-            return
+            raise
         except Exception:
             logger.exception(
                 "gpu_session.orphan_instance_cleanup.get_instance_error",

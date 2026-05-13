@@ -3192,3 +3192,16 @@ class TestDestroyWithRetry:
 
         assert had_errors is True
         mock_repo.mark_instance_destroyed.assert_not_called()
+
+    async def test_retry_exception_binding_does_not_suppress_return_false(self) -> None:
+        """Binding `except Exception as exc` must not change the return value on exhaustion."""
+        service, mocks = _make_service()
+        mocks["settings"].vastai_destroy_retry_attempts = 2
+        error = VastAIError("auth failed", status_code=401)
+        mocks["vastai_client"].destroy_instance = AsyncMock(side_effect=error)
+
+        with patch("src.api.services.gpu_session.service.asyncio.sleep", new_callable=AsyncMock):
+            result = await service._destroy_with_retry(12345, log_prefix="test", session_id=uuid4())
+
+        assert result is False
+        assert mocks["vastai_client"].destroy_instance.call_count == 2

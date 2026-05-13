@@ -124,11 +124,14 @@ class Settings(BaseSettings):
         ge=1,
         le=5,
         description=(
-            "How many times _teardown_external_resources tries destroy_instance "
-            "before marking the session stopped. This is in addition to the per-call "
-            "429 retry budget — defends against transient non-429 errors and against "
-            "sustained 429s exceeding the per-call budget. Combined worst-case "
-            "wait at stop time: ~45s. Above this, the orphan sweeper recovers."
+            "Total destroy_instance attempts in _teardown_external_resources "
+            "before marking the stop as 'teardown failed' and relying on the "
+            "orphan sweeper to recover later. Exponential backoff between attempts: "
+            "1s, 2s, 4s, capped at 5s (so 5 attempts wait at most 1+2+4+5 = 12s "
+            "in addition to actual API call durations). Each attempt itself may "
+            "wait further under HTTP 429 (see vastai_max_429_retries). "
+            "Above this attempt count, the orphan sweeper recovers within "
+            "orphaned_tunnel_cleanup_interval_minutes."
         ),
     )
 

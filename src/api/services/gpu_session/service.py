@@ -881,9 +881,9 @@ class GpuSessionService:
                         attempt=attempt,
                     )
                 return True
-            except Exception:
+            except Exception as exc:
                 if attempt == attempts:
-                    logger.warning(
+                    logger.exception(
                         f"{log_prefix}.teardown_instance_failed",
                         session_id=str(session_id),
                         instance_id=instance_id,
@@ -896,6 +896,7 @@ class GpuSessionService:
                     instance_id=instance_id,
                     attempt=attempt,
                     backoff_seconds=backoff_seconds,
+                    error=str(exc),
                 )
                 await asyncio.sleep(backoff_seconds)
                 backoff_seconds = min(backoff_seconds * 2, 5.0)

@@ -515,3 +515,56 @@ class TestInstanceSweep:
 
         mocks["vastai_client"].get_instance.assert_not_called()
         mocks["vastai_client"].destroy_instance.assert_not_called()
+
+    async def test_sweep_aborts_on_rate_limit(self) -> None:
+        """Regression: sweep must abort when any candidate hits VastAIRateLimitError,
+        not continue burning rate-limit budget on remaining candidates."""
+        worker, mocks = _make_worker()
+        sessions = [_make_orphan_session(vastai_instance_id=i) for i in range(1, 6)]
+
+        # First candidate succeeds (instance alive → destroy), second rate-limits.
+        alive = MagicMock(spec=VastAIInstance)
+        alive.actual_status = "running"
+        alive.cur_state = "running"
+        mocks["vastai_client"].get_instance = AsyncMock(
+            side_effect=[alive, VastAIRateLimitError("rate limited", retry_after_seconds=1.0)]
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock(return_value=None)
+
+        with patch(_INSTANCE_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_orphaned_instance_candidates.return_value = sessions
+            mock_repo.mark_instance_destroyed = AsyncMock(return_value=None)
+
+            # Must not raise — sweep aborts cleanly.
+            await worker._sweep_instances()
+
+        # First candidate: get_instance + destroy; second: get_instance (raises); rest: not called.
+        assert mocks["vastai_client"].get_instance.call_count == 2
+        assert mocks["vastai_client"].destroy_instance.call_count == 1
+
+    async def test_sweep_aborts_marks_only_completed_candidates(self) -> None:
+        """On rate-limit abort, only candidates processed before the error are stamped in DB."""
+        worker, mocks = _make_worker()
+        sessions = [_make_orphan_session(vastai_instance_id=i) for i in range(1, 4)]
+
+        # All three candidates 404 (already gone), but the third rate-limits on get_instance.
+        mocks["vastai_client"].get_instance = AsyncMock(
+            side_effect=[
+                InstanceNotFoundError("gone", status_code=404),
+                InstanceNotFoundError("gone", status_code=404),
+                VastAIRateLimitError("rate limited", retry_after_seconds=1.0),
+            ]
+        )
+
+        with patch(_INSTANCE_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_orphaned_instance_candidates.return_value = sessions
+            mock_repo.mark_instance_destroyed = AsyncMock(return_value=None)
+
+            await worker._sweep_instances()
+
+        # Only the two successful 404s stamped in DB; third candidate aborted the sweep.
+        assert mock_repo.mark_instance_destroyed.call_count == 2
