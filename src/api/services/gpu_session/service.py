@@ -372,7 +372,7 @@ class GpuSessionService:
         # Step 6: create Vast.ai instance with retry loop
         try:
             instance_id, selected_offer = await self._provision_instance(
-                offers, hardware.min_disk_gb, env
+                offers, hardware.min_disk_gb, env, hardware.template_hash_id
             )
         except Exception as exc:
             await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
@@ -406,6 +406,11 @@ class GpuSessionService:
                     vastai_gpu_name=selected_offer.gpu_name,
                     callback_token=callback_token,
                     account_id=account_id,
+                    readiness_marker_node_class=(
+                        bundle.readiness_marker.node_class
+                        if bundle.readiness_marker is not None
+                        else None
+                    ),
                 )
             except IntegrityError:
                 # Race with a concurrent start_session call that slipped past our pre-check.
@@ -1389,6 +1394,7 @@ class GpuSessionService:
         offers: Sequence[VastAIOffer],
         disk_gb: int,
         env: dict[str, str],
+        template_hash_id: str | None,
     ) -> tuple[int, VastAIOffer]:
         """Thin wrapper around the shared provision_vastai_instance helper."""
         return await provision_vastai_instance(
@@ -1396,6 +1402,7 @@ class GpuSessionService:
             offers=offers,
             disk_gb=disk_gb,
             env=env,
+            template_hash_id=template_hash_id,
             onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
             offer_walk_depth=self._settings.provisioning_offer_walk_depth,
         )

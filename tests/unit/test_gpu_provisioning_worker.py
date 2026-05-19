@@ -1619,3 +1619,187 @@ class TestHandleTerminalStateIfAny:
 
         matching = [log for log in logs if log.get("stage") == "provisioning"]
         assert matching, "expected stage='provisioning' as a structured log field"
+
+
+# ---------------------------------------------------------------------------
+# TestProbeComfyui — unit tests for _probe_comfyui
+# ---------------------------------------------------------------------------
+
+
+def _make_object_info_response(classes: list[str]) -> MagicMock:
+    """Build a mock httpx.Response whose content is a JSON dict of class names → {}."""
+    import json
+
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.content = json.dumps({cls: {} for cls in classes}).encode()
+    return resp
+
+
+class TestProbeComfyui:
+    async def test_marker_present_class_in_response_returns_true(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        mocks["http_client"].get.return_value = _make_object_info_response(
+            ["WanVideoSampler", "KSampler", "CLIPTextEncode"]
+        )
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is True
+
+    async def test_marker_present_class_missing_returns_false(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        mocks["http_client"].get.return_value = _make_object_info_response(
+            ["KSampler", "CLIPTextEncode"]
+        )
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is False
+
+    async def test_marker_none_with_200_logs_error_and_returns_true(self) -> None:
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        mocks["http_client"].get.return_value = _make_object_info_response(["KSampler"])
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is True
+        error_logs = [
+            log
+            for log in logs
+            if log.get("event") == "gpu_session.provision.probe_no_marker_configured"
+        ]
+        assert error_logs, "expected probe_no_marker_configured log"
+        assert error_logs[0].get("log_level") == "error"
+
+    async def test_invalid_json_returns_false(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = b"not valid json {"
+
+        mocks["http_client"].get.return_value = resp
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is False
+
+    async def test_non_dict_json_returns_false(self) -> None:
+        import json
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = json.dumps(["KSampler", "CLIPTextEncode"]).encode()
+
+        mocks["http_client"].get.return_value = resp
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is False
+
+    async def test_non_200_returns_false(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 503
+
+        mocks["http_client"].get.return_value = resp
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is False
+
+    async def test_httpx_error_returns_false(self) -> None:
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is False
+
+    async def test_logs_first_five_classes_when_more_present(self) -> None:
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(readiness_marker_node_class="MissingNode")
+        all_classes = [f"Node{i}" for i in range(10)]
+        mocks["http_client"].get.return_value = _make_object_info_response(all_classes)
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is False
+        missing_logs = [
+            log for log in logs if log.get("event") == "gpu_session.provision.probe_marker_missing"
+        ]
+        assert missing_logs, "expected probe_marker_missing log"
+        log = missing_logs[0]
+        assert log.get("total_classes_registered") == 10
+        sample = log.get("sample_classes")
+        assert isinstance(sample, list)
+        assert len(sample) == 5
+
+
+# ---------------------------------------------------------------------------
+# TestProvisionVastaiInstance — unit tests for provision_vastai_instance
+# ---------------------------------------------------------------------------
+
+
+class TestProvisionVastaiInstance:
+    async def test_passes_template_hash_id_when_set(self) -> None:
+        from src.api.services.gpu_session._provisioning import provision_vastai_instance
+
+        vastai = AsyncMock(spec=VastAIClient)
+        vastai.create_instance.return_value = 42
+        offer = _make_offer(offer_id=7)
+
+        instance_id, selected = await provision_vastai_instance(
+            vastai_client=vastai,
+            offers=[offer],
+            disk_gb=100,
+            env={},
+            template_hash_id="abc123hash",
+            offer_walk_depth=3,
+        )
+
+        assert instance_id == 42
+        assert selected is offer
+        vastai.create_instance.assert_called_once_with(
+            7,
+            disk_gb=100,
+            env={},
+            template_hash_id="abc123hash",
+        )
+
+    async def test_falls_back_to_image_when_template_hash_none(self) -> None:
+        from src.api.services.gpu_session._provisioning import provision_vastai_instance
+
+        vastai = AsyncMock(spec=VastAIClient)
+        vastai.create_instance.return_value = 99
+        offer = _make_offer(offer_id=5)
+
+        await provision_vastai_instance(
+            vastai_client=vastai,
+            offers=[offer],
+            disk_gb=100,
+            env={},
+            template_hash_id=None,
+            image="vastai/comfy:v0.15.1-cuda-12.9-py312",
+            onstart_cmd="bash /start.sh",
+            offer_walk_depth=3,
+        )
+
+        call_kwargs = vastai.create_instance.call_args[1]
+        assert call_kwargs.get("image") == "vastai/comfy:v0.15.1-cuda-12.9-py312"
+        assert call_kwargs.get("onstart_cmd") == "bash /start.sh"
+        assert "template_hash_id" not in call_kwargs

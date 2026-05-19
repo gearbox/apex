@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import msgspec
 import structlog
 
 from src.api.services.vastai.exceptions import InstanceNotFoundError
@@ -369,7 +370,13 @@ class GpuProvisioningWorker:
     # ------------------------------------------------------------------
 
     async def _probe_comfyui(self, session: GpuSession) -> bool:
-        """Return True if ComfyUI is reachable via the tunnel, False otherwise."""
+        """Probe ComfyUI for readiness via the CF tunnel.
+
+        Returns True iff:
+        - HTTP 200, AND
+        - either session.readiness_marker_node_class is None (with ERROR log),
+          OR the marker class is present in the /object_info JSON response.
+        """
         if session.tunnel_hostname is None:
             logger.warning(
                 "gpu_session.provision.probe_no_hostname",
@@ -378,6 +385,7 @@ class GpuProvisioningWorker:
             return False
 
         url = f"https://{session.tunnel_hostname}/object_info"
+        start = time.monotonic()
         try:
             resp = await self._http.get(url, timeout=_PROBE_TIMEOUT_SECONDS)
         except httpx.HTTPError as exc:
@@ -388,15 +396,67 @@ class GpuProvisioningWorker:
                 error_class=exc.__class__.__name__,
             )
             return False
+        latency_ms = int((time.monotonic() - start) * 1000)
 
-        reachable = resp.status_code == 200
+        if resp.status_code != 200:
+            logger.info(
+                "gpu_session.provision.probe",
+                session_id=str(session.id),
+                status_code=resp.status_code,
+                reachable=False,
+            )
+            return False
+
+        marker = session.readiness_marker_node_class
+        if marker is None:
+            logger.error(
+                "gpu_session.provision.probe_no_marker_configured",
+                session_id=str(session.id),
+                bundle_name=session.bundle_name,
+                bundle_version=session.bundle_version,
+                tunnel_hostname=session.tunnel_hostname,
+            )
+            return True  # fall back to 200-OK reachability
+
+        # Parse the response body as JSON; ComfyUI's /object_info returns a
+        # dict where top-level keys are class names.
+        try:
+            parsed = msgspec.json.decode(resp.content)
+        except msgspec.DecodeError as exc:
+            logger.info(
+                "gpu_session.provision.probe_invalid_json",
+                session_id=str(session.id),
+                error=str(exc),
+            )
+            return False
+
+        if not isinstance(parsed, dict):
+            logger.info(
+                "gpu_session.provision.probe_unexpected_response",
+                session_id=str(session.id),
+                response_type=type(parsed).__name__,
+            )
+            return False
+
+        if marker in parsed:
+            logger.info(
+                "gpu_session.provision.probe_marker_found",
+                session_id=str(session.id),
+                marker=marker,
+                latency_ms=latency_ms,
+            )
+            return True
+
+        # Marker missing — log enough to diagnose without flooding logs.
+        class_names = list(parsed.keys())
         logger.info(
-            "gpu_session.provision.probe",
+            "gpu_session.provision.probe_marker_missing",
             session_id=str(session.id),
-            status_code=resp.status_code,
-            reachable=reachable,
+            marker=marker,
+            total_classes_registered=len(class_names),
+            sample_classes=class_names[:5],
         )
-        return reachable
+        return False
 
     # ------------------------------------------------------------------
     # Retry logic
@@ -516,6 +576,7 @@ class GpuProvisioningWorker:
                 offers=offers,
                 disk_gb=bundle.hardware.min_disk_gb,
                 env=env,
+                template_hash_id=bundle.hardware.template_hash_id,
                 onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
                 offer_walk_depth=self._settings.provisioning_offer_walk_depth,
             )

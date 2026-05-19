@@ -43,6 +43,7 @@ class GpuSessionRepository:
         vastai_gpu_name: str | None = None,
         callback_token: str | None = None,
         account_id: UUID | None = None,
+        readiness_marker_node_class: str | None = None,
     ) -> GpuSession:
         """Create and persist a new GPU session row.
 
@@ -84,6 +85,7 @@ class GpuSessionRepository:
             vastai_gpu_name=vastai_gpu_name,
             callback_token=callback_token,
             account_id=account_id,
+            readiness_marker_node_class=readiness_marker_node_class,
         )
         self._session.add(session_row)
         await self._session.flush()

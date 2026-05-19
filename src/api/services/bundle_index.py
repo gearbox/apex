@@ -16,7 +16,7 @@ import httpx
 import structlog
 import yaml
 
-from src.core.bundle_config import BundleMapping, HardwareRequirements
+from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
 
 logger = structlog.get_logger()
 
@@ -232,6 +232,7 @@ class BundleIndexService:
             bundle_name=entry.mapping.bundle_name,
             bundle_version=version,
             hardware=entry.mapping.hardware,
+            readiness_marker=entry.mapping.readiness_marker,
         )
 
     # ------------------------------------------------------------------
@@ -580,12 +581,13 @@ class BundleIndexService:
         is_default = bool(item.get("default_bundle", False))
 
         bundle_path = self._cache_dir / path
-        hardware = self._parse_hardware(bundle_path)
+        hardware, readiness_marker = self._parse_hardware(bundle_path)
 
         mapping = BundleMapping(
             bundle_name=name,
             bundle_version=None,
             hardware=hardware,
+            readiness_marker=readiness_marker,
         )
         return _BundleIndexEntry(
             bundle_name=name,
@@ -595,14 +597,16 @@ class BundleIndexService:
             mapping=mapping,
         )
 
-    def _parse_hardware(self, bundle_path: Path) -> HardwareRequirements:
-        """Parse hardware requirements from a bundle.yaml file.
+    def _parse_hardware(
+        self, bundle_path: Path
+    ) -> tuple[HardwareRequirements, ReadinessMarker | None]:
+        """Parse hardware requirements and readiness marker from a bundle.yaml file.
 
         Args:
             bundle_path: Path to the bundle directory (containing the 'current' symlink).
 
         Returns:
-            HardwareRequirements parsed from the hardware section.
+            Tuple of (HardwareRequirements, ReadinessMarker | None).
 
         Raises:
             ValueError: If the hardware section is missing or malformed.
@@ -685,7 +689,17 @@ class BundleIndexService:
         # produces consistent error messages for invalid values.
         hw.setdefault("comfyui_port", 18188)
 
-        return HardwareRequirements(
+        template_hash_id = hw.get("template_hash_id")
+        if template_hash_id is not None:
+            if not isinstance(template_hash_id, str):
+                raise ValueError(
+                    f"{bundle_yaml}: 'hardware.template_hash_id' must be a string, got "
+                    f"{type(template_hash_id).__name__}"
+                )
+            if not template_hash_id.strip():
+                raise ValueError(f"{bundle_yaml}: 'hardware.template_hash_id' must be non-empty")
+
+        hardware = HardwareRequirements(
             gpu_whitelist=tuple(gpu_whitelist_raw),
             min_disk_gb=_require_int("min_disk_gb"),
             min_network_upload_mbps=_require_int("min_network_upload_mbps"),
@@ -693,7 +707,31 @@ class BundleIndexService:
             cuda_min_version=cuda_min,
             num_gpus=_require_int("num_gpus"),
             comfyui_port=_require_int("comfyui_port"),
+            template_hash_id=template_hash_id,
         )
+        readiness_marker = self._parse_readiness_marker(data, bundle_yaml)
+        return hardware, readiness_marker
+
+    def _parse_readiness_marker(
+        self, data: dict[str, object], bundle_yaml: Path
+    ) -> ReadinessMarker | None:
+        """Parse optional readiness_marker block. Returns None if absent.
+
+        Raises ValueError if the key is present but malformed (e.g., missing node_class).
+        """
+        marker = data.get("readiness_marker")
+        if marker is None:
+            return None
+        if not isinstance(marker, dict):
+            raise ValueError(
+                f"{bundle_yaml}: 'readiness_marker' must be a mapping, got {type(marker).__name__}"
+            )
+        node_class = marker.get("node_class")
+        if not isinstance(node_class, str) or not node_class.strip():
+            raise ValueError(
+                f"{bundle_yaml}: 'readiness_marker.node_class' must be a non-empty string"
+            )
+        return ReadinessMarker(node_class=node_class)
 
     async def _sync_loop(self) -> None:
         """Periodic background sync loop."""

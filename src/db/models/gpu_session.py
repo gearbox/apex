@@ -87,6 +87,14 @@ class GpuSession(Base):
         nullable=False,
         comment="ModelType slug that triggered this session (e.g. aisha-image)",
     )
+    readiness_marker_node_class: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment=(
+            "ComfyUI class name to require in /object_info during readiness probe. "
+            "NULL = fall back to 200-OK with ERROR log."
+        ),
+    )
 
     # Session status
     status: Mapped[str] = mapped_column(

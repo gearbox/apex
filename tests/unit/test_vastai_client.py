@@ -656,3 +656,65 @@ async def test_zero_retries_raises_immediately_on_429() -> None:
     with pytest.raises(VastAIRateLimitError):
         await client.destroy_instance(12345)
     assert mock_http.delete.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# create_instance — template_hash_id vs image path
+# ---------------------------------------------------------------------------
+
+
+async def test_create_instance_with_template_hash_id_omits_image_and_onstart() -> None:
+    """When template_hash_id is set, payload must NOT contain 'image' or 'onstart'."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.put = AsyncMock(
+        return_value=_mock_response(200, {"new_contract": 99, "success": True})
+    )
+    client = _make_client(mock_http)
+    instance_id = await client.create_instance(
+        offer_id=7,
+        disk_gb=100,
+        env={"-p 18188:18188": "1"},
+        template_hash_id="abc123hash",
+    )
+
+    assert instance_id == 99
+    payload = mock_http.put.call_args[1]["json"]
+    assert payload["template_hash_id"] == "abc123hash"
+    assert "image" not in payload
+    assert "onstart" not in payload
+
+
+async def test_create_instance_with_image_and_onstart_works() -> None:
+    """Legacy path: image + onstart_cmd → no template_hash_id in payload."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.put = AsyncMock(
+        return_value=_mock_response(200, {"new_contract": 55, "success": True})
+    )
+    client = _make_client(mock_http)
+    instance_id = await client.create_instance(
+        offer_id=7,
+        disk_gb=100,
+        env={},
+        image="vastai/comfy:v0.15.1-cuda-12.9-py312",
+        onstart_cmd="bash /start.sh",
+    )
+
+    assert instance_id == 55
+    payload = mock_http.put.call_args[1]["json"]
+    assert payload["image"] == "vastai/comfy:v0.15.1-cuda-12.9-py312"
+    assert payload["onstart"] == "bash /start.sh"
+    assert "template_hash_id" not in payload
+
+
+async def test_create_instance_raises_when_neither_template_nor_image_provided() -> None:
+    """create_instance must raise ValueError when called with neither template_hash_id nor image."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    client = _make_client(mock_http)
+    with pytest.raises(
+        ValueError, match="create_instance requires either template_hash_id or image"
+    ):
+        await client.create_instance(
+            offer_id=7,
+            disk_gb=100,
+            env={},
+        )

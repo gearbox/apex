@@ -198,35 +198,46 @@ class VastAIClient:
         self,
         offer_id: int,
         *,
-        image: str,
         disk_gb: int,
         env: dict[str, str],
-        onstart_cmd: str,
+        template_hash_id: str | None = None,
+        image: str | None = None,
+        onstart_cmd: str | None = None,
     ) -> int:
         """Create a Vast.ai instance from an offer.
 
         Args:
             offer_id: Offer ID from search results.
-            image: Docker image (e.g. "vastai/comfy:latest").
             disk_gb: Disk allocation in GB.
             env: Environment variables dict (includes port mappings as "-p X:X": "1").
-            onstart_cmd: Onstart script command.
+            template_hash_id: Vast.ai template hash. When set, image and onstart_cmd
+                are omitted (template provides them).
+            image: Docker image (e.g. "vastai/comfy:latest"). Required when
+                template_hash_id is None.
+            onstart_cmd: Onstart script command. Optional when using template.
 
         Returns:
             Instance ID.
 
         Raises:
+            ValueError: If neither template_hash_id nor image is provided.
             OfferTakenError: If the offer was already rented.
             VastAIPaymentError: If account balance is insufficient.
             VastAIError: On other API errors.
         """
         payload: dict[str, Any] = {
-            "image": image,
             "disk": disk_gb,
             "runtype": "ssh_direct",
             "env": env,
-            "onstart": onstart_cmd,
         }
+        if template_hash_id is not None:
+            payload["template_hash_id"] = template_hash_id
+        else:
+            if image is None:
+                raise ValueError("create_instance requires either template_hash_id or image")
+            payload["image"] = image
+            if onstart_cmd is not None:
+                payload["onstart"] = onstart_cmd
         resp = await self._request_with_retry(
             "put",
             f"{self._VASTAI_API_BASE}/asks/{offer_id}/",
