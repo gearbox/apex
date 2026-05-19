@@ -30,7 +30,7 @@ from src.api.services.gpu_session import (
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
 from src.api.services.vastai.schemas import VastAIOffer
-from src.core.bundle_config import BundleMapping, HardwareRequirements
+from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
 from src.core.enums import GpuSessionStatus, ModelType
 from src.db.models.gpu_session import GpuSession
 
@@ -74,11 +74,19 @@ def _make_bundle_mapping(
     *,
     bundle_name: str = "wan_2.2_i2v",
     bundle_version: str | None = "260105-01",
+    readiness_marker: ReadinessMarker | None = None,
+    template_hash_id: str | None = None,
 ) -> BundleMapping:
+    hardware = _make_hardware()
+    if template_hash_id is not None:
+        from dataclasses import replace
+
+        hardware = replace(hardware, template_hash_id=template_hash_id)
     return BundleMapping(
         bundle_name=bundle_name,
         bundle_version=bundle_version,
-        hardware=_make_hardware(),
+        hardware=hardware,
+        readiness_marker=readiness_marker,
     )
 
 
@@ -3205,3 +3213,68 @@ class TestDestroyWithRetry:
 
         assert result is False
         assert mocks["vastai_client"].destroy_instance.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# TestStartSessionReadinessMarkerAndTemplateHash — Step 14 tests
+# ---------------------------------------------------------------------------
+
+
+class TestStartSessionReadinessMarkerAndTemplateHash:
+    """Verify that readiness_marker_node_class and template_hash_id flow through start_session."""
+
+    async def _call_start_session(
+        self,
+        service: GpuSessionService,
+        mocks: dict[str, Any],
+        bundle: BundleMapping,
+    ) -> GpuSession:
+        mock_repo = AsyncMock()
+        mock_repo.get_non_terminal_for_model.return_value = None
+        session_row = _make_gpu_session(status=GpuSessionStatus.pending)
+        mock_repo.create.return_value = session_row
+        mocks["bundle_index"].resolve_bundle.return_value = bundle
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        with patch(_REPO_PATH) as MockRepo:
+            MockRepo.return_value = mock_repo
+            result = await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+            )
+        return result, mock_repo  # type: ignore[return-value]
+
+    async def test_persists_readiness_marker_when_bundle_has_one(self) -> None:
+        service, mocks = _make_service()
+        marker = ReadinessMarker(node_class="WanVideoSampler")
+        bundle = _make_bundle_mapping(readiness_marker=marker)
+
+        _, mock_repo = await self._call_start_session(service, mocks, bundle)  # type: ignore[misc]
+
+        create_kwargs = mock_repo.create.call_args[1]
+        assert create_kwargs["readiness_marker_node_class"] == "WanVideoSampler"
+
+    async def test_persists_none_when_bundle_has_no_marker(self) -> None:
+        service, mocks = _make_service()
+        bundle = _make_bundle_mapping(readiness_marker=None)
+
+        _, mock_repo = await self._call_start_session(service, mocks, bundle)  # type: ignore[misc]
+
+        create_kwargs = mock_repo.create.call_args[1]
+        assert create_kwargs["readiness_marker_node_class"] is None
+
+    async def test_passes_template_hash_to_create_instance(self) -> None:
+        service, mocks = _make_service()
+        bundle = _make_bundle_mapping(template_hash_id="abc123templatehash")
+
+        await self._call_start_session(service, mocks, bundle)  # type: ignore[misc]
+
+        mocks["vastai_client"].create_instance.assert_called_once()
+        call_kwargs = mocks["vastai_client"].create_instance.call_args[1]
+        assert call_kwargs.get("template_hash_id") == "abc123templatehash"
+        assert "image" not in call_kwargs
+        assert "onstart_cmd" not in call_kwargs

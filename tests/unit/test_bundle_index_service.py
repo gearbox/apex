@@ -17,7 +17,7 @@ from src.api.services.bundle_index import (
     BundleNotFoundError,
     _parse_github_url,
 )
-from src.core.bundle_config import BundleMapping, HardwareRequirements
+from src.core.bundle_config import BundleMapping, ReadinessMarker
 from src.core.config import Settings
 
 # ---------------------------------------------------------------------------
@@ -55,11 +55,18 @@ def _make_service(cache_dir: Path, **kwargs: Any) -> BundleIndexService:
     return BundleIndexService(**defaults)
 
 
-def _write_bundle_yaml(bundle_path: Path, hw: dict[str, object] | None = None) -> None:
+def _write_bundle_yaml(
+    bundle_path: Path,
+    hw: dict[str, object] | None = None,
+    *,
+    readiness_marker: dict[str, object] | None = None,
+) -> None:
     """Create {bundle_path}/current/bundle.yaml with the given hardware section."""
     current_dir = bundle_path / "current"
     current_dir.mkdir(parents=True, exist_ok=True)
     data: dict[str, object] = {"hardware": hw if hw is not None else _HW_YAML}
+    if readiness_marker is not None:
+        data["readiness_marker"] = readiness_marker
     (current_dir / "bundle.yaml").write_text(yaml.dump(data))
 
 
@@ -404,7 +411,7 @@ class TestParseHardware:
         _write_bundle_yaml(tmp_path / "my_bundle", hw)
 
         svc = _make_service(tmp_path)
-        result: HardwareRequirements = svc._parse_hardware(tmp_path / "my_bundle")
+        result, _ = svc._parse_hardware(tmp_path / "my_bundle")
 
         assert result.gpu_whitelist == ("RTX_3090", "RTX_4090")
         assert result.min_disk_gb == 200
@@ -419,7 +426,7 @@ class TestParseHardware:
         _write_bundle_yaml(tmp_path / "my_bundle", hw)
 
         svc = _make_service(tmp_path)
-        result = svc._parse_hardware(tmp_path / "my_bundle")
+        result, _ = svc._parse_hardware(tmp_path / "my_bundle")
         assert result.comfyui_port == 18188
 
     def test_raises_on_missing_hardware_section(self, tmp_path: Path) -> None:
@@ -487,7 +494,7 @@ class TestParseHardware:
         hw = {**_HW_YAML, "min_disk_gb": "100"}
         _write_bundle_yaml(tmp_path / "ok", hw)
         svc = _make_service(tmp_path)
-        result = svc._parse_hardware(tmp_path / "ok")
+        result, _ = svc._parse_hardware(tmp_path / "ok")
         assert result.min_disk_gb == 100
 
     def test_raises_on_invalid_cuda_min_version(self, tmp_path: Path) -> None:
@@ -526,8 +533,124 @@ class TestParseHardware:
         hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
         _write_bundle_yaml(tmp_path / "no_port", hw)
         svc = _make_service(tmp_path)
-        result = svc._parse_hardware(tmp_path / "no_port")
+        result, _ = svc._parse_hardware(tmp_path / "no_port")
         assert result.comfyui_port == 18188
+
+    def test_template_hash_id_when_set_string(self, tmp_path: Path) -> None:
+        hw = {**_HW_YAML, "template_hash_id": "4e17788f74f075dd9aab7d0d4427968f"}
+        _write_bundle_yaml(tmp_path / "b", hw)
+        svc = _make_service(tmp_path)
+        result, _ = svc._parse_hardware(tmp_path / "b")
+        assert result.template_hash_id == "4e17788f74f075dd9aab7d0d4427968f"
+
+    def test_template_hash_id_absent_returns_none(self, tmp_path: Path) -> None:
+        _write_bundle_yaml(tmp_path / "b", dict(_HW_YAML))
+        svc = _make_service(tmp_path)
+        result, _ = svc._parse_hardware(tmp_path / "b")
+        assert result.template_hash_id is None
+
+    def test_template_hash_id_empty_string_rejected(self, tmp_path: Path) -> None:
+        hw = {**_HW_YAML, "template_hash_id": ""}
+        _write_bundle_yaml(tmp_path / "b", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="template_hash_id.*non-empty"):
+            svc._parse_hardware(tmp_path / "b")
+
+    def test_template_hash_id_whitespace_only_rejected(self, tmp_path: Path) -> None:
+        hw = {**_HW_YAML, "template_hash_id": "   "}
+        _write_bundle_yaml(tmp_path / "b", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="template_hash_id.*non-empty"):
+            svc._parse_hardware(tmp_path / "b")
+
+    def test_template_hash_id_non_string_rejected(self, tmp_path: Path) -> None:
+        hw = {**_HW_YAML, "template_hash_id": 12345}
+        _write_bundle_yaml(tmp_path / "b", hw)
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="template_hash_id.*string"):
+            svc._parse_hardware(tmp_path / "b")
+
+
+# ---------------------------------------------------------------------------
+# _parse_readiness_marker / TestParseReadinessMarker
+# ---------------------------------------------------------------------------
+
+
+class TestParseReadinessMarker:
+    def _write(
+        self,
+        bundle_path: Path,
+        hw: dict[str, object] | None = None,
+        *,
+        readiness_marker: dict[str, object] | None = None,
+    ) -> None:
+        _write_bundle_yaml(bundle_path, hw, readiness_marker=readiness_marker)
+
+    def test_marker_absent_returns_none(self, tmp_path: Path) -> None:
+        self._write(tmp_path / "b")
+        svc = _make_service(tmp_path)
+        _, marker = svc._parse_hardware(tmp_path / "b")
+        assert marker is None
+
+    def test_marker_with_node_class_parsed(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path / "b",
+            readiness_marker={"node_class": "WanImageToVideo"},
+        )
+        svc = _make_service(tmp_path)
+        _, marker = svc._parse_hardware(tmp_path / "b")
+        assert isinstance(marker, ReadinessMarker)
+        assert marker.node_class == "WanImageToVideo"
+
+    def test_marker_without_node_class_raises(self, tmp_path: Path) -> None:
+        self._write(tmp_path / "b", readiness_marker={})
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="node_class"):
+            svc._parse_hardware(tmp_path / "b")
+
+    def test_marker_node_class_empty_raises(self, tmp_path: Path) -> None:
+        self._write(tmp_path / "b", readiness_marker={"node_class": ""})
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="node_class"):
+            svc._parse_hardware(tmp_path / "b")
+
+    def test_marker_not_a_mapping_raises(self, tmp_path: Path) -> None:
+        self._write(tmp_path / "b", readiness_marker=None)
+        # Write the YAML manually so readiness_marker is a bare string
+        current_dir = tmp_path / "b" / "current"
+        current_dir.mkdir(parents=True, exist_ok=True)
+        data: dict[str, object] = {
+            "hardware": dict(_HW_YAML),
+            "readiness_marker": "WanImageToVideo",
+        }
+        (current_dir / "bundle.yaml").write_text(yaml.dump(data))
+
+        svc = _make_service(tmp_path)
+        with pytest.raises(ValueError, match="must be a mapping"):
+            svc._parse_hardware(tmp_path / "b")
+
+    def test_bundle_mapping_carries_readiness_marker(self, tmp_path: Path) -> None:
+        """BundleMapping produced by _build_entry includes the marker."""
+        _write_bundle_yaml(
+            tmp_path / "bundles" / "wan_2_i2v",
+            readiness_marker={"node_class": "WanImageToVideo"},
+        )
+        _write_index(
+            tmp_path,
+            [
+                {
+                    "name": "wan_2_i2v",
+                    "path": "bundles/wan_2_i2v",
+                    "model_type": "aisha-i2v",
+                    "default_bundle": True,
+                }
+            ],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        mapping = svc.resolve_bundle("aisha-i2v")
+        assert isinstance(mapping.readiness_marker, ReadinessMarker)
+        assert mapping.readiness_marker.node_class == "WanImageToVideo"
 
 
 # ---------------------------------------------------------------------------

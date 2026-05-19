@@ -23,6 +23,7 @@ logger = structlog.get_logger(__name__)
 # No :latest tag exists. Pin to a specific version; bumping requires deliberate review
 # because it changes CUDA/PyTorch/Python versions. Check hub.docker.com/r/vastai/comfy/tags.
 # TODO: move to bundle.yaml so each bundle pins its own image (bundle-driven docker image).
+# This TODO is deferred because right now we use vastai templates with comfyui/cuda preset.
 _VASTAI_IMAGE = "vastai/comfy:v0.15.1-cuda-12.9-py312"
 
 
@@ -42,8 +43,9 @@ async def provision_vastai_instance(
     offers: Sequence[VastAIOffer],
     disk_gb: int,
     env: dict[str, str],
+    template_hash_id: str | None,
     image: str = _VASTAI_IMAGE,
-    onstart_cmd: str,
+    onstart_cmd: str | None = None,
     offer_walk_depth: int,
 ) -> tuple[int, VastAIOffer]:
     """Try to create a Vast.ai instance, walking down cheapest offers on OfferTakenError.
@@ -59,8 +61,10 @@ async def provision_vastai_instance(
         offers: Sorted list of offers (cheapest first).
         disk_gb: Disk allocation for the instance.
         env: Environment variables dict (SECURITY: never log this — contains tokens).
-        image: Docker image to use.
-        onstart_cmd: Shell command to run on instance start.
+        template_hash_id: Vast.ai template hash. When set, image and onstart_cmd are
+            omitted (template provides them). None uses the legacy image+onstart path.
+        image: Docker image to use (legacy path when template_hash_id is None).
+        onstart_cmd: Shell command for the legacy path. Ignored when template_hash_id set.
         offer_walk_depth: Max number of offers to try within a single provisioning attempt.
 
     Returns:
@@ -77,13 +81,21 @@ async def provision_vastai_instance(
 
     for attempt, offer in enumerate(candidates):
         try:
-            instance_id = await vastai_client.create_instance(
-                offer.id,
-                image=image,
-                disk_gb=disk_gb,
-                env=env,
-                onstart_cmd=onstart_cmd,
-            )
+            if template_hash_id is not None:
+                instance_id = await vastai_client.create_instance(
+                    offer.id,
+                    disk_gb=disk_gb,
+                    env=env,
+                    template_hash_id=template_hash_id,
+                )
+            else:
+                instance_id = await vastai_client.create_instance(
+                    offer.id,
+                    disk_gb=disk_gb,
+                    env=env,
+                    image=image,
+                    onstart_cmd=onstart_cmd,
+                )
         except OfferTakenError:
             remaining = len(candidates) - attempt - 1
             logger.warning(

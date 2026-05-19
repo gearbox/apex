@@ -10,6 +10,26 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
+class ReadinessMarker:
+    """Bundle-declared evidence that bundle deployment succeeded.
+
+    Apex's GpuProvisioningWorker probes ComfyUI's /object_info endpoint and
+    requires this class name to be present in the registered class list before
+    transitioning the session to 'active'. Without a marker, the probe falls
+    back to 200-OK reachability and emits an ERROR-level log.
+    """
+
+    node_class: str
+    """ComfyUI class name registered by one of the bundle's custom nodes.
+
+    Pick a class central to the bundle's primary workflow — one that would
+    cause catastrophic workflow failure if missing. Examples: 'WanImageToVideo'
+    for the WAN i2v bundle; do NOT pick a class from ComfyUI-Manager or
+    generic essentials, those can register on a half-broken node.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class HardwareRequirements:
     """GPU hardware requirements parsed from bundle.yaml."""
 
@@ -34,6 +54,11 @@ class HardwareRequirements:
     comfyui_port: int = 18188
     """ComfyUI listen port inside the container."""
 
+    template_hash_id: str | None = None
+    """Vast.ai template content hash. When set, apex calls create_instance with
+    template_hash_id and omits the explicit image. None means use the legacy
+    image+onstart path (for backward compatibility with any unmigrated bundles)."""
+
 
 @dataclass(frozen=True, slots=True)
 class BundleMapping:
@@ -47,3 +72,6 @@ class BundleMapping:
 
     hardware: HardwareRequirements
     """Hardware requirements for Vast.ai search."""
+
+    readiness_marker: ReadinessMarker | None = None
+    """Optional bundle-declared readiness marker. None means fall back to 200-OK probe."""
