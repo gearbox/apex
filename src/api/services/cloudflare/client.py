@@ -119,7 +119,7 @@ class CloudflareTunnelClient:
 
         Args:
             tunnel_id: CF tunnel UUID.
-            hostname: Public hostname (e.g. "01jf8x3k.gpu.cloudin.space").
+            hostname: Public hostname (e.g. "gpu-01jf8x3k.your-gpu-domain.com").
             local_port: Local port to forward to (e.g. 18188 for ComfyUI).
 
         Raises:
@@ -163,7 +163,7 @@ class CloudflareTunnelClient:
         """Create CNAME DNS record pointing hostname to tunnel.
 
         Args:
-            hostname: Full hostname (e.g. "01jf8x3k.gpu.cloudin.space").
+            hostname: Full hostname (e.g. "gpu-01jf8x3k.your-gpu-domain.com").
             tunnel_id: CF tunnel UUID.
 
         Returns:
@@ -393,7 +393,7 @@ class CloudflareTunnelClient:
         before calling delete_session_tunnel.
 
         Args:
-            hostname: Full hostname to search for (e.g. "01jf8x3k.gpu.cloudin.space").
+            hostname: Full hostname to search for (e.g. "gpu-01jf8x3k.your-gpu-domain.com").
 
         Returns:
             DNS record ID if found, None otherwise.
@@ -459,7 +459,7 @@ class CloudflareTunnelClient:
             Tuple of (tunnel_id, tunnel_token, dns_record_id, hostname).
         """
         tunnel_name = f"gpu-session-{session_id_short}"
-        hostname = f"{session_id_short}.{self._tunnel_domain}"
+        hostname = f"gpu-{session_id_short}.{self._tunnel_domain}"
         tunnel_id, tunnel_token = await self.create_tunnel(tunnel_name)
         try:
             await self.configure_tunnel_ingress(tunnel_id, hostname, comfyui_port)

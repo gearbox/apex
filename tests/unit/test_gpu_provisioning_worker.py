@@ -72,7 +72,7 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.vastai_gpu_name = "RTX_4090"
     session.cf_tunnel_id = "tunnel-abc"
     session.cf_dns_record_id = "dns-abc"
-    session.tunnel_hostname = "01234567.gpu.cloudin.space"
+    session.tunnel_hostname = "gpu-01234567.gpu-domain.com"
     session.callback_token = "callback-tok"
     session.provision_attempt = 1
     session.provisioning_started_at = None
@@ -102,7 +102,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
-    settings.aisha_cf_tunnel_domain = "gpu.cloudin.space"
+    settings.aisha_cf_tunnel_domain = "gpu-domain.com"
     settings.ai_bundles_github_token = "ghp_test_token"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
@@ -477,7 +477,7 @@ class TestAdvanceProvisioning:
         # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         original_tunnel_id = "tunnel-abc"
-        original_hostname = "01234567.gpu.cloudin.space"
+        original_hostname = "gpu-01234567.gpu-domain.com"
         old_created = datetime.now(UTC) - timedelta(minutes=25)
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,

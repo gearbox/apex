@@ -18,7 +18,7 @@ This document describes the architecture for on-demand GPU node provisioning via
 | **Aisha** | CLI tool on GPU node — deploys bundles (ComfyUI + models + workflows) via `onstart.sh` |
 | **ai-bundles** | Private repo — bundle configs with hardware requirements, model mappings |
 | **Vast.ai** | GPU marketplace — provides on-demand GPU instances via REST API |
-| **Cloudflare** | Tunnel API — creates secure tunnels for Apex ↔ GPU node connectivity via `cloudin.space` |
+| **Cloudflare** | Tunnel API — creates secure tunnels for Apex ↔ GPU node connectivity via `gpu-domain.com` |
 
 ---
 
@@ -62,7 +62,7 @@ User                     Apex                        Cloudflare            Vast.
  │                        │                             │                    │  - ComfyUI ready    │
  │                        │                             │                    │                     │
  │                        │  Provisioning Worker polls  │                    │                     │
- │                        │  https://{session}.gpu.cloudin.space/object_info │                     │
+ │                        │  https://gpu-{session}.gpu-domain.com/object_info │                     │
  │                        │────────────────────────────>│───────────(tunnel)─────────────────────>│
  │                        │  ← 200 OK                   │                    │                     │
  │                        │                             │                    │                     │
@@ -313,7 +313,7 @@ src/api/services/
 |--------|----------------|---------|
 | `create_tunnel()` | `POST /accounts/{id}/cfd_tunnel` | Create named tunnel, get token |
 | `configure_tunnel()` | `PUT /accounts/{id}/cfd_tunnel/{tunnel_id}/configurations` | Set ingress rules (port 18188 → localhost) |
-| `create_dns_record()` | `POST /zones/{id}/dns_records` | CNAME `{session_id}.gpu.cloudin.space` → `{tunnel_id}.cfargotunnel.com` |
+| `create_dns_record()` | `POST /zones/{id}/dns_records` | CNAME `gpu-{session_id}.gpu-domain.com` → `{tunnel_id}.cfargotunnel.com` |
 | `delete_tunnel()` | `DELETE /accounts/{id}/cfd_tunnel/{tunnel_id}` | Cleanup on session stop (not pause) |
 | `delete_dns_record()` | `DELETE /zones/{id}/dns_records/{record_id}` | Cleanup on session stop (not pause) |
 
@@ -327,7 +327,7 @@ When creating a tunnel via API with `config_src: "cloudflare"`, the ingress rule
     "config": {
         "ingress": [
             {
-                "hostname": f"{short_session_id}.gpu.cloudin.space",
+                "hostname": f"gpu-{short_session_id}.gpu-domain.com",
                 "service": f"http://localhost:{comfyui_port}"
             },
             {
@@ -343,12 +343,14 @@ The GPU node runs: `cloudflared tunnel run --token $ACS_CF_TUNNEL_TOKEN` — zer
 ### 5.4 Tunnel Hostname Convention
 
 ```
-{short_session_id}.gpu.cloudin.space
+gpu-{short_session_id}.gpu-domain.com
 ```
 
-Example: `01jf8x3k.gpu.cloudin.space` where `01jf8x3k` is the first 8 chars of the session UUIDv7.
+Example: `gpu-01jf8x3k.gpu-domain.com` where `01jf8x3k` is the first 8 chars of the session UUIDv7.
 
 > **Why short ID?** CF tunnel hostnames must be valid DNS labels. Full UUIDs work but are unwieldy in logs. The 8-char prefix of a UUIDv7 is timestamp-derived and collision-resistant for concurrent sessions.
+
+> **Why prefix instead of subdomain?** Cloudflare Universal SSL (free plan) covers the zone apex (`gpu-domain.com`) and one wildcard level (`*.gpu-domain.com`). A nested subdomain like `*.gpu.gpu-domain.com` requires Advanced Certificate Manager. To keep infrastructure costs minimal, GPU session hostnames live one level below the apex with a `gpu-` prefix instead of a `gpu` subdomain.
 
 ### 5.5 Orphaned Tunnel Cleanup
 
@@ -482,7 +484,7 @@ cf_dns_record_id: Mapped[str | None] = mapped_column(
 )
 tunnel_hostname: Mapped[str | None] = mapped_column(
     String(255), nullable=True,
-    comment="Full tunnel hostname (e.g. 01jf8x3k.gpu.cloudin.space)",
+    comment="Full tunnel hostname (e.g. gpu-01jf8x3k.gpu-domain.com)",
 )
 
 # Vast.ai instance details
@@ -958,7 +960,7 @@ Session status changes are published via the existing `EventBus` (Redis Pub/Sub)
         "session_id": "...",
         "status": "active",
         "model_type": "aisha-video",
-        "tunnel_hostname": "01jf8x3k.gpu.cloudin.space"
+        "tunnel_hostname": "gpu-01jf8x3k.gpu-domain.com"
     }
 }
 ```
@@ -991,8 +993,8 @@ aisha_cf_api_token: str = Field(default="", description="Cloudflare API token (T
 aisha_cf_account_id: str = Field(default="", description="Cloudflare account ID for per-session GPU node tunnels")
 aisha_cf_zone_id: str = Field(default="", description="Cloudflare zone ID for the GPU tunnel domain")
 aisha_cf_tunnel_domain: str = Field(
-    default="gpu.cloudin.space",
-    description="Base domain for GPU session tunnel hostnames",
+    default="gpu-domain.com",
+    description="CF zone for tunnel DNS records. Tunnel hostnames are constructed as gpu-{session_id_short}.{this}.",
 )
 
 # --- Provisioning Worker ---

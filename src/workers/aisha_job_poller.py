@@ -66,6 +66,7 @@ class AishaPollerConfig:
     job_age_timeout_seconds: int = 1800
     comfyui_request_timeout_seconds: float = 5.0
     tunnel_allowed_suffix: str = ""
+    tunnel_allowed_prefix: str | None = None
     retention_days: int = 7
 
 
@@ -101,8 +102,12 @@ class AishaJobPoller:
                 "If Aisha is intentionally disabled in this environment, "
                 "set AISHA_POLLER_ENABLED=false. Otherwise, set "
                 "AISHA_CF_TUNNEL_DOMAIN to the GPU tunnel domain "
-                "(e.g. 'gpu.cloudin.space')."
+                "(e.g. 'your-gpu-domain.com')."
             )
+
+        self._allowed_tunnel_prefix = (
+            config.tunnel_allowed_prefix.strip() if config.tunnel_allowed_prefix else None
+        )
 
     def _make_transition_service(self, session: AsyncSession) -> JobStateTransitionService:
         return JobStateTransitionService(
@@ -201,7 +206,11 @@ class AishaJobPoller:
         # mixed-case responses don't bypass the suffix check.
         hostname = (gpu_session.tunnel_hostname or "").lower()
         try:
-            validate_tunnel_hostname(hostname, allowed_suffix=self._allowed_tunnel_suffix)
+            validate_tunnel_hostname(
+                hostname,
+                allowed_suffix=self._allowed_tunnel_suffix,
+                allowed_prefix=self._allowed_tunnel_prefix,
+            )
         except InvalidTunnelHostnameError as exc:
             logger.error(
                 "aisha_job_poller.invalid_tunnel_hostname",

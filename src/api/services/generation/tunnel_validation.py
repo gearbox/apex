@@ -9,7 +9,7 @@ Two checks are required:
                Defeats embedded URL-meta characters (``?``, ``#``, ``@``, ``/``)
                that could smuggle a different host through urllib even when the
                endswith suffix check passes.
-  2. Suffix   — ends with the configured tunnel domain (e.g. ``.gpu.cloudin.space``).
+  2. Suffix   — ends with the configured tunnel domain (e.g. ``.your-gpu-domain.com``).
 """
 
 from __future__ import annotations
@@ -28,13 +28,15 @@ def validate_tunnel_hostname(
     hostname: str,
     *,
     allowed_suffix: str,
+    allowed_prefix: str | None = None,
 ) -> None:
     """Raise InvalidTunnelHostnameError if hostname fails any check.
 
     Args:
-        hostname: The tunnel hostname to validate (e.g. ``abc123.gpu.cloudin.space``).
+        hostname: The tunnel hostname to validate (e.g. ``gpu-01jf8x3k.your-gpu-domain.com``).
         allowed_suffix: The required hostname suffix including leading dot
-            (e.g. ``".gpu.cloudin.space"``). Must be non-empty.
+            (e.g. ``".your-gpu-domain.com"``). Must be non-empty.
+        allowed_prefix: The required hostname prefix (e.g. ``"gpu-"``). Can be None.
 
     Raises:
         InvalidTunnelHostnameError: If hostname is empty, fails the charset
@@ -57,4 +59,9 @@ def validate_tunnel_hostname(
     if not hostname.endswith(allowed_suffix):
         raise InvalidTunnelHostnameError(
             f"Tunnel hostname {hostname!r} does not end with allowed suffix {allowed_suffix!r}"
+        )
+
+    if allowed_prefix and not hostname.startswith(allowed_prefix):
+        raise InvalidTunnelHostnameError(
+            f"Tunnel hostname {hostname!r} does not start with required prefix {allowed_prefix!r}"
         )

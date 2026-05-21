@@ -25,7 +25,8 @@ def _make_config(**kwargs: object) -> AishaPollerConfig:
         "job_age_warning_seconds": 300,
         "job_age_timeout_seconds": 1800,
         "comfyui_request_timeout_seconds": 5.0,
-        "tunnel_allowed_suffix": "gpu.cloudin.space",
+        "tunnel_allowed_suffix": "gpu-domain.com",
+        "tunnel_allowed_prefix": "gpu-",
         "retention_days": 7,
     } | kwargs
     return AishaPollerConfig(**defaults)  # type: ignore[arg-type]
@@ -49,7 +50,7 @@ def _make_job(
     *,
     status: str = JobStatus.QUEUED.value,
     external_request_id: str | None = "prompt-abc",
-    tunnel_hostname: str = "node1.gpu.cloudin.space",
+    tunnel_hostname: str = "gpu-node1.gpu-domain.com",
     started_at: datetime | None = None,
     created_at: datetime | None = None,
 ) -> MagicMock:
@@ -99,12 +100,12 @@ class TestConstructor:
             )
 
     def test_normalizes_suffix_without_leading_dot(self) -> None:
-        poller = _make_poller(tunnel_allowed_suffix="gpu.cloudin.space")
-        assert poller._allowed_tunnel_suffix == ".gpu.cloudin.space"
+        poller = _make_poller(tunnel_allowed_suffix="gpu-domain.com")
+        assert poller._allowed_tunnel_suffix == ".gpu-domain.com"
 
     def test_preserves_suffix_with_leading_dot(self) -> None:
-        poller = _make_poller(tunnel_allowed_suffix=".gpu.cloudin.space")
-        assert poller._allowed_tunnel_suffix == ".gpu.cloudin.space"
+        poller = _make_poller(tunnel_allowed_suffix=".gpu-domain.com")
+        assert poller._allowed_tunnel_suffix == ".gpu-domain.com"
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +262,8 @@ class TestIsJobPastTimeout:
 
 class TestPollOne:
     async def test_fails_when_tunnel_hostname_invalid(self) -> None:
-        poller = _make_poller(tunnel_allowed_suffix="gpu.cloudin.space")
-        job = _make_job(tunnel_hostname="evil.com?attack.gpu.cloudin.space")
+        poller = _make_poller(tunnel_allowed_suffix="gpu-domain.com", tunnel_allowed_prefix="gpu-")
+        job = _make_job(tunnel_hostname="evil.com?attack.gpu-domain.com")
         session = AsyncMock()
 
         ts = AsyncMock()
@@ -285,9 +286,9 @@ class TestPollOne:
             mock_client_cls.assert_not_called()
 
     async def test_lowercases_hostname_before_validation(self) -> None:
-        poller = _make_poller(tunnel_allowed_suffix="gpu.cloudin.space")
+        poller = _make_poller(tunnel_allowed_suffix="gpu-domain.com", tunnel_allowed_prefix="gpu-")
         # Mixed-case hostname that is valid after lowercasing
-        job = _make_job(tunnel_hostname="Node1.GPU.Cloudin.Space")
+        job = _make_job(tunnel_hostname="GPU-Node1.Gpu-domain.Com")
         session = AsyncMock()
 
         client = AsyncMock()

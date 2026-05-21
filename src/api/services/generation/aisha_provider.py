@@ -87,6 +87,7 @@ class AishaGenerationProvider:
         gpu_session_service: GpuSessionService | None,
         r2_storage: R2StorageService | None = None,
         tunnel_domain: str = "",
+        tunnel_hostname_allowed_prefix: str | None = None,
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
@@ -101,6 +102,7 @@ class AishaGenerationProvider:
         # at outbound-request time so a corrupted DB row, bad migration, or a
         # future code path that writes the column can't cause SSRF.
         self._tunnel_domain = tunnel_domain
+        self._tunnel_hostname_allowed_prefix = tunnel_hostname_allowed_prefix
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
         """Aisha-specific validation beyond what the enum provides."""
@@ -257,9 +259,13 @@ class AishaGenerationProvider:
 
         # 2. Build a session-scoped ComfyUI client.
         # SSRF guard: validate tunnel hostname against the configured domain.
-        hostname = gpu_session.tunnel_hostname or ""
+        hostname = (gpu_session.tunnel_hostname or "").lower()
         try:
-            validate_tunnel_hostname(hostname, allowed_suffix=f".{self._tunnel_domain}")
+            validate_tunnel_hostname(
+                hostname,
+                allowed_suffix=f".{self._tunnel_domain}",
+                allowed_prefix=self._tunnel_hostname_allowed_prefix,
+            )
         except InvalidTunnelHostnameError as e:
             logger.error(
                 "aisha.tunnel_hostname.allowlist_violation",

@@ -448,7 +448,7 @@ async def test_list_aisha_jobs_for_polling_eager_loads_gpu_session(
     gpu_session = await make_gpu_session(
         user=user,
         status=GpuSessionStatus.active,
-        tunnel_hostname="node1.gpu.cloudin.space",
+        tunnel_hostname="node1.gpu-domain.com",
     )
     job = await make_job(
         user=user,

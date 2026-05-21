@@ -245,10 +245,25 @@ class Settings(BaseSettings):
         ),
     )
     aisha_cf_tunnel_domain: str = Field(
-        default="gpu.cloudin.space",
+        default="your-gpu-domain.com",
         description=(
+            "CF zone for tunnel DNS records. "
             "Base domain for GPU session tunnel hostnames for per-session GPU node tunnels "
             "(NOT the staging API's own cloudflared sidecar — that uses CLOUDFLARE_TUNNEL_TOKEN)."
+            "Tunnel hostnames are constructed as gpu-{session_id_short}.{this}. "
+            "Must be a single-level subdomain of the apex zone "
+            "so Cloudflare Universal SSL (free plan) covers it."
+        ),
+    )
+
+    aisha_cf_tunnel_prefix: str | None = Field(
+        default="gpu-",
+        description=(
+            "Required prefix for GPU tunnel hostnames (e.g. 'gpu-'). "
+            "Defends against a smuggling attack where a malicious user creates a "
+            "hostname like 'abc123.evil.com.your-gpu-domain.com' that passes the "
+            "endswith check but actually resolves to evil.com. By enforcing a "
+            "prefix, we ensure the hostname structure is {prefix}{session_id}.{allowed_suffix}."
         ),
     )
 

@@ -144,7 +144,7 @@ services:
       AISHA_CF_API_TOKEN: ${AISHA_CF_API_TOKEN:?AISHA_CF_API_TOKEN is required for per-session GPU tunnels}
       AISHA_CF_ACCOUNT_ID: ${AISHA_CF_ACCOUNT_ID:?AISHA_CF_ACCOUNT_ID is required}
       AISHA_CF_ZONE_ID: ${AISHA_CF_ZONE_ID:?AISHA_CF_ZONE_ID is required}
-      AISHA_CF_TUNNEL_DOMAIN: ${AISHA_CF_TUNNEL_DOMAIN:?AISHA_CF_TUNNEL_DOMAIN is required (e.g. gpu.cloudin.space)}
+      AISHA_CF_TUNNEL_DOMAIN: ${AISHA_CF_TUNNEL_DOMAIN:?AISHA_CF_TUNNEL_DOMAIN is required (e.g. your-gpu-domain.com)}
 
       # --- Aisha CLI runtime (forwarded to GPU nodes via vastai_client.create_instance) ---
       AI_BUNDLES_GITHUB_TOKEN: ${AI_BUNDLES_GITHUB_TOKEN:?AI_BUNDLES_GITHUB_TOKEN is required (PAT for private gearbox/ai-bundles)}

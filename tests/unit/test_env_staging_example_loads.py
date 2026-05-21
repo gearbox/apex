@@ -44,7 +44,7 @@ def test_env_staging_example_loads_into_settings(monkeypatch: pytest.MonkeyPatch
         "AISHA_CF_API_TOKEN": "cf_test",
         "AISHA_CF_ACCOUNT_ID": "cf_acct",
         "AISHA_CF_ZONE_ID": "cf_zone",
-        "AISHA_CF_TUNNEL_DOMAIN": "gpu.test.example",
+        "AISHA_CF_TUNNEL_DOMAIN": "test.example",
         "AI_BUNDLES_GITHUB_TOKEN": "ghp_test",
         "APEX_CALLBACK_URL": "https://staging.test.example",
         "R2_ACCOUNT_ID": "r2_test",

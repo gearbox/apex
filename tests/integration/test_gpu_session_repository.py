@@ -88,7 +88,7 @@ async def test_create_persists_all_fields(
         model_type="aisha-video",
         cf_tunnel_id="tun-abc",
         cf_dns_record_id="rec-xyz",
-        tunnel_hostname="gpu-abc.gpu.cloudin.space",
+        tunnel_hostname="gpu-abc.gpu-domain.com",
         vastai_instance_id=12345,
         vastai_offer_id=99,
         vastai_cost_per_hour_micros=500_000,
@@ -105,7 +105,7 @@ async def test_create_persists_all_fields(
     assert row.model_type == "aisha-video"
     assert row.cf_tunnel_id == "tun-abc"
     assert row.cf_dns_record_id == "rec-xyz"
-    assert row.tunnel_hostname == "gpu-abc.gpu.cloudin.space"
+    assert row.tunnel_hostname == "gpu-abc.gpu-domain.com"
     assert row.vastai_instance_id == 12345
     assert row.vastai_offer_id == 99
     assert row.vastai_cost_per_hour_micros == 500_000

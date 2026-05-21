@@ -110,7 +110,7 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.vastai_gpu_name = "RTX_4090"
     session.cf_tunnel_id = "tunnel-abc123"
     session.cf_dns_record_id = "dns-abc123"
-    session.tunnel_hostname = "01234567.gpu.cloudin.space"
+    session.tunnel_hostname = "gpu-01234567.gpu-domain.com"
     session.callback_token = "test-callback-token"
     session.stale_detected_at = None
     session.stale_notified = False

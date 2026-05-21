@@ -58,7 +58,7 @@ def _make_gpu_session(
     session.model_type = "aisha-image"
     session.cf_tunnel_id = cf_tunnel_id
     session.cf_dns_record_id = "dns-abc"
-    session.tunnel_hostname = "01234567.gpu.cloudin.space"
+    session.tunnel_hostname = "gpu-01234567.gpu-domain.com"
     session.vastai_instance_id = 12345
     session.vastai_offer_id = 67890
     session.vastai_cost_per_hour_micros = 500_000
@@ -85,7 +85,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.orphaned_tunnel_cleanup_grace_period_minutes = 10
     settings.orphaned_instance_cleanup_grace_period_minutes = 5
     settings.orphaned_instance_cleanup_horizon_minutes = 1440
-    settings.aisha_cf_tunnel_domain = "gpu.cloudin.space"
+    settings.aisha_cf_tunnel_domain = "gpu-domain.com"
     for k, v in overrides.items():
         setattr(settings, k, v)
     return settings

@@ -559,6 +559,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             job_age_timeout_seconds=settings.aisha_poller_job_age_timeout_seconds,
             comfyui_request_timeout_seconds=settings.aisha_poller_comfyui_request_timeout_seconds,
             tunnel_allowed_suffix=settings.aisha_cf_tunnel_domain or "",
+            tunnel_allowed_prefix=settings.aisha_cf_tunnel_prefix or None,
             retention_days=settings.retention_days,
         )
         _services.aisha_job_poller = AishaJobPoller(

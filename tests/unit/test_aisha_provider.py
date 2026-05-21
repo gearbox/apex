@@ -343,8 +343,6 @@ class TestAishaProviderSSRFGuard:
             "evil.com:443.gpu.test",
             "/etc/passwd.gpu.test",
             "evil\\\\path.gpu.test",
-            # Uppercase: Cloudflare emits lowercase, anything else is corruption
-            "AB123.GPU.TEST",
             # Leading dot or hyphen: invalid DNS shape
             ".abc.gpu.test",
             "-abc.gpu.test",

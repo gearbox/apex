@@ -36,7 +36,7 @@ def _make_client(mock_http: AsyncMock) -> CloudflareTunnelClient:
         api_token="test-token",
         account_id="acc-123",
         zone_id="zone-456",
-        tunnel_domain="gpu.cloudin.space",
+        tunnel_domain="gpu-domain.com",
     )
 
 
@@ -53,7 +53,7 @@ _CREATE_DNS_OK = {
     "messages": [],
     "result": {
         "id": "dns-def",
-        "name": "01jf8x3k.gpu.cloudin.space",
+        "name": "gpu-01jf8x3k.gpu-domain.com",
         "type": "CNAME",
         "content": "tunnel-abc.cfargotunnel.com",
     },
@@ -134,7 +134,7 @@ class TestConfigureTunnelIngress:
         mock_http.put = AsyncMock(return_value=_mock_response(200, _CONFIGURE_OK))
         client = _make_client(mock_http)
 
-        await client.configure_tunnel_ingress("tunnel-abc", "01jf8x3k.gpu.cloudin.space", 18188)
+        await client.configure_tunnel_ingress("tunnel-abc", "gpu-01jf8x3k.gpu-domain.com", 18188)
 
         mock_http.put.assert_called_once()
         call_url = mock_http.put.call_args[0][0]
@@ -164,7 +164,7 @@ class TestCreateDnsRecord:
         mock_http.post = AsyncMock(return_value=_mock_response(200, _CREATE_DNS_OK))
         client = _make_client(mock_http)
 
-        record_id = await client.create_dns_record("01jf8x3k.gpu.cloudin.space", "tunnel-abc")
+        record_id = await client.create_dns_record("gpu-01jf8x3k.gpu-domain.com", "tunnel-abc")
 
         assert record_id == "dns-def"
         call_url = mock_http.post.call_args[0][0]
@@ -372,7 +372,7 @@ class TestCreateSessionTunnel:
         assert tunnel_id == "tunnel-abc"
         assert token == "tok-xyz"
         assert dns_record_id == "dns-def"
-        assert hostname == "01jf8x3k.gpu.cloudin.space"
+        assert hostname == "gpu-01jf8x3k.gpu-domain.com"
 
         # Verify call order: post (create) → put (configure) → post (DNS)
         assert mock_http.post.call_count == 2
@@ -446,6 +446,29 @@ class TestCreateSessionTunnel:
             await client.create_session_tunnel("01jf8x3k", 18188)
 
         mock_http.delete.assert_called_once()
+
+    async def test_create_session_tunnel_uses_gpu_prefix(self) -> None:
+        """The hostname must start with 'gpu-' so the validator and DNS records
+        are recognizable as GPU-session tunnels regardless of the zone domain."""
+        mock_http = AsyncMock(spec=httpx.AsyncClient)
+        mock_http.post = AsyncMock(
+            side_effect=[
+                _mock_response(200, _CREATE_TUNNEL_OK),
+                _mock_response(200, _CREATE_DNS_OK),
+            ]
+        )
+        mock_http.put = AsyncMock(return_value=_mock_response(200, _CONFIGURE_OK))
+        client = _make_client(mock_http)
+
+        _, _, _, hostname = await client.create_session_tunnel("01jf8x3k", 18188)
+
+        assert hostname.startswith("gpu-01jf8x3k.")
+        assert hostname.endswith(".gpu-domain.com")
+        # zone "gpu-domain.com" has 1 dot → one-level hostname has 2 dots total.
+        # If someone reverts to {id}.gpu.{domain}, count becomes 3 — regression guard.
+        assert hostname.count(".") == 2, (
+            "Hostname must be single-level under the apex zone for Universal SSL coverage"
+        )
 
 
 # ---------------------------------------------------------------------------
