@@ -148,7 +148,7 @@ hardware:
 comfyui:
   repo: https://github.com/comfyanonymous/ComfyUI
   commit: a1b2c3d4e5f6...
-  port: 18188                     # ComfyUI listen port inside container
+  port: 8188                      # ComfyUI listen port inside container
 
 # ... rest of bundle.yaml (custom_nodes, models, workflow_file, etc.)
 ```
@@ -182,7 +182,7 @@ class HardwareRequirements:
     min_network_download_mbps: int
     cuda_min_version: str
     num_gpus: int
-    comfyui_port: int = 18188
+    comfyui_port: int = 8188
 
 @dataclass(frozen=True, slots=True)
 class BundleMapping:
@@ -271,7 +271,7 @@ When Apex provisions a node, it translates `HardwareRequirements` into Vast.ai s
         "ACS_APEX_CALLBACK_TOKEN": callback_token,
 
         # Port mapping for ComfyUI (internal, tunneled via CF)
-        "-p 18188:18188": "1"
+        "-p 8188:8188": "1"
     },
     "onstart": "curl -sL https://raw.githubusercontent.com/gearbox/aisha/main/scripts/onstart.sh | bash"
 }
@@ -312,7 +312,7 @@ src/api/services/
 | Method | CF API Endpoint | Purpose |
 |--------|----------------|---------|
 | `create_tunnel()` | `POST /accounts/{id}/cfd_tunnel` | Create named tunnel, get token |
-| `configure_tunnel()` | `PUT /accounts/{id}/cfd_tunnel/{tunnel_id}/configurations` | Set ingress rules (port 18188 → localhost) |
+| `configure_tunnel()` | `PUT /accounts/{id}/cfd_tunnel/{tunnel_id}/configurations` | Set ingress rules (port 8188 → localhost) |
 | `create_dns_record()` | `POST /zones/{id}/dns_records` | CNAME `gpu-{session_id}.gpu-domain.com` → `{tunnel_id}.cfargotunnel.com` |
 | `delete_tunnel()` | `DELETE /accounts/{id}/cfd_tunnel/{tunnel_id}` | Cleanup on session stop (not pause) |
 | `delete_dns_record()` | `DELETE /zones/{id}/dns_records/{record_id}` | Cleanup on session stop (not pause) |
@@ -399,6 +399,16 @@ start_tunnel
 ```
 
 The tunnel starts early so Apex can begin probing even while the bundle is still deploying (probes will fail with connection refused until ComfyUI starts, which is expected and handled by the provisioning worker).
+
+### 5.7 Instance Portal Named Tunnel
+
+The Vast.ai template image ships an **Instance Portal** that runs a built-in `tunnel_manager`. By default it creates account-less quick tunnels (`*.trycloudflare.com`) for every service at boot. When the env var `CF_TUNNEL_TOKEN` is present at boot, the portal runs a **named tunnel** instead.
+
+Apex injects `CF_TUNNEL_TOKEN` (set to the same value as `ACS_CF_TUNNEL_TOKEN`) into the per-instance env at creation time, so the portal sees it before the provisioning script runs. This is the **only mechanism** that starts the named tunnel — there is no separate `cloudflared` process managed by the Aisha script for named tunnels.
+
+**Ingress is authoritative in Cloudflare.** Apex creates the tunnel with `config_src: "cloudflare"`, meaning the ingress rules are stored remotely in Cloudflare and pulled by the connector at startup. Apex sets the ingress via `configure_tunnel_ingress()` (pointing at `localhost:8188`). The portal connector fetches and honors that config — there is exactly one ingress config and no conflict.
+
+**One token per instance.** Cloudflare enforces that each tunnel token can connect from exactly one location. Apex generates a fresh tunnel (and token) per GPU session. The token must not be shared across sessions.
 
 ---
 

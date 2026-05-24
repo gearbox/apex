@@ -51,7 +51,7 @@ class HardwareRequirements:
     num_gpus: int
     """Number of GPUs required."""
 
-    comfyui_port: int = 18188
+    comfyui_port: int = 8188
     """ComfyUI listen port inside the container."""
 
     template_hash_id: str | None = None

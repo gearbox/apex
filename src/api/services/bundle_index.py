@@ -687,7 +687,7 @@ class BundleIndexService:
 
         # Apply default for optional int fields before validation so _require_int
         # produces consistent error messages for invalid values.
-        hw.setdefault("comfyui_port", 18188)
+        hw.setdefault("comfyui_port", 8188)
 
         template_hash_id = hw.get("template_hash_id")
         if template_hash_id is not None:

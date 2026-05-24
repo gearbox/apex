@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     # ComfyUI connection settings
     comfyui_host: str = Field(default="127.0.0.1", description="ComfyUI server host")
-    comfyui_port: int = Field(default=18188, description="ComfyUI server port")
+    comfyui_port: int = Field(default=8188, description="ComfyUI server port")
 
     # xAI Grok API settings
     xai_api_key: str = Field(

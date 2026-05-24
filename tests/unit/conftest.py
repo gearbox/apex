@@ -22,7 +22,7 @@ def settings() -> Settings:
     """Provide test settings."""
     return Settings(
         comfyui_host="127.0.0.1",
-        comfyui_port=18188,
+        comfyui_port=8188,
         debug=True,
     )
 

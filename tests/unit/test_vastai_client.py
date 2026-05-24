@@ -194,7 +194,7 @@ async def test_create_instance_success() -> None:
         offer_id=7,
         image="vastai/comfy:latest",
         disk_gb=100,
-        env={"-p 18188:18188": "1"},
+        env={"-p 8188:8188": "1"},
         onstart_cmd="bash /start.sh",
     )
     assert instance_id == 42
@@ -673,7 +673,7 @@ async def test_create_instance_with_template_hash_id_omits_image_and_onstart() -
     instance_id = await client.create_instance(
         offer_id=7,
         disk_gb=100,
-        env={"-p 18188:18188": "1"},
+        env={"-p 8188:8188": "1"},
         template_hash_id="abc123hash",
     )
 

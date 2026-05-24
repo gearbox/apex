@@ -29,7 +29,7 @@ class TestHardwareRequirements:
 
     def test_default_comfyui_port(self) -> None:
         hw = self._make()
-        assert hw.comfyui_port == 18188
+        assert hw.comfyui_port == 8188
 
     def test_custom_comfyui_port(self) -> None:
         hw = self._make(comfyui_port=8188)

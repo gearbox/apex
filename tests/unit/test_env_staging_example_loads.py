@@ -76,6 +76,11 @@ def test_no_unprefixed_cf_in_source() -> None:
 
     The four CF-API fields must always be prefixed with AISHA_ to disambiguate
     from CLOUDFLARE_TUNNEL_TOKEN (which is a separate concern).
+
+    NOTE: CF_TUNNEL_TOKEN intentionally excluded from forbidden_env — it is the
+    Vast.ai Instance Portal's mandated boot-time env var name for named tunnels,
+    set in _env_builder.build_acs_env. Its legitimate, sole location is pinned by
+    test_cf_tunnel_token_only_in_env_builder.
     """
     import subprocess
 
@@ -110,3 +115,31 @@ def test_no_unprefixed_cf_in_source() -> None:
         assert result.returncode == 1, (
             f"Forbidden identifier {needle!r} reintroduced in source: {result.stdout}"
         )
+
+
+def test_cf_tunnel_token_only_in_env_builder() -> None:
+    """CF_TUNNEL_TOKEN (unprefixed) is allowed ONLY in _env_builder.py, where it is
+    injected for the Vast.ai portal. Anywhere else is an accidental convention breach."""
+    import subprocess
+
+    src_root = _REPO_ROOT / "src"
+    result = subprocess.run(  # noqa: S603
+        [
+            "grep",
+            "-r",
+            "-l",
+            "-w",
+            "CF_TUNNEL_TOKEN",
+            "--exclude-dir=__pycache__",
+            "--include=*.py",
+            str(src_root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    matched_files = set(result.stdout.split()) if result.returncode == 0 else set()
+    allowed = {str(src_root / "api" / "services" / "gpu_session" / "_env_builder.py")}
+    assert matched_files <= allowed, (
+        f"CF_TUNNEL_TOKEN found outside the allowed location(s): {matched_files - allowed}"
+    )

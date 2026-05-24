@@ -168,7 +168,7 @@ deep). A `*.gpu.gpu-sessions-domain.com` wildcard cert is **not** included.
 
 **Option B — Use HTTP between CF edge and the GPU node (recommended for this use case)**
 - When apex creates the per-session tunnel route, set service type to
-  `HTTP` pointing at `http://localhost:18188` on the node
+  `HTTP` pointing at `http://localhost:8188` on the node
 - CF still presents HTTPS to apex (the only caller — no browser is
   involved), and the CF-to-node leg is HTTP over the outbound
   `cloudflared` tunnel, which is never exposed to the public internet
