@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+DEFAULT_COMFYUI_PORT: int = 8188
+"""Canonical default ComfyUI listen port. Used by HardwareRequirements, BundleIndexService,
+and Settings so the three stay in sync without each hardcoding the literal."""
+
 
 @dataclass(frozen=True, slots=True)
 class ReadinessMarker:
@@ -51,7 +55,7 @@ class HardwareRequirements:
     num_gpus: int
     """Number of GPUs required."""
 
-    comfyui_port: int = 8188
+    comfyui_port: int = DEFAULT_COMFYUI_PORT
     """ComfyUI listen port inside the container."""
 
     template_hash_id: str | None = None

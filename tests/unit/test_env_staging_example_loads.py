@@ -143,3 +143,4 @@ def test_cf_tunnel_token_only_in_env_builder() -> None:
     assert matched_files <= allowed, (
         f"CF_TUNNEL_TOKEN found outside the allowed location(s): {matched_files - allowed}"
     )
+    assert allowed <= matched_files, "CF_TUNNEL_TOKEN missing from _env_builder.py"
