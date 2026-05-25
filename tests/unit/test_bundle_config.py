@@ -4,7 +4,12 @@ import dataclasses
 
 import pytest
 
-from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
+from src.core.bundle_config import (
+    DEFAULT_COMFYUI_PORT,
+    BundleMapping,
+    HardwareRequirements,
+    ReadinessMarker,
+)
 
 
 class TestHardwareRequirements:
@@ -29,7 +34,7 @@ class TestHardwareRequirements:
 
     def test_default_comfyui_port(self) -> None:
         hw = self._make()
-        assert hw.comfyui_port == 18188
+        assert hw.comfyui_port == DEFAULT_COMFYUI_PORT
 
     def test_custom_comfyui_port(self) -> None:
         hw = self._make(comfyui_port=8188)

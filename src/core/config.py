@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.core.bundle_config import DEFAULT_COMFYUI_PORT
+
 
 class GrokBillingConfig(BaseModel):
     """Grok moderation billing policy configuration."""
@@ -74,7 +76,7 @@ class Settings(BaseSettings):
 
     # ComfyUI connection settings
     comfyui_host: str = Field(default="127.0.0.1", description="ComfyUI server host")
-    comfyui_port: int = Field(default=18188, description="ComfyUI server port")
+    comfyui_port: int = Field(default=DEFAULT_COMFYUI_PORT, description="ComfyUI server port")
 
     # xAI Grok API settings
     xai_api_key: str = Field(

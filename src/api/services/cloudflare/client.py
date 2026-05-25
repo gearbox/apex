@@ -120,7 +120,7 @@ class CloudflareTunnelClient:
         Args:
             tunnel_id: CF tunnel UUID.
             hostname: Public hostname (e.g. "gpu-01jf8x3k.your-gpu-domain.com").
-            local_port: Local port to forward to (e.g. 18188 for ComfyUI).
+            local_port: Local port to forward to (e.g. 8188 for ComfyUI).
 
         Raises:
             TunnelConfigError: If configuration fails.
@@ -453,7 +453,7 @@ class CloudflareTunnelClient:
 
         Args:
             session_id_short: First 8 chars of session UUIDv7.
-            comfyui_port: ComfyUI port (typically 18188).
+            comfyui_port: ComfyUI port (typically 8188).
 
         Returns:
             Tuple of (tunnel_id, tunnel_token, dns_record_id, hostname).

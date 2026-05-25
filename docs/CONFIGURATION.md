@@ -61,7 +61,7 @@ Controls how Apex connects to the ComfyUI backend that executes generation workf
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `COMFYUI_HOST` | `127.0.0.1` | `str` | Hostname or IP of the ComfyUI server. Change to the remote host or GPU node IP when ComfyUI is not co-located. |
-| `COMFYUI_PORT` | `18188` | `int` | TCP port ComfyUI listens on. Must match the `--port` flag passed to ComfyUI. |
+| `COMFYUI_PORT` | `8188` | `int` | TCP port ComfyUI listens on. Must match the `--port` flag passed to ComfyUI. |
 
 > **Computed:** `COMFYUI_BASE_URL` is derived as `http://{COMFYUI_HOST}:{COMFYUI_PORT}` and
 > cannot be set directly.

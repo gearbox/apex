@@ -57,7 +57,12 @@ def build_acs_env(
         "ACS_AISHA_REPO": settings.aisha_repo_url,
         "ACS_AISHA_BRANCH": settings.aisha_branch,
         # --- Tunnel + apex callback ---
-        "ACS_CF_TUNNEL_TOKEN": tunnel_token,
+        "ACS_CF_TUNNEL_TOKEN": tunnel_token,  # Aisha script / prefixed convention
+        # Vast.ai Instance Portal reads this exact (unprefixed) name at boot to run a NAMED
+        # tunnel instead of account-less quick tunnels. See Vast.ai Instance Portal docs →
+        # "Named Tunnels". This is a third-party-mandated env-var name, NOT an apex CF-API
+        # field, so it is intentionally unprefixed. Do not rename.
+        "CF_TUNNEL_TOKEN": tunnel_token,
         "ACS_APEX_SESSION_ID": str(session_id),
         "ACS_APEX_CALLBACK_URL": settings.apex_callback_url,
         "ACS_APEX_CALLBACK_TOKEN": callback_token,

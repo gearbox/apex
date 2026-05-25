@@ -16,7 +16,12 @@ import httpx
 import structlog
 import yaml
 
-from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
+from src.core.bundle_config import (
+    DEFAULT_COMFYUI_PORT,
+    BundleMapping,
+    HardwareRequirements,
+    ReadinessMarker,
+)
 
 logger = structlog.get_logger()
 
@@ -687,7 +692,7 @@ class BundleIndexService:
 
         # Apply default for optional int fields before validation so _require_int
         # produces consistent error messages for invalid values.
-        hw.setdefault("comfyui_port", 18188)
+        hw.setdefault("comfyui_port", DEFAULT_COMFYUI_PORT)
 
         template_hash_id = hw.get("template_hash_id")
         if template_hash_id is not None:
