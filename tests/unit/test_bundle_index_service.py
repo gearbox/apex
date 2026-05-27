@@ -407,7 +407,7 @@ class TestParseHardware:
             "min_network_download_mbps": 1000,
             "cuda_min_version": "12.4",
             "num_gpus": 2,
-            "comfyui_port": 8188,
+            "comfyui_port": 18188,
         }
         _write_bundle_yaml(tmp_path / "my_bundle", hw)
 
@@ -420,7 +420,7 @@ class TestParseHardware:
         assert result.min_network_download_mbps == 1000
         assert result.cuda_min_version == "12.4"
         assert result.num_gpus == 2
-        assert result.comfyui_port == 8188
+        assert result.comfyui_port == 18188
 
     def test_default_comfyui_port(self, tmp_path: Path) -> None:
         hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
@@ -534,6 +534,14 @@ class TestParseHardware:
         hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
         _write_bundle_yaml(tmp_path / "no_port", hw)
         svc = _make_service(tmp_path)
+        result, _ = svc._parse_hardware(tmp_path / "no_port")
+        assert result.comfyui_port == 18188
+
+    def test_comfyui_port_respects_non_default_default_comfyui_port(self, tmp_path: Path) -> None:
+        """When default_comfyui_port is overridden, bundles without comfyui_port use that value."""
+        hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
+        _write_bundle_yaml(tmp_path / "no_port", hw)
+        svc = _make_service(tmp_path, default_comfyui_port=18188)
         result, _ = svc._parse_hardware(tmp_path / "no_port")
         assert result.comfyui_port == 18188
 
@@ -1299,6 +1307,7 @@ class TestInitValidation:
     def test_rejects_zero_cap_values(self, tmp_path: Path) -> None:
         """Cap fields must be positive; zero or negative raise ValueError."""
         for bad_field in (
+            "default_comfyui_port",
             "max_download_bytes",
             "max_member_count",
             "max_member_size_bytes",

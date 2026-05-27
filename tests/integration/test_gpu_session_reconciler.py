@@ -24,7 +24,7 @@ async def _create_gpu_session(
     user_id: object = None,
     status: str = GpuSessionStatus.active.value,
     host: str = "10.0.0.1",
-    port: int = 8188,
+    port: int = 18188,
 ) -> GpuSession:
     """Insert a GpuSession directly via the test session."""
     gpu_session = GpuSession(

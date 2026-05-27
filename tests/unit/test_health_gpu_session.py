@@ -18,7 +18,7 @@ def _make_session(
     *,
     status: str = GpuSessionStatus.active.value,
     host: str | None = "10.0.0.1",
-    port: int | None = 8188,
+    port: int | None = 18188,
     stale_detected_at: datetime | None = None,
 ) -> GpuSession:
     """Build a mock GpuSession without touching the DB."""

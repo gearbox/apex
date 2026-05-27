@@ -11,7 +11,7 @@ from src.core.config import Settings
 def _base_settings(**overrides: object) -> Settings:
     return Settings(
         comfyui_host="127.0.0.1",
-        comfyui_port=8188,
+        comfyui_port=18188,
         **overrides,  # type: ignore[arg-type]
     )
 

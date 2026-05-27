@@ -94,6 +94,7 @@ class BundleIndexService:
                 f"sync_interval_minutes must be a positive integer, got {sync_interval_minutes!r}"
             )
         for name, val in (
+            ("default_comfyui_port", default_comfyui_port),
             ("max_download_bytes", max_download_bytes),
             ("max_member_count", max_member_count),
             ("max_member_size_bytes", max_member_size_bytes),
