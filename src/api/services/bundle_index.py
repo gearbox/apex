@@ -17,6 +17,7 @@ import structlog
 import yaml
 
 from src.core.bundle_config import (
+    DEFAULT_COMFYUI_PORT,
     BundleMapping,
     HardwareRequirements,
     ReadinessMarker,
@@ -693,7 +694,7 @@ class BundleIndexService:
 
         # Apply default for optional int fields before validation so _require_int
         # produces consistent error messages for invalid values.
-        hw.setdefault("comfyui_port", self._default_comfyui_port)
+        hw.setdefault("comfyui_port", DEFAULT_COMFYUI_PORT)
 
         template_hash_id = hw.get("template_hash_id")
         if template_hash_id is not None:
