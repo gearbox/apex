@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 from src.api.services.gpu_session._env_builder import build_acs_env
+from src.core.bundle_config import DEFAULT_COMFYUI_PORT
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -66,7 +67,7 @@ def _build(**overrides: object) -> dict[str, str]:
         session_id=session_id,
         bundle_name=overrides.pop("bundle_name", "wan_2.2_i2v"),  # type: ignore[arg-type]
         bundle_version=overrides.pop("bundle_version", "260105-01"),  # type: ignore[arg-type]
-        comfyui_port=overrides.pop("comfyui_port", 18188),  # type: ignore[arg-type]
+        comfyui_port=overrides.pop("comfyui_port", DEFAULT_COMFYUI_PORT),  # type: ignore[arg-type]
         tunnel_token=overrides.pop("tunnel_token", "tunnel-secret"),  # type: ignore[arg-type]
         callback_token=overrides.pop("callback_token", "cb-secret"),  # type: ignore[arg-type]
     )
@@ -133,7 +134,7 @@ def test_session_id_is_stringified() -> None:
 
 
 def test_dict_has_no_unexpected_keys() -> None:
-    port = 18188
+    port = DEFAULT_COMFYUI_PORT
     env = _build(comfyui_port=port)
     port_key = f"-p {port}:{port}"
     actual_keys = set(env.keys()) - {port_key}
@@ -152,11 +153,11 @@ def test_bundle_name_passed_through() -> None:
     assert env["ACS_BUNDLE_VERSION"] == "260201-01"
 
 
-def test_default_port_18188_mapping_present() -> None:
-    env = _build(comfyui_port=18188)
-    assert env["ACS_COMFYUI_PORT"] == "18188"
-    assert "-p 18188:18188" in env
-    assert env["-p 18188:18188"] == "1"
+def test_default_port_8188_mapping_present() -> None:
+    env = _build(comfyui_port=DEFAULT_COMFYUI_PORT)
+    assert env["ACS_COMFYUI_PORT"] == str(DEFAULT_COMFYUI_PORT)
+    assert f"-p {DEFAULT_COMFYUI_PORT}:{DEFAULT_COMFYUI_PORT}" in env
+    assert env[f"-p {DEFAULT_COMFYUI_PORT}:{DEFAULT_COMFYUI_PORT}"] == "1"
 
 
 def test_cf_tunnel_token_present_and_unprefixed() -> None:
