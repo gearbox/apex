@@ -16,13 +16,15 @@ from src.core.config import Settings
 from src.db.models import User
 from src.db.repositories import UserRepository
 
+_DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
+
 
 @pytest.fixture
 def settings() -> Settings:
     """Provide test settings."""
     return Settings(
         comfyui_host="127.0.0.1",
-        comfyui_port=8188,
+        comfyui_port=_DEFAULT_COMFYUI_PORT,
         debug=True,
     )
 

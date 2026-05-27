@@ -13,6 +13,8 @@ from structlog.testing import capture_logs
 from src.core.config import Settings
 from src.core.logging import configure_logging, get_logger
 
+_DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
+
 
 @pytest.fixture
 def _reset_structlog() -> Generator[None]:
@@ -27,7 +29,7 @@ def minimal_settings() -> Settings:
     """Minimal Settings with explicit log config for logging tests."""
     return Settings(
         comfyui_host="127.0.0.1",
-        comfyui_port=8188,
+        comfyui_port=_DEFAULT_COMFYUI_PORT,
         log_level="DEBUG",
         log_format="console",
     )
@@ -43,7 +45,7 @@ class TestConfigureLogging:
     def test_json_format_runs_without_error(self) -> None:
         settings = Settings(
             comfyui_host="127.0.0.1",
-            comfyui_port=8188,
+            comfyui_port=_DEFAULT_COMFYUI_PORT,
             log_level="INFO",
             log_format="json",
         )
@@ -55,7 +57,7 @@ class TestConfigureLogging:
     def test_root_logger_level_is_applied(self) -> None:
         settings = Settings(
             comfyui_host="127.0.0.1",
-            comfyui_port=8188,
+            comfyui_port=_DEFAULT_COMFYUI_PORT,
             log_level="WARNING",
             log_format="console",
         )

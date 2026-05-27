@@ -24,6 +24,8 @@ from src.core.bundle_config import BundleMapping, HardwareRequirements
 from src.core.enums import GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 
+_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
+
 _REPO_PATH = "src.api.services.gpu_session.provisioning_worker.GpuSessionRepository"
 
 
@@ -40,7 +42,7 @@ def _make_hardware() -> HardwareRequirements:
         min_network_download_mbps=500,
         cuda_min_version="12.1",
         num_gpus=1,
-        comfyui_port=8188,
+        comfyui_port=_DEFAULT_COMFYUI_PORT,
     )
 
 
@@ -567,10 +569,10 @@ class TestAdvanceProvisioning:
         assert env["ACS_BUNDLES_BRANCH"] == "master"
         assert env["ACS_AISHA_REPO"] == "https://github.com/gearbox/aisha.git"
         assert env["ACS_AISHA_BRANCH"] == "master"
-        assert env["ACS_COMFYUI_PORT"] == "8188"
+        assert env["ACS_COMFYUI_PORT"] == str(_DEFAULT_COMFYUI_PORT)
         assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
         assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
-        assert "-p 8188:8188" in env
+        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
 
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
         """If ai_bundles_github_token is empty, mark session failed before create_instance."""
@@ -776,7 +778,7 @@ class TestEnvReconstruction:
             await worker._retry_or_fail(session, reason="timeout")
 
         env = mocks["vastai_client"].create_instance.call_args[1]["env"]
-        assert "-p 8188:8188" in env
+        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
 
 
 class TestSweepConcurrency:
