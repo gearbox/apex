@@ -17,7 +17,6 @@ import structlog
 import yaml
 
 from src.core.bundle_config import (
-    DEFAULT_COMFYUI_PORT,
     BundleMapping,
     HardwareRequirements,
     ReadinessMarker,
@@ -83,6 +82,7 @@ class BundleIndexService:
         sync_interval_minutes: int,
         cache_dir: Path | None = None,
         *,
+        default_comfyui_port: int,
         max_download_bytes: int,
         max_member_count: int,
         max_member_size_bytes: int,
@@ -101,6 +101,7 @@ class BundleIndexService:
         ):
             if val <= 0:
                 raise ValueError(f"{name} must be a positive integer, got {val!r}")
+        self._default_comfyui_port = default_comfyui_port
         self._owner, self._repo = _parse_github_url(repo_url)
         self._github_token = github_token
         self._branch = branch
@@ -692,7 +693,7 @@ class BundleIndexService:
 
         # Apply default for optional int fields before validation so _require_int
         # produces consistent error messages for invalid values.
-        hw.setdefault("comfyui_port", DEFAULT_COMFYUI_PORT)
+        hw.setdefault("comfyui_port", self._default_comfyui_port)
 
         template_hash_id = hw.get("template_hash_id")
         if template_hash_id is not None:
