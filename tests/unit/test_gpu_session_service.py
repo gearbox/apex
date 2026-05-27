@@ -34,6 +34,8 @@ from src.core.bundle_config import BundleMapping, HardwareRequirements, Readines
 from src.core.enums import GpuSessionStatus, ModelType
 from src.db.models.gpu_session import GpuSession
 
+_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
+
 _REPO_PATH = "src.api.services.gpu_session.service.GpuSessionRepository"
 _JOB_REPO_PATH = "src.api.services.gpu_session.service.JobRepository"
 
@@ -66,7 +68,7 @@ def _make_hardware() -> HardwareRequirements:
         min_network_download_mbps=500,
         cuda_min_version="12.1",
         num_gpus=1,
-        comfyui_port=18188,
+        comfyui_port=_DEFAULT_COMFYUI_PORT,
     )
 
 
@@ -405,7 +407,7 @@ class TestStartSession:
     async def test_port_mapping_uses_hardware_comfyui_port(self) -> None:
         """The env dict's port mapping must be derived from hardware.comfyui_port, not hardcoded."""
         service, mocks = _make_service()
-        # Custom port — different from the default 18188
+        # Custom port — different from the default _DEFAULT_COMFYUI_PORT
         custom_hardware = HardwareRequirements(
             gpu_whitelist=("RTX_4090",),
             min_disk_gb=100,
@@ -441,7 +443,7 @@ class TestStartSession:
         # Inspect the env dict passed to create_instance
         env_arg = mocks["vastai_client"].create_instance.call_args.kwargs["env"]
         assert "-p 9999:9999" in env_arg
-        assert "-p 18188:18188" not in env_arg
+        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" not in env_arg
         # Also verify CF tunnel was configured for the same port
         mocks["cf_client"].create_session_tunnel.assert_called_once_with(ANY, 9999)
 
@@ -673,15 +675,15 @@ class TestStartSession:
         assert "ACS_APEX_CALLBACK_TOKEN" in env
         assert "ACS_HF_TOKEN" in env
         assert "ACS_CIVITAI_API_TOKEN" in env
-        assert "-p 18188:18188" in env
-        assert env["-p 18188:18188"] == "1"
+        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
+        assert env[f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}"] == "1"
         # New contract keys
         assert env["ACS_GITHUB_TOKEN"] == "ghp_test_token"
         assert env["ACS_BUNDLES_REPO"] == "https://github.com/gearbox/ai-bundles.git"
         assert env["ACS_BUNDLES_BRANCH"] == "master"
         assert env["ACS_AISHA_REPO"] == "https://github.com/gearbox/aisha.git"
         assert env["ACS_AISHA_BRANCH"] == "master"
-        assert env["ACS_COMFYUI_PORT"] == "18188"
+        assert env["ACS_COMFYUI_PORT"] == str(_DEFAULT_COMFYUI_PORT)
         assert env["ACS_COMFYUI_PORT"] == str(bundle.hardware.comfyui_port)
         assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
         assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""

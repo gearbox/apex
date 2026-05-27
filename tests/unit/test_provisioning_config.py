@@ -7,11 +7,13 @@ from pydantic import ValidationError
 
 from src.core.config import Settings
 
+_DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
+
 
 def _base_settings(**overrides: object) -> Settings:
     return Settings(
         comfyui_host="127.0.0.1",
-        comfyui_port=18188,
+        comfyui_port=_DEFAULT_COMFYUI_PORT,
         **overrides,  # type: ignore[arg-type]
     )
 

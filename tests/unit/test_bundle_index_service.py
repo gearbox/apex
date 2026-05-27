@@ -17,8 +17,10 @@ from src.api.services.bundle_index import (
     BundleNotFoundError,
     _parse_github_url,
 )
-from src.core.bundle_config import DEFAULT_COMFYUI_PORT, BundleMapping, ReadinessMarker
+from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
 from src.core.config import Settings
+
+_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,12 +33,12 @@ _HW_YAML: dict[str, object] = {
     "min_network_download_mbps": 500,
     "cuda_min_version": "12.1",
     "num_gpus": 1,
-    "comfyui_port": DEFAULT_COMFYUI_PORT,
+    "comfyui_port": _DEFAULT_COMFYUI_PORT,
 }
 
 
 _TEST_CAPS: dict[str, Any] = {
-    "default_comfyui_port": 18188,
+    "default_comfyui_port": _DEFAULT_COMFYUI_PORT,
     "max_download_bytes": 10 * 1024 * 1024,  # 10 MB
     "max_member_count": 1000,
     "max_member_size_bytes": 5 * 1024 * 1024,
@@ -407,7 +409,7 @@ class TestParseHardware:
             "min_network_download_mbps": 1000,
             "cuda_min_version": "12.4",
             "num_gpus": 2,
-            "comfyui_port": 18188,
+            "comfyui_port": _DEFAULT_COMFYUI_PORT,
         }
         _write_bundle_yaml(tmp_path / "my_bundle", hw)
 
@@ -420,7 +422,7 @@ class TestParseHardware:
         assert result.min_network_download_mbps == 1000
         assert result.cuda_min_version == "12.4"
         assert result.num_gpus == 2
-        assert result.comfyui_port == 18188
+        assert result.comfyui_port == _DEFAULT_COMFYUI_PORT
 
     def test_default_comfyui_port(self, tmp_path: Path) -> None:
         hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
@@ -428,7 +430,7 @@ class TestParseHardware:
 
         svc = _make_service(tmp_path)
         result, _ = svc._parse_hardware(tmp_path / "my_bundle")
-        assert result.comfyui_port == DEFAULT_COMFYUI_PORT
+        assert result.comfyui_port == _DEFAULT_COMFYUI_PORT
 
     def test_raises_on_missing_hardware_section(self, tmp_path: Path) -> None:
         bundle_dir = tmp_path / "bad_bundle" / "current"
@@ -530,20 +532,20 @@ class TestParseHardware:
             svc._parse_hardware(tmp_path / "bad")
 
     def test_comfyui_port_default_applied_when_missing(self, tmp_path: Path) -> None:
-        """Missing comfyui_port uses the default 8188, still goes through _require_int."""
+        """Missing comfyui_port uses the default _DEFAULT_COMFYUI_PORT, still goes through _require_int."""
         hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
         _write_bundle_yaml(tmp_path / "no_port", hw)
         svc = _make_service(tmp_path)
         result, _ = svc._parse_hardware(tmp_path / "no_port")
-        assert result.comfyui_port == DEFAULT_COMFYUI_PORT
+        assert result.comfyui_port == _DEFAULT_COMFYUI_PORT
 
     def test_comfyui_port_respects_non_default_default_comfyui_port(self, tmp_path: Path) -> None:
         """When default_comfyui_port is overridden, bundles without comfyui_port use that value."""
         hw = {k: v for k, v in _HW_YAML.items() if k != "comfyui_port"}
         _write_bundle_yaml(tmp_path / "no_port", hw)
-        svc = _make_service(tmp_path, default_comfyui_port=18188)
+        svc = _make_service(tmp_path, default_comfyui_port=_DEFAULT_COMFYUI_PORT)
         result, _ = svc._parse_hardware(tmp_path / "no_port")
-        assert result.comfyui_port == 18188
+        assert result.comfyui_port == _DEFAULT_COMFYUI_PORT
 
     def test_template_hash_id_when_set_string(self, tmp_path: Path) -> None:
         hw = {**_HW_YAML, "template_hash_id": "4e17788f74f075dd9aab7d0d4427968f"}

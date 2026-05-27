@@ -5,11 +5,12 @@ import dataclasses
 import pytest
 
 from src.core.bundle_config import (
-    DEFAULT_COMFYUI_PORT,
     BundleMapping,
     HardwareRequirements,
     ReadinessMarker,
 )
+
+_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 
 class TestHardwareRequirements:
@@ -34,11 +35,11 @@ class TestHardwareRequirements:
 
     def test_default_comfyui_port(self) -> None:
         hw = self._make()
-        assert hw.comfyui_port == DEFAULT_COMFYUI_PORT
+        assert hw.comfyui_port == _DEFAULT_COMFYUI_PORT
 
     def test_custom_comfyui_port(self) -> None:
-        hw = self._make(comfyui_port=18188)
-        assert hw.comfyui_port == 18188
+        hw = self._make(comfyui_port=_DEFAULT_COMFYUI_PORT)
+        assert hw.comfyui_port == _DEFAULT_COMFYUI_PORT
 
     def test_fields_stored_correctly(self) -> None:
         hw = self._make(

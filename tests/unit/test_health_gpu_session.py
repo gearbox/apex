@@ -10,15 +10,18 @@ import httpx
 
 from src.api.services.health.base import HealthChecker
 from src.api.services.health.checkers.gpu_session import GpuSessionReconciler
+from src.core.bundle_config import HardwareRequirements
 from src.core.enums import ComponentCategory, ComponentStatus, GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
+
+_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 
 def _make_session(
     *,
     status: str = GpuSessionStatus.active.value,
     host: str | None = "10.0.0.1",
-    port: int | None = 18188,
+    port: int | None = _DEFAULT_COMFYUI_PORT,
     stale_detected_at: datetime | None = None,
 ) -> GpuSession:
     """Build a mock GpuSession without touching the DB."""

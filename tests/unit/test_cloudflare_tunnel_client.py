@@ -16,6 +16,9 @@ from src.api.services.cloudflare.exceptions import (
     TunnelCreationError,
     TunnelDeletionError,
 )
+from src.core.bundle_config import HardwareRequirements
+
+_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -134,7 +137,9 @@ class TestConfigureTunnelIngress:
         mock_http.put = AsyncMock(return_value=_mock_response(200, _CONFIGURE_OK))
         client = _make_client(mock_http)
 
-        await client.configure_tunnel_ingress("tunnel-abc", "gpu-01jf8x3k.gpu-domain.com", 18188)
+        await client.configure_tunnel_ingress(
+            "tunnel-abc", "gpu-01jf8x3k.gpu-domain.com", _DEFAULT_COMFYUI_PORT
+        )
 
         mock_http.put.assert_called_once()
         call_url = mock_http.put.call_args[0][0]
@@ -148,7 +153,9 @@ class TestConfigureTunnelIngress:
         client = _make_client(mock_http)
 
         with pytest.raises(TunnelConfigError) as exc_info:
-            await client.configure_tunnel_ingress("tunnel-abc", "host.example.com", 18188)
+            await client.configure_tunnel_ingress(
+                "tunnel-abc", "host.example.com", _DEFAULT_COMFYUI_PORT
+            )
 
         assert exc_info.value.status_code == 500
 
@@ -366,7 +373,7 @@ class TestCreateSessionTunnel:
         client = _make_client(mock_http)
 
         tunnel_id, token, dns_record_id, hostname = await client.create_session_tunnel(
-            "01jf8x3k", 18188
+            "01jf8x3k", _DEFAULT_COMFYUI_PORT
         )
 
         assert tunnel_id == "tunnel-abc"
@@ -399,7 +406,7 @@ class TestCreateSessionTunnel:
         client = _make_client(mock_http)
 
         with pytest.raises(TunnelConfigError):
-            await client.create_session_tunnel("01jf8x3k", 18188)
+            await client.create_session_tunnel("01jf8x3k", _DEFAULT_COMFYUI_PORT)
 
         # Rollback: tunnel should have been deleted
         mock_http.delete.assert_called_once()
@@ -422,7 +429,7 @@ class TestCreateSessionTunnel:
         client = _make_client(mock_http)
 
         with pytest.raises(DNSRecordError):
-            await client.create_session_tunnel("01jf8x3k", 18188)
+            await client.create_session_tunnel("01jf8x3k", _DEFAULT_COMFYUI_PORT)
 
         mock_http.delete.assert_called_once()
         delete_url = mock_http.delete.call_args[0][0]
@@ -443,7 +450,7 @@ class TestCreateSessionTunnel:
 
         # Original TunnelConfigError must propagate, not the delete failure
         with pytest.raises(TunnelConfigError):
-            await client.create_session_tunnel("01jf8x3k", 18188)
+            await client.create_session_tunnel("01jf8x3k", _DEFAULT_COMFYUI_PORT)
 
         mock_http.delete.assert_called_once()
 
@@ -460,7 +467,7 @@ class TestCreateSessionTunnel:
         mock_http.put = AsyncMock(return_value=_mock_response(200, _CONFIGURE_OK))
         client = _make_client(mock_http)
 
-        _, _, _, hostname = await client.create_session_tunnel("01jf8x3k", 18188)
+        _, _, _, hostname = await client.create_session_tunnel("01jf8x3k", _DEFAULT_COMFYUI_PORT)
 
         assert hostname.startswith("gpu-01jf8x3k.")
         assert hostname.endswith(".gpu-domain.com")

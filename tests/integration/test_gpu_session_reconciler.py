@@ -10,10 +10,13 @@ from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.bundle_config import HardwareRequirements
 from src.core.enums import GpuSessionStatus
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
+
+_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 UserFactory = Callable[..., Coroutine[Any, Any, User]]
 
@@ -24,7 +27,7 @@ async def _create_gpu_session(
     user_id: object = None,
     status: str = GpuSessionStatus.active.value,
     host: str = "10.0.0.1",
-    port: int = 18188,
+    port: int = _DEFAULT_COMFYUI_PORT,
 ) -> GpuSession:
     """Insert a GpuSession directly via the test session."""
     gpu_session = GpuSession(
