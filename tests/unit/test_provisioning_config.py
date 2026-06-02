@@ -76,3 +76,25 @@ class TestOldSettingRemoved:
         """max_node_provisioning_retries was removed; setting it must have no effect."""
         s = _base_settings()
         assert not hasattr(s, "max_node_provisioning_retries")
+
+
+class TestGpuProvisionTimeoutSeconds:
+    def test_default_is_2000(self) -> None:
+        assert Settings.model_fields["gpu_provision_timeout_seconds"].default == 2000
+
+    def test_custom_value(self) -> None:
+        s = _base_settings(gpu_provision_timeout_seconds=500)
+        assert s.gpu_provision_timeout_seconds == 500
+
+    def test_below_min_is_invalid(self) -> None:
+        with pytest.raises(ValidationError):
+            _base_settings(gpu_provision_timeout_seconds=299)
+
+    def test_boundary_min_300(self) -> None:
+        s = _base_settings(gpu_provision_timeout_seconds=300)
+        assert s.gpu_provision_timeout_seconds == 300
+
+    def test_env_var_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GPU_PROVISION_TIMEOUT_SECONDS", "500")
+        s = Settings(comfyui_host="127.0.0.1", comfyui_port=_DEFAULT_COMFYUI_PORT)
+        assert s.gpu_provision_timeout_seconds == 500

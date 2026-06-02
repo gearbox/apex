@@ -15,6 +15,9 @@ from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.gpu_session.provisioning_worker import (
     GpuProvisioningWorker,
+    _REASON_PENDING_TIMEOUT,
+    _REASON_PENDING_TIMEOUT_AFTER_ERRORS,
+    _REASON_PROVISIONING_TIMEOUT,
     _classify_terminal_state,
 )
 from src.api.services.vastai.client import VastAIClient
@@ -96,7 +99,9 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
 def _make_settings(**overrides: Any) -> MagicMock:
     settings = MagicMock()
     settings.gpu_provision_poll_interval_seconds = 15
-    settings.gpu_provision_timeout_minutes = 20
+    settings.gpu_provision_timeout_seconds = (
+        1200  # 20 min in seconds — matches timeout_minutes default
+    )
     settings.gpu_resume_timeout_minutes = 5
     settings.provisioning_offer_walk_depth = 10
     settings.provisioning_recreation_attempts = 1
@@ -384,7 +389,7 @@ class TestAdvancePending:
 
         await worker._advance_pending(session)
 
-        worker._retry_or_fail.assert_called_once_with(session, reason="pending_timeout")
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PENDING_TIMEOUT)
 
     async def test_pending_without_instance_id_marks_failed(self) -> None:
         worker, mocks = _make_worker()
@@ -471,7 +476,7 @@ class TestAdvanceProvisioning:
 
         await worker._advance_provisioning(session)
 
-        worker._retry_or_fail.assert_called_once_with(session, reason="provisioning_timeout")
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PROVISIONING_TIMEOUT)
         mocks["http_client"].get.assert_not_called()
 
     async def test_retry_preserves_tunnel(self) -> None:
@@ -505,7 +510,7 @@ class TestAdvanceProvisioning:
             mock_repo.get_by_id.return_value = reloaded
             mocks["vastai_client"].create_instance.return_value = 99999
 
-            await worker._retry_or_fail(session, reason="pending_timeout")
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
 
         # Tunnel ID must be unchanged (not deleted/recreated)
         mocks["cf_client"].delete_session_tunnel.assert_not_called()
@@ -1260,7 +1265,7 @@ class TestAdvancePendingNullInstance:
 
         await worker._advance_pending(session)
 
-        worker._retry_or_fail.assert_called_once_with(session, reason="pending_timeout")
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PENDING_TIMEOUT)
 
     async def test_transient_error_triggers_retry_on_timeout(self) -> None:
         """Exception from get_instance + timeout exceeded → _retry_or_fail fires."""
@@ -1274,7 +1279,7 @@ class TestAdvancePendingNullInstance:
         await worker._advance_pending(session)
 
         worker._retry_or_fail.assert_called_once_with(
-            session, reason="pending_timeout_after_errors"
+            session, reason=_REASON_PENDING_TIMEOUT_AFTER_ERRORS
         )
 
     async def test_transient_error_before_timeout_is_noop(self) -> None:
@@ -1805,3 +1810,126 @@ class TestProvisionVastaiInstance:
         assert call_kwargs.get("image") == "vastai/comfy:v0.15.1-cuda-12.9-py312"
         assert call_kwargs.get("onstart_cmd") == "bash /start.sh"
         assert "template_hash_id" not in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# TestProvisioningTimeoutSettings — Phase 2A timeout fix
+# ---------------------------------------------------------------------------
+
+
+class TestProvisioningTimeoutSettings:
+    """Tests for GPU_PROVISION_TIMEOUT_SECONDS wiring and the no-relaunch guard."""
+
+    def test_timeout_used_from_settings_small_value_triggers(self) -> None:
+        """_provision_timeout_exceeded respects gpu_provision_timeout_seconds, not a literal."""
+        elapsed_seconds = 90
+        created = datetime.now(UTC) - timedelta(seconds=elapsed_seconds)
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, created_at=created)
+
+        worker_short, _ = _make_worker(settings=_make_settings(gpu_provision_timeout_seconds=50))
+        assert worker_short._provision_timeout_exceeded(session) is True
+
+    def test_timeout_used_from_settings_large_value_does_not_trigger(self) -> None:
+        """_provision_timeout_exceeded with a large timeout: same elapsed time is not a timeout."""
+        elapsed_seconds = 90
+        created = datetime.now(UTC) - timedelta(seconds=elapsed_seconds)
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, created_at=created)
+
+        worker_long, _ = _make_worker(settings=_make_settings(gpu_provision_timeout_seconds=200))
+        assert worker_long._provision_timeout_exceeded(session) is False
+
+    async def test_within_timeout_window_is_noop(self) -> None:
+        """Elapsed < timeout and probe still fails: no provisioning_timeout event, no destroy."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker(settings=_make_settings(gpu_provision_timeout_seconds=2000))
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            created_at=datetime.now(UTC) - timedelta(seconds=30),
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        resp = MagicMock()
+        resp.status_code = 502
+        mocks["http_client"].get.return_value = resp
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with capture_logs() as logs:
+                await worker._advance_provisioning(session)
+
+        timeout_logs = [entry for entry in logs if "provisioning_timeout" in entry.get("event", "")]
+        assert not timeout_logs
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mock_repo.update_status.assert_not_called()
+
+    async def test_over_timeout_emits_events_and_fails_terminally(self) -> None:
+        """Elapsed >= timeout: provisioning_timeout + attempts_exhausted logged, session → failed."""
+        from structlog.testing import capture_logs
+
+        billing_mock = AsyncMock()
+        # provisioning_recreation_attempts=3: without the guard, recreation would fire
+        worker, mocks = _make_worker(
+            settings=_make_settings(
+                provisioning_recreation_attempts=3,
+                gpu_provision_timeout_seconds=60,
+            ),
+            billing_service=billing_mock,
+        )
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            created_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            with capture_logs() as logs:
+                await worker._advance_provisioning(session)
+
+        event_names = [entry.get("event", "") for entry in logs]
+        assert any("provisioning_timeout" in e for e in event_names)
+        assert any("attempts_exhausted" in e for e in event_names)
+        failed_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
+        ]
+        assert failed_calls, "session must be transitioned to failed"
+        billing_mock.refund.assert_awaited_once()
+
+    async def test_provisioning_timeout_never_calls_create_instance(self) -> None:
+        """_retry_or_fail with reason='provisioning_timeout' must never call create_instance,
+        even when provisioning_recreation_attempts > 1 would normally allow recreation."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            # attempt=2 < 3+1=4, so without the guard recreation would fire
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            with capture_logs() as logs:
+                await worker._retry_or_fail(session, reason=_REASON_PROVISIONING_TIMEOUT)
+
+        mocks["vastai_client"].create_instance.assert_not_called()
+        assert any("attempts_exhausted" in entry.get("event", "") for entry in logs)

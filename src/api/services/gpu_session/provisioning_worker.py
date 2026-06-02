@@ -49,6 +49,12 @@ logger = structlog.get_logger(__name__)
 _PROBE_TIMEOUT_SECONDS = 10.0
 _TERMINAL_STATUSES = frozenset({GpuSessionStatus.stopped, GpuSessionStatus.failed})
 
+# Reason strings passed to _retry_or_fail — defined as constants so the terminal guard
+# and every call site share a single source of truth (no typo risk, grep-friendly).
+_REASON_PROVISIONING_TIMEOUT = "provisioning_timeout"
+_REASON_PENDING_TIMEOUT = "pending_timeout"
+_REASON_PENDING_TIMEOUT_AFTER_ERRORS = "pending_timeout_after_errors"
+
 # Vast.ai actual_status values that mean the container is dead and will never reach 'running'.
 # Sourced from Vast.ai docs: https://docs.vast.ai/sdk/python/quickstart — "if actual_status
 # becomes 'exited' (container crashed), 'unknown' (no heartbeat from host), or 'offline'
@@ -254,7 +260,7 @@ class GpuProvisioningWorker:
                     "gpu_session.provision.pending_timeout_after_errors",
                     session_id=str(session.id),
                 )
-                await self._retry_or_fail(session, reason="pending_timeout_after_errors")
+                await self._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT_AFTER_ERRORS)
             return
 
         # Fast-fail on terminal Vast.ai states — no 20-min timeout wait.
@@ -267,7 +273,7 @@ class GpuProvisioningWorker:
                     "gpu_session.provision.pending_timeout",
                     session_id=str(session.id),
                 )
-                await self._retry_or_fail(session, reason="pending_timeout")
+                await self._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
             return
 
         await self._transition(
@@ -306,7 +312,7 @@ class GpuProvisioningWorker:
                 "gpu_session.provision.provisioning_timeout",
                 session_id=str(session.id),
             )
-            await self._retry_or_fail(session, reason="provisioning_timeout")
+            await self._retry_or_fail(session, reason=_REASON_PROVISIONING_TIMEOUT)
             return
 
         reachable = await self._probe_comfyui(session)
@@ -491,7 +497,14 @@ class GpuProvisioningWorker:
         # Attempts are 1-indexed: attempt=1 is the original; attempt=2 would be the
         # first recreation. With provisioning_recreation_attempts=1 (default), the
         # original attempt's failure is terminal — no recreation ever fires.
-        if new_attempt >= self._settings.provisioning_recreation_attempts + 1:
+
+        # provisioning_timeout is always terminal: re-downloading the full model on a
+        # fresh node hits the exact same wall (same slow network, same bundle size).
+        # Any other failure reason retains the existing recreation logic.
+        if (
+            reason == _REASON_PROVISIONING_TIMEOUT
+            or new_attempt >= self._settings.provisioning_recreation_attempts + 1
+        ):
             logger.warning(
                 "gpu_session.provision.attempts_exhausted",
                 session_id=str(session.id),
@@ -753,7 +766,7 @@ class GpuProvisioningWorker:
     def _provision_timeout_exceeded(self, session: GpuSession) -> bool:
         base = session.provisioning_started_at or session.created_at
         elapsed = datetime.now(UTC) - base
-        return elapsed > timedelta(minutes=self._settings.gpu_provision_timeout_minutes)
+        return elapsed > timedelta(seconds=self._settings.gpu_provision_timeout_seconds)
 
     def _resuming_timeout_exceeded(self, session: GpuSession) -> bool:
         base = session.resumed_at
