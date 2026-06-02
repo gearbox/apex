@@ -280,6 +280,15 @@ class Settings(BaseSettings):
         le=60,
         description="Max time per provisioning attempt before retry/failure",
     )
+    gpu_provision_timeout_seconds: int = Field(
+        default=2000,
+        ge=300,
+        description=(
+            "Max wall-clock seconds for a GPU session to finish provisioning (reach ready). "
+            "Generous to cover large model downloads (e.g. ~28 GB) on throttled nodes. "
+            "Env: GPU_PROVISION_TIMEOUT_SECONDS."
+        ),
+    )
     gpu_resume_timeout_minutes: int = Field(
         default=5,
         ge=1,

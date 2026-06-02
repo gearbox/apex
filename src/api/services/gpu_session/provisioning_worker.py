@@ -491,7 +491,14 @@ class GpuProvisioningWorker:
         # Attempts are 1-indexed: attempt=1 is the original; attempt=2 would be the
         # first recreation. With provisioning_recreation_attempts=1 (default), the
         # original attempt's failure is terminal — no recreation ever fires.
-        if new_attempt >= self._settings.provisioning_recreation_attempts + 1:
+
+        # provisioning_timeout is always terminal: re-downloading the full model on a
+        # fresh node hits the exact same wall (same slow network, same bundle size).
+        # Any other failure reason retains the existing recreation logic.
+        if (
+            reason == "provisioning_timeout"
+            or new_attempt >= self._settings.provisioning_recreation_attempts + 1
+        ):
             logger.warning(
                 "gpu_session.provision.attempts_exhausted",
                 session_id=str(session.id),
@@ -753,7 +760,7 @@ class GpuProvisioningWorker:
     def _provision_timeout_exceeded(self, session: GpuSession) -> bool:
         base = session.provisioning_started_at or session.created_at
         elapsed = datetime.now(UTC) - base
-        return elapsed > timedelta(minutes=self._settings.gpu_provision_timeout_minutes)
+        return elapsed > timedelta(seconds=self._settings.gpu_provision_timeout_seconds)
 
     def _resuming_timeout_exceeded(self, session: GpuSession) -> bool:
         base = session.resumed_at
