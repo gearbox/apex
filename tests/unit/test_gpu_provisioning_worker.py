@@ -15,6 +15,9 @@ from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.gpu_session.provisioning_worker import (
     GpuProvisioningWorker,
+    _REASON_PENDING_TIMEOUT,
+    _REASON_PENDING_TIMEOUT_AFTER_ERRORS,
+    _REASON_PROVISIONING_TIMEOUT,
     _classify_terminal_state,
 )
 from src.api.services.vastai.client import VastAIClient
@@ -96,7 +99,6 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
 def _make_settings(**overrides: Any) -> MagicMock:
     settings = MagicMock()
     settings.gpu_provision_poll_interval_seconds = 15
-    settings.gpu_provision_timeout_minutes = 20
     settings.gpu_provision_timeout_seconds = (
         1200  # 20 min in seconds — matches timeout_minutes default
     )
@@ -387,7 +389,7 @@ class TestAdvancePending:
 
         await worker._advance_pending(session)
 
-        worker._retry_or_fail.assert_called_once_with(session, reason="pending_timeout")
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PENDING_TIMEOUT)
 
     async def test_pending_without_instance_id_marks_failed(self) -> None:
         worker, mocks = _make_worker()
@@ -474,7 +476,7 @@ class TestAdvanceProvisioning:
 
         await worker._advance_provisioning(session)
 
-        worker._retry_or_fail.assert_called_once_with(session, reason="provisioning_timeout")
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PROVISIONING_TIMEOUT)
         mocks["http_client"].get.assert_not_called()
 
     async def test_retry_preserves_tunnel(self) -> None:
@@ -508,7 +510,7 @@ class TestAdvanceProvisioning:
             mock_repo.get_by_id.return_value = reloaded
             mocks["vastai_client"].create_instance.return_value = 99999
 
-            await worker._retry_or_fail(session, reason="pending_timeout")
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
 
         # Tunnel ID must be unchanged (not deleted/recreated)
         mocks["cf_client"].delete_session_tunnel.assert_not_called()
@@ -1263,7 +1265,7 @@ class TestAdvancePendingNullInstance:
 
         await worker._advance_pending(session)
 
-        worker._retry_or_fail.assert_called_once_with(session, reason="pending_timeout")
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PENDING_TIMEOUT)
 
     async def test_transient_error_triggers_retry_on_timeout(self) -> None:
         """Exception from get_instance + timeout exceeded → _retry_or_fail fires."""
@@ -1277,7 +1279,7 @@ class TestAdvancePendingNullInstance:
         await worker._advance_pending(session)
 
         worker._retry_or_fail.assert_called_once_with(
-            session, reason="pending_timeout_after_errors"
+            session, reason=_REASON_PENDING_TIMEOUT_AFTER_ERRORS
         )
 
     async def test_transient_error_before_timeout_is_noop(self) -> None:
@@ -1927,7 +1929,7 @@ class TestProvisioningTimeoutSettings:
             )
 
             with capture_logs() as logs:
-                await worker._retry_or_fail(session, reason="provisioning_timeout")
+                await worker._retry_or_fail(session, reason=_REASON_PROVISIONING_TIMEOUT)
 
         mocks["vastai_client"].create_instance.assert_not_called()
         assert any("attempts_exhausted" in entry.get("event", "") for entry in logs)

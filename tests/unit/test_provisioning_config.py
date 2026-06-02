@@ -80,8 +80,7 @@ class TestOldSettingRemoved:
 
 class TestGpuProvisionTimeoutSeconds:
     def test_default_is_2000(self) -> None:
-        s = _base_settings()
-        assert s.gpu_provision_timeout_seconds == 2000
+        assert Settings.model_fields["gpu_provision_timeout_seconds"].default == 2000
 
     def test_custom_value(self) -> None:
         s = _base_settings(gpu_provision_timeout_seconds=500)

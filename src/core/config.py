@@ -274,12 +274,6 @@ class Settings(BaseSettings):
         le=60,
         description="How often to poll pending/provisioning/resuming sessions",
     )
-    gpu_provision_timeout_minutes: int = Field(
-        default=20,
-        ge=5,
-        le=60,
-        description="Max time per provisioning attempt before retry/failure",
-    )
     gpu_provision_timeout_seconds: int = Field(
         default=2000,
         ge=300,
