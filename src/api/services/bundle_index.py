@@ -209,6 +209,23 @@ class BundleIndexService:
             raise BundleNotFoundError(f"No default bundle configured for model type '{model_type}'")
         return entry.mapping
 
+    def get_bundle_path(self, bundle_name: str) -> Path:
+        """Return the on-disk root path for a named bundle (without version segment).
+
+        Args:
+            bundle_name: The bundle name (e.g. "qwen_rapid_aio").
+
+        Returns:
+            Absolute path to the bundle root directory in the local cache.
+
+        Raises:
+            BundleNotFoundError: If the bundle is not in the index.
+        """
+        entry = self._bundle_index.get(bundle_name)
+        if entry is None:
+            raise BundleNotFoundError(f"Bundle '{bundle_name}' not found in index")
+        return self._cache_dir / entry.bundle_path
+
     def resolve_bundle_override(self, bundle_spec: str) -> BundleMapping:
         """Resolve an admin-specified bundle override.
 

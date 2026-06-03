@@ -10,6 +10,7 @@ from uuid import UUID
 import structlog
 
 from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationRequest
+from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.generation.service import ProviderResponseError
 from src.api.services.generation.tunnel_validation import (
@@ -88,6 +89,7 @@ class AishaGenerationProvider:
         r2_storage: R2StorageService | None = None,
         tunnel_domain: str = "",
         tunnel_hostname_allowed_prefix: str | None = None,
+        bundle_index: BundleIndexService | None = None,
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
@@ -103,6 +105,7 @@ class AishaGenerationProvider:
         # future code path that writes the column can't cause SSRF.
         self._tunnel_domain = tunnel_domain
         self._tunnel_hostname_allowed_prefix = tunnel_hostname_allowed_prefix
+        self._bundle_index = bundle_index
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
         """Aisha-specific validation beyond what the enum provides."""
@@ -319,9 +322,28 @@ class AishaGenerationProvider:
                     bytes=len(image_bytes),
                 )
 
-            # Build and queue workflow
-            workflow = self._workflow.load_workflow(request.model)
+            # Build and queue workflow from the provisioned bundle's cache
+            if self._bundle_index is None:
+                raise NoActiveSessionError(
+                    "Bundle index not configured — cannot load workflow from bundle."
+                )
+            try:
+                bundle_dir = self._bundle_index.get_bundle_path(gpu_session.bundle_name)
+            except BundleNotFoundError as exc:
+                raise NoActiveSessionError(
+                    f"Bundle '{gpu_session.bundle_name}' not found in index. "
+                    "Wait for the bundle index to sync and try again."
+                ) from exc
+            workflow = self._workflow.load_workflow_from_bundle(
+                bundle_dir, gpu_session.bundle_version
+            )
             self._workflow.validate_workflow(workflow)
+            self._workflow.inject_checkpoint(
+                workflow,
+                bundle_dir,
+                gpu_session.bundle_version,
+                session_id=str(gpu_session.id),
+            )
             configured = self._workflow.apply_parameters(
                 workflow=workflow,
                 request=legacy_request,

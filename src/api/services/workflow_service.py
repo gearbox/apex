@@ -5,11 +5,12 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import structlog
+import yaml
 
-from src.api.schemas.generation import GenerationRequest, GenerationType, ModelType
+from src.api.schemas.generation import GenerationRequest, GenerationType
 
 logger = structlog.get_logger(__name__)
 
@@ -43,57 +44,35 @@ class WorkflowService:
     """Service for loading and modifying ComfyUI workflows.
 
     Handles:
-    - Loading workflow templates from disk
+    - Loading workflow templates from the synced bundle cache
+    - Injecting checkpoint names from bundle.yaml at submit time
     - Applying user parameters to workflow nodes
     - Converting GUI workflow format to API format
     """
 
-    # Mapping of model types to workflow paths
-    MODEL_WORKFLOW_MAP: ClassVar[dict[ModelType, str]] = {
-        ModelType.AISHA_IMAGE: "config/bundles/qwen_rapid_aio/260103-18/workflow.json",
-    }
-
-    def __init__(self, base_path: Path | None = None) -> None:
-        """Initialize workflow service.
-
-        Args:
-            base_path: Base path for resolving workflow files.
-                      Defaults to current working directory.
-        """
-        self._base_path = base_path or Path.cwd()
+    def __init__(self) -> None:
         self._workflow_cache: dict[str, dict[str, Any]] = {}
 
-    def get_workflow_path(self, model_type: ModelType) -> Path:
-        """Get workflow file path for a model type.
+    def load_workflow_from_bundle(
+        self,
+        bundle_dir: Path,
+        bundle_version: str | None,
+    ) -> dict[str, Any]:
+        """Load and convert the workflow from a provisioned bundle directory.
 
         Args:
-            model_type: The model type to get workflow for.
+            bundle_dir: Path to the bundle root (e.g. cache_dir / "bundles/qwen_rapid_aio").
+            bundle_version: Specific version (e.g. "260103-19"). None uses the "current" symlink.
 
         Returns:
-            Path to the workflow JSON file.
+            Parsed workflow in API format (deep copy from cache).
 
         Raises:
-            WorkflowNotFoundError: If model type has no mapped workflow.
+            WorkflowNotFoundError: If the workflow file does not exist.
+            WorkflowValidationError: If the workflow JSON is invalid.
         """
-        if model_type not in self.MODEL_WORKFLOW_MAP:
-            raise WorkflowNotFoundError(f"No workflow mapped for model type: {model_type}")
-
-        return self._base_path / self.MODEL_WORKFLOW_MAP[model_type]
-
-    def load_workflow(self, model_type: ModelType) -> dict[str, Any]:
-        """Load and cache workflow template.
-
-        Args:
-            model_type: The model type to load workflow for.
-
-        Returns:
-            Parsed workflow dictionary (API format).
-
-        Raises:
-            WorkflowNotFoundError: If workflow file doesn't exist.
-            WorkflowValidationError: If workflow JSON is invalid.
-        """
-        workflow_path = self.get_workflow_path(model_type)
+        version_str = bundle_version or "current"
+        workflow_path = bundle_dir / version_str / "workflow.json"
         cache_key = str(workflow_path)
 
         if cache_key not in self._workflow_cache:
@@ -104,15 +83,80 @@ class WorkflowService:
                 with workflow_path.open() as f:
                     gui_workflow = json.load(f)
 
-                # Convert from GUI format to API format
                 api_workflow = self._convert_gui_to_api_format(gui_workflow)
                 self._workflow_cache[cache_key] = api_workflow
 
             except json.JSONDecodeError as e:
                 raise WorkflowValidationError(f"Invalid workflow JSON: {e}") from e
 
-        # Return a deep copy to prevent mutation of cached workflow
         return copy.deepcopy(self._workflow_cache[cache_key])
+
+    def inject_checkpoint(
+        self,
+        workflow: dict[str, Any],
+        bundle_dir: Path,
+        bundle_version: str | None,
+        *,
+        session_id: str,
+    ) -> None:
+        """Inject ckpt_name from bundle.yaml into the workflow (in-place).
+
+        Guard: only injects when there is exactly one checkpoint file in bundle.yaml
+        AND exactly one CheckpointLoaderSimple node in the workflow. Multi-loader
+        (video) workflows are left untouched.
+
+        Args:
+            workflow: API-format workflow dict to modify in-place.
+            bundle_dir: Path to the bundle root directory.
+            bundle_version: Specific version. None uses the "current" symlink.
+            session_id: Session ID for log context.
+        """
+        version_str = bundle_version or "current"
+        bundle_yaml_path = bundle_dir / version_str / "bundle.yaml"
+
+        ckpt_files: list[str] = []
+        try:
+            with bundle_yaml_path.open() as f:
+                bundle_data = yaml.safe_load(f)
+            if isinstance(bundle_data, dict):
+                for model in bundle_data.get("models", []) or []:
+                    if isinstance(model, dict) and model.get("model_type") == "checkpoints":
+                        ckpt_files.extend(
+                            str(file_entry["filename"])
+                            for file_entry in model.get("files", []) or []
+                            if isinstance(file_entry, dict) and "filename" in file_entry
+                        )
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning(
+                "workflow.checkpoint_injection_skipped",
+                session_id=session_id,
+                reason="bundle_yaml_read_error",
+                error=str(exc),
+            )
+            return
+
+        ckpt_nodes = [
+            (node_id, node)
+            for node_id, node in workflow.items()
+            if isinstance(node, dict) and node.get("class_type") == "CheckpointLoaderSimple"
+        ]
+
+        if len(ckpt_files) != 1 or len(ckpt_nodes) != 1:
+            logger.info(
+                "workflow.checkpoint_injection_skipped",
+                session_id=session_id,
+                checkpoint_file_count=len(ckpt_files),
+                loader_node_count=len(ckpt_nodes),
+            )
+            return
+
+        _node_id, node = ckpt_nodes[0]
+        node["inputs"]["ckpt_name"] = ckpt_files[0]
+        logger.info(
+            "workflow.checkpoint_injected",
+            session_id=session_id,
+            ckpt_name=ckpt_files[0],
+        )
 
     def validate_workflow(self, workflow: dict[str, Any]) -> bool:
         """Validate workflow has required nodes.
@@ -163,9 +207,6 @@ class WorkflowService:
         for node in nodes:
             node_id = str(node["id"])
             class_type = node["type"]
-
-            # Start with widget values as inputs
-            inputs: dict[str, Any] = {}
 
             # Process widgets_values - these are the actual parameter values
             widgets_values = node.get("widgets_values", [])

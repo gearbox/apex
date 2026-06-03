@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from pathlib import Path
 
 import httpx
 import structlog
@@ -425,14 +424,11 @@ def get_product_id(request: Request) -> str:  # type: ignore[type-arg]
 # -----------------------------------------------------------------------------
 
 
-async def init_services(settings: Settings, base_path: Path | None = None) -> JWTService:
+async def init_services(settings: Settings) -> JWTService:
     """Initialize all service singletons.
 
     Called during application startup.
 
-    Args:
-        settings: Application settings.
-        base_path: Base path for workflow files.
     Returns:
         JWT service for storing in app state.
     """
@@ -461,7 +457,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
     init_rate_limiter(settings)
 
     # Initialize workflow service
-    _services.workflow_service = WorkflowService(base_path=base_path)
+    _services.workflow_service = WorkflowService()
 
     # Initialize R2 storage (if configured)
     if settings.r2_configured:
@@ -672,6 +668,7 @@ async def init_services(settings: Settings, base_path: Path | None = None) -> JW
             gpu_session_service=_services.gpu_session_service,
             r2_storage=_services.r2_storage,
             tunnel_domain=settings.aisha_cf_tunnel_domain,
+            bundle_index=_services.bundle_index,
         )
     }
 
