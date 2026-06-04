@@ -40,16 +40,25 @@ def _make_active_gpu_session() -> MagicMock:
     return gs
 
 
+def _make_bundle_index_mock() -> MagicMock:
+    """A minimal bundle-index mock that returns a sentinel Path for any bundle name."""
+    bi = MagicMock()
+    bi.get_bundle_path = MagicMock(return_value=MagicMock())
+    return bi
+
+
 def _make_provider_with_mocks() -> tuple[AishaGenerationProvider, dict]:
     workflow = MagicMock()
-    workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+    workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
     workflow.validate_workflow = MagicMock()
+    workflow.inject_checkpoint = MagicMock()
     workflow.apply_parameters.return_value = {"3": {"inputs": {"text": "a cat"}}}
 
     gpu_session_service = AsyncMock()
     gpu_session_service.get_active_session_for_model = AsyncMock(
         return_value=_make_active_gpu_session()
     )
+    bundle_index = _make_bundle_index_mock()
 
     # tunnel_domain matches the mocked hostname suffix so the SSRF allowlist
     # check passes by default; SSRF-specific tests construct their own provider
@@ -58,6 +67,7 @@ def _make_provider_with_mocks() -> tuple[AishaGenerationProvider, dict]:
         workflow_service=workflow,
         gpu_session_service=gpu_session_service,
         tunnel_domain="gpu.test",
+        bundle_index=bundle_index,
     )
     return provider, {"workflow": workflow, "gpu_session_service": gpu_session_service}
 
@@ -202,6 +212,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",  # legitimate domain — hostname must end with .gpu.test
         )
 
@@ -259,6 +270,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",
         )
 
@@ -307,6 +319,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",
         )
 
@@ -372,6 +385,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",
         )
 
@@ -429,8 +443,9 @@ class TestAishaProviderI2IBridge:
     async def test_i2i_with_user_image_uploads_bytes_to_comfyui(self) -> None:
         """End-to-end: input_image_id → R2 download → ComfyUI upload → workflow wiring."""
         workflow = MagicMock()
-        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
         workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
         workflow.apply_parameters.return_value = {"3": {}}
 
         gpu_session_service = AsyncMock()
@@ -448,6 +463,7 @@ class TestAishaProviderI2IBridge:
             gpu_session_service=gpu_session_service,
             r2_storage=r2,
             tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
         )
 
         billing = AsyncMock()
@@ -516,8 +532,9 @@ class TestAishaProviderI2IBridge:
     async def test_i2i_with_source_output_id_takes_precedence(self) -> None:
         """source_output_id branch: filename derived from storage_key tail."""
         workflow = MagicMock()
-        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
         workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
         workflow.apply_parameters.return_value = {"3": {}}
 
         gpu_session_service = AsyncMock()
@@ -533,6 +550,7 @@ class TestAishaProviderI2IBridge:
             gpu_session_service=gpu_session_service,
             r2_storage=r2,
             tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
         )
 
         billing = AsyncMock()
@@ -604,6 +622,7 @@ class TestAishaProviderI2IBridge:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             r2_storage=r2,
             tunnel_domain="gpu.test",
         )
@@ -656,6 +675,7 @@ class TestAishaProviderI2IBridge:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             r2_storage=None,
             tunnel_domain="gpu.test",
         )
@@ -805,8 +825,9 @@ class TestAishaProviderI2IDefensive:
         is preserved for uniqueness.
         """
         workflow = MagicMock()
-        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
         workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
         workflow.apply_parameters.return_value = {"3": {}}
 
         gpu_session_service = AsyncMock()
@@ -822,6 +843,7 @@ class TestAishaProviderI2IDefensive:
             gpu_session_service=gpu_session_service,
             r2_storage=r2,
             tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
         )
 
         billing = AsyncMock()

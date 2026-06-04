@@ -6,12 +6,13 @@ import json
 from pathlib import Path
 
 import pytest
+import structlog.testing
+import yaml
 
 from src.api.schemas.generation import (
     AspectRatio,
     GenerationRequest,
     GenerationType,
-    ModelType,
 )
 from src.api.services.workflow_service import (
     NodeIDs,
@@ -19,39 +20,228 @@ from src.api.services.workflow_service import (
     WorkflowService,
     WorkflowValidationError,
 )
+from tests.unit.conftest import _MINIMAL_GUI_WORKFLOW, make_bundle_dir
 
 
-class TestWorkflowService:
-    """Tests for WorkflowService."""
+class TestLoadWorkflowFromBundle:
+    """WorkflowService.load_workflow_from_bundle() — bundle cache path."""
 
-    def test_load_workflow(self, workflow_service: WorkflowService) -> None:
-        """Test loading a workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
+    def test_load_uses_bundle_cache_not_vendored(self, tmp_path: Path) -> None:
+        """Workflow is loaded from the bundle cache, not a vendored path."""
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+
+        workflow = svc.load_workflow_from_bundle(bundle_root, bundle_version="260103-19")
 
         assert isinstance(workflow, dict)
+        # Required nodes present
         assert NodeIDs.EMPTY_LATENT in workflow
         assert NodeIDs.KSAMPLER in workflow
 
-    def test_workflow_caching(self, workflow_service: WorkflowService) -> None:
-        """Test that workflows are cached."""
-        workflow1 = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
-        workflow2 = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
+    def test_load_uses_current_symlink_when_no_version(self, tmp_path: Path) -> None:
+        """When bundle_version is None, 'current' symlink is used."""
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
 
-        # Should be different objects (deep copy)
-        assert workflow1 is not workflow2
-        # But with same content
-        assert workflow1 == workflow2
+        workflow = svc.load_workflow_from_bundle(bundle_root, bundle_version=None)
 
-    def test_workflow_not_found(self, tmp_path: Path) -> None:
-        """Test error when workflow file missing."""
-        service = WorkflowService(base_path=tmp_path)
+        assert NodeIDs.EMPTY_LATENT in workflow
+
+    def test_workflow_caching_returns_deep_copy(self, tmp_path: Path) -> None:
+        """Successive calls return equal but distinct dicts (cache + deep copy)."""
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+
+        w1 = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+        w2 = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        assert w1 == w2
+        assert w1 is not w2
+
+    def test_raises_workflow_not_found_when_missing(self, tmp_path: Path) -> None:
+        bundle_root = tmp_path / "bundles" / "nonexistent"
+        bundle_root.mkdir(parents=True)
+        svc = WorkflowService()
 
         with pytest.raises(WorkflowNotFoundError):
-            service.load_workflow(ModelType.AISHA_IMAGE)
+            svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-    def test_apply_parameters(self, workflow_service: WorkflowService) -> None:
-        """Test applying generation parameters to workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
+    def test_raises_validation_error_on_bad_json(self, tmp_path: Path) -> None:
+        bundle_root = tmp_path / "bundles" / "bad"
+        version_dir = bundle_root / "v1"
+        version_dir.mkdir(parents=True)
+        (version_dir / "workflow.json").write_text("{ invalid json")
+        svc = WorkflowService()
+
+        with pytest.raises(WorkflowValidationError):
+            svc.load_workflow_from_bundle(bundle_root, "v1")
+
+
+class TestInjectCheckpoint:
+    """WorkflowService.inject_checkpoint() — single source of truth for ckpt_name."""
+
+    def test_ckpt_name_from_bundle_yaml_overrides_stale_widget(self, tmp_path: Path) -> None:
+        """Checkpoint filename from bundle.yaml replaces whatever is baked in the workflow."""
+        bundle_root, _ = make_bundle_dir(
+            tmp_path,
+            version="260103-19",
+            ckpt_name="Qwen-Rapid-AIO-NSFW-v19.safetensors",
+        )
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        # The workflow bakes "STALE.safetensors" as the checkpoint name
+        assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == "STALE.safetensors"
+
+        with structlog.testing.capture_logs() as cap:
+            svc.inject_checkpoint(workflow, bundle_root, "260103-19", session_id="test-session")
+
+        assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == (
+            "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+        )
+        assert any(e["event"] == "workflow.checkpoint_injected" for e in cap)
+        injected = next(e for e in cap if e["event"] == "workflow.checkpoint_injected")
+        assert injected["ckpt_name"] == "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+
+    def test_injection_skipped_when_multiple_checkpoint_files(self, tmp_path: Path) -> None:
+        """Guard: two checkpoint files → no injection, skipped log emitted."""
+        bundle_root = tmp_path / "bundles" / "multi"
+        version_dir = bundle_root / "v1"
+        version_dir.mkdir(parents=True)
+        bundle_yaml = {
+            "hardware": {
+                "gpu_whitelist": [],
+                "min_disk_gb": 100,
+                "min_network_upload_mbps": 100,
+                "min_network_download_mbps": 100,
+                "cuda_min_version": "12.1",
+                "num_gpus": 1,
+            },
+            "models": [
+                {
+                    "model_type": "checkpoints",
+                    "files": [
+                        {"filename": "high.safetensors"},
+                        {"filename": "low.safetensors"},
+                    ],
+                }
+            ],
+        }
+        (version_dir / "bundle.yaml").write_text(yaml.dump(bundle_yaml))
+        (version_dir / "workflow.json").write_text(json.dumps(_MINIMAL_GUI_WORKFLOW))
+
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "v1")
+        original_ckpt = workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"]
+
+        with structlog.testing.capture_logs() as cap:
+            svc.inject_checkpoint(workflow, bundle_root, "v1", session_id="s1")
+
+        # Widget value unchanged
+        assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == original_ckpt
+        assert any(e["event"] == "workflow.checkpoint_injection_skipped" for e in cap)
+
+    def test_injection_skipped_when_multiple_loader_nodes(self, tmp_path: Path) -> None:
+        """Guard: two CheckpointLoaderSimple nodes → no injection."""
+        nodes_raw = _MINIMAL_GUI_WORKFLOW["nodes"]
+        assert isinstance(nodes_raw, list)
+        extra_nodes = [
+            *nodes_raw,
+            {
+                "id": 99,
+                "type": "CheckpointLoaderSimple",
+                "inputs": [],
+                "widgets_values": ["extra.safetensors"],
+            },
+        ]
+        multi_loader_workflow: dict[str, object] = {
+            "nodes": extra_nodes,
+            "links": _MINIMAL_GUI_WORKFLOW["links"],
+        }
+        bundle_root = tmp_path / "bundles" / "multi_loader"
+        version_dir = bundle_root / "v1"
+        version_dir.mkdir(parents=True)
+        bundle_yaml = {
+            "hardware": {
+                "gpu_whitelist": [],
+                "min_disk_gb": 100,
+                "min_network_upload_mbps": 100,
+                "min_network_download_mbps": 100,
+                "cuda_min_version": "12.1",
+                "num_gpus": 1,
+            },
+            "models": [
+                {"model_type": "checkpoints", "files": [{"filename": "single.safetensors"}]}
+            ],
+        }
+        (version_dir / "bundle.yaml").write_text(yaml.dump(bundle_yaml))
+        (version_dir / "workflow.json").write_text(json.dumps(multi_loader_workflow))
+
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "v1")
+        original_ckpt = workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"]
+
+        with structlog.testing.capture_logs() as cap:
+            svc.inject_checkpoint(workflow, bundle_root, "v1", session_id="s2")
+
+        assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == original_ckpt
+        assert any(e["event"] == "workflow.checkpoint_injection_skipped" for e in cap)
+
+
+class TestWiredInputsPreserved:
+    """The converter correctly wires output nodes from the links array."""
+
+    def test_wired_save_image_has_images_input(self, tmp_path: Path) -> None:
+        """Node 11 (SaveImage, link 19 from VAEDecode node 5) is correctly wired."""
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        save_node = workflow[NodeIDs.SAVE_IMAGE]  # node "11"
+        assert save_node["class_type"] == "SaveImage"
+        # Link 19: VAEDecode (node 5) slot 0 → SaveImage (node 11)
+        assert save_node["inputs"]["images"] == ["5", 0]
+
+
+class TestEndToEndAishaImage:
+    """End-to-end workflow shape for aisha-image with qwen_rapid_aio v19."""
+
+    def test_final_workflow_has_correct_ckpt_and_wired_save_image(self, tmp_path: Path) -> None:
+        """After load + inject + apply_parameters, ckpt_name is v19 and SaveImage is wired."""
+        bundle_root, _ = make_bundle_dir(
+            tmp_path,
+            version="260103-19",
+            ckpt_name="Qwen-Rapid-AIO-NSFW-v19.safetensors",
+        )
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+        svc.inject_checkpoint(workflow, bundle_root, "260103-19", session_id="e2e")
+
+        request = GenerationRequest(
+            prompt="A ginger cat on grass",
+            generation_type=GenerationType.T2I,
+        )
+        configured = svc.apply_parameters(workflow=workflow, request=request)
+
+        assert (
+            configured[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"]
+            == "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+        )
+        # All SaveImage nodes in the final workflow must have a non-null images input
+        save_image_nodes = [v for v in configured.values() if v.get("class_type") == "SaveImage"]
+        assert save_image_nodes, "Expected at least one SaveImage node"
+        for node in save_image_nodes:
+            assert "images" in node["inputs"], f"SaveImage node missing 'images' input: {node}"
+
+
+class TestApplyParameters:
+    """WorkflowService.apply_parameters() — parameter injection."""
+
+    def test_apply_parameters(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
         request = GenerationRequest(
             prompt="A beautiful cat",
@@ -62,33 +252,37 @@ class TestWorkflowService:
             seed=42,
             steps=8,
         )
+        modified = svc.apply_parameters(workflow=workflow, request=request, filename_prefix="test")
 
-        modified = workflow_service.apply_parameters(
-            workflow=workflow,
-            request=request,
-            filename_prefix="test_output",
-        )
-
-        # Check dimensions
         assert modified[NodeIDs.EMPTY_LATENT]["inputs"]["width"] == 1920
         assert modified[NodeIDs.EMPTY_LATENT]["inputs"]["height"] == 1080
         assert modified[NodeIDs.EMPTY_LATENT]["inputs"]["batch_size"] == 2
-
-        # Check prompts
         assert modified[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"] == "A beautiful cat"
         assert modified[NodeIDs.NEGATIVE_PROMPT]["inputs"]["prompt"] == "ugly, blurry"
-
-        # Check sampler
         assert modified[NodeIDs.KSAMPLER]["inputs"]["seed"] == 42
         assert modified[NodeIDs.KSAMPLER]["inputs"]["steps"] == 8
+        save_image_nodes = [v for v in modified.values() if v.get("class_type") == "SaveImage"]
+        assert save_image_nodes, "Expected at least one SaveImage node"
+        for node in save_image_nodes:
+            assert node["inputs"].get("filename_prefix") == "test"
 
-    def test_apply_parameters_with_images(self, workflow_service: WorkflowService) -> None:
-        """Test applying input images to workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
+    def test_apply_parameters_immutable(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+        original_prompt = workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"]
+
+        svc.apply_parameters(workflow=workflow, request=GenerationRequest(prompt="New prompt"))
+
+        assert workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"] == original_prompt
+
+    def test_apply_parameters_with_images(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
         request = GenerationRequest(prompt="test", generation_type=GenerationType.I2I)
-
-        modified = workflow_service.apply_parameters(
+        modified = svc.apply_parameters(
             workflow=workflow,
             request=request,
             input_image_1="uploaded_image1.png",
@@ -98,112 +292,72 @@ class TestWorkflowService:
         assert modified[NodeIDs.LOAD_IMAGE_1]["inputs"]["image"] == "uploaded_image1.png"
         assert modified[NodeIDs.LOAD_IMAGE_2]["inputs"]["image"] == "uploaded_image2.png"
 
-    def test_apply_parameters_immutable(self, workflow_service: WorkflowService) -> None:
-        """Test that apply_parameters doesn't modify original workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
-        original_prompt = workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"]
+    def test_t2i_disconnects_images(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(prompt="New prompt")
-        workflow_service.apply_parameters(workflow=workflow, request=request)
+        request = GenerationRequest(prompt="A cat", generation_type=GenerationType.T2I)
+        modified = svc.apply_parameters(workflow=workflow, request=request)
 
-        # Original should be unchanged
-        assert workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"] == original_prompt
-
-    def test_apply_parameters_t2i_disconnects_images(
-        self,
-        workflow_service: WorkflowService,
-    ) -> None:
-        """Test that t2i mode disconnects image inputs."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
-
-        request = GenerationRequest(
-            prompt="A beautiful cat",
-            generation_type=GenerationType.T2I,
-        )
-
-        modified = workflow_service.apply_parameters(
-            workflow=workflow,
-            request=request,
-        )
-
-        # Image inputs should be disconnected from positive prompt encoder
         positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
         assert "image1" not in positive_inputs
         assert "image2" not in positive_inputs
         assert "image3" not in positive_inputs
 
-    def test_apply_parameters_i2i_keeps_images(
-        self,
-        workflow_service: WorkflowService,
-    ) -> None:
-        """Test that i2i mode preserves image connections for uploaded images."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
+    def test_i2i_keeps_images(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(
-            prompt="Use this reference",
-            generation_type=GenerationType.I2I,
-        )
-
-        modified = workflow_service.apply_parameters(
+        request = GenerationRequest(prompt="Use this", generation_type=GenerationType.I2I)
+        modified = svc.apply_parameters(
             workflow=workflow,
             request=request,
             input_image_1="ref1.png",
             input_image_2="ref2.png",
         )
 
-        # Both images should be connected
         positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
         assert positive_inputs["image1"] == [NodeIDs.LOAD_IMAGE_1, 0]
         assert positive_inputs["image2"] == [NodeIDs.LOAD_IMAGE_2, 0]
 
-    def test_apply_parameters_i2i_single_image(
-        self,
-        workflow_service: WorkflowService,
-    ) -> None:
-        """Test that i2i mode only connects provided images."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
+    def test_i2i_single_image(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(
-            prompt="Use this reference",
-            generation_type=GenerationType.I2I,
-        )
-
-        modified = workflow_service.apply_parameters(
+        request = GenerationRequest(prompt="Use this", generation_type=GenerationType.I2I)
+        modified = svc.apply_parameters(
             workflow=workflow,
             request=request,
             input_image_1=None,
             input_image_2="only_second.png",
         )
 
-        # Only image2 should be connected
         positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
         assert "image1" not in positive_inputs
         assert positive_inputs["image2"] == [NodeIDs.LOAD_IMAGE_2, 0]
         assert modified[NodeIDs.LOAD_IMAGE_2]["inputs"]["image"] == "only_second.png"
 
-    def test_validate_workflow_valid(self, workflow_service: WorkflowService) -> None:
-        """Test validation passes for valid workflow."""
-        workflow = workflow_service.load_workflow(ModelType.AISHA_IMAGE)
-        assert workflow_service.validate_workflow(workflow) is True
 
-    def test_validate_workflow_missing_nodes(
-        self,
-        workflow_service: WorkflowService,
-    ) -> None:
-        """Test validation fails for incomplete workflow."""
-        workflow = {"1": {"class_type": "SomeNode", "inputs": {}}}
+class TestValidateWorkflow:
+    def test_validate_valid(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+        assert svc.validate_workflow(workflow) is True
 
-        with pytest.raises(WorkflowValidationError) as exc_info:
-            workflow_service.validate_workflow(workflow)
-
-        assert "missing required nodes" in str(exc_info.value).lower()
+    def test_validate_missing_nodes(self) -> None:
+        svc = WorkflowService()
+        with pytest.raises(WorkflowValidationError, match="missing required nodes"):
+            svc.validate_workflow({"1": {"class_type": "SomeNode", "inputs": {}}})
 
 
 class TestGuiToApiConversion:
-    """Tests for GUI to API workflow format conversion."""
+    """GUI → API workflow format conversion."""
 
     def test_convert_simple_workflow(self, tmp_path: Path) -> None:
-        """Test converting a simple GUI workflow to API format."""
         gui_workflow = {
             "nodes": [
                 {
@@ -215,38 +369,25 @@ class TestGuiToApiConversion:
                 {
                     "id": 2,
                     "type": "KSampler",
-                    "inputs": [
-                        {"name": "model", "link": 1},
-                    ],
+                    "inputs": [{"name": "model", "link": 1}],
                     "widgets_values": [12345, "fixed", 20, 7.0, "euler", "normal", 1.0],
                 },
             ],
             "links": [
-                # link_id, src_node, src_slot, dst_node, dst_slot, type
                 [1, 1, 0, 2, 0, "MODEL"],
             ],
         }
+        version_dir = tmp_path / "bundles" / "test" / "v1"
+        version_dir.mkdir(parents=True)
+        (version_dir / "workflow.json").write_text(json.dumps(gui_workflow))
 
-        # Create test workflow file
-        bundle_dir = tmp_path / "config" / "bundles" / "qwen_rapid_aio" / "260103-18"
-        bundle_dir.mkdir(parents=True)
-        (bundle_dir / "workflow.json").write_text(json.dumps(gui_workflow))
+        svc = WorkflowService()
+        api_workflow = svc.load_workflow_from_bundle(tmp_path / "bundles" / "test", "v1")
 
-        service = WorkflowService(base_path=tmp_path)
-        api_workflow = service.load_workflow(ModelType.AISHA_IMAGE)
-
-        # Check structure
-        assert "1" in api_workflow
-        assert "2" in api_workflow
-
-        # Check class types
         assert api_workflow["1"]["class_type"] == "CheckpointLoaderSimple"
         assert api_workflow["2"]["class_type"] == "KSampler"
-
-        # Check widget values converted to inputs
         assert api_workflow["1"]["inputs"]["ckpt_name"] == "model.safetensors"
         assert api_workflow["2"]["inputs"]["seed"] == 12345
         assert api_workflow["2"]["inputs"]["steps"] == 20
-
-        # Check link converted to connection reference
+        # Link resolved: KSampler.model ← CheckpointLoaderSimple slot 0
         assert api_workflow["2"]["inputs"]["model"] == ["1", 0]

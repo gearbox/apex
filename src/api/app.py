@@ -2,7 +2,6 @@
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -275,28 +274,9 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
     settings = get_settings()
     configure_logging(settings)
 
-    # Determine base path for workflows
-    # Check common locations
-    possible_paths = [
-        Path.cwd(),  # Current directory
-        Path(__file__).parent.parent.parent.parent,  # Project root
-        Path("/app"),  # Container path
-    ]
-
-    base_path = None
-    for base_path in possible_paths:
-        workflow_check = base_path / "config" / "bundles"
-        if workflow_check.exists():
-            logger.info("app.bundles_found", path=str(base_path))
-            break
-    else:
-        # Loop completed without break: use first path as fallback
-        logger.warning("app.bundles_not_found")
-        base_path = possible_paths[0]  # Use current directory as fallback
-
     logger.info("app.startup")
 
-    jwt_service = await init_services(settings, base_path=base_path)
+    jwt_service = await init_services(settings)
 
     # Store JWT service in app state for auth guards
     app.state["jwt_service"] = jwt_service
