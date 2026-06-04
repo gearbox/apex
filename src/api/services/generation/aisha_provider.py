@@ -86,10 +86,10 @@ class AishaGenerationProvider:
         self,
         workflow_service: WorkflowService,
         gpu_session_service: GpuSessionService | None,
+        bundle_index: BundleIndexService,
         r2_storage: R2StorageService | None = None,
         tunnel_domain: str = "",
         tunnel_hostname_allowed_prefix: str | None = None,
-        bundle_index: BundleIndexService | None = None,
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
@@ -323,10 +323,6 @@ class AishaGenerationProvider:
                 )
 
             # Build and queue workflow from the provisioned bundle's cache
-            if self._bundle_index is None:
-                raise NoActiveSessionError(
-                    "Bundle index not configured — cannot load workflow from bundle."
-                )
             try:
                 bundle_dir = self._bundle_index.get_bundle_path(gpu_session.bundle_name)
             except BundleNotFoundError as exc:

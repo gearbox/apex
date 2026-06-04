@@ -53,6 +53,11 @@ class WorkflowService:
     def __init__(self) -> None:
         self._workflow_cache: dict[str, dict[str, Any]] = {}
 
+    @staticmethod
+    def _bundle_version_dir(bundle_dir: Path, bundle_version: str | None) -> Path:
+        """Return the versioned subdirectory for a bundle."""
+        return bundle_dir / (bundle_version or "current")
+
     def load_workflow_from_bundle(
         self,
         bundle_dir: Path,
@@ -71,9 +76,10 @@ class WorkflowService:
             WorkflowNotFoundError: If the workflow file does not exist.
             WorkflowValidationError: If the workflow JSON is invalid.
         """
-        version_str = bundle_version or "current"
-        workflow_path = bundle_dir / version_str / "workflow.json"
-        cache_key = str(workflow_path)
+        workflow_path = self._bundle_version_dir(bundle_dir, bundle_version) / "workflow.json"
+        # When bundle_version is None we follow the "current" symlink; resolve it
+        # so the cache key changes when the symlink is updated to a new version.
+        cache_key = str(workflow_path.resolve() if bundle_version is None else workflow_path)
 
         if cache_key not in self._workflow_cache:
             if not workflow_path.exists():
@@ -111,8 +117,7 @@ class WorkflowService:
             bundle_version: Specific version. None uses the "current" symlink.
             session_id: Session ID for log context.
         """
-        version_str = bundle_version or "current"
-        bundle_yaml_path = bundle_dir / version_str / "bundle.yaml"
+        bundle_yaml_path = self._bundle_version_dir(bundle_dir, bundle_version) / "bundle.yaml"
 
         ckpt_files: list[str] = []
         try:
@@ -151,7 +156,7 @@ class WorkflowService:
             return
 
         _node_id, node = ckpt_nodes[0]
-        node["inputs"]["ckpt_name"] = ckpt_files[0]
+        node.setdefault("inputs", {})["ckpt_name"] = ckpt_files[0]
         logger.info(
             "workflow.checkpoint_injected",
             session_id=session_id,

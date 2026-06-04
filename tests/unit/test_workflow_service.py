@@ -261,6 +261,10 @@ class TestApplyParameters:
         assert modified[NodeIDs.NEGATIVE_PROMPT]["inputs"]["prompt"] == "ugly, blurry"
         assert modified[NodeIDs.KSAMPLER]["inputs"]["seed"] == 42
         assert modified[NodeIDs.KSAMPLER]["inputs"]["steps"] == 8
+        save_image_nodes = [v for v in modified.values() if v.get("class_type") == "SaveImage"]
+        assert save_image_nodes, "Expected at least one SaveImage node"
+        for node in save_image_nodes:
+            assert node["inputs"].get("filename_prefix") == "test"
 
     def test_apply_parameters_immutable(self, tmp_path: Path) -> None:
         bundle_root, _ = make_bundle_dir(tmp_path)

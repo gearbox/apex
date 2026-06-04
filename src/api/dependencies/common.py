@@ -662,15 +662,15 @@ async def init_services(settings: Settings) -> JWTService:
     from src.api.services.generation.grok_provider import GrokGenerationProvider
     from src.core.enums import Provider
 
-    generation_providers: dict[Provider, object] = {
-        Provider.AISHA: AishaGenerationProvider(
+    generation_providers: dict[Provider, object] = {}
+    if _services.bundle_index is not None:
+        generation_providers[Provider.AISHA] = AishaGenerationProvider(
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,
+            bundle_index=_services.bundle_index,
             r2_storage=_services.r2_storage,
             tunnel_domain=settings.aisha_cf_tunnel_domain,
-            bundle_index=_services.bundle_index,
         )
-    }
 
     if _services.grok_job_service is not None and _services.r2_storage is not None:
         generation_providers[Provider.GROK] = GrokGenerationProvider(

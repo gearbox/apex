@@ -212,6 +212,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",  # legitimate domain — hostname must end with .gpu.test
         )
 
@@ -269,6 +270,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",
         )
 
@@ -317,6 +319,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",
         )
 
@@ -382,6 +385,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             tunnel_domain="gpu.test",
         )
 
@@ -618,6 +622,7 @@ class TestAishaProviderI2IBridge:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             r2_storage=r2,
             tunnel_domain="gpu.test",
         )
@@ -670,6 +675,7 @@ class TestAishaProviderI2IBridge:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
+            bundle_index=MagicMock(),
             r2_storage=None,
             tunnel_domain="gpu.test",
         )
