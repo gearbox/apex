@@ -663,7 +663,13 @@ async def init_services(settings: Settings) -> JWTService:
     from src.core.enums import Provider
 
     generation_providers: dict[Provider, object] = {}
-    if _services.bundle_index is not None:
+    if _services.bundle_index is None:
+        logger.warning(
+            "aisha_provider.disabled",
+            reason="bundle index is not configured",
+            hint="Ensure bundle indexing is set up if AISHA should be available",
+        )
+    else:
         generation_providers[Provider.AISHA] = AishaGenerationProvider(
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,

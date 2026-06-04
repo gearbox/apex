@@ -79,7 +79,13 @@ class WorkflowService:
         workflow_path = self._bundle_version_dir(bundle_dir, bundle_version) / "workflow.json"
         # When bundle_version is None we follow the "current" symlink; resolve it
         # so the cache key changes when the symlink is updated to a new version.
-        cache_key = str(workflow_path.resolve() if bundle_version is None else workflow_path)
+        if bundle_version is None:
+            try:
+                cache_key = str(workflow_path.resolve())
+            except OSError as e:
+                raise WorkflowNotFoundError(f"Workflow not found: {workflow_path}") from e
+        else:
+            cache_key = str(workflow_path)
 
         if cache_key not in self._workflow_cache:
             if not workflow_path.exists():
