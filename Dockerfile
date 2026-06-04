@@ -50,7 +50,6 @@ ENV PYTHONUNBUFFERED=1
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser alembic/ ./alembic/
 COPY --chown=appuser:appuser alembic.ini ./
-COPY --chown=appuser:appuser config/ ./config/
 
 # Switch to non-root user
 USER appuser
