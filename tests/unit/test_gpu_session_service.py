@@ -122,8 +122,6 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.started_at = now - timedelta(hours=2)
     session.created_at = now - timedelta(hours=3)
     session.error_message = None
-    session.node_host = None
-    session.node_port = None
     session.provision_attempt = 1
     session.total_paused_seconds = 0
     session.account_id = uuid4()

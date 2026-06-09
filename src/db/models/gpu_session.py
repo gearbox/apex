@@ -33,14 +33,15 @@ from src.db.models.base import Base
 class GpuSession(Base):
     """Tracks the lifecycle of an on-demand Vast.ai GPU node session.
 
-    The health reconciler probes active/stale/paused/resuming sessions and
-    transitions unreachable ones to 'stale'. The provisioning worker drives
+    The health reconciler probes active/stale sessions and transitions
+    unreachable ones to 'stale'. The provisioning worker drives
     pending → provisioning → active transitions and handles pause/resume.
 
     Key columns for health reconciliation:
-    - status: 'active', 'stale', 'paused', 'resuming' sessions are probed
-    - node_host / node_port: ComfyUI endpoint to probe
-    - stale_detected_at: set by reconciler when probe fails
+    - status: only 'active' and 'stale' sessions are probed
+    - tunnel_hostname: ComfyUI endpoint resolved via CF tunnel
+    - last_reachable_at: stamped at activation and on each healthy probe
+    - stale_detected_at: set by reconciler when probe fails past grace window
     - stale_notified: prevents duplicate admin notifications
 
     Key columns for provisioning:
@@ -108,16 +109,6 @@ class GpuSession(Base):
         Integer,
         nullable=True,
         comment="Vast.ai instance/machine ID",
-    )
-    node_host: Mapped[str | None] = mapped_column(
-        String(255),
-        nullable=True,
-        comment="GPU node hostname or IP",
-    )
-    node_port: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-        comment="ComfyUI port on the GPU node",
     )
 
     # Cloudflare tunnel
@@ -203,6 +194,15 @@ class GpuSession(Base):
         nullable=False,
         server_default=text("false"),
         comment="Prevents duplicate admin notifications for stale sessions",
+    )
+    last_reachable_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "Stamped at active transition and on each healthy reconciler probe. "
+            "Used with gpu_session_stale_grace_seconds to prevent single-blip "
+            "stale flapping."
+        ),
     )
 
     # Error tracking

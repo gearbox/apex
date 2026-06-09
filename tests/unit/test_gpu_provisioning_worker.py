@@ -87,8 +87,6 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.stopped_at = None
     session.created_at = now - timedelta(minutes=2)
     session.error_message = None
-    session.node_host = None
-    session.node_port = None
     session.stale_detected_at = None
     session.stale_notified = False
     for k, v in kwargs.items():

@@ -53,8 +53,6 @@ def _make_gpu_session(
     session.billing_finalized_at = billing_finalized_at
     session.billing_finalization_attempts = billing_finalization_attempts
     session.error_message = None
-    session.node_host = None
-    session.node_port = None
     session.stale_detected_at = None
     session.stale_notified = False
     return session

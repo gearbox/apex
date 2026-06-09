@@ -1,8 +1,9 @@
 """GPU session reconciler — detects stale Aisha nodes.
 
 Probes all active GPU sessions in the database. If a session's
-ComfyUI endpoint is unreachable, it's flagged as stale.
-This is detection only — recovery is a separate future worker.
+ComfyUI tunnel endpoint is unreachable past the grace window, it's
+flagged as stale. Stale sessions that become reachable again recover
+automatically.
 """
 
 from __future__ import annotations
@@ -15,6 +16,10 @@ from uuid import UUID
 import structlog
 from sqlalchemy import select, update
 
+from src.api.services.generation.tunnel_validation import (
+    InvalidTunnelHostnameError,
+    session_comfyui_base_url,
+)
 from src.core.enums import ComponentCategory, ComponentStatus, GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 
@@ -41,8 +46,8 @@ class GpuSessionReconciler:
 
     This is a HealthChecker that:
     1. Queries all gpu_sessions with status = 'active' or 'stale'
-    2. Probes each node's ComfyUI endpoint concurrently
-    3. Marks unreachable sessions as 'stale' in the DB
+    2. Probes each node's ComfyUI tunnel endpoint concurrently
+    3. Marks unreachable sessions as 'stale' after the grace window expires
     4. Clears staleness for sessions that have recovered
     5. Returns an aggregate ComponentHealth result
 
@@ -64,9 +69,16 @@ class GpuSessionReconciler:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         http_client: httpx.AsyncClient,
+        *,
+        tunnel_domain: str,
+        tunnel_prefix: str | None,
+        grace_seconds: int,
     ) -> None:
         self._session_factory = session_factory
         self._client = http_client
+        self._tunnel_domain = tunnel_domain
+        self._tunnel_prefix = tunnel_prefix
+        self._grace_seconds = grace_seconds
 
     async def check(self) -> ComponentHealth:
         """Run reconciliation. Returns aggregate status."""
@@ -98,30 +110,51 @@ class GpuSessionReconciler:
             )
 
         # Probe all sessions concurrently.
-        # _probe_node catches all exceptions and returns bool — no need for
+        # _probe_session catches all exceptions and returns bool — no need for
         # return_exceptions=True, so probe_results is cleanly list[bool].
-        probe_tasks = [self._probe_node(s.node_host, s.node_port) for s in active_sessions]
+        probe_tasks = [self._probe_session(s) for s in active_sessions]
         probe_results: list[bool] = await asyncio.gather(*probe_tasks)
+
+        now = datetime.now(UTC)
 
         # Classify results — collect IDs for batch DB writes
         healthy_count = 0
         stale_count = 0
+        reachable_ids: list[UUID] = []
         newly_stale_ids: list[UUID] = []
         recovered_ids: list[UUID] = []
 
         for session, reachable in zip(active_sessions, probe_results, strict=True):
             if reachable:
                 healthy_count += 1
+                reachable_ids.append(session.id)
                 if session.stale_detected_at is not None:
                     recovered_ids.append(session.id)
             else:
                 stale_count += 1
                 if session.stale_detected_at is None:
-                    newly_stale_ids.append(session.id)
+                    # Defensive: created_at has a server_default so it should
+                    # never be None in practice, but fall back to `now` (elapsed=0,
+                    # within grace) rather than blow up if it somehow is.
+                    last_seen = session.last_reachable_at or session.created_at or now
+                    elapsed = (now - last_seen).total_seconds()
+                    if elapsed >= self._grace_seconds:
+                        newly_stale_ids.append(session.id)
+                    else:
+                        logger.info(
+                            "health.gpu_session.within_grace",
+                            session_id=str(session.id),
+                            elapsed_seconds=elapsed,
+                            grace_seconds=self._grace_seconds,
+                        )
 
-        # Batch DB writes — one UPDATE each, not per-session
+        # Batch DB writes — one UPDATE each, not per-session.
+        # Pass `now` so the decision timestamp and stored values are aligned.
+        if reachable_ids:
+            await self._update_last_reachable_batch(reachable_ids, now=now)
+
         if newly_stale_ids:
-            await self._mark_stale(newly_stale_ids)
+            await self._mark_stale(newly_stale_ids, now=now)
             logger.warning(
                 "health.gpu_sessions.stale_detected",
                 count=len(newly_stale_ids),
@@ -129,7 +162,7 @@ class GpuSessionReconciler:
             )
 
         if recovered_ids:
-            await self._clear_stale_batch(recovered_ids)
+            await self._clear_stale_batch(recovered_ids, now=now)
             logger.info(
                 "health.gpu_sessions.recovered",
                 count=len(recovered_ids),
@@ -182,41 +215,68 @@ class GpuSessionReconciler:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
-    async def _probe_node(self, host: str | None, port: int | None) -> bool:
-        """Probe ComfyUI /object_info on a GPU node.
+    async def _probe_session(self, session: GpuSession) -> bool:
+        """Probe ComfyUI /object_info on a session's tunnel endpoint.
 
-        Returns True if reachable, False otherwise.
-        Handles missing host/port gracefully (returns False).
+        Returns True if reachable, False otherwise. Invalid or missing
+        tunnel_hostname logs health.gpu_session.invalid_hostname and returns
+        False — subject to the same grace period as a network failure.
         """
-        if not host or not port:
+        try:
+            base_url = session_comfyui_base_url(
+                session.tunnel_hostname,
+                tunnel_domain=self._tunnel_domain,
+                allowed_prefix=self._tunnel_prefix,
+            )
+        except InvalidTunnelHostnameError:
             logger.warning(
-                "health.gpu_session.missing_endpoint",
-                host=host,
-                port=port,
+                "health.gpu_session.invalid_hostname",
+                session_id=str(session.id),
+                tunnel_hostname=session.tunnel_hostname,
             )
             return False
 
         try:
             resp = await self._client.get(
-                f"http://{host}:{port}{_COMFYUI_PROBE_PATH}",
+                f"{base_url}{_COMFYUI_PROBE_PATH}",
                 timeout=_PROBE_TIMEOUT_SECONDS,
             )
             return resp.status_code == 200
         except Exception as exc:
             logger.debug(
                 "health.gpu_session.probe_failed",
-                host=host,
-                port=port,
+                session_id=str(session.id),
+                tunnel_hostname=session.tunnel_hostname,
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
             return False
 
-    async def _mark_stale(self, session_ids: list[UUID]) -> None:
+    async def _update_last_reachable_batch(
+        self,
+        session_ids: list[UUID],
+        *,
+        now: datetime,
+    ) -> None:
+        """Set last_reachable_at = now for all reachable sessions.
+
+        ``now`` must be the same timestamp used for grace-window calculations so
+        the decision time and stored value stay aligned across a single run.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                update(GpuSession)
+                .where(GpuSession.id.in_(session_ids))
+                .values(last_reachable_at=now)
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+    async def _mark_stale(self, session_ids: list[UUID], *, now: datetime) -> None:
         """Mark sessions as stale in the DB.
 
-        Sets stale_detected_at to now, but only for sessions where
-        it's still NULL (idempotent — won't overwrite an earlier detection).
+        Sets stale_detected_at to ``now``, but only for sessions where it is
+        still NULL (idempotent — won't overwrite an earlier detection).
         Also transitions status from 'active' to 'stale'.
         """
         async with self._session_factory() as session:
@@ -227,19 +287,19 @@ class GpuSessionReconciler:
                     GpuSession.stale_detected_at.is_(None),
                 )
                 .values(
-                    stale_detected_at=datetime.now(UTC),
+                    stale_detected_at=now,
                     status=GpuSessionStatus.stale.value,
                 )
             )
             await session.execute(stmt)
             await session.commit()
 
-    async def _clear_stale_batch(self, session_ids: list[UUID]) -> None:
+    async def _clear_stale_batch(self, session_ids: list[UUID], *, now: datetime) -> None:
         """Batch-clear staleness for sessions that have recovered.
 
-        Transitions status back to 'active' and resets stale tracking.
-        Handles transient network blips — if nodes come back, they
-        don't stay stuck in 'stale'.
+        Transitions status back to 'active', resets stale tracking, and
+        stamps last_reachable_at to ``now``. Handles transient network blips
+        — if nodes come back, they don't stay stuck in 'stale'.
         """
         if not session_ids:
             return
@@ -251,6 +311,7 @@ class GpuSessionReconciler:
                     stale_detected_at=None,
                     stale_notified=False,
                     status=GpuSessionStatus.active.value,
+                    last_reachable_at=now,
                 )
             )
             await session.execute(stmt)

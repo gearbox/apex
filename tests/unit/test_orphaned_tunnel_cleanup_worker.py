@@ -72,8 +72,6 @@ def _make_gpu_session(
     session.stopped_at = None
     session.created_at = now - timedelta(hours=2)
     session.error_message = None
-    session.node_host = None
-    session.node_port = None
     session.stale_detected_at = None
     session.stale_notified = False
     return session
@@ -154,8 +152,6 @@ def _make_orphan_session(
     session.stopped_at = now - timedelta(minutes=30)
     session.created_at = now - timedelta(hours=3)
     session.error_message = None
-    session.node_host = None
-    session.node_port = None
     session.stale_detected_at = None
     session.stale_notified = False
     return session

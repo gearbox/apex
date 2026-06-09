@@ -10,13 +10,10 @@ from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.bundle_config import HardwareRequirements
 from src.core.enums import GpuSessionStatus
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
-
-_DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 UserFactory = Callable[..., Coroutine[Any, Any, User]]
 
@@ -26,8 +23,7 @@ async def _create_gpu_session(
     *,
     user_id: object = None,
     status: str = GpuSessionStatus.active.value,
-    host: str = "10.0.0.1",
-    port: int = _DEFAULT_COMFYUI_PORT,
+    tunnel_hostname: str = "gpu-test01.gpu-domain.com",
 ) -> GpuSession:
     """Insert a GpuSession directly via the test session."""
     gpu_session = GpuSession(
@@ -37,8 +33,7 @@ async def _create_gpu_session(
         bundle_name="test_bundle",
         model_type="aisha-image",
         status=status,
-        node_host=host,
-        node_port=port,
+        tunnel_hostname=tunnel_hostname,
     )
     db_session.add(gpu_session)
     await db_session.flush()
@@ -59,7 +54,9 @@ class TestReconcilerIntegration:
     ) -> None:
         """Verify the stale-marking UPDATE writes correct values to DB."""
         user = await make_user(email=f"gpu-{uuid4().hex[:8]}@example.com")
-        gpu_sess = await _create_gpu_session(db_session, user_id=user.id, host="10.0.0.99")
+        gpu_sess = await _create_gpu_session(
+            db_session, user_id=user.id, tunnel_hostname="gpu-test99.gpu-domain.com"
+        )
 
         # Execute the same UPDATE the reconciler's _mark_stale uses
         stmt = (

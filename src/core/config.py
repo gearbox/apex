@@ -412,6 +412,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    gpu_session_stale_grace_seconds: int = Field(
+        default=120,
+        ge=30,
+        le=600,
+        description=(
+            "Seconds a session may be unreachable before the health reconciler marks it stale. "
+            "Must be ≥ 2× the reconciler cycle (60s default) to absorb a single transient blip. "
+            "last_reachable_at is stamped at activation and on every healthy probe."
+        ),
+    )
+
     # --- Phase 2 Callback (pre-wired) ---
     apex_callback_url: str = Field(
         default="",
