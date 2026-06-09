@@ -98,6 +98,30 @@ class TestProbesTunnelEndpoint:
         assert call_url == "https://gpu-abc123.gpu-domain.com/object_info"
         r._mark_stale.assert_not_awaited()
 
+    async def test_non_200_probe_is_treated_as_unreachable(self) -> None:
+        """A non-200 tunnel probe (e.g. 503) must be treated as unreachable."""
+        session = _make_session(
+            tunnel_hostname="gpu-abc123.gpu-domain.com",
+            last_reachable_at=datetime.now(UTC) - timedelta(seconds=200),
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=503))
+
+        r = _make_reconciler(http_client=mock_client, grace_seconds=120)
+        r._get_active_sessions = AsyncMock(return_value=[session])  # type: ignore[method-assign]
+        r._mark_stale = AsyncMock()  # type: ignore[method-assign]
+        r._update_last_reachable_batch = AsyncMock()  # type: ignore[method-assign]
+
+        result = await r.check()
+
+        assert result.status == ComponentStatus.unhealthy
+        assert result.metadata["healthy"] == 0
+        assert result.metadata["stale"] == 1
+        r._mark_stale.assert_awaited_once()
+        stale_ids = r._mark_stale.call_args[0][0]
+        assert session.id in stale_ids
+        r._update_last_reachable_batch.assert_not_awaited()
+
 
 class TestAllHealthy:
     async def test_all_nodes_reachable(self) -> None:

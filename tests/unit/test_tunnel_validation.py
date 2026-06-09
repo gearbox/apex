@@ -132,3 +132,12 @@ class TestSessionComfyuiBaseUrl:
                 tunnel_domain="gpu-domain.com",
                 allowed_prefix="gpu-",
             )
+
+    def test_no_prefix_restriction(self) -> None:
+        """allowed_prefix=None disables prefix enforcement; any valid hostname is accepted."""
+        url = session_comfyui_base_url(
+            "any-prefix-123.gpu-domain.com",
+            tunnel_domain="gpu-domain.com",
+            allowed_prefix=None,
+        )
+        assert url == "https://any-prefix-123.gpu-domain.com"

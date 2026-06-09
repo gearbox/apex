@@ -133,7 +133,10 @@ class GpuSessionReconciler:
             else:
                 stale_count += 1
                 if session.stale_detected_at is None:
-                    last_seen = session.last_reachable_at or session.created_at
+                    # Defensive: created_at has a server_default so it should
+                    # never be None in practice, but fall back to `now` (elapsed=0,
+                    # within grace) rather than blow up if it somehow is.
+                    last_seen = session.last_reachable_at or session.created_at or now
                     elapsed = (now - last_seen).total_seconds()
                     if elapsed >= self._grace_seconds:
                         newly_stale_ids.append(session.id)
@@ -145,12 +148,13 @@ class GpuSessionReconciler:
                             grace_seconds=self._grace_seconds,
                         )
 
-        # Batch DB writes — one UPDATE each, not per-session
+        # Batch DB writes — one UPDATE each, not per-session.
+        # Pass `now` so the decision timestamp and stored values are aligned.
         if reachable_ids:
-            await self._update_last_reachable_batch(reachable_ids)
+            await self._update_last_reachable_batch(reachable_ids, now=now)
 
         if newly_stale_ids:
-            await self._mark_stale(newly_stale_ids)
+            await self._mark_stale(newly_stale_ids, now=now)
             logger.warning(
                 "health.gpu_sessions.stale_detected",
                 count=len(newly_stale_ids),
@@ -158,7 +162,7 @@ class GpuSessionReconciler:
             )
 
         if recovered_ids:
-            await self._clear_stale_batch(recovered_ids)
+            await self._clear_stale_batch(recovered_ids, now=now)
             logger.info(
                 "health.gpu_sessions.recovered",
                 count=len(recovered_ids),
@@ -248,22 +252,31 @@ class GpuSessionReconciler:
             )
             return False
 
-    async def _update_last_reachable_batch(self, session_ids: list[UUID]) -> None:
-        """Set last_reachable_at = now() for all reachable sessions."""
+    async def _update_last_reachable_batch(
+        self,
+        session_ids: list[UUID],
+        *,
+        now: datetime,
+    ) -> None:
+        """Set last_reachable_at = now for all reachable sessions.
+
+        ``now`` must be the same timestamp used for grace-window calculations so
+        the decision time and stored value stay aligned across a single run.
+        """
         async with self._session_factory() as session:
             stmt = (
                 update(GpuSession)
                 .where(GpuSession.id.in_(session_ids))
-                .values(last_reachable_at=datetime.now(UTC))
+                .values(last_reachable_at=now)
             )
             await session.execute(stmt)
             await session.commit()
 
-    async def _mark_stale(self, session_ids: list[UUID]) -> None:
+    async def _mark_stale(self, session_ids: list[UUID], *, now: datetime) -> None:
         """Mark sessions as stale in the DB.
 
-        Sets stale_detected_at to now, but only for sessions where
-        it's still NULL (idempotent — won't overwrite an earlier detection).
+        Sets stale_detected_at to ``now``, but only for sessions where it is
+        still NULL (idempotent — won't overwrite an earlier detection).
         Also transitions status from 'active' to 'stale'.
         """
         async with self._session_factory() as session:
@@ -274,19 +287,19 @@ class GpuSessionReconciler:
                     GpuSession.stale_detected_at.is_(None),
                 )
                 .values(
-                    stale_detected_at=datetime.now(UTC),
+                    stale_detected_at=now,
                     status=GpuSessionStatus.stale.value,
                 )
             )
             await session.execute(stmt)
             await session.commit()
 
-    async def _clear_stale_batch(self, session_ids: list[UUID]) -> None:
+    async def _clear_stale_batch(self, session_ids: list[UUID], *, now: datetime) -> None:
         """Batch-clear staleness for sessions that have recovered.
 
         Transitions status back to 'active', resets stale tracking, and
-        stamps last_reachable_at. Handles transient network blips — if nodes
-        come back, they don't stay stuck in 'stale'.
+        stamps last_reachable_at to ``now``. Handles transient network blips
+        — if nodes come back, they don't stay stuck in 'stale'.
         """
         if not session_ids:
             return
@@ -298,7 +311,7 @@ class GpuSessionReconciler:
                     stale_detected_at=None,
                     stale_notified=False,
                     status=GpuSessionStatus.active.value,
-                    last_reachable_at=datetime.now(UTC),
+                    last_reachable_at=now,
                 )
             )
             await session.execute(stmt)
