@@ -68,16 +68,20 @@ class TestGpuSessionModelColumns:
             "product_id",
             "status",
             "vastai_instance_id",
-            "node_host",
-            "node_port",
             "stale_detected_at",
             "stale_notified",
+            "last_reachable_at",
             "error_message",
             "created_at",
             "started_at",
             "stopped_at",
         }
         assert original.issubset(cols)
+
+    def test_retired_columns_absent(self) -> None:
+        cols = {c.name for c in _table().columns}
+        assert "node_host" not in cols
+        assert "node_port" not in cols
 
     def test_partial_unique_index_exists(self) -> None:
         index_names = {idx.name for idx in _table().indexes}

@@ -6,6 +6,7 @@ import pytest
 
 from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
+    session_comfyui_base_url,
     validate_tunnel_hostname,
 )
 
@@ -81,3 +82,53 @@ class TestInvalidHosts:
     def test_wrong_suffix_with_correct_prefix_rejected(self) -> None:
         """Correct gpu- prefix but wrong suffix (cross-tenant SSRF guard)."""
         _bad("gpu-01jf8x3k.attacker.com")
+
+
+class TestSessionComfyuiBaseUrl:
+    def test_valid_hostname_returns_https_url(self) -> None:
+        url = session_comfyui_base_url(
+            "gpu-abc123.gpu-domain.com",
+            tunnel_domain="gpu-domain.com",
+            allowed_prefix="gpu-",
+        )
+        assert url == "https://gpu-abc123.gpu-domain.com"
+
+    def test_lowercases_hostname(self) -> None:
+        url = session_comfyui_base_url(
+            "GPU-ABC123.gpu-domain.com",
+            tunnel_domain="gpu-domain.com",
+            allowed_prefix="gpu-",
+        )
+        assert url == "https://gpu-abc123.gpu-domain.com"
+
+    def test_none_raises(self) -> None:
+        with pytest.raises(InvalidTunnelHostnameError):
+            session_comfyui_base_url(
+                None,
+                tunnel_domain="gpu-domain.com",
+                allowed_prefix="gpu-",
+            )
+
+    def test_empty_raises(self) -> None:
+        with pytest.raises(InvalidTunnelHostnameError):
+            session_comfyui_base_url(
+                "",
+                tunnel_domain="gpu-domain.com",
+                allowed_prefix="gpu-",
+            )
+
+    def test_wrong_suffix_raises(self) -> None:
+        with pytest.raises(InvalidTunnelHostnameError):
+            session_comfyui_base_url(
+                "gpu-abc.evil.com",
+                tunnel_domain="gpu-domain.com",
+                allowed_prefix="gpu-",
+            )
+
+    def test_wrong_prefix_raises(self) -> None:
+        with pytest.raises(InvalidTunnelHostnameError):
+            session_comfyui_base_url(
+                "bad-abc.gpu-domain.com",
+                tunnel_domain="gpu-domain.com",
+                allowed_prefix="gpu-",
+            )

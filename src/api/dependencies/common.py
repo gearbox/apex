@@ -760,6 +760,9 @@ async def init_services(settings: Settings) -> JWTService:
         GpuSessionReconciler(
             session_factory=_services.db_manager.session_factory,
             http_client=health_http_client,
+            tunnel_domain=settings.aisha_cf_tunnel_domain,
+            tunnel_prefix=settings.aisha_cf_tunnel_prefix,
+            grace_seconds=settings.gpu_session_stale_grace_seconds,
         )
     )
 

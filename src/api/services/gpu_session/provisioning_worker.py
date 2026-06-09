@@ -674,6 +674,10 @@ class GpuProvisioningWorker:
         extra: dict[str, Any] = {}
         if session.started_at is None:
             extra["started_at"] = datetime.now(UTC)
+        # Stamp last_reachable_at at activation so the reconciler grace window
+        # starts from when the session became usable, not from created_at
+        # (provisioning takes ~15 min, so created_at would be stale immediately).
+        extra["last_reachable_at"] = datetime.now(UTC)
         await self._transition(
             session,
             new_status=GpuSessionStatus.active,

@@ -65,3 +65,36 @@ def validate_tunnel_hostname(
         raise InvalidTunnelHostnameError(
             f"Tunnel hostname {hostname!r} does not start with required prefix {allowed_prefix!r}"
         )
+
+
+def session_comfyui_base_url(
+    tunnel_hostname: str | None,
+    *,
+    tunnel_domain: str,
+    allowed_prefix: str | None = None,
+) -> str:
+    """Build and validate the HTTPS base URL for a session's ComfyUI tunnel.
+
+    Single source of truth for converting a ``GpuSession.tunnel_hostname``
+    column value into the ``https://`` base URL used by all callers
+    (generation, job poller, reconciler).
+
+    Args:
+        tunnel_hostname: Raw value from ``GpuSession.tunnel_hostname`` (may be None).
+        tunnel_domain: CF zone domain (e.g. ``"your-gpu-domain.com"``).
+        allowed_prefix: Optional required hostname prefix (e.g. ``"gpu-"``).
+
+    Returns:
+        ``f"https://{hostname}"`` for the lowercased, validated hostname.
+
+    Raises:
+        InvalidTunnelHostnameError: If ``tunnel_hostname`` is None/empty or
+            fails charset, suffix, or prefix validation.
+    """
+    hostname = (tunnel_hostname or "").lower()
+    validate_tunnel_hostname(
+        hostname,
+        allowed_suffix=f".{tunnel_domain}",
+        allowed_prefix=allowed_prefix,
+    )
+    return f"https://{hostname}"
