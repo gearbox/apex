@@ -15,9 +15,10 @@ from src.db.models.gpu_session import GpuSession
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_PROVISIONING_STATUSES = frozenset(
+PROVISIONING_STATUSES = frozenset(
     {GpuSessionStatus.pending, GpuSessionStatus.provisioning, GpuSessionStatus.resuming}
 )
+_PROVISIONING_STATUSES = PROVISIONING_STATUSES  # backward-compat alias
 
 _TERMINAL_STATUSES = (GpuSessionStatus.stopped, GpuSessionStatus.failed)
 

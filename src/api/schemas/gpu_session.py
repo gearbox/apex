@@ -14,6 +14,15 @@ if TYPE_CHECKING:
     from src.db.models.gpu_session import GpuSession
 
 
+class DownloadProgressBody(msgspec.Struct, kw_only=True):
+    """Download-progress snapshot sent by aisha during the 'downloading' phase."""
+
+    bytes_done: int
+    bytes_total: int
+    files_done: int
+    files_total: int
+
+
 class StartSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     model: ModelType
     """The model to provision a GPU session for."""

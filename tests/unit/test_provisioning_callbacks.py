@@ -17,8 +17,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from litestar import Litestar
+from litestar.di import Provide
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
+)
+from litestar.testing import TestClient
 
-from src.api.schemas.gpu_session import GpuSessionResponse
+from src.api.routes.internal_gpu_session import InternalGpuSessionController
+from src.api.schemas.gpu_session import DownloadProgressBody, GpuSessionResponse
 from src.api.services.gpu_session.provisioning_callback_service import (
     ProvisioningCallbackService,
     _validate_token,
@@ -97,7 +106,9 @@ async def _call(
         bearer_token=token,
         phase=phase,
         message="test message",
-        download={"bytes_done": 1000, "bytes_total": 5000, "files_done": 0, "files_total": 1}
+        download=DownloadProgressBody(
+            bytes_done=1000, bytes_total=5000, files_done=0, files_total=1
+        )
         if phase == "downloading"
         else None,
         error=None,
@@ -122,7 +133,7 @@ class TestTokenValidation:
         assert _validate_token("wrong", stored) is False
 
     def test_empty_stored_hash_rejected(self) -> None:
-        assert _validate_token("anything", None) is False  # type: ignore[arg-type]
+        assert _validate_token("anything", None) is False
         assert _validate_token("anything", "") is False
 
     def test_constant_time_comparison(self) -> None:
@@ -263,6 +274,31 @@ class TestProgressPersistence:
         assert status == 200
         mock_repo.update_provisioning_progress.assert_called_once()
 
+    async def test_non_download_phase_with_download_field_drops_download(self) -> None:
+        """Download blob sent for a non-download phase must be silently dropped."""
+        svc, db = _make_service()
+        session = _make_session()
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+            await svc.handle_callback(
+                session_id=session.id,
+                bearer_token=_VALID_TOKEN,
+                phase="installing",
+                message="installing deps",
+                download=DownloadProgressBody(
+                    bytes_done=0, bytes_total=0, files_done=0, files_total=0
+                ),
+                error=None,
+                elapsed_seconds=10,
+                ts=_TS,
+            )
+
+        mock_repo.update_provisioning_progress.assert_called_once()
+        call_kwargs = mock_repo.update_provisioning_progress.call_args[1]
+        assert "download" not in call_kwargs["progress"]
+
 
 # ---------------------------------------------------------------------------
 # D4: Status gate
@@ -394,3 +430,108 @@ class TestSessionResponseSchema:
         response = GpuSessionResponse.from_model(session)
         assert response.provisioning_phase is None
         assert response.provisioning_progress is None
+
+
+# ---------------------------------------------------------------------------
+# HTTP controller tests — auth parsing, session_id mismatch, happy path
+# ---------------------------------------------------------------------------
+
+_CALLBACK_BEARER = "test-node-token"
+_SESSION_UUID = uuid4()
+_VALID_BODY = {
+    "session_id": str(_SESSION_UUID),
+    "phase": "downloading",
+    "message": "fetching models",
+    "elapsed_seconds": 30,
+    "ts": "2026-06-09T10:30:00+00:00",
+}
+_CALLBACK_PATH = f"/v1/internal/gpu-sessions/{_SESSION_UUID}/provisioning"
+
+
+def _build_callback_service(
+    *,
+    handle_callback_return: tuple[bool, int] = (True, 200),
+) -> ProvisioningCallbackService:
+    svc = ProvisioningCallbackService(session_factory=MagicMock())
+    svc.handle_callback = AsyncMock(return_value=handle_callback_return)  # type: ignore[method-assign]
+    return svc
+
+
+def _create_callback_app(svc: ProvisioningCallbackService) -> Litestar:
+    return Litestar(
+        route_handlers=[InternalGpuSessionController],
+        dependencies={
+            "provisioning_callback_service": Provide(lambda: svc, sync_to_thread=False),
+        },
+    )
+
+
+class TestProvisioningCallbackController:
+    """HTTP contract tests for InternalGpuSessionController.provisioning_callback."""
+
+    def test_missing_authorization_header_returns_401(self) -> None:
+        svc = _build_callback_service()
+        app = _create_callback_app(svc)
+
+        with TestClient(app=app) as client:
+            resp = client.post(_CALLBACK_PATH, json=_VALID_BODY)
+
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+        svc.handle_callback.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_empty_bearer_token_returns_401(self) -> None:
+        svc = _build_callback_service()
+        app = _create_callback_app(svc)
+
+        with TestClient(app=app) as client:
+            resp = client.post(
+                _CALLBACK_PATH,
+                json=_VALID_BODY,
+                headers={"Authorization": "Bearer "},
+            )
+
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+        svc.handle_callback.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_invalid_token_service_returns_unauthorized_401(self) -> None:
+        svc = _build_callback_service(handle_callback_return=(False, 401))
+        app = _create_callback_app(svc)
+
+        with TestClient(app=app) as client:
+            resp = client.post(
+                _CALLBACK_PATH,
+                json=_VALID_BODY,
+                headers={"Authorization": f"Bearer {_CALLBACK_BEARER}"},
+            )
+
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+        svc.handle_callback.assert_called_once()  # type: ignore[attr-defined]
+
+    def test_authorized_callback_returns_200_ok(self) -> None:
+        svc = _build_callback_service(handle_callback_return=(True, 200))
+        app = _create_callback_app(svc)
+
+        with TestClient(app=app) as client:
+            resp = client.post(
+                _CALLBACK_PATH,
+                json=_VALID_BODY,
+                headers={"Authorization": f"Bearer {_CALLBACK_BEARER}"},
+            )
+
+        assert resp.status_code == HTTP_200_OK
+        assert resp.json() == {"ok": True}
+
+    def test_session_id_mismatch_returns_400(self) -> None:
+        svc = _build_callback_service()
+        app = _create_callback_app(svc)
+        different_id = str(uuid4())
+
+        with TestClient(app=app) as client:
+            resp = client.post(
+                _CALLBACK_PATH,
+                json={**_VALID_BODY, "session_id": different_id},
+                headers={"Authorization": f"Bearer {_CALLBACK_BEARER}"},
+            )
+
+        assert resp.status_code == HTTP_400_BAD_REQUEST
+        svc.handle_callback.assert_not_called()  # type: ignore[attr-defined]

@@ -18,7 +18,8 @@ from uuid import UUID
 
 import structlog
 
-from src.db.repositories.gpu_session import GpuSessionRepository
+from src.api.schemas.gpu_session import DownloadProgressBody
+from src.db.repositories.gpu_session import PROVISIONING_STATUSES, GpuSessionRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -26,11 +27,6 @@ if TYPE_CHECKING:
     from src.db.models.gpu_session import GpuSession
 
 logger = structlog.get_logger(__name__)
-
-# Statuses that can still receive callbacks. Any other status means the session
-# has moved past provisioning; the node may not know yet (benign race) — return
-# 200 silently so the node doesn't retry on a permanent error.
-_CALLBACK_ALLOWED_STATUSES = frozenset({"pending", "provisioning", "resuming"})
 
 # Phases that carry download progress; others only update phase + message.
 _DOWNLOAD_PHASES = frozenset({"downloading"})
@@ -57,7 +53,7 @@ class ProvisioningCallbackService:
         bearer_token: str,
         phase: str,
         message: str,
-        download: dict[str, int] | None,
+        download: DownloadProgressBody | None,
         error: str | None,
         elapsed_seconds: int,
         ts: datetime,
@@ -69,68 +65,77 @@ class ProvisioningCallbackService:
             returns 200 regardless of whether the write was applied (status-gated
             and stale-ts callbacks return 200 with no write per the design spec).
         """
-        # Load the session to check auth + status gate.
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
             session = await repo.get_by_id(session_id)
 
-        if session is None:
-            logger.warning(
-                "gpu_session.callback.rejected",
-                session_id=str(session_id),
-                reason="session_not_found",
-            )
-            return False, 401
+            if session is None:
+                logger.warning(
+                    "gpu_session.callback.rejected",
+                    session_id=str(session_id),
+                    reason="session_not_found",
+                )
+                return False, 401
 
-        if not _validate_token(bearer_token, session.callback_token_hash):
-            logger.warning(
-                "gpu_session.callback.rejected",
-                session_id=str(session_id),
-                reason="invalid_token",
-            )
-            return False, 401
+            if not _validate_token(bearer_token, session.callback_token_hash):
+                logger.warning(
+                    "gpu_session.callback.rejected",
+                    session_id=str(session_id),
+                    reason="invalid_token",
+                )
+                return False, 401
 
-        status_str = str(session.status)
-        if status_str not in _CALLBACK_ALLOWED_STATUSES:
-            logger.info(
-                "gpu_session.callback.ignored_status",
-                session_id=str(session_id),
-                session_status=status_str,
-                phase=phase,
-            )
-            return True, 200
+            if session.status not in PROVISIONING_STATUSES:
+                logger.info(
+                    "gpu_session.callback.ignored_status",
+                    session_id=str(session_id),
+                    session_status=session.status,
+                    phase=phase,
+                )
+                return True, 200
 
-        # TS gate: ignore stale callbacks (out-of-order delivery from the node).
-        stored_ts = _extract_stored_ts(session)
-        if stored_ts is not None and ts < stored_ts:
-            logger.debug(
-                "gpu_session.callback.stale_ts",
-                session_id=str(session_id),
-                callback_ts=ts.isoformat(),
-                stored_ts=stored_ts.isoformat(),
-            )
-            return True, 200
+            # TS gate: ignore stale callbacks (out-of-order delivery from the node).
+            stored_ts = _extract_stored_ts(session)
+            if stored_ts is not None and ts < stored_ts:
+                logger.debug(
+                    "gpu_session.callback.stale_ts",
+                    session_id=str(session_id),
+                    callback_ts=ts.isoformat(),
+                    stored_ts=stored_ts.isoformat(),
+                )
+                return True, 200
 
-        # Build the progress blob stored in JSONB.
-        progress: dict[str, object] = {
-            "ts": ts.isoformat(),
-            "message": message,
-            "elapsed_seconds": elapsed_seconds,
-        }
-        if download is not None:
-            progress["download"] = download
-        if error is not None:
-            progress["error"] = error
+            # Build the progress blob stored in JSONB.
+            progress: dict[str, object] = {
+                "ts": ts.isoformat(),
+                "message": message,
+                "elapsed_seconds": elapsed_seconds,
+            }
+            if download is not None:
+                if phase in _DOWNLOAD_PHASES:
+                    progress["download"] = {
+                        "bytes_done": download.bytes_done,
+                        "bytes_total": download.bytes_total,
+                        "files_done": download.files_done,
+                        "files_total": download.files_total,
+                    }
+                else:
+                    logger.debug(
+                        "gpu_session.callback.unexpected_download",
+                        session_id=str(session_id),
+                        phase=phase,
+                    )
+            if error is not None:
+                progress["error"] = error
 
-        now = datetime.now(UTC)
-        async with self._session_factory() as db, db.begin():
-            repo = GpuSessionRepository(db)
-            await repo.update_provisioning_progress(
-                session_id,
-                phase=phase,
-                progress=progress,
-                last_progress_at=now,
-            )
+            now = datetime.now(UTC)
+            async with db.begin():
+                await repo.update_provisioning_progress(
+                    session_id,
+                    phase=phase,
+                    progress=progress,
+                    last_progress_at=now,
+                )
 
         logger.info(
             "gpu_session.callback.received",

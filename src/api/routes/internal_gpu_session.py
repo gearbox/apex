@@ -20,19 +20,13 @@ import msgspec
 import structlog
 from litestar import Controller, Request, Response, post
 from litestar.params import Body
-from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED
+from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED
 
 from src.api.schemas.errors import ErrorEnvelope
+from src.api.schemas.gpu_session import DownloadProgressBody
 from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
 
 logger = structlog.get_logger(__name__)
-
-
-class DownloadProgressBody(msgspec.Struct, kw_only=True):
-    bytes_done: int
-    bytes_total: int
-    files_done: int
-    files_total: int
 
 
 class ProvisioningCallbackBody(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
@@ -72,6 +66,7 @@ class InternalGpuSessionController(Controller):
         """Receive a provisioning progress callback from a GPU node.
 
         Returns 401 for missing/invalid bearer token.
+        Returns 400 if path and body session_id disagree.
         Returns 200 for all other outcomes (status-gated, stale-ts, and successful writes)
         so the node never retries on a benign race.
         """
@@ -83,21 +78,20 @@ class InternalGpuSessionController(Controller):
         if not bearer_token:
             return _error(HTTP_401_UNAUTHORIZED, "unauthorized", "Empty Bearer token")
 
-        download_dict: dict[str, int] | None = None
-        if data.download is not None:
-            download_dict = {
-                "bytes_done": data.download.bytes_done,
-                "bytes_total": data.download.bytes_total,
-                "files_done": data.download.files_done,
-                "files_total": data.download.files_total,
-            }
+        if data.session_id != session_id:
+            logger.warning(
+                "gpu_session.callback.session_id_mismatch",
+                path_session_id=str(session_id),
+                body_session_id=str(data.session_id),
+            )
+            return _error(HTTP_400_BAD_REQUEST, "bad_request", "session_id mismatch")
 
         authorized, _status = await provisioning_callback_service.handle_callback(
             session_id=session_id,
             bearer_token=bearer_token,
             phase=data.phase,
             message=data.message,
-            download=download_dict,
+            download=data.download,
             error=data.error,
             elapsed_seconds=data.elapsed_seconds,
             ts=data.ts,
