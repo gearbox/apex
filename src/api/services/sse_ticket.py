@@ -59,6 +59,6 @@ class SSETicketService:
             logger.debug("sse_ticket.invalid_or_expired", ticket=ticket[:8])
             return None
 
-        user_id = UUID(value)
+        user_id = UUID(value if isinstance(value, str) else bytes(value).decode())
         logger.debug("sse_ticket.redeemed", user_id=str(user_id))
         return user_id
