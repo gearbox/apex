@@ -56,7 +56,7 @@ class TestGpuSessionModelColumns:
             "provision_attempt",
             "paused_at",
             "resumed_at",
-            "callback_token",
+            "callback_token_hash",
         }
         assert expected.issubset(cols)
 

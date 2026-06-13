@@ -6,12 +6,13 @@ Covers the full provisioning, tunnel, pause/resume, and billing workflow:
 - Vast.ai details: offer ID, GPU name, hourly cost captured at creation
 - Provisioning tracking: attempt counter for retry logic
 - Pause/resume timestamps: for billing and UX
-- Phase 2 callback token: pre-wired for GPU → Apex callbacks
+- Phase 2 callbacks: hashed token auth + phase/progress persistence
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -24,6 +25,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -177,10 +179,26 @@ class GpuSession(Base):
         nullable=True,
     )
 
-    # Phase 2 callback
-    callback_token: Mapped[str | None] = mapped_column(
-        String(128),
+    # Phase 2 callbacks — hashed token auth + provisioning progress
+    callback_token_hash: Mapped[str | None] = mapped_column(
+        String(64),
         nullable=True,
+        comment="SHA-256 hex digest of the bearer token sent by the node. Plaintext never stored.",
+    )
+    provisioning_phase: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="Latest phase reported by the node via callback (e.g. 'downloading', 'ready', 'failed').",
+    )
+    provisioning_progress: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Latest progress blob from node callback: {ts, message, download?, error?}.",
+    )
+    last_progress_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Wall-clock time when the last accepted callback was written. Used for stall detection.",
     )
 
     # Staleness tracking (health reconciler)

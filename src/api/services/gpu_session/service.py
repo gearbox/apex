@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -275,6 +276,8 @@ class GpuSessionService:
         session_id = new_id()
         session_id_short = str(session_id)[:8]
         callback_token = secrets.token_urlsafe(48)
+        # SECURITY: only the hash is persisted; plaintext goes into the env and is never logged.
+        callback_token_hash = hashlib.sha256(callback_token.encode()).hexdigest()
 
         # Step 1.5: assert sufficient balance BEFORE creating external resources.
         # The base reservation is derived from the per-minute rate so start-time
@@ -404,7 +407,7 @@ class GpuSessionService:
                     vastai_offer_id=selected_offer.id,
                     vastai_cost_per_hour_micros=selected_offer.dph_total_micros,
                     vastai_gpu_name=selected_offer.gpu_name,
-                    callback_token=callback_token,
+                    callback_token_hash=callback_token_hash,
                     account_id=account_id,
                     readiness_marker_node_class=(
                         bundle.readiness_marker.node_class

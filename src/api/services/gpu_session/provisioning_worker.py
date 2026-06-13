@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import secrets
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -54,6 +56,10 @@ _TERMINAL_STATUSES = frozenset({GpuSessionStatus.stopped, GpuSessionStatus.faile
 _REASON_PROVISIONING_TIMEOUT = "provisioning_timeout"
 _REASON_PENDING_TIMEOUT = "pending_timeout"
 _REASON_PENDING_TIMEOUT_AFTER_ERRORS = "pending_timeout_after_errors"
+# Retryable: stall = no callbacks for stall_timeout; node_reported_failure = node said it failed.
+# Both are eligible for recreation (unlike provisioning_timeout which stays terminal).
+_REASON_PROVISIONING_STALLED = "provisioning_stalled"
+_REASON_NODE_REPORTED_FAILURE = "node_reported_failure"
 
 # Vast.ai actual_status values that mean the container is dead and will never reach 'running'.
 # Sourced from Vast.ai docs: https://docs.vast.ai/sdk/python/quickstart — "if actual_status
@@ -307,12 +313,41 @@ class GpuProvisioningWorker:
         if await self._handle_terminal_state_if_any(session, instance, stage="provisioning"):
             return
 
+        # Stall check (retryable): only applies when callbacks have been flowing.
+        # If last_progress_at is null (old aisha, unset env, network gap), we fall
+        # back to the fixed ceiling below — identical to pre-Phase-2 behavior.
+        if session.last_progress_at is not None:
+            stall_elapsed = datetime.now(UTC) - session.last_progress_at
+            if stall_elapsed >= timedelta(
+                seconds=self._settings.gpu_provision_stall_timeout_seconds
+            ):
+                logger.warning(
+                    "gpu_session.provision.stalled",
+                    session_id=str(session.id),
+                    stall_seconds=int(stall_elapsed.total_seconds()),
+                    stall_timeout=self._settings.gpu_provision_stall_timeout_seconds,
+                )
+                await self._retry_or_fail(session, reason=_REASON_PROVISIONING_STALLED)
+                return
+
+        # Fixed ceiling (terminal backstop): applies whether or not callbacks flow.
         if self._provision_timeout_exceeded(session):
             logger.warning(
                 "gpu_session.provision.provisioning_timeout",
                 session_id=str(session.id),
             )
             await self._retry_or_fail(session, reason=_REASON_PROVISIONING_TIMEOUT)
+            return
+
+        # Node-reported failure: receiver wrote provisioning_phase="failed"; worker
+        # picks it up on next sweep and routes into the existing retry machinery.
+        if session.provisioning_phase == "failed":
+            logger.warning(
+                "gpu_session.provision.node_reported_failure",
+                session_id=str(session.id),
+                error=str((session.provisioning_progress or {}).get("error", "")),
+            )
+            await self._retry_or_fail(session, reason=_REASON_NODE_REPORTED_FAILURE)
             return
 
         reachable = await self._probe_comfyui(session)
@@ -500,7 +535,7 @@ class GpuProvisioningWorker:
 
         # provisioning_timeout is always terminal: re-downloading the full model on a
         # fresh node hits the exact same wall (same slow network, same bundle size).
-        # Any other failure reason retains the existing recreation logic.
+        # provisioning_stalled and node_reported_failure are retryable (bad node, not bad bundle).
         if (
             reason == _REASON_PROVISIONING_TIMEOUT
             or new_attempt >= self._settings.provisioning_recreation_attempts + 1
@@ -571,6 +606,11 @@ class GpuProvisioningWorker:
             await self._mark_failed(session, "misconfigured: ai_bundles_github_token is empty")
             return
 
+        # Generate a fresh callback token so the destroyed node's leaked token is dead.
+        # The hash is written to the DB atomically with the new instance info below.
+        fresh_callback_token = secrets.token_urlsafe(48)
+        fresh_callback_token_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
+
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
         # civitai_api_token, and ACS_GITHUB_TOKEN.
         env = build_acs_env(
@@ -580,7 +620,7 @@ class GpuProvisioningWorker:
             bundle_version=session.bundle_version,
             comfyui_port=bundle.hardware.comfyui_port,
             tunnel_token=tunnel_token,
-            callback_token=session.callback_token or "",
+            callback_token=fresh_callback_token,
         )
 
         try:
@@ -612,6 +652,8 @@ class GpuProvisioningWorker:
                 with contextlib.suppress(Exception):
                     await self._vastai.destroy_instance(instance_id)
                 return
+            # Rotate the callback token so the old (destroyed) node's token is invalidated.
+            await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
             await repo.update_instance(
                 session.id,
                 vastai_instance_id=instance_id,

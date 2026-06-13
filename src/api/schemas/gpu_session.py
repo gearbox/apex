@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import msgspec
@@ -12,6 +12,15 @@ from src.core.enums import ModelType
 
 if TYPE_CHECKING:
     from src.db.models.gpu_session import GpuSession
+
+
+class DownloadProgressBody(msgspec.Struct, kw_only=True):
+    """Download-progress snapshot sent by aisha during the 'downloading' phase."""
+
+    bytes_done: int
+    bytes_total: int
+    files_done: int
+    files_total: int
 
 
 class StartSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
@@ -42,6 +51,10 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
     in_flight_job_count: int = 0
     """Number of QUEUED/RUNNING Aisha jobs on this session. Non-zero only for active
     sessions. Used by the frontend to gate the Pause button."""
+    provisioning_phase: str | None = None
+    """Latest provisioning phase reported via callback (e.g. 'downloading', 'ready')."""
+    provisioning_progress: dict[str, Any] | None = None
+    """Latest progress blob from node callback (download bytes, message, etc.)."""
 
     @classmethod
     def from_model(cls, m: GpuSession, *, in_flight_job_count: int = 0) -> GpuSessionResponse:
@@ -63,6 +76,8 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
             stopped_at=m.stopped_at,
             error_message=m.error_message,
             in_flight_job_count=in_flight_job_count,
+            provisioning_phase=m.provisioning_phase,
+            provisioning_progress=m.provisioning_progress,
         )
 
 

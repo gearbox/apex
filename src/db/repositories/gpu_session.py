@@ -15,6 +15,11 @@ from src.db.models.gpu_session import GpuSession
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+PROVISIONING_STATUSES = frozenset(
+    {GpuSessionStatus.pending, GpuSessionStatus.provisioning, GpuSessionStatus.resuming}
+)
+_PROVISIONING_STATUSES = PROVISIONING_STATUSES  # backward-compat alias
+
 _TERMINAL_STATUSES = (GpuSessionStatus.stopped, GpuSessionStatus.failed)
 
 
@@ -41,7 +46,7 @@ class GpuSessionRepository:
         vastai_offer_id: int | None = None,
         vastai_cost_per_hour_micros: int | None = None,
         vastai_gpu_name: str | None = None,
-        callback_token: str | None = None,
+        callback_token_hash: str | None = None,
         account_id: UUID | None = None,
         readiness_marker_node_class: str | None = None,
     ) -> GpuSession:
@@ -62,7 +67,7 @@ class GpuSessionRepository:
             vastai_offer_id: Vast.ai offer ID selected.
             vastai_cost_per_hour_micros: Hourly cost in microdollars.
             vastai_gpu_name: GPU model name from Vast.ai.
-            callback_token: Shared secret for Phase 2 GPU → Apex callbacks.
+            callback_token_hash: SHA-256 hex digest of the callback bearer token.
             account_id: Billing account ID for charging; may be None if not yet determined.
 
         Returns:
@@ -83,7 +88,7 @@ class GpuSessionRepository:
             vastai_offer_id=vastai_offer_id,
             vastai_cost_per_hour_micros=vastai_cost_per_hour_micros,
             vastai_gpu_name=vastai_gpu_name,
-            callback_token=callback_token,
+            callback_token_hash=callback_token_hash,
             account_id=account_id,
             readiness_marker_node_class=readiness_marker_node_class,
         )
@@ -415,6 +420,35 @@ class GpuSessionRepository:
             update(GpuSession)
             .where(GpuSession.id == session_id)
             .values(vastai_instance_destroyed_at=destroyed_at)
+        )
+        await self._session.flush()
+
+    async def update_callback_token_hash(self, session_id: UUID, token_hash: str) -> None:
+        """Replace the stored callback token hash (called on provisioning retry)."""
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(callback_token_hash=token_hash)
+        )
+        await self._session.flush()
+
+    async def update_provisioning_progress(
+        self,
+        session_id: UUID,
+        *,
+        phase: str,
+        progress: dict[str, Any],
+        last_progress_at: datetime,
+    ) -> None:
+        """Write the latest provisioning callback data (latest-state-wins, no history)."""
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(
+                provisioning_phase=phase,
+                provisioning_progress=progress,
+                last_progress_at=last_progress_at,
+            )
         )
         await self._session.flush()
 
