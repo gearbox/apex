@@ -14,10 +14,10 @@ from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.gpu_session.provisioning_worker import (
-    GpuProvisioningWorker,
     _REASON_PENDING_TIMEOUT,
     _REASON_PENDING_TIMEOUT_AFTER_ERRORS,
     _REASON_PROVISIONING_TIMEOUT,
+    GpuProvisioningWorker,
     _classify_terminal_state,
 )
 from src.api.services.vastai.client import VastAIClient
@@ -62,6 +62,8 @@ def _make_offer(*, offer_id: int = 1001, dph_total: float = 0.5) -> VastAIOffer:
 
 
 def _make_gpu_session(**kwargs: Any) -> GpuSession:
+    import hashlib
+
     now = datetime.now(UTC)
     session = GpuSession()
     session.id = uuid4()
@@ -78,7 +80,7 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.cf_tunnel_id = "tunnel-abc"
     session.cf_dns_record_id = "dns-abc"
     session.tunnel_hostname = "gpu-01234567.gpu-domain.com"
-    session.callback_token = "callback-tok"
+    session.callback_token_hash = hashlib.sha256(b"callback-tok").hexdigest()
     session.provision_attempt = 1
     session.provisioning_started_at = None
     session.started_at = None
@@ -89,6 +91,9 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.error_message = None
     session.stale_detected_at = None
     session.stale_notified = False
+    session.provisioning_phase = None
+    session.provisioning_progress = None
+    session.last_progress_at = None
     for k, v in kwargs.items():
         setattr(session, k, v)
     return session
@@ -100,6 +105,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.gpu_provision_timeout_seconds = (
         1200  # 20 min in seconds — matches timeout_minutes default
     )
+    settings.gpu_provision_stall_timeout_seconds = 420
     settings.gpu_resume_timeout_minutes = 5
     settings.provisioning_offer_walk_depth = 10
     settings.provisioning_recreation_attempts = 1
@@ -533,14 +539,19 @@ class TestAdvanceProvisioning:
         assert mock_repo.update_status.call_args[0][1] == GpuSessionStatus.failed
 
     async def test_retry_reconstructs_env_vars_from_session_row(self) -> None:
-        """The env dict passed to create_instance must contain all required vars."""
+        """The env dict passed to create_instance must contain all required vars.
+
+        On retry, a fresh callback token is generated — it will NOT match any
+        old session.callback_token_hash value (that's the security goal of D2).
+        """
+        import hashlib
+
         # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
             bundle_version="260105-01",
-            callback_token="cb-tok",
         )
         mocks["vastai_client"].destroy_instance = AsyncMock()
         bundle = _make_bundle_mapping()
@@ -563,7 +574,12 @@ class TestAdvanceProvisioning:
         assert env["ACS_BUNDLE"] == "wan_2.2_i2v"
         assert env["ACS_BUNDLE_VERSION"] == "260105-01"
         assert env["ACS_CF_TUNNEL_TOKEN"] == "fetched-tunnel-token"
-        assert env["ACS_APEX_CALLBACK_TOKEN"] == "cb-tok"
+        # Fresh token generated per retry — must be a non-empty string
+        fresh_callback_token = env["ACS_APEX_CALLBACK_TOKEN"]
+        assert isinstance(fresh_callback_token, str) and len(fresh_callback_token) > 0
+        # The hash written to DB must match the fresh token in the env
+        expected_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
+        mock_repo.update_callback_token_hash.assert_called_once_with(session.id, expected_hash)
         assert "ACS_HF_TOKEN" in env
         assert "ACS_CIVITAI_API_TOKEN" in env
         # New contract keys
@@ -587,7 +603,7 @@ class TestAdvanceProvisioning:
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
             bundle_version="260105-01",
-            callback_token="cb-tok",
+            callback_token_hash="some-existing-hash",
         )
         mocks["vastai_client"].destroy_instance = AsyncMock()
         bundle = _make_bundle_mapping()
@@ -1326,7 +1342,7 @@ class TestRetryOrFailOneAttemptPolicy:
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
             bundle_version="260105-01",
-            callback_token="cb-tok",
+            callback_token_hash="some-existing-hash",
         )
         mocks["vastai_client"].destroy_instance = AsyncMock()
         bundle = _make_bundle_mapping()
@@ -1931,3 +1947,166 @@ class TestProvisioningTimeoutSettings:
 
         mocks["vastai_client"].create_instance.assert_not_called()
         assert any("attempts_exhausted" in entry.get("event", "") for entry in logs)
+
+
+# ---------------------------------------------------------------------------
+# TestStallLiveness (D5)
+# ---------------------------------------------------------------------------
+
+
+class TestStallLiveness:
+    """Stall-based liveness: stall when callbacks stop flowing, fall back to ceiling otherwise."""
+
+    async def test_no_callbacks_no_stall_check(self) -> None:
+        """last_progress_at=None → stall logic must not fire; only fixed ceiling applies."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            last_progress_at=None,
+        )
+        # Instance is healthy
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        # Probe fails so we don't transition to active
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        # _retry_or_fail should NOT have been called (session is recent, no stall)
+        worker._retry_or_fail.assert_not_called()
+
+    async def test_stall_timeout_exceeded_triggers_stalled_retry(self) -> None:
+        """last_progress_at older than stall_timeout → provisioning_stalled retry."""
+        from src.api.services.gpu_session.provisioning_worker import _REASON_PROVISIONING_STALLED
+
+        worker, mocks = _make_worker()
+        # last_progress_at is 500s ago; stall_timeout is 420s → stalled
+        stale_progress = datetime.now(UTC) - timedelta(seconds=500)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            last_progress_at=stale_progress,
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PROVISIONING_STALLED)
+
+    async def test_recent_progress_no_stall(self) -> None:
+        """last_progress_at is recent → no stall, continue probing."""
+        worker, mocks = _make_worker()
+        recent_progress = datetime.now(UTC) - timedelta(seconds=30)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            last_progress_at=recent_progress,
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        # Probe fails so no active transition
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._retry_or_fail.assert_not_called()
+
+    async def test_fixed_ceiling_terminal_even_with_recent_progress(self) -> None:
+        """Fixed ceiling backstop: even if callbacks are flowing, ceiling-hit is terminal."""
+        worker, mocks = _make_worker()
+        # Created 25 minutes ago → ceiling exceeded (settings default 1200s = 20min)
+        old_created = datetime.now(UTC) - timedelta(minutes=25)
+        # recent progress (would normally prevent stall)
+        recent_progress = datetime.now(UTC) - timedelta(seconds=10)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            created_at=old_created,
+            last_progress_at=recent_progress,
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PROVISIONING_TIMEOUT)
+
+
+# ---------------------------------------------------------------------------
+# TestNodeReportedFailure (D4)
+# ---------------------------------------------------------------------------
+
+
+class TestNodeReportedFailure:
+    """Worker picks up node-reported failure on next sweep via provisioning_phase column."""
+
+    async def test_node_failed_phase_triggers_retry(self) -> None:
+        from src.api.services.gpu_session.provisioning_worker import _REASON_NODE_REPORTED_FAILURE
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            provisioning_phase="failed",
+            provisioning_progress={"error": "comfyui install failed", "ts": "2026-06-09T10:00:00Z"},
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_NODE_REPORTED_FAILURE)
+
+    async def test_non_failed_phase_does_not_trigger_retry(self) -> None:
+        """Other phases (downloading, ready, etc.) should NOT trigger _retry_or_fail."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            provisioning_phase="downloading",
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+        worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
+
+        await worker._advance_provisioning(session)
+
+        worker._retry_or_fail.assert_not_called()
+
+    async def test_stalled_reason_is_retryable_not_terminal(self) -> None:
+        """provisioning_stalled must NOT hit the terminal guard in _retry_or_fail."""
+        from src.api.services.gpu_session.provisioning_worker import _REASON_PROVISIONING_STALLED
+
+        # provisioning_recreation_attempts=2 → new_attempt=2 < 2+1=3 → should recreate
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=2))
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "token"
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["vastai_client"].create_instance.return_value = 11111
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            await worker._retry_or_fail(session, reason=_REASON_PROVISIONING_STALLED)
+
+        # Should create a new instance (retryable), NOT mark failed
+        mocks["vastai_client"].create_instance.assert_called_once()
+        # update_status should set pending, not failed
+        update_calls = [str(c) for c in mock_repo.update_status.call_args_list]
+        assert not any("failed" in c for c in update_calls)

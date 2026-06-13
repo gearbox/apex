@@ -24,6 +24,7 @@ from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
+from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
 from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
@@ -87,6 +88,8 @@ class ServiceContainer:
     billing_reconciler_worker: BillingReconcilerWorker | None = None
     gpu_session_http_client: httpx.AsyncClient | None = None
     bundle_index: BundleIndexService | None = None
+    # Callback receiver — initialized whenever the DB is available (not GPU-stack-gated)
+    provisioning_callback_service: ProvisioningCallbackService | None = None
 
 
 _services = ServiceContainer()
@@ -360,6 +363,15 @@ def get_gpu_session_service() -> GpuSessionService:
     return _services.gpu_session_service
 
 
+def get_provisioning_callback_service() -> ProvisioningCallbackService:
+    """Provide ProvisioningCallbackService singleton (503 if DB not initialized)."""
+    if _services.provisioning_callback_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(detail="Provisioning callback service not available")
+    return _services.provisioning_callback_service
+
+
 def get_content_proxy(
     r2_storage: R2StorageService,
     settings: Settings,
@@ -440,6 +452,12 @@ async def init_services(settings: Settings) -> JWTService:
         echo=settings.db_echo,
     )
     logger.info("db.pool_initialized")
+
+    # Initialize provisioning callback service (only needs the DB session factory).
+    _services.provisioning_callback_service = ProvisioningCallbackService(
+        session_factory=_services.db_manager.session_factory
+    )
+    logger.info("provisioning_callback_service.initialized")
 
     # Initialize Redis (required for pub/sub and rate limiting)
     from src.core.redis import init_redis_pool
@@ -894,4 +912,8 @@ dependencies = {
     "health_service": Provide(get_health_service, sync_to_thread=False),
     # GPU sessions
     "gpu_session_service": Provide(get_gpu_session_service, sync_to_thread=False),
+    # Internal provisioning callbacks (node bearer auth validated in handler)
+    "provisioning_callback_service": Provide(
+        get_provisioning_callback_service, sync_to_thread=False
+    ),
 }

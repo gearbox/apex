@@ -354,6 +354,19 @@ class Settings(BaseSettings):
         le=100,
         description="Max sessions processed concurrently per provisioning worker sweep",
     )
+    gpu_provision_stall_timeout_seconds: int = Field(
+        default=420,
+        ge=60,
+        le=1800,
+        description=(
+            "Seconds of silence before the worker treats a provisioning session as stalled. "
+            "Only activates when callbacks are flowing (last_progress_at is set); falls back to "
+            "gpu_provision_timeout_seconds when no callbacks have ever arrived. "
+            "A stalled session is retryable (unlike a ceiling timeout). "
+            "Default 420s (7 min) is generous vs. the node's ~3s throttle. "
+            "Env: GPU_PROVISION_STALL_TIMEOUT_SECONDS."
+        ),
+    )
 
     # --- Billing Finalization Reconciler ---
     billing_reconciler_interval_minutes: int = Field(

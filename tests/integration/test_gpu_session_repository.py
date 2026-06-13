@@ -93,7 +93,7 @@ async def test_create_persists_all_fields(
         vastai_offer_id=99,
         vastai_cost_per_hour_micros=500_000,
         vastai_gpu_name="RTX_4090",
-        callback_token="tok-secret",
+        callback_token_hash="a" * 64,
     )
 
     assert row.id == session_id
@@ -110,7 +110,7 @@ async def test_create_persists_all_fields(
     assert row.vastai_offer_id == 99
     assert row.vastai_cost_per_hour_micros == 500_000
     assert row.vastai_gpu_name == "RTX_4090"
-    assert row.callback_token == "tok-secret"
+    assert row.callback_token_hash == "a" * 64
     assert row.provision_attempt == 1
 
 
