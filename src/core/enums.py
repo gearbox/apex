@@ -124,26 +124,14 @@ class AspectRatio(StrEnum):
     RATIO_16_9 = "16:9"
     RATIO_3_4 = "3:4"
     RATIO_4_3 = "4:3"
-    # RATIO_21_9 = "21:9"
 
     def calculate_width(self, height: int) -> int:
         """Calculate width from height based on aspect ratio.
 
         Returns width rounded to nearest multiple of 8 for latent space compatibility.
         """
-        ratio_map = {
-            "1:1": 1.0,
-            "4:3": 4 / 3,
-            "3:4": 3 / 4,
-            "16:9": 16 / 9,
-            "9:16": 9 / 16,
-            "2:3": 2 / 3,
-            "3:2": 3 / 2,
-            # "21:9": 21 / 9,
-        }
-        ratio = ratio_map[self.value]
-        width = int(height * ratio)
-        # Round to nearest multiple of 8
+        rw, rh = self.as_fraction()
+        width = int(height * rw / rh)
         return (width + 4) // 8 * 8
 
     def as_fraction(self) -> tuple[int, int]:

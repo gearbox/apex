@@ -40,6 +40,14 @@ def _floor_multiple(value: int, multiple: int) -> int:
     return max(multiple, (value // multiple) * multiple)
 
 
+def _resolve_edge(value: float, multiple: int, max_edge: int) -> int:
+    """Snap value to nearest multiple and hard-clamp to max_edge."""
+    snapped = _snap(value, multiple)
+    cap = (max_edge // multiple) * multiple  # largest multiple ≤ max_edge
+    # max_edge smaller than one latent tile — honor hard cap literally
+    return max_edge if cap < multiple else min(snapped, cap)
+
+
 def _clamp_area(w: float, h: float, max_megapixels: float) -> tuple[float, float]:
     """Scale (w, h) down proportionally if w*h exceeds the MP cap."""
     max_area = max_megapixels * 1_000_000
@@ -84,6 +92,6 @@ def resolve_dimensions(
         w = h * rw / rh
 
     w, h = _clamp_area(w, h, max_megapixels)
-    width = min(_snap(w, latent_multiple), _floor_multiple(max_edge, latent_multiple))
-    height = min(_snap(h, latent_multiple), _floor_multiple(max_edge, latent_multiple))
+    width = _resolve_edge(w, latent_multiple, max_edge)
+    height = _resolve_edge(h, latent_multiple, max_edge)
     return ResolvedDimensions(width=width, height=height)

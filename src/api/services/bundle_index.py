@@ -9,8 +9,9 @@ import shutil
 import tarfile
 import tempfile
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import httpx
@@ -34,6 +35,22 @@ if TYPE_CHECKING:
     from src.core.config import Settings
 
 logger = structlog.get_logger()
+
+
+def _safe_enum[E: StrEnum](enum_cls: type[E], value: str | None, fallback: E) -> E:
+    """Parse an enum value, returning fallback + warning on invalid input."""
+    if value is None:
+        return fallback
+    try:
+        return enum_cls(value)
+    except ValueError:
+        logger.warning(
+            "bundle_index.invalid_settings_enum",
+            enum=enum_cls.__name__,
+            value=value,
+            using=fallback.value,
+        )
+        return fallback
 
 
 class BundleNotFoundError(Exception):
@@ -306,11 +323,13 @@ class BundleIndexService:
         s = self._settings
         return BundleGenerationConfig(
             defaults=GenerationDefaults(
-                resolution=Resolution(s.default_resolution) if s else Resolution.STANDARD,
+                resolution=_safe_enum(
+                    Resolution, s.default_resolution if s else None, Resolution.STANDARD
+                ),
                 steps=s.default_steps if s else 12,
                 cfg=s.default_cfg if s else 1.1,
-                sampler=Sampler(s.default_sampler) if s else Sampler.EULER,
-                scheduler=Scheduler(s.default_scheduler) if s else Scheduler.BETA,
+                sampler=_safe_enum(Sampler, s.default_sampler if s else None, Sampler.EULER),
+                scheduler=_safe_enum(Scheduler, s.default_scheduler if s else None, Scheduler.BETA),
                 denoise=s.default_denoise if s else 1.0,
             ),
             constraints=GenerationConstraints(
@@ -330,7 +349,7 @@ class BundleIndexService:
         """Parse the ``generation:`` block from a bundle.yaml file.
 
         Missing keys fall back to Settings or permissive defaults.
-        Unknown enum values in the YAML raise BundleConfigError.
+        Unknown enum values or non-numeric YAML values raise BundleConfigError.
         """
         fallback = self._fallback_generation_config()
 
@@ -340,17 +359,35 @@ class BundleIndexService:
         try:
             with bundle_yaml_path.open() as fh:
                 data = yaml.safe_load(fh)
-        except (OSError, yaml.YAMLError):
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning(
+                "bundle_index.generation_config_unreadable",
+                path=str(bundle_yaml_path),
+                error=str(exc),
+            )
             return fallback
 
         if not isinstance(data, dict):
+            logger.warning(
+                "bundle_index.generation_config_invalid_root",
+                path=str(bundle_yaml_path),
+                got_type=type(data).__name__,
+            )
             return fallback
 
         gen = data.get("generation")
         if gen is None:
+            logger.debug(
+                "bundle_index.generation_config_section_absent", path=str(bundle_yaml_path)
+            )
             return fallback
 
         if not isinstance(gen, dict):
+            logger.warning(
+                "bundle_index.generation_config_section_malformed",
+                path=str(bundle_yaml_path),
+                got_type=type(gen).__name__,
+            )
             return fallback
 
         raw_defaults = gen.get("defaults", {}) or {}
@@ -358,6 +395,26 @@ class BundleIndexService:
 
         fd = fallback.defaults
         fc = fallback.constraints
+
+        def _parse_int(raw: dict[str, Any], key: str, default: int) -> int:
+            if key not in raw or raw[key] is None:
+                return default
+            try:
+                return int(raw[key])
+            except (TypeError, ValueError) as exc:
+                raise BundleConfigError(
+                    f"{bundle_yaml_path}: {raw[key]!r} is not a valid integer for generation.{key}"
+                ) from exc
+
+        def _parse_float(raw: dict[str, Any], key: str, default: float) -> float:
+            if key not in raw or raw[key] is None:
+                return default
+            try:
+                return float(raw[key])
+            except (TypeError, ValueError) as exc:
+                raise BundleConfigError(
+                    f"{bundle_yaml_path}: {raw[key]!r} is not a valid float for generation.{key}"
+                ) from exc
 
         def _parse_sampler(key: str, default: Sampler) -> Sampler:
             v = raw_defaults.get(key)
@@ -422,23 +479,46 @@ class BundleIndexService:
 
         defaults = GenerationDefaults(
             resolution=_parse_resolution("resolution", fd.resolution),
-            steps=int(raw_defaults.get("steps", fd.steps)),
-            cfg=float(raw_defaults.get("cfg", fd.cfg)),
+            steps=_parse_int(raw_defaults, "steps", fd.steps),
+            cfg=_parse_float(raw_defaults, "cfg", fd.cfg),
             sampler=_parse_sampler("sampler", fd.sampler),
             scheduler=_parse_scheduler("scheduler", fd.scheduler),
-            denoise=float(raw_defaults.get("denoise", fd.denoise)),
+            denoise=_parse_float(raw_defaults, "denoise", fd.denoise),
         )
         constraints = GenerationConstraints(
-            max_megapixels=float(raw_constraints.get("max_megapixels", fc.max_megapixels)),
-            latent_multiple=int(raw_constraints.get("latent_multiple", fc.latent_multiple)),
-            max_edge=int(raw_constraints.get("max_edge", fc.max_edge)),
-            min_steps=int(raw_constraints.get("min_steps", fc.min_steps)),
-            max_steps=int(raw_constraints.get("max_steps", fc.max_steps)),
-            min_cfg=float(raw_constraints.get("min_cfg", fc.min_cfg)),
-            max_cfg=float(raw_constraints.get("max_cfg", fc.max_cfg)),
+            max_megapixels=_parse_float(raw_constraints, "max_megapixels", fc.max_megapixels),
+            latent_multiple=_parse_int(raw_constraints, "latent_multiple", fc.latent_multiple),
+            max_edge=_parse_int(raw_constraints, "max_edge", fc.max_edge),
+            min_steps=_parse_int(raw_constraints, "min_steps", fc.min_steps),
+            max_steps=_parse_int(raw_constraints, "max_steps", fc.max_steps),
+            min_cfg=_parse_float(raw_constraints, "min_cfg", fc.min_cfg),
+            max_cfg=_parse_float(raw_constraints, "max_cfg", fc.max_cfg),
             allowed_samplers=_parse_samplers_list("allowed_samplers"),
             allowed_schedulers=_parse_schedulers_list("allowed_schedulers"),
         )
+
+        c = constraints
+        if c.latent_multiple <= 0:
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: latent_multiple must be positive, got {c.latent_multiple}"
+            )
+        if c.max_megapixels <= 0:
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: max_megapixels must be positive, got {c.max_megapixels}"
+            )
+        if c.max_edge < c.latent_multiple:
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: max_edge ({c.max_edge}) < latent_multiple ({c.latent_multiple})"
+            )
+        if c.min_steps > c.max_steps:
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: min_steps ({c.min_steps}) > max_steps ({c.max_steps})"
+            )
+        if c.min_cfg > c.max_cfg:
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: min_cfg ({c.min_cfg}) > max_cfg ({c.max_cfg})"
+            )
+
         return BundleGenerationConfig(defaults=defaults, constraints=constraints)
 
     # ------------------------------------------------------------------
@@ -632,6 +712,9 @@ class BundleIndexService:
         staging.rename(self._cache_dir)
         if trash is not None:
             shutil.rmtree(trash)
+
+        self._generation_config_cache.clear()
+        logger.info("bundle_index.generation_config_cache_cleared")
 
     def _extract_member_capped(
         self,

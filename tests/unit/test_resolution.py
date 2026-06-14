@@ -155,3 +155,70 @@ class TestResolvedDimensionsProperty:
     def test_megapixels_wide(self) -> None:
         d = ResolvedDimensions(width=1920, height=1080)
         assert d.megapixels == pytest.approx(2.0736)
+
+
+class TestMaxEdgeSubTile:
+    """When max_edge < latent_multiple the degenerate cap is honoured literally."""
+
+    def test_both_edges_at_or_below_max_edge(self) -> None:
+        dims = resolve_dimensions(
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            max_megapixels=4.0,
+            latent_multiple=16,
+            max_edge=8,
+            tier=Resolution.STANDARD,
+        )
+        assert dims.width <= 8
+        assert dims.height <= 8
+
+    @pytest.mark.parametrize("ar", list(AspectRatio))
+    @pytest.mark.parametrize(
+        "tier,max_edge",
+        [
+            (Resolution.STANDARD, 512),
+            (Resolution.HIGH, 1024),
+            (Resolution.ULTRA, 2048),
+        ],
+    )
+    def test_edges_never_exceed_max_edge(
+        self, ar: AspectRatio, tier: Resolution, max_edge: int
+    ) -> None:
+        dims = resolve_dimensions(
+            aspect_ratio=ar,
+            max_megapixels=4.0,
+            latent_multiple=16,
+            max_edge=max_edge,
+            tier=tier,
+        )
+        assert dims.width <= max_edge, (
+            f"{ar.value}/{tier.value}: width {dims.width} > max_edge {max_edge}"
+        )
+        assert dims.height <= max_edge, (
+            f"{ar.value}/{tier.value}: height {dims.height} > max_edge {max_edge}"
+        )
+
+    @pytest.mark.parametrize("ar", list(AspectRatio))
+    @pytest.mark.parametrize(
+        "tier,max_edge",
+        [
+            (Resolution.STANDARD, 512),
+            (Resolution.HIGH, 1024),
+        ],
+    )
+    def test_edges_are_multiples_of_latent_multiple_when_not_degenerate(
+        self, ar: AspectRatio, tier: Resolution, max_edge: int
+    ) -> None:
+        latent_multiple = 16
+        dims = resolve_dimensions(
+            aspect_ratio=ar,
+            max_megapixels=4.0,
+            latent_multiple=latent_multiple,
+            max_edge=max_edge,
+            tier=tier,
+        )
+        assert dims.width % latent_multiple == 0, (
+            f"{ar.value}/{tier.value}: width {dims.width} not multiple of {latent_multiple}"
+        )
+        assert dims.height % latent_multiple == 0, (
+            f"{ar.value}/{tier.value}: height {dims.height} not multiple of {latent_multiple}"
+        )

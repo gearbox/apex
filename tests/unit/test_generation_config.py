@@ -216,3 +216,106 @@ class TestGetGenerationConfigInvalidEnum:
         _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
         with pytest.raises(BundleConfigError, match="totally_fake"):
             svc.get_generation_config("test_bundle", "260101-01")
+
+
+class TestGetGenerationConfigNumericCoercion:
+    """Non-numeric YAML values must raise BundleConfigError (not raw ValueError)."""
+
+    def test_steps_string_raises_bundle_config_error(self, tmp_path: Path) -> None:
+        block: dict[str, Any] = {"defaults": {"steps": "twelve"}, "constraints": {}}
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
+        with pytest.raises(BundleConfigError, match="twelve"):
+            svc.get_generation_config("test_bundle", "260101-01")
+
+    def test_cfg_list_raises_bundle_config_error(self, tmp_path: Path) -> None:
+        block: dict[str, Any] = {"defaults": {"cfg": [1, 2, 3]}, "constraints": {}}
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
+        with pytest.raises(BundleConfigError, match="cfg"):
+            svc.get_generation_config("test_bundle", "260101-01")
+
+    def test_max_edge_string_raises_bundle_config_error(self, tmp_path: Path) -> None:
+        block: dict[str, Any] = {"defaults": {}, "constraints": {"max_edge": "big"}}
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
+        with pytest.raises(BundleConfigError, match="big"):
+            svc.get_generation_config("test_bundle", "260101-01")
+
+
+class TestGetGenerationConfigConstraintInvariants:
+    """Constraint sanity checks must raise BundleConfigError on violation."""
+
+    def test_max_edge_less_than_latent_multiple_raises(self, tmp_path: Path) -> None:
+        block: dict[str, Any] = {
+            "defaults": {},
+            "constraints": {"max_edge": 8, "latent_multiple": 16},
+        }
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
+        with pytest.raises(BundleConfigError, match="max_edge"):
+            svc.get_generation_config("test_bundle", "260101-01")
+
+    def test_min_steps_greater_than_max_steps_raises(self, tmp_path: Path) -> None:
+        block: dict[str, Any] = {
+            "defaults": {},
+            "constraints": {"min_steps": 50, "max_steps": 10},
+        }
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
+        with pytest.raises(BundleConfigError, match="min_steps"):
+            svc.get_generation_config("test_bundle", "260101-01")
+
+    def test_max_megapixels_zero_raises(self, tmp_path: Path) -> None:
+        block: dict[str, Any] = {
+            "defaults": {},
+            "constraints": {"max_megapixels": 0.0},
+        }
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
+        with pytest.raises(BundleConfigError, match="max_megapixels"):
+            svc.get_generation_config("test_bundle", "260101-01")
+
+    def test_latent_multiple_zero_raises(self, tmp_path: Path) -> None:
+        block: dict[str, Any] = {
+            "defaults": {},
+            "constraints": {"latent_multiple": 0},
+        }
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=block)
+        with pytest.raises(BundleConfigError, match="latent_multiple"):
+            svc.get_generation_config("test_bundle", "260101-01")
+
+
+class TestGetGenerationConfigSilentFallbackWarnings:
+    """Silent fallbacks must emit structured warnings (or debug for absent section)."""
+
+    def test_unreadable_yaml_returns_fallback_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _, version_dir, svc = _make_bundle_dir(tmp_path, generation_block=_FULL_GENERATION_BLOCK)
+        # Overwrite bundle.yaml with invalid YAML
+        (version_dir / "bundle.yaml").write_text(":\tinvalid: yaml: [{{")
+        with caplog.at_level("WARNING"):
+            cfg = svc.get_generation_config("test_bundle", "260101-01")
+        assert cfg.defaults.steps == 12  # Settings fallback
+        assert any("bundle_index.generation_config_unreadable" in r.message for r in caplog.records)
+
+    def test_non_dict_root_returns_fallback_and_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _, version_dir, svc = _make_bundle_dir(tmp_path, generation_block=_FULL_GENERATION_BLOCK)
+        (version_dir / "bundle.yaml").write_text("- just\n- a\n- list\n")
+        with caplog.at_level("WARNING"):
+            cfg = svc.get_generation_config("test_bundle", "260101-01")
+        assert cfg.defaults.steps == 12
+        assert any(
+            "bundle_index.generation_config_invalid_root" in r.message for r in caplog.records
+        )
+
+    def test_absent_generation_section_returns_fallback_at_debug(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # generation_block=None → bundle.yaml without a 'generation' key
+        _, _, svc = _make_bundle_dir(tmp_path, generation_block=None)
+        with caplog.at_level("DEBUG"):
+            cfg = svc.get_generation_config("test_bundle", "260101-01")
+        assert cfg.defaults.steps == 12
+        debug_msgs = [r for r in caplog.records if r.levelname == "DEBUG"]
+        assert any("bundle_index.generation_config_section_absent" in r.message for r in debug_msgs)
+        # Must NOT emit a WARNING for a legitimately absent section
+        warning_msgs = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert all("generation_config" not in r.message for r in warning_msgs)

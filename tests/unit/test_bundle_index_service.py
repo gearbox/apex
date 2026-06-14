@@ -1330,3 +1330,210 @@ class TestInitValidation:
         """Settings ge=1024 / ge=1 constraints reject values below the minimum."""
         with pytest.raises(ValidationError):
             Settings(ai_bundles_max_download_bytes=0)
+
+
+# ---------------------------------------------------------------------------
+# _fallback_generation_config — safe enum degradation (F3)
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackGenerationConfigSafeEnum:
+    """Invalid Settings enum strings must degrade gracefully to safe defaults."""
+
+    def test_invalid_sampler_falls_back_to_euler(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from src.core.enums import Sampler
+
+        mock_settings = MagicMock()
+        mock_settings.default_steps = 12
+        mock_settings.max_steps = 20
+        mock_settings.default_cfg = 1.1
+        mock_settings.default_sampler = "not_a_sampler"
+        mock_settings.default_scheduler = "beta"
+        mock_settings.default_denoise = 1.0
+        mock_settings.default_resolution = "standard"
+
+        svc = _make_service(tmp_path, settings=mock_settings)
+        with caplog.at_level("WARNING"):
+            cfg = svc._fallback_generation_config()
+
+        assert cfg.defaults.sampler == Sampler.EULER
+        assert any("bundle_index.invalid_settings_enum" in r.message for r in caplog.records)
+
+    def test_invalid_scheduler_falls_back_to_beta(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from src.core.enums import Scheduler
+
+        mock_settings = MagicMock()
+        mock_settings.default_steps = 12
+        mock_settings.max_steps = 20
+        mock_settings.default_cfg = 1.1
+        mock_settings.default_sampler = "euler"
+        mock_settings.default_scheduler = "not_a_scheduler"
+        mock_settings.default_denoise = 1.0
+        mock_settings.default_resolution = "standard"
+
+        svc = _make_service(tmp_path, settings=mock_settings)
+        with caplog.at_level("WARNING"):
+            cfg = svc._fallback_generation_config()
+
+        assert cfg.defaults.scheduler == Scheduler.BETA
+        assert any("bundle_index.invalid_settings_enum" in r.message for r in caplog.records)
+
+    def test_invalid_resolution_falls_back_to_standard(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from src.core.enums import Resolution
+
+        mock_settings = MagicMock()
+        mock_settings.default_steps = 12
+        mock_settings.max_steps = 20
+        mock_settings.default_cfg = 1.1
+        mock_settings.default_sampler = "euler"
+        mock_settings.default_scheduler = "beta"
+        mock_settings.default_denoise = 1.0
+        mock_settings.default_resolution = "bogus_tier"
+
+        svc = _make_service(tmp_path, settings=mock_settings)
+        with caplog.at_level("WARNING"):
+            cfg = svc._fallback_generation_config()
+
+        assert cfg.defaults.resolution == Resolution.STANDARD
+        assert any("bundle_index.invalid_settings_enum" in r.message for r in caplog.records)
+
+    def test_none_settings_returns_hardcoded_defaults(self, tmp_path: Path) -> None:
+        from src.core.enums import Resolution, Sampler, Scheduler
+
+        svc = _make_service(tmp_path)  # no settings kwarg → None
+        cfg = svc._fallback_generation_config()
+        assert cfg.defaults.sampler == Sampler.EULER
+        assert cfg.defaults.scheduler == Scheduler.BETA
+        assert cfg.defaults.resolution == Resolution.STANDARD
+
+
+# ---------------------------------------------------------------------------
+# _extract_to_cache — generation config cache invalidation (F1)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerationConfigCacheInvalidation:
+    """Cache must be cleared after a successful tarball extract, not on 304."""
+
+    def _svc_with_transport(
+        self, tmp_path: Path, transport: httpx.MockTransport
+    ) -> BundleIndexService:
+        from unittest.mock import MagicMock
+
+        mock_settings = MagicMock()
+        mock_settings.default_steps = 12
+        mock_settings.max_steps = 20
+        mock_settings.default_cfg = 1.1
+        mock_settings.default_sampler = "euler"
+        mock_settings.default_scheduler = "beta"
+        mock_settings.default_denoise = 1.0
+        mock_settings.default_resolution = "standard"
+
+        client = httpx.AsyncClient(transport=transport)
+        return _make_service(tmp_path, http_client=client, settings=mock_settings)
+
+    def _tarball_with_bundle(self, steps: int) -> bytes:
+        """Create a minimal tarball with a bundle that has the given default steps."""
+        import yaml as _yaml
+
+        bundle_yaml_content = _yaml.dump(
+            {
+                "hardware": {**_HW_YAML},
+                "generation": {
+                    "defaults": {
+                        "steps": steps,
+                        "cfg": 1.1,
+                        "sampler": "euler",
+                        "scheduler": "beta",
+                        "denoise": 1.0,
+                        "resolution": "standard",
+                    },
+                    "constraints": {
+                        "max_megapixels": 1.05,
+                        "latent_multiple": 16,
+                        "max_edge": 1536,
+                        "min_steps": 1,
+                        "max_steps": 50,
+                        "min_cfg": 0.0,
+                        "max_cfg": 15.0,
+                    },
+                },
+            }
+        )
+        return _make_test_tarball(
+            "gearbox-ai-bundles-abc",
+            {
+                "bundle-index.yaml": yaml.dump(
+                    {
+                        "bundles": [
+                            {
+                                "name": "my_bundle",
+                                "path": "bundles/my_bundle",
+                                "model_type": "aisha-image",
+                                "default_bundle": True,
+                            }
+                        ]
+                    }
+                ),
+                "bundles/my_bundle/current/bundle.yaml": bundle_yaml_content,
+            },
+        )
+
+    async def test_cache_cleared_after_content_change(self, tmp_path: Path) -> None:
+        """After a 200 extract, the generation config cache is empty."""
+        tarball_v1 = self._tarball_with_bundle(steps=12)
+
+        transport = _make_mock_transport(200, tarball_v1, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        # Prime the cache: sync + parse index + read config
+        await svc._fetch_and_extract()
+        svc._parse_index()
+        _ = svc.get_generation_config("my_bundle", "current")
+        assert len(svc._generation_config_cache) == 1
+
+        # Simulate a second 200 (new content)
+        tarball_v2 = self._tarball_with_bundle(steps=20)
+        transport2 = _make_mock_transport(200, tarball_v2, {"ETag": '"v2"'})
+        svc._http_client = httpx.AsyncClient(transport=transport2)
+
+        await svc._fetch_and_extract()
+        assert svc._generation_config_cache == {}
+
+    async def test_cache_not_cleared_on_304(self, tmp_path: Path) -> None:
+        """A 304 Not Modified response must leave the cache intact."""
+        tarball_v1 = self._tarball_with_bundle(steps=12)
+
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if request.headers.get("if-none-match") == '"v1"':
+                return httpx.Response(304)
+            return httpx.Response(200, content=tarball_v1, headers={"ETag": '"v1"'})
+
+        transport = httpx.MockTransport(handler)
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        # First fetch (200) — prime cache
+        await svc._fetch_and_extract()
+        svc._parse_index()
+        _ = svc.get_generation_config("my_bundle", "current")
+        assert len(svc._generation_config_cache) == 1
+
+        # Second fetch (304) — cache must not be cleared
+        await svc._fetch_and_extract()
+        assert len(svc._generation_config_cache) == 1
