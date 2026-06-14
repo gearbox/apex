@@ -19,7 +19,20 @@ from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
 from src.api.services.generation.service import ProviderResponseError
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
-from src.core.enums import AspectRatio, GenerationType, JobStatus, ModelType
+from src.core.enums import (
+    AspectRatio,
+    GenerationType,
+    JobStatus,
+    ModelType,
+    Resolution,
+    Sampler,
+    Scheduler,
+)
+from src.core.generation_config import (
+    BundleGenerationConfig,
+    GenerationConstraints,
+    GenerationDefaults,
+)
 
 
 def _make_request() -> UnifiedGenerationRequest:
@@ -40,10 +53,35 @@ def _make_active_gpu_session() -> MagicMock:
     return gs
 
 
+def _make_default_gen_config() -> BundleGenerationConfig:
+    return BundleGenerationConfig(
+        defaults=GenerationDefaults(
+            resolution=Resolution.STANDARD,
+            steps=12,
+            cfg=1.1,
+            sampler=Sampler.EULER,
+            scheduler=Scheduler.BETA,
+            denoise=1.0,
+        ),
+        constraints=GenerationConstraints(
+            max_megapixels=1.05,
+            latent_multiple=16,
+            max_edge=1536,
+            min_steps=1,
+            max_steps=30,
+            min_cfg=0.0,
+            max_cfg=15.0,
+            allowed_samplers=frozenset(),
+            allowed_schedulers=frozenset(),
+        ),
+    )
+
+
 def _make_bundle_index_mock() -> MagicMock:
     """A minimal bundle-index mock that returns a sentinel Path for any bundle name."""
     bi = MagicMock()
     bi.get_bundle_path = MagicMock(return_value=MagicMock())
+    bi.get_generation_config = MagicMock(return_value=_make_default_gen_config())
     return bi
 
 
@@ -212,7 +250,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
-            bundle_index=MagicMock(),
+            bundle_index=_make_bundle_index_mock(),
             tunnel_domain="gpu.test",  # legitimate domain — hostname must end with .gpu.test
         )
 
@@ -270,7 +308,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
-            bundle_index=MagicMock(),
+            bundle_index=_make_bundle_index_mock(),
             tunnel_domain="gpu.test",
         )
 
@@ -319,7 +357,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
-            bundle_index=MagicMock(),
+            bundle_index=_make_bundle_index_mock(),
             tunnel_domain="gpu.test",
         )
 
@@ -385,7 +423,7 @@ class TestAishaProviderSSRFGuard:
         provider = AishaGenerationProvider(
             workflow_service=workflow,
             gpu_session_service=gpu_session_service,
-            bundle_index=MagicMock(),
+            bundle_index=_make_bundle_index_mock(),
             tunnel_domain="gpu.test",
         )
 
@@ -891,3 +929,252 @@ class TestAishaProviderI2IDefensive:
         assert len(suffix) == 8
         # The "input_" prefix is preserved.
         assert upload_kwargs["filename"].startswith("input_")
+
+
+# ---------------------------------------------------------------------------
+# Resolution + sampler validation tests
+# ---------------------------------------------------------------------------
+
+
+def _make_constrained_gen_config(
+    *,
+    max_megapixels: float = 1.05,
+    min_steps: int = 1,
+    max_steps: int = 30,
+    min_cfg: float = 0.0,
+    max_cfg: float = 15.0,
+    allowed_samplers: frozenset[Sampler] = frozenset(),
+    allowed_schedulers: frozenset[Scheduler] = frozenset(),
+) -> BundleGenerationConfig:
+    return BundleGenerationConfig(
+        defaults=GenerationDefaults(
+            resolution=Resolution.STANDARD,
+            steps=12,
+            cfg=1.1,
+            sampler=Sampler.EULER,
+            scheduler=Scheduler.BETA,
+            denoise=1.0,
+        ),
+        constraints=GenerationConstraints(
+            max_megapixels=max_megapixels,
+            latent_multiple=16,
+            max_edge=1536,
+            min_steps=min_steps,
+            max_steps=max_steps,
+            min_cfg=min_cfg,
+            max_cfg=max_cfg,
+            allowed_samplers=allowed_samplers,
+            allowed_schedulers=allowed_schedulers,
+        ),
+    )
+
+
+async def _submit_with_config(
+    request: UnifiedGenerationRequest,
+    gen_cfg: BundleGenerationConfig,
+) -> None:
+    """Helper: submit a request through a provider with the given gen config."""
+    workflow = MagicMock()
+    workflow.load_workflow_from_bundle.return_value = {
+        "3": {"inputs": {}},
+        "9": {"inputs": {}},
+        "2": {"inputs": {}},
+    }
+    workflow.validate_workflow = MagicMock()
+    workflow.inject_checkpoint = MagicMock()
+    workflow.apply_parameters.return_value = {"3": {"inputs": {"text": "a cat"}}}
+
+    gpu_session_service = AsyncMock()
+    gpu_session_service.get_active_session_for_model = AsyncMock(
+        return_value=_make_active_gpu_session()
+    )
+
+    bundle_index = MagicMock()
+    bundle_index.get_bundle_path = MagicMock(return_value=MagicMock())
+    bundle_index.get_generation_config = MagicMock(return_value=gen_cfg)
+
+    provider = AishaGenerationProvider(
+        workflow_service=workflow,
+        gpu_session_service=gpu_session_service,
+        tunnel_domain="gpu.test",
+        bundle_index=bundle_index,
+    )
+
+    billing = AsyncMock()
+    billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+    session = AsyncMock()
+    db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+    with (
+        patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+        patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+    ):
+        MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+        mock_client = AsyncMock()
+        mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "abc123"})
+        MockComfyClient.return_value = mock_client
+
+        await provider.submit(
+            request,
+            user_id=uuid4(),
+            session=session,
+            billing_service=billing,
+            account_id=uuid4(),
+            token_cost=50,
+            product_id="vex",
+        )
+
+
+class TestAishaProviderResolutionAndSamplerValidation:
+    """Resolution clamping + sampler parameter validation in submit()."""
+
+    async def test_defaults_from_bundle_when_request_omits_params(self) -> None:
+        """When the request omits all optional params, bundle defaults are used."""
+        request = _make_request()
+        gen_cfg = _make_constrained_gen_config()
+
+        # Should complete without error
+        await _submit_with_config(request, gen_cfg)
+
+    async def test_steps_out_of_range_raises_before_billing(self) -> None:
+        """steps override outside [min, max] must raise ValueError before reservation."""
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            steps=999,  # way beyond max_steps=30
+        )
+        gen_cfg = _make_constrained_gen_config(max_steps=30)
+
+        workflow = MagicMock()
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+        bundle_index = MagicMock()
+        bundle_index.get_bundle_path = MagicMock(return_value=MagicMock())
+        bundle_index.get_generation_config = MagicMock(return_value=gen_cfg)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",
+            bundle_index=bundle_index,
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+        with pytest.raises(ValueError, match="steps"):
+            await provider.submit(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        # Billing reservation must NOT have been called
+        billing.check_and_reserve.assert_not_awaited()
+
+    async def test_cfg_out_of_range_raises_before_billing(self) -> None:
+        """cfg override outside model range raises before billing reservation."""
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            cfg=20.0,  # max_cfg=15.0
+        )
+        gen_cfg = _make_constrained_gen_config(max_cfg=15.0)
+
+        bundle_index = MagicMock()
+        bundle_index.get_bundle_path = MagicMock(return_value=MagicMock())
+        bundle_index.get_generation_config = MagicMock(return_value=gen_cfg)
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        provider = AishaGenerationProvider(
+            workflow_service=MagicMock(),
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",
+            bundle_index=bundle_index,
+        )
+
+        billing = AsyncMock()
+
+        with pytest.raises(ValueError, match="cfg"):
+            await provider.submit(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+        billing.check_and_reserve.assert_not_awaited()
+
+    async def test_sampler_not_in_allowed_list_raises_before_billing(self) -> None:
+        """sampler override not in allowed set raises before billing reservation."""
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            sampler=Sampler.HEUN,  # not in allowed set
+        )
+        gen_cfg = _make_constrained_gen_config(
+            allowed_samplers=frozenset({Sampler.EULER, Sampler.DPMPP_2M})
+        )
+
+        bundle_index = MagicMock()
+        bundle_index.get_bundle_path = MagicMock(return_value=MagicMock())
+        bundle_index.get_generation_config = MagicMock(return_value=gen_cfg)
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        provider = AishaGenerationProvider(
+            workflow_service=MagicMock(),
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",
+            bundle_index=bundle_index,
+        )
+
+        billing = AsyncMock()
+
+        with pytest.raises(ValueError, match="sampler"):
+            await provider.submit(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+        billing.check_and_reserve.assert_not_awaited()
+
+    async def test_explicit_dims_over_mp_cap_clamped_no_error(self) -> None:
+        """Explicit width+height exceeding mp cap is clamped, not rejected."""
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            width=2048,
+            height=2048,  # 4.19 MP; model cap is 1.05
+        )
+        gen_cfg = _make_constrained_gen_config(max_megapixels=1.05)
+
+        # Should not raise
+        await _submit_with_config(request, gen_cfg)

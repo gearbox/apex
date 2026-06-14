@@ -24,6 +24,15 @@ class ImageConstraints(msgspec.Struct, kw_only=True):
     """Advertised output resolutions (informational, e.g. ["1024x1024", "2048x2048"]).
     None means the backend determines the size automatically."""
 
+    supported_tiers: list[str] | None = None
+    """Supported image quality tiers (draft/standard/high/ultra). None for models with fixed sizing."""
+
+    default_tier: str | None = None
+    """Default quality tier. None for models with fixed sizing."""
+
+    tier_megapixels: dict[str, float] | None = None
+    """Target megapixel budget per tier. Actual W×H depends on model and aspect ratio."""
+
 
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""

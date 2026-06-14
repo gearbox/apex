@@ -464,12 +464,17 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Generation defaults
+    # Generation defaults — bundle.yaml overrides these per-model when present
     default_steps: int = Field(default=12, description="Default generation steps")
     max_steps: int = Field(default=20, description="Maximum generation steps")
     default_cfg: float = Field(default=1.1, description="Default CFG scale")
     default_sampler: str = Field(default="euler", description="Default sampler")
     default_scheduler: str = Field(default="beta", description="Default scheduler")
+    default_denoise: float = Field(default=1.0, description="Default denoise strength")
+    default_resolution: str = Field(
+        default="standard",
+        description="Default image resolution tier (bundle.yaml overrides per-model)",
+    )
 
     # -------------------------------------------------------------------------
     # System settings

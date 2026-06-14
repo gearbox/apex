@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.core.enums import AspectRatio, GenerationType, ModelType, Provider, VideoResolution
+from src.core.enums import (
+    AspectRatio,
+    GenerationType,
+    ModelType,
+    Provider,
+    Resolution,
+    VideoResolution,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +45,12 @@ class ImageMeta:
     output_resolutions: tuple[str, ...] | None = None
     """Advertised output resolutions (informational, e.g. ("1024x1024", "2048x2048")).
     None means the backend determines the size automatically."""
+
+    supported_tiers: tuple[Resolution, ...] | None = None
+    """Image quality tiers supported by this model. None for Grok (fixed server-side)."""
+
+    default_tier: Resolution | None = None
+    """Default quality tier when the user omits image_resolution. None for Grok."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +189,8 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             min_height=256,
             max_height=2048,
             default_height=1024,
+            supported_tiers=tuple(Resolution),
+            default_tier=Resolution.STANDARD,
         ),
         rate_limit=None,
     ),

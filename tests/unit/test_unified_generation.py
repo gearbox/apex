@@ -23,6 +23,9 @@ from src.core.enums import (
     JobStatus,
     ModelType,
     Provider,
+    Resolution,
+    Sampler,
+    Scheduler,
     VideoResolution,
 )
 
@@ -69,13 +72,23 @@ class TestUnifiedGenerationRequestSchema:
             prompt="A landscape",
             generation_type=GenerationType.T2I,
             model=ModelType.AISHA_IMAGE,
-            height=768,
+            image_resolution="standard",
             seed=42,
             steps=8,
         )
-        assert req.height == 768
         assert req.seed == 42
         assert req.steps == 8
+
+    def test_aisha_explicit_width_and_height(self) -> None:
+        req = UnifiedGenerationRequest(
+            prompt="A landscape",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            width=768,
+            height=768,
+        )
+        assert req.width == 768
+        assert req.height == 768
 
     def test_forbid_unknown_fields(self) -> None:
         with pytest.raises(msgspec.ValidationError):
@@ -107,6 +120,125 @@ class TestUnifiedGenerationRequestSchema:
         encoded = msgspec.json.encode(req)
         decoded = msgspec.json.decode(encoded, type=UnifiedGenerationRequest)
         assert decoded.prompt == "test"
+
+
+# ---------------------------------------------------------------------------
+# Image resolution + sampler field tests
+# ---------------------------------------------------------------------------
+
+
+class TestImageResolutionFields:
+    def test_image_resolution_ultra_accepted(self) -> None:
+        req = msgspec.json.decode(
+            b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","image_resolution":"ultra"}',
+            type=UnifiedGenerationRequest,
+        )
+        assert req.image_resolution == Resolution.ULTRA
+
+    def test_width_and_height_together_accepted(self) -> None:
+        req = msgspec.json.decode(
+            b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","width":512,"height":512}',
+            type=UnifiedGenerationRequest,
+        )
+        assert req.width == 512
+        assert req.height == 512
+
+    def test_only_width_no_height_raises(self) -> None:
+        with pytest.raises((msgspec.ValidationError, ValueError)):
+            msgspec.json.decode(
+                b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","width":512}',
+                type=UnifiedGenerationRequest,
+            )
+
+    def test_only_height_no_width_raises(self) -> None:
+        with pytest.raises((msgspec.ValidationError, ValueError)):
+            msgspec.json.decode(
+                b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","height":512}',
+                type=UnifiedGenerationRequest,
+            )
+
+    def test_image_resolution_and_explicit_dims_mutually_exclusive(self) -> None:
+        with pytest.raises((msgspec.ValidationError, ValueError)):
+            msgspec.json.decode(
+                b'{"prompt":"x","generation_type":"t2i","model":"aisha-image",'
+                b'"image_resolution":"standard","width":512,"height":512}',
+                type=UnifiedGenerationRequest,
+            )
+
+    def test_video_resolution_720p_still_accepted(self) -> None:
+        req = msgspec.json.decode(
+            b'{"prompt":"x","generation_type":"t2v","model":"grok-imagine-video","resolution":"720p"}',
+            type=UnifiedGenerationRequest,
+        )
+        assert req.resolution == VideoResolution.RES_720P
+
+    def test_video_resolution_1080p_rejected(self) -> None:
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt":"x","generation_type":"t2v","model":"grok-imagine-video","resolution":"1080p"}',
+                type=UnifiedGenerationRequest,
+            )
+
+
+class TestSamplerFields:
+    def test_cfg_accepts_valid_value(self) -> None:
+        req = UnifiedGenerationRequest(
+            prompt="x",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            cfg=7.5,
+        )
+        assert req.cfg == pytest.approx(7.5)
+
+    def test_sampler_accepts_valid_value(self) -> None:
+        req = UnifiedGenerationRequest(
+            prompt="x",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            sampler=Sampler.DPMPP_2M,
+        )
+        assert req.sampler == Sampler.DPMPP_2M
+
+    def test_scheduler_accepts_valid_value(self) -> None:
+        req = UnifiedGenerationRequest(
+            prompt="x",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            scheduler=Scheduler.KARRAS,
+        )
+        assert req.scheduler == Scheduler.KARRAS
+
+    def test_denoise_accepts_valid_value(self) -> None:
+        req = UnifiedGenerationRequest(
+            prompt="x",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            denoise=0.75,
+        )
+        assert req.denoise == pytest.approx(0.75)
+
+    def test_invalid_sampler_enum_rejected(self) -> None:
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","sampler":"not_real"}',
+                type=UnifiedGenerationRequest,
+            )
+
+    def test_steps_up_to_150_accepted(self) -> None:
+        req = UnifiedGenerationRequest(
+            prompt="x",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            steps=150,
+        )
+        assert req.steps == 150
+
+    def test_steps_above_150_rejected(self) -> None:
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","steps":151}',
+                type=UnifiedGenerationRequest,
+            )
 
 
 # ---------------------------------------------------------------------------
