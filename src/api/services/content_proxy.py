@@ -127,6 +127,12 @@ class ContentProxyService:
         # Try output first (more common deletion target)
         output = await output_repo.get(content_id, user_id=user_id)
         if output is not None and output.product_id == product_id:
+            # Delete derivative (thumbnail) R2 objects before removing the parent row.
+            # The DB cascade (ON DELETE CASCADE on parent_output_id) removes derivative
+            # rows, but we must explicitly clean up their R2 objects.
+            derivatives = await output_repo.list_derivatives(content_id)
+            for derivative in derivatives:
+                await self._storage.delete(derivative.storage_key)
             await self._storage.delete(output.storage_key)
             await output_repo.delete(content_id, user_id=user_id)
             logger.info(

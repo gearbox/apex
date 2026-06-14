@@ -53,6 +53,10 @@ class WorkflowService:
     def __init__(self) -> None:
         self._workflow_cache: dict[str, dict[str, Any]] = {}
 
+    def invalidate_cache(self) -> None:
+        """Drop all cached workflows. Call when the bundle cache is refreshed."""
+        self._workflow_cache.clear()
+
     @staticmethod
     def _bundle_version_dir(bundle_dir: Path, bundle_version: str | None) -> Path:
         """Return the versioned subdirectory for a bundle."""

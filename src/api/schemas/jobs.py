@@ -69,7 +69,10 @@ class JobOutputItem(msgspec.Struct, kw_only=True):
     """File size in bytes."""
 
     output_index: int
-    """Position within the batch (0-based). -1 is reserved for thumbnails."""
+    """Position within the batch (0-based)."""
+
+    thumbnail_url: str | None = None
+    """Presigned URL for a WEBP thumbnail of this output (image) or poster frame (video)."""
 
     is_thumbnail: bool = False
     """True for the extracted first-frame/poster image of a video."""

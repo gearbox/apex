@@ -55,6 +55,10 @@ class GenerationOutputData:
     format: str
     output_index: int
     expires_at: datetime
+    is_thumbnail: bool = False
+    parent_output_id: UUID | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 class JobStateTransitionService:
@@ -166,8 +170,10 @@ class JobStateTransitionService:
             await self._session.refresh(job)
             return job
 
-        # Persist outputs in same transaction
-        for out in outputs:
+        # Persist outputs in same transaction — parents before children so the
+        # self-FK on parent_output_id is satisfiable within a single transaction.
+        sorted_outputs = sorted(outputs, key=lambda o: 1 if o.is_thumbnail else 0)
+        for out in sorted_outputs:
             await self._output_repo.create(
                 id=out.id,
                 user_id=job.user_id,
@@ -179,6 +185,10 @@ class JobStateTransitionService:
                 output_index=out.output_index,
                 expires_at=out.expires_at,
                 product_id=product_id,
+                is_thumbnail=out.is_thumbnail,
+                parent_output_id=out.parent_output_id,
+                width=out.width,
+                height=out.height,
             )
 
         await self._session.commit()

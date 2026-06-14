@@ -25,7 +25,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, backref, mapped_column, relationship
 
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.models.base import Base
@@ -339,7 +339,7 @@ class GenerationOutput(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     format: Mapped[str] = mapped_column(String(10), nullable=False)
 
-    # Thumbnail flag — True for extracted video poster frames
+    # Thumbnail flag — True for derived previews (image thumbnails, video poster frames)
     is_thumbnail: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -349,6 +349,18 @@ class GenerationOutput(Base):
 
     # Output index (for batch generation)
     output_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Dimensions (nullable; populated for both full and thumbnail rows)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Self-referential FK: thumbnail → full output (ON DELETE CASCADE)
+    parent_output_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("generation_outputs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
@@ -376,6 +388,14 @@ class GenerationOutput(Base):
         "UserImage",
         back_populates="generation_outputs",
         foreign_keys=[input_image_id],
+    )
+    # Self-referential: a full output has many derivatives (thumbnails/previews).
+    derivatives: Mapped[list[GenerationOutput]] = relationship(
+        "GenerationOutput",
+        backref=backref("parent", remote_side="GenerationOutput.id"),
+        cascade="all, delete-orphan",
+        single_parent=True,
+        foreign_keys="GenerationOutput.parent_output_id",
     )
 
     __table_args__ = (

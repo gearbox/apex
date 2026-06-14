@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.17.1"
+version = "0.17.2"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -40,6 +40,7 @@ dependencies = [
     "redis>=8.0.0",
     "tldextract>=5.3.1",
     "typer>=0.26.7",
+    "pillow>=11.0.0",
 ]
 
 [project.optional-dependencies]

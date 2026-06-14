@@ -77,6 +77,7 @@ def _make_output(
     output_index: int = 0,
     is_thumbnail: bool = False,
     storage_key: str | None = None,
+    parent_output_id: UUID | None = None,
 ) -> MagicMock:
     out = MagicMock()
     out.id = output_id or uuid4()
@@ -87,6 +88,7 @@ def _make_output(
     out.output_index = output_index
     out.is_thumbnail = is_thumbnail
     out.storage_key = storage_key or f"users/uid/outputs/{uuid4()}/file.{format}"
+    out.parent_output_id = parent_output_id
     return out
 
 
@@ -513,26 +515,31 @@ class TestBuildResponseOutputs:
         assert item.output_index == 1
         assert item.is_thumbnail is False
 
-    async def test_thumbnail_flagged_output_used_as_thumbnail_url(self) -> None:
+    async def test_thumbnail_linked_via_parent_output_id_used_as_thumbnail_url(self) -> None:
+        """Thumbnail row with parent_output_id surfaces as thumbnail_url on the primary output."""
         user_id = uuid4()
         job = _make_job(user_id=user_id)
+        video_id = uuid4()
         thumb_key = "users/uid/outputs/job/thumb.jpg"
         video_key = "users/uid/outputs/job/video.mp4"
 
-        thumb = _make_output(
-            job_id=job.id,
-            content_type="image/jpeg",
-            format="jpeg",
-            is_thumbnail=True,
-            output_index=-1,
-            storage_key=thumb_key,
-        )
         video = _make_output(
+            output_id=video_id,
             job_id=job.id,
             content_type="video/mp4",
             format="mp4",
             output_index=0,
             storage_key=video_key,
+        )
+        # Thumbnail linked to video via parent_output_id
+        thumb = _make_output(
+            job_id=job.id,
+            content_type="image/jpeg",
+            format="jpeg",
+            is_thumbnail=True,
+            output_index=0,
+            storage_key=thumb_key,
+            parent_output_id=video_id,
         )
         session = _session_for_get(job, outputs=[thumb, video])
 
@@ -546,8 +553,11 @@ class TestBuildResponseOutputs:
         result = await _service(storage=storage).get_job(job.id, user_id, session=session)
 
         assert result is not None
+        # Top-level thumbnail_url comes from the video's linked thumbnail
         assert result.thumbnail_url == "https://r2.example.com/thumb.jpg"
-        assert len(result.outputs) == 2
+        # Thumbnail rows are excluded from outputs; only the primary video output appears
+        assert len(result.outputs) == 1
+        assert result.outputs[0].thumbnail_url == "https://r2.example.com/thumb.jpg"
 
     async def test_video_output_without_thumbnail_flag_has_no_thumbnail_url(self) -> None:
         user_id = uuid4()
@@ -618,6 +628,46 @@ class TestBuildResponseOutputs:
         assert result is not None
         assert result.outputs == []
         assert result.thumbnail_url is None
+
+    async def test_legacy_thumbnail_used_when_no_parent_link(self) -> None:
+        """Legacy jobs: is_thumbnail=True with parent_output_id=None populates top-level thumbnail_url."""
+        user_id = uuid4()
+        job = _make_job(user_id=user_id)
+        primary_key = "users/uid/outputs/job/primary.mp4"
+        legacy_thumb_key = "users/uid/outputs/job/thumb.jpg"
+
+        primary = _make_output(
+            job_id=job.id,
+            content_type="video/mp4",
+            format="mp4",
+            output_index=0,
+            storage_key=primary_key,
+        )
+        # Legacy thumbnail: is_thumbnail=True but parent_output_id=None
+        legacy_thumb = _make_output(
+            job_id=job.id,
+            content_type="image/jpeg",
+            format="jpeg",
+            is_thumbnail=True,
+            output_index=0,
+            storage_key=legacy_thumb_key,
+            parent_output_id=None,
+        )
+        session = _session_for_get(job, outputs=[primary, legacy_thumb])
+
+        url_map = {
+            primary_key: "https://r2.example.com/primary.mp4",
+            legacy_thumb_key: "https://r2.example.com/legacy_thumb.jpg",
+        }
+        storage = AsyncMock()
+        storage.get_presigned_url = AsyncMock(side_effect=lambda key, **_: _url_mock(url_map[key]))
+
+        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert result.thumbnail_url == "https://r2.example.com/legacy_thumb.jpg"
+        assert len(result.outputs) == 1
+        assert result.outputs[0].content_type == "video/mp4"
 
     async def test_multiple_image_outputs_first_becomes_thumbnail(self) -> None:
         user_id = uuid4()

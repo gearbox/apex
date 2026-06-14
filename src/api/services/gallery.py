@@ -145,10 +145,13 @@ class GalleryService:
 
         gt = GenerationType(job.generation_type)
         non_thumbnail_outputs = [o for o in job.outputs if not o.is_thumbnail]
-        thumbnail_map = {o.job_id: o for o in job.outputs if o.is_thumbnail}
+        # Map parent_output_id → thumbnail so each output can have its own thumbnail.
+        thumbnail_map = {
+            o.parent_output_id: o for o in job.outputs if o.is_thumbnail and o.parent_output_id
+        }
 
         output_items = [
-            self._build_output_item(o, thumbnail_map.get(o.job_id))
+            self._build_output_item(o, thumbnail_map.get(o.id))
             for o in sorted(non_thumbnail_outputs, key=lambda o: o.output_index)
         ]
 
@@ -224,16 +227,16 @@ class GalleryService:
             video_url = self._output_url(cover_data.video_output_id)
 
         if gt.requires_image_input:
-            # i2i, i2v, flf2v: prefer source output, then upload, then cover
+            # i2i, i2v, flf2v: prefer source output, then upload, then thumbnail/cover
             if job.source_output_id is not None:
                 return self._output_url(job.source_output_id), video_url
             if job.input_image_id is not None:
                 return self._upload_url(job.input_image_id), video_url
-            if cover_data.cover_output_id is not None:
-                return self._output_url(cover_data.cover_output_id), video_url
-            # Fallback: use thumbnail if available
+            # For image i2i without a source input, prefer thumbnail over full output
             if cover_data.thumbnail_output_id is not None:
                 return self._output_url(cover_data.thumbnail_output_id), video_url
+            if cover_data.cover_output_id is not None:
+                return self._output_url(cover_data.cover_output_id), video_url
 
         elif gt.requires_video_input:
             # v2v: prefer source output, then thumbnail
@@ -254,7 +257,9 @@ class GalleryService:
             return cover, video_url
 
         else:
-            # t2i: last generated output
+            # t2i: prefer thumbnail (lighter egress), fall back to full output
+            if cover_data.thumbnail_output_id is not None:
+                return self._output_url(cover_data.thumbnail_output_id), None
             if cover_data.cover_output_id is not None:
                 return self._output_url(cover_data.cover_output_id), None
 
@@ -292,13 +297,7 @@ class GalleryService:
         _thumbnail: GenerationOutput | None = None,
     ) -> GalleryOutputItem:
         """Build a GalleryOutputItem from a GenerationOutput."""
-        thumbnail_url: str | None = None
-        if (
-            self._output_media_type(output.content_type) == OutputMediaType.VIDEO
-            and _thumbnail is not None
-        ):
-            thumbnail_url = self._output_url(_thumbnail.id)
-
+        thumbnail_url = None if _thumbnail is None else self._output_url(_thumbnail.id)
         return GalleryOutputItem(
             id=output.id,
             url=self._output_url(output.id),

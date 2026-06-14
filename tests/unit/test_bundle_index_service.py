@@ -1537,3 +1537,93 @@ class TestGenerationConfigCacheInvalidation:
         # Second fetch (304) — cache must not be cleared
         await svc._fetch_and_extract()
         assert len(svc._generation_config_cache) == 1
+
+
+# ---------------------------------------------------------------------------
+# register_on_resync — workflow cache invalidation callbacks (T1)
+# ---------------------------------------------------------------------------
+
+
+class TestOnResyncCallbacks:
+    """register_on_resync callbacks are invoked on content change, not on 304."""
+
+    def _svc_with_transport(
+        self, tmp_path: Path, transport: httpx.MockTransport
+    ) -> BundleIndexService:
+        client = httpx.AsyncClient(transport=transport)
+        return _make_service(tmp_path, http_client=client)
+
+    def _minimal_tarball(self) -> bytes:
+        return _make_test_tarball(
+            "gearbox-ai-bundles-abc",
+            {"bundle-index.yaml": "bundles: []"},
+        )
+
+    async def test_callback_invoked_after_content_change(self, tmp_path: Path) -> None:
+        """Registered callback is called exactly once after a 200 extract."""
+        tarball = self._minimal_tarball()
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        calls: list[int] = []
+        svc.register_on_resync(lambda: calls.append(1))
+
+        await svc._fetch_and_extract()
+
+        assert calls == [1]
+
+    async def test_callback_not_invoked_on_304(self, tmp_path: Path) -> None:
+        """Callback must NOT be called when server returns 304 Not Modified."""
+        tarball = self._minimal_tarball()
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(200, content=tarball, headers={"ETag": '"v1"'})
+            return httpx.Response(304)
+
+        svc = self._svc_with_transport(tmp_path, httpx.MockTransport(handler))
+
+        cb_calls: list[int] = []
+        svc.register_on_resync(lambda: cb_calls.append(1))
+
+        await svc._fetch_and_extract()  # 200 — callback fires
+        assert cb_calls == [1]
+
+        await svc._fetch_and_extract()  # 304 — callback must not fire again
+        assert cb_calls == [1]
+
+    async def test_failing_callback_is_swallowed_and_does_not_abort(self, tmp_path: Path) -> None:
+        """A callback that raises must be logged and must not abort the resync."""
+        tarball = self._minimal_tarball()
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        def bad_cb() -> None:
+            raise RuntimeError("callback exploded")
+
+        good_calls: list[int] = []
+        svc.register_on_resync(bad_cb)
+        svc.register_on_resync(lambda: good_calls.append(1))
+
+        # Should not raise
+        await svc._fetch_and_extract()
+
+        # The second (good) callback still runs after the first one raises
+        assert good_calls == [1]
+
+    async def test_multiple_callbacks_all_invoked(self, tmp_path: Path) -> None:
+        """All registered callbacks are called after a content change."""
+        tarball = self._minimal_tarball()
+        transport = _make_mock_transport(200, tarball, {"ETag": '"v1"'})
+        svc = self._svc_with_transport(tmp_path, transport)
+
+        results: list[str] = []
+        svc.register_on_resync(lambda: results.append("a"))
+        svc.register_on_resync(lambda: results.append("b"))
+
+        await svc._fetch_and_extract()
+
+        assert results == ["a", "b"]
