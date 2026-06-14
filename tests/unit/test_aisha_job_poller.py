@@ -165,15 +165,25 @@ class TestCollectImageInfos:
     def test_multiple_nodes_multiple_images(self) -> None:
         entry = {
             "outputs": {
-                "1": {"images": [{"filename": "a.png"}, {"filename": "b.png"}]},
-                "2": {"images": [{"filename": "c.png"}]},
+                "1": {
+                    "images": [
+                        {"filename": "a.png", "type": "output"},
+                        {"filename": "b.png", "type": "output"},
+                    ]
+                },
+                "2": {"images": [{"filename": "c.png", "type": "output"}]},
             }
         }
         result = AishaJobPoller._collect_image_infos(entry)
         assert len(result) == 3
 
     def test_nodes_without_images_key_ignored(self) -> None:
-        entry = {"outputs": {"1": {"latents": []}, "2": {"images": [{"filename": "x.png"}]}}}
+        entry = {
+            "outputs": {
+                "1": {"latents": []},
+                "2": {"images": [{"filename": "x.png", "type": "output"}]},
+            }
+        }
         result = AishaJobPoller._collect_image_infos(entry)
         assert len(result) == 1
 

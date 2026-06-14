@@ -24,6 +24,7 @@ from src.api.services.grok import (
     GrokVideoJobStarted,
     GrokVideoResult,
 )
+from src.api.services.image_thumbnail import read_dimensions
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
@@ -721,6 +722,7 @@ class GrokJobService:
                     ContentType=MediaFormat.JPEG.content_type,
                 )
 
+            thumb_dims = await read_dimensions(thumbnail_bytes)
             await output_repo.create(
                 id=thumb_id,
                 user_id=user_id,
@@ -729,10 +731,13 @@ class GrokJobService:
                 content_type=MediaFormat.JPEG.content_type,
                 size_bytes=len(thumbnail_bytes),
                 format=MediaFormat.JPEG.value,
-                output_index=-1,  # sentinel: thumbnail
+                output_index=0,
                 expires_at=expires_at,
                 input_image_id=None,
-                is_thumbnail=True,  # <-- marks this as poster frame
+                is_thumbnail=True,
+                parent_output_id=output_id,
+                width=thumb_dims.width if thumb_dims else None,
+                height=thumb_dims.height if thumb_dims else None,
                 product_id=product_id,
             )
             logger.debug("grok.thumbnail_stored", thumb_id=str(thumb_id), job_id=str(job_id))

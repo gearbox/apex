@@ -39,6 +39,9 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         product_id: str,
         input_image_id: UUID | None = None,
         is_thumbnail: bool = False,
+        parent_output_id: UUID | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> GenerationOutput:
         """Create a new generation output record.
 
@@ -54,7 +57,10 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             expires_at: When the output should be cleaned up.
             product_id: Product this output belongs to.
             input_image_id: Associated input image (for i2i).
-            is_thumbnail: Whether this output is a thumbnail.
+            is_thumbnail: Whether this output is a derived preview.
+            parent_output_id: Full output this thumbnail derives from.
+            width: Pixel width (stored for full and thumbnail rows).
+            height: Pixel height (stored for full and thumbnail rows).
 
         Returns:
             Created GenerationOutput instance.
@@ -71,6 +77,9 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             expires_at=expires_at,
             input_image_id=input_image_id,
             is_thumbnail=is_thumbnail,
+            parent_output_id=parent_output_id,
+            width=width,
+            height=height,
             product_id=product_id,
         )
         self._session.add(output)
@@ -135,6 +144,20 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         return await self._list_by_user_cursor(
             user_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
         )
+
+    async def list_derivatives(self, parent_output_id: UUID) -> Sequence[GenerationOutput]:
+        """List derivative outputs (thumbnails) for a given parent output.
+
+        Args:
+            parent_output_id: Parent full output ID.
+
+        Returns:
+            List of derivative GenerationOutput instances.
+        """
+        result = await self._session.execute(
+            select(GenerationOutput).where(GenerationOutput.parent_output_id == parent_output_id)
+        )
+        return result.scalars().all()
 
     async def get_expired(
         self,

@@ -207,10 +207,31 @@ class UnifiedJobService:
         """
         db_outputs = await self._get_job_outputs(job, session)
 
+        # Separate primary outputs from thumbnails; build presigned URL map.
+        primary_outputs = [o for o in db_outputs if not getattr(o, "is_thumbnail", False)]
+        thumbnail_outputs = [o for o in db_outputs if getattr(o, "is_thumbnail", False)]
+        # thumbnail keyed by parent_output_id for O(1) lookup
+        thumb_by_parent: dict[UUID, GenerationOutput] = {}
+        for _t in thumbnail_outputs:
+            _pid = getattr(_t, "parent_output_id", None)
+            if _pid is not None:
+                thumb_by_parent[_pid] = _t
+
         output_items: list[JobOutputItem] = []
         thumbnail_url: str | None = None
 
-        for out in db_outputs:
+        # Pre-sign thumbnail URLs so we can attach them per-output
+        thumb_presigned: dict[UUID, str] = {}
+        for thumb in thumbnail_outputs:
+            try:
+                if self._storage is None:
+                    continue
+                r = await self._storage.get_presigned_url(thumb.storage_key, expires_in=_URL_TTL)
+                thumb_presigned[thumb.id] = r.presigned_url
+            except Exception:
+                logger.warning("unified_jobs.presigned_url_failed", output_id=str(thumb.id))
+
+        for out in primary_outputs:
             try:
                 if self._storage is None:
                     logger.warning("unified_jobs.presigned_url_skipped", output_id=str(out.id))
@@ -223,6 +244,10 @@ class UnifiedJobService:
                 logger.warning("unified_jobs.presigned_url_failed", output_id=str(out.id))
                 continue
 
+            # Attach this output's thumbnail URL if available
+            thumb_obj = thumb_by_parent.get(out.id)
+            out_thumb_url = thumb_presigned.get(thumb_obj.id) if thumb_obj else None
+
             item = JobOutputItem(
                 id=out.id,
                 url=presigned,
@@ -230,14 +255,16 @@ class UnifiedJobService:
                 format=out.format,
                 size_bytes=out.size_bytes,
                 output_index=out.output_index,
-                is_thumbnail=getattr(out, "is_thumbnail", False),
+                thumbnail_url=out_thumb_url,
+                is_thumbnail=False,
             )
             output_items.append(item)
 
-            if item.is_thumbnail and thumbnail_url is None:
-                thumbnail_url = presigned
+            # Top-level thumbnail_url = cover output's thumbnail (first one found)
+            if thumbnail_url is None and out_thumb_url is not None:
+                thumbnail_url = out_thumb_url
 
-        # For image jobs without an explicit thumbnail flag, use first output
+        # Legacy fallback: jobs without thumbnails use first image URL
         if thumbnail_url is None and output_items:
             first = output_items[0]
             if "image" in first.content_type:

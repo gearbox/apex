@@ -29,12 +29,14 @@ from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
     validate_tunnel_hostname,
 )
+from src.api.services.image_thumbnail import make_image_thumbnail, read_dimensions
 from src.api.services.job_state_transition import (
     GenerationOutputData,
     JobStateTransitionService,
 )
 from src.api.services.storage import R2StorageService, StorageType
 from src.core.enums import JobStatus
+from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
@@ -327,15 +329,14 @@ class AishaJobPoller:
         expires_at = JobStateTransitionService.make_output_expires_at(self._config.retention_days)
 
         for idx, img_info in enumerate(image_infos):
-            out_data = await self._download_and_upload(
+            results = await self._download_and_upload(
                 client=client,
                 job=job,
                 img_info=img_info,
                 output_index=idx,
                 expires_at=expires_at,
             )
-            if out_data is not None:
-                outputs.append(out_data)
+            outputs.extend(results)
 
         await ts.transition_to_completed(
             job.id,
@@ -420,19 +421,19 @@ class AishaJobPoller:
         img_info: dict[str, Any],
         output_index: int,
         expires_at: datetime,
-    ) -> GenerationOutputData | None:
+    ) -> list[GenerationOutputData]:
         if self._r2 is None:
             logger.warning(
                 "aisha_job_poller.r2_not_configured",
                 job_id=str(job.id),
             )
-            return None
+            return []
 
         filename: str = img_info.get("filename", "")
         subfolder: str = img_info.get("subfolder", "")
         img_type: str = img_info.get("type", "output")
         if not filename:
-            return None
+            return []
 
         try:
             data = await client.get_image(
@@ -446,9 +447,12 @@ class AishaJobPoller:
                 job_id=str(job.id),
                 filename=filename,
             )
-            return None
+            return []
 
         ext, content_type = self._infer_image_format_and_content_type(filename)
+
+        # Read dimensions before upload (bytes still in RAM)
+        dims = await read_dimensions(data)
 
         try:
             result = await self._r2.upload(
@@ -465,9 +469,9 @@ class AishaJobPoller:
                 job_id=str(job.id),
                 filename=filename,
             )
-            return None
+            return []
 
-        return GenerationOutputData(
+        full = GenerationOutputData(
             id=result.id,
             storage_key=result.storage_key,
             content_type=content_type,
@@ -475,7 +479,53 @@ class AishaJobPoller:
             format=ext,
             output_index=output_index,
             expires_at=expires_at,
+            width=dims.width if dims else None,
+            height=dims.height if dims else None,
         )
+
+        # Generate WEBP thumbnail — non-fatal if it fails
+        thumb_result = await make_image_thumbnail(data)
+        if thumb_result is None:
+            logger.warning(
+                "thumbnail.image.skipped",
+                job_id=str(job.id),
+                filename=filename,
+            )
+            return [full]
+
+        thumb_id = new_id()
+        thumb_filename = f"{thumb_id}_thumb.webp"
+        try:
+            thumb_upload = await self._r2.upload(
+                user_id=job.user_id,
+                data=thumb_result.data,
+                filename=thumb_filename,
+                content_type=thumb_result.content_type,
+                storage_type=StorageType.OUTPUT,
+                job_id=job.id,
+            )
+        except Exception:
+            logger.warning(
+                "thumbnail.image.skipped",
+                job_id=str(job.id),
+                filename=filename,
+            )
+            return [full]
+
+        thumb = GenerationOutputData(
+            id=thumb_upload.id,
+            storage_key=thumb_upload.storage_key,
+            content_type=thumb_result.content_type,
+            size_bytes=len(thumb_result.data),
+            format=thumb_result.format,
+            output_index=output_index,
+            expires_at=expires_at,
+            is_thumbnail=True,
+            parent_output_id=full.id,
+            width=thumb_result.width,
+            height=thumb_result.height,
+        )
+        return [full, thumb]
 
     @staticmethod
     def _infer_image_format_and_content_type(filename: str) -> tuple[str, str]:
@@ -487,6 +537,7 @@ class AishaJobPoller:
     def _collect_image_infos(history_entry: dict[str, Any]) -> list[dict[str, Any]]:
         images: list[dict[str, Any]] = []
         for _node_id, node_output in history_entry.get("outputs", {}).items():
-            if "images" in node_output:
-                images.extend(node_output["images"])
+            images.extend(
+                img for img in node_output.get("images", []) if img.get("type") == "output"
+            )
         return images

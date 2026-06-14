@@ -162,14 +162,18 @@ class GalleryRepository:
         cover_map: dict[UUID, CoverData] = {}
         for job_id in job_ids:
             job_outputs = by_job.get(job_id, [])
-            thumbnail_output_id: UUID | None = None
+            # thumbnails_by_parent: parent_output_id → thumbnail.id (new-style link)
+            thumbnails_by_parent: dict[UUID, UUID] = {}
+            fallback_thumbnail_id: UUID | None = None  # for legacy rows without parent_output_id
             video_output_id: UUID | None = None
             cover_output_id: UUID | None = None
             real_count = 0
 
             for out in job_outputs:
                 if out.is_thumbnail:
-                    thumbnail_output_id = out.id
+                    fallback_thumbnail_id = out.id
+                    if out.parent_output_id is not None:
+                        thumbnails_by_parent[out.parent_output_id] = out.id
                 else:
                     real_count += 1
                     if out.content_type.startswith("video/"):
@@ -179,6 +183,15 @@ class GalleryRepository:
                     else:
                         # Last real image output (highest index) becomes cover
                         cover_output_id = out.id
+
+            # Find the thumbnail that corresponds to the chosen cover/video output.
+            # Fall back to any thumbnail for legacy jobs that lack parent_output_id.
+            thumbnail_output_id: UUID | None = None
+            primary_id = cover_output_id if cover_output_id is not None else video_output_id
+            if primary_id is not None:
+                thumbnail_output_id = thumbnails_by_parent.get(primary_id, fallback_thumbnail_id)
+            else:
+                thumbnail_output_id = fallback_thumbnail_id
 
             cover_map[job_id] = CoverData(
                 cover_output_id=cover_output_id,
