@@ -619,6 +619,8 @@ async def init_services(settings: Settings) -> JWTService:
             max_uncompressed_bytes=settings.ai_bundles_max_uncompressed_bytes,
             settings=settings,
         )
+        if _services.workflow_service is not None:
+            _services.bundle_index.register_on_resync(_services.workflow_service.invalidate_cache)
         await _services.bundle_index.start()
 
         billing_service_for_worker = BillingService(event_bus=_services.event_bus)

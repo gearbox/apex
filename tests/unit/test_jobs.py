@@ -629,6 +629,46 @@ class TestBuildResponseOutputs:
         assert result.outputs == []
         assert result.thumbnail_url is None
 
+    async def test_legacy_thumbnail_used_when_no_parent_link(self) -> None:
+        """Legacy jobs: is_thumbnail=True with parent_output_id=None populates top-level thumbnail_url."""
+        user_id = uuid4()
+        job = _make_job(user_id=user_id)
+        primary_key = "users/uid/outputs/job/primary.mp4"
+        legacy_thumb_key = "users/uid/outputs/job/thumb.jpg"
+
+        primary = _make_output(
+            job_id=job.id,
+            content_type="video/mp4",
+            format="mp4",
+            output_index=0,
+            storage_key=primary_key,
+        )
+        # Legacy thumbnail: is_thumbnail=True but parent_output_id=None
+        legacy_thumb = _make_output(
+            job_id=job.id,
+            content_type="image/jpeg",
+            format="jpeg",
+            is_thumbnail=True,
+            output_index=0,
+            storage_key=legacy_thumb_key,
+            parent_output_id=None,
+        )
+        session = _session_for_get(job, outputs=[primary, legacy_thumb])
+
+        url_map = {
+            primary_key: "https://r2.example.com/primary.mp4",
+            legacy_thumb_key: "https://r2.example.com/legacy_thumb.jpg",
+        }
+        storage = AsyncMock()
+        storage.get_presigned_url = AsyncMock(side_effect=lambda key, **_: _url_mock(url_map[key]))
+
+        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert result.thumbnail_url == "https://r2.example.com/legacy_thumb.jpg"
+        assert len(result.outputs) == 1
+        assert result.outputs[0].content_type == "video/mp4"
+
     async def test_multiple_image_outputs_first_becomes_thumbnail(self) -> None:
         user_id = uuid4()
         job = _make_job(user_id=user_id)

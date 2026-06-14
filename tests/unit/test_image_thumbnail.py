@@ -100,3 +100,32 @@ class TestMakeImageThumbnail:
         result = await make_image_thumbnail(data)
         assert isinstance(result, ThumbnailResult)
         assert len(result.data) > 0
+
+    async def test_palette_image_converted_and_thumbnailed(self) -> None:
+        """Palette (P mode) images trigger the non-RGB/RGBA conversion branch."""
+        src = Image.new("RGB", (300, 200), "red").convert("P")
+        buf = io.BytesIO()
+        src.save(buf, format="PNG")
+        data = buf.getvalue()
+
+        result = await make_image_thumbnail(data, max_edge=512)
+
+        assert result is not None
+        assert result.format == "webp"
+        assert max(result.width, result.height) <= 512
+        img = Image.open(io.BytesIO(result.data))
+        assert img.format == "WEBP"
+
+    async def test_cmyk_image_converted_and_thumbnailed(self) -> None:
+        """CMYK images trigger the non-RGB/RGBA conversion branch."""
+        src = Image.new("CMYK", (300, 200))
+        buf = io.BytesIO()
+        src.save(buf, format="JPEG")
+        data = buf.getvalue()
+
+        result = await make_image_thumbnail(data, max_edge=512)
+
+        assert result is not None
+        assert result.format == "webp"
+        img = Image.open(io.BytesIO(result.data))
+        assert img.format == "WEBP"

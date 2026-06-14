@@ -341,6 +341,64 @@ class TestApplyParameters:
         assert modified[NodeIDs.LOAD_IMAGE_2]["inputs"]["image"] == "only_second.png"
 
 
+class TestInvalidateCache:
+    def test_invalidate_cache_clears_workflow_cache(self, tmp_path: Path) -> None:
+        """invalidate_cache() empties _workflow_cache."""
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+
+        svc.load_workflow_from_bundle(bundle_root, "260103-19")
+        assert len(svc._workflow_cache) == 1
+
+        svc.invalidate_cache()
+
+        assert svc._workflow_cache == {}
+
+    def test_invalidate_cache_forces_reload_from_disk(self, tmp_path: Path) -> None:
+        """After invalidate_cache(), load_workflow_from_bundle re-reads from disk."""
+        bundle_root, version_dir = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+
+        svc.load_workflow_from_bundle(bundle_root, "260103-19")
+        svc.invalidate_cache()
+
+        # Replace workflow.json on disk with a minimal valid workflow
+        new_workflow = {
+            "nodes": [
+                {
+                    "id": 9,
+                    "type": "EmptyLatentImage",
+                    "inputs": [],
+                    "widgets_values": [512, 512, 1],
+                },
+                {
+                    "id": 3,
+                    "type": "TextEncodeQwenImageEditPlus",
+                    "inputs": [],
+                    "widgets_values": ["new prompt"],
+                },
+                {
+                    "id": 2,
+                    "type": "KSampler",
+                    "inputs": [],
+                    "widgets_values": [0, "fixed", 10, 1.0, "euler", "beta", 1.0],
+                },
+            ],
+            "links": [],
+        }
+        (version_dir / "workflow.json").write_text(json.dumps(new_workflow))
+
+        reloaded = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        assert reloaded[NodeIDs.EMPTY_LATENT]["inputs"]["width"] == 512
+
+    def test_invalidate_cache_noop_when_cache_empty(self) -> None:
+        """invalidate_cache() is safe when the cache is already empty."""
+        svc = WorkflowService()
+        svc.invalidate_cache()
+        assert svc._workflow_cache == {}
+
+
 class TestValidateWorkflow:
     def test_validate_valid(self, tmp_path: Path) -> None:
         bundle_root, _ = make_bundle_dir(tmp_path)

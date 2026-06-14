@@ -207,31 +207,30 @@ class UnifiedJobService:
         """
         db_outputs = await self._get_job_outputs(job, session)
 
-        # Separate primary outputs from thumbnails; build presigned URL map.
-        primary_outputs = [o for o in db_outputs if not getattr(o, "is_thumbnail", False)]
-        thumbnail_outputs = [o for o in db_outputs if getattr(o, "is_thumbnail", False)]
-        # thumbnail keyed by parent_output_id for O(1) lookup
-        thumb_by_parent: dict[UUID, GenerationOutput] = {}
-        for _t in thumbnail_outputs:
-            _pid = getattr(_t, "parent_output_id", None)
-            if _pid is not None:
-                thumb_by_parent[_pid] = _t
+        # One pass: parent_id -> presigned thumbnail URL, plus a legacy fallback
+        # (older rows have is_thumbnail=True but parent_output_id=None, e.g. pre-migration video posters).
+        thumb_url_by_parent: dict[UUID, str] = {}
+        legacy_thumb_url: str | None = None
+        if self._storage is not None:
+            for out in db_outputs:
+                if not out.is_thumbnail:
+                    continue
+                try:
+                    r = await self._storage.get_presigned_url(out.storage_key, expires_in=_URL_TTL)
+                except Exception:
+                    logger.warning("unified_jobs.presigned_url_failed", output_id=str(out.id))
+                    continue
+                if out.parent_output_id is not None:
+                    thumb_url_by_parent[out.parent_output_id] = r.presigned_url
+                elif legacy_thumb_url is None:
+                    legacy_thumb_url = r.presigned_url
 
         output_items: list[JobOutputItem] = []
         thumbnail_url: str | None = None
 
-        # Pre-sign thumbnail URLs so we can attach them per-output
-        thumb_presigned: dict[UUID, str] = {}
-        for thumb in thumbnail_outputs:
-            try:
-                if self._storage is None:
-                    continue
-                r = await self._storage.get_presigned_url(thumb.storage_key, expires_in=_URL_TTL)
-                thumb_presigned[thumb.id] = r.presigned_url
-            except Exception:
-                logger.warning("unified_jobs.presigned_url_failed", output_id=str(thumb.id))
-
-        for out in primary_outputs:
+        for out in db_outputs:
+            if out.is_thumbnail:
+                continue
             try:
                 if self._storage is None:
                     logger.warning("unified_jobs.presigned_url_skipped", output_id=str(out.id))
@@ -244,31 +243,27 @@ class UnifiedJobService:
                 logger.warning("unified_jobs.presigned_url_failed", output_id=str(out.id))
                 continue
 
-            # Attach this output's thumbnail URL if available
-            thumb_obj = thumb_by_parent.get(out.id)
-            out_thumb_url = thumb_presigned.get(thumb_obj.id) if thumb_obj else None
-
-            item = JobOutputItem(
-                id=out.id,
-                url=presigned,
-                content_type=out.content_type,
-                format=out.format,
-                size_bytes=out.size_bytes,
-                output_index=out.output_index,
-                thumbnail_url=out_thumb_url,
-                is_thumbnail=False,
+            out_thumb_url = thumb_url_by_parent.get(out.id)
+            output_items.append(
+                JobOutputItem(
+                    id=out.id,
+                    url=presigned,
+                    content_type=out.content_type,
+                    format=out.format,
+                    size_bytes=out.size_bytes,
+                    output_index=out.output_index,
+                    thumbnail_url=out_thumb_url,
+                    is_thumbnail=False,
+                )
             )
-            output_items.append(item)
-
-            # Top-level thumbnail_url = cover output's thumbnail (first one found)
             if thumbnail_url is None and out_thumb_url is not None:
                 thumbnail_url = out_thumb_url
 
-        # Legacy fallback: jobs without thumbnails use first image URL
-        if thumbnail_url is None and output_items:
-            first = output_items[0]
-            if "image" in first.content_type:
-                thumbnail_url = first.url
+        # Cover thumbnail fallbacks for legacy jobs.
+        if thumbnail_url is None:
+            thumbnail_url = legacy_thumb_url
+        if thumbnail_url is None and output_items and "image" in output_items[0].content_type:
+            thumbnail_url = output_items[0].url
 
         return UnifiedJobResponse(
             id=job.id,

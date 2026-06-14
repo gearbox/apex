@@ -8,6 +8,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -158,6 +159,11 @@ class BundleIndexService:
             self._owned_client = httpx.AsyncClient()
         self._settings = settings
         self._generation_config_cache: dict[str, BundleGenerationConfig] = {}
+        self._on_resync: list[Callable[[], None]] = []
+
+    def register_on_resync(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked after the bundle cache is refreshed (content change only)."""
+        self._on_resync.append(callback)
 
     async def start(self) -> None:
         """Initial sync + start periodic background sync.
@@ -715,6 +721,11 @@ class BundleIndexService:
 
         self._generation_config_cache.clear()
         logger.info("bundle_index.generation_config_cache_cleared")
+        for cb in self._on_resync:
+            try:
+                cb()
+            except Exception:
+                logger.exception("bundle_index.on_resync_callback_failed")
 
     def _extract_member_capped(
         self,
