@@ -28,8 +28,8 @@ from src.api.security import optional_auth_guard
 from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import GenerationType, ModelType, Provider
 from src.core.model_registry import get_model_meta
-from src.core.resolution import TIER_MEGAPIXELS
 from src.core.product import ProductConfig
+from src.core.resolution import TIER_MEGAPIXELS
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 
