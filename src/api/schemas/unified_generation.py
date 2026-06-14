@@ -7,14 +7,24 @@ from uuid import UUID
 
 import msgspec
 
-from src.core.enums import AspectRatio, GenerationType, ModelType, VideoResolution
+from src.core.enums import (
+    AspectRatio,
+    GenerationType,
+    ModelType,
+    Resolution,
+    Sampler,
+    Scheduler,
+    VideoResolution,
+)
 
 PromptStr = Annotated[str, msgspec.Meta(min_length=1, max_length=4096)]
 NegativePromptStr = Annotated[str, msgspec.Meta(max_length=2048)]
 ImageCount = Annotated[int, msgspec.Meta(ge=1, le=10)]
 VideoDuration = Annotated[int, msgspec.Meta(ge=1, le=15)]
-Height = Annotated[int, msgspec.Meta(ge=256, le=2048)]
-Steps = Annotated[int, msgspec.Meta(ge=1, le=20)]
+ImageDim = Annotated[int, msgspec.Meta(ge=256, le=4096)]
+Cfg = Annotated[float, msgspec.Meta(ge=0.0, le=30.0)]
+StepsOpt = Annotated[int, msgspec.Meta(ge=1, le=150)]  # raise from le=20; bundle clamps per-model
+Denoise = Annotated[float, msgspec.Meta(ge=0.0, le=1.0)]
 
 
 class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
@@ -63,15 +73,43 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     """Video duration in seconds (1-15). Ignored for image generation."""
 
     resolution: VideoResolution = VideoResolution.RES_720P
-    """Video resolution. Ignored for image generation."""
+    """Video resolution (480p/720p). Ignored for image generation."""
 
-    # --- Aisha-specific (ignored by Grok provider) ---
+    # --- Aisha image sizing. Tier XOR explicit (width AND height). None => bundle default tier. ---
 
-    height: Height | None = None
-    """Image height in pixels (256-2048). Aisha only. Default: 1024."""
+    image_resolution: Resolution | None = None
+    """Image quality tier (draft/standard/high/ultra). Aisha only. Mutually exclusive with width+height."""
+
+    width: ImageDim | None = None
+    """Explicit image width in pixels (256-4096). Must be paired with height. Aisha only."""
+
+    height: ImageDim | None = None
+    """Explicit image height in pixels (256-4096). Must be paired with width. Aisha only."""
+
+    # --- Aisha sampler overrides. None => per-model bundle default. ---
 
     seed: int | None = None
     """Reproducibility seed. Aisha only. Auto-generated if omitted."""
 
-    steps: Steps | None = None
-    """Inference steps (1-20). Aisha only. Default: 12."""
+    steps: StepsOpt | None = None
+    """Inference steps (1-150). Aisha only. Bundle clamps per-model max."""
+
+    cfg: Cfg | None = None
+    """CFG scale (0.0-30.0). Aisha only."""
+
+    sampler: Sampler | None = None
+    """ComfyUI sampler name. Aisha only."""
+
+    scheduler: Scheduler | None = None
+    """ComfyUI scheduler name. Aisha only."""
+
+    denoise: Denoise | None = None
+    """Denoise strength (0.0-1.0). Aisha only."""
+
+    def __post_init__(self) -> None:
+        if (self.width is None) != (self.height is None):
+            raise ValueError("width and height must be provided together")
+        if self.image_resolution is not None and (
+            self.width is not None or self.height is not None
+        ):
+            raise ValueError("image_resolution and explicit width/height are mutually exclusive")

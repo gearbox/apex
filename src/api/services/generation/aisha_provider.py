@@ -20,7 +20,9 @@ from src.api.services.generation.tunnel_validation import (
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.storage import R2StorageService
 from src.api.services.workflow_service import WorkflowService
-from src.core.enums import JobStatus, ModelType, Provider
+from src.core.enums import JobStatus, ModelType, Provider, Sampler, Scheduler
+from src.core.generation_config import BundleGenerationConfig
+from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
@@ -111,6 +113,39 @@ class AishaGenerationProvider:
         """Aisha-specific validation beyond what the enum provides."""
         if request.model == ModelType.AISHA_VIDEO:
             raise ValueError("Aisha video generation is not yet available via the unified endpoint")
+
+    @staticmethod
+    def _resolve_int(value: int | None, default: int, min_val: int, max_val: int, name: str) -> int:
+        if value is None:
+            return default
+        if not (min_val <= value <= max_val):
+            raise ValueError(f"{name} {value} out of range [{min_val}, {max_val}] for this model")
+        return value
+
+    @staticmethod
+    def _resolve_float(
+        value: float | None, default: float, min_val: float, max_val: float, name: str
+    ) -> float:
+        if value is None:
+            return default
+        if not (min_val <= value <= max_val):
+            raise ValueError(f"{name} {value} out of range [{min_val}, {max_val}] for this model")
+        return value
+
+    @staticmethod
+    def _resolve_enum(
+        value: Sampler | Scheduler | None,
+        default: Sampler | Scheduler,
+        allowed: frozenset[Sampler] | frozenset[Scheduler],
+        name: str,
+    ) -> Sampler | Scheduler:
+        if value is None:
+            return default
+        if allowed and value not in allowed:
+            raise ValueError(
+                f"{name} {value!r} is not allowed for this model; allowed: {sorted(v.value for v in allowed)}"
+            )
+        return value
 
     async def _resolve_input_image(
         self,
@@ -210,18 +245,81 @@ class AishaGenerationProvider:
         # as a 5xx. Either way: no reservation made, nothing to refund.
         i2i_input = await self._resolve_input_image(request, session)
 
+        # Resolve per-model generation config from bundle.yaml (before billing)
+        gen_cfg: BundleGenerationConfig = self._bundle_index.get_generation_config(
+            gpu_session.bundle_name, gpu_session.bundle_version
+        )
+
+        # Resolve image dimensions
+        tier = request.image_resolution or gen_cfg.defaults.resolution
+        has_explicit_dims = request.width is not None and request.height is not None
+        dims = resolve_dimensions(
+            aspect_ratio=request.aspect_ratio,
+            max_megapixels=gen_cfg.constraints.max_megapixels,
+            latent_multiple=gen_cfg.constraints.latent_multiple,
+            max_edge=gen_cfg.constraints.max_edge,
+            tier=None if has_explicit_dims else tier,
+            explicit_width=request.width,
+            explicit_height=request.height,
+        )
+        if not has_explicit_dims:
+            requested_mp = TIER_MEGAPIXELS[tier]
+            if dims.megapixels < requested_mp * 0.9:
+                logger.info(
+                    "generation.resolution.clamped",
+                    tier=tier.value,
+                    requested_mp=requested_mp,
+                    resolved_mp=round(dims.megapixels, 3),
+                    max_megapixels=gen_cfg.constraints.max_megapixels,
+                    aspect_ratio=request.aspect_ratio.value,
+                )
+
+        # Resolve + validate sampler params (raises ValueError → 4xx, no reservation made)
+        steps = self._resolve_int(
+            request.steps,
+            gen_cfg.defaults.steps,
+            gen_cfg.constraints.min_steps,
+            gen_cfg.constraints.max_steps,
+            "steps",
+        )
+        cfg = self._resolve_float(
+            request.cfg,
+            gen_cfg.defaults.cfg,
+            gen_cfg.constraints.min_cfg,
+            gen_cfg.constraints.max_cfg,
+            "cfg",
+        )
+        sampler = self._resolve_enum(
+            request.sampler,
+            gen_cfg.defaults.sampler,
+            gen_cfg.constraints.allowed_samplers,
+            "sampler",
+        )
+        scheduler = self._resolve_enum(
+            request.scheduler,
+            gen_cfg.defaults.scheduler,
+            gen_cfg.constraints.allowed_schedulers,
+            "scheduler",
+        )
+        denoise = request.denoise if request.denoise is not None else gen_cfg.defaults.denoise
+
         # Map unified request -> legacy GenerationRequest for workflow_service
         legacy_request = GenerationRequest(
             prompt=request.prompt,
             name=request.name,
             negative_prompt=request.negative_prompt or DEFAULT_NEGATIVE_PROMPT,
-            height=request.height or 1024,
+            height=dims.height,
+            width=dims.width,
             aspect_ratio=request.aspect_ratio,
             model_type=request.model,
             generation_type=request.generation_type,
             max_images=request.n,
             seed=request.seed,
-            steps=request.steps or 12,
+            steps=steps,
+            cfg=cfg,
+            sampler=sampler.value,
+            scheduler=scheduler.value,
+            denoise=denoise,
         )
 
         # Create DB job record

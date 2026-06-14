@@ -124,6 +124,21 @@ class GenerationService:
         if provider is None:
             raise ProviderUnavailableError(f"Provider '{provider_key.value}' is not configured")
 
+        if provider_key == Provider.GROK and (
+            request.image_resolution is not None
+            or request.width is not None
+            or request.height is not None
+        ):
+            logger.info(
+                "generation.image_sizing.ignored_for_grok",
+                model=request.model.value,
+                image_resolution=request.image_resolution.value
+                if request.image_resolution
+                else None,
+                width=request.width,
+                height=request.height,
+            )
+
         # 6. Provider-specific validation
         provider.validate(request)
 

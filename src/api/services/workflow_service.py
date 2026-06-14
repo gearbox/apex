@@ -321,9 +321,10 @@ class WorkflowService:
 
         # Apply image dimensions and batch size
         if NodeIDs.EMPTY_LATENT in workflow:
-            workflow[NodeIDs.EMPTY_LATENT]["inputs"]["width"] = request.get_calculated_width()
-            workflow[NodeIDs.EMPTY_LATENT]["inputs"]["height"] = request.height
-            workflow[NodeIDs.EMPTY_LATENT]["inputs"]["batch_size"] = request.max_images
+            inputs = workflow[NodeIDs.EMPTY_LATENT]["inputs"]
+            inputs["width"] = request.width or request.get_calculated_width()
+            inputs["height"] = request.height
+            inputs["batch_size"] = request.max_images
 
         # Apply positive prompt
         if NodeIDs.POSITIVE_PROMPT in workflow:
@@ -335,8 +336,13 @@ class WorkflowService:
 
         # Apply KSampler parameters
         if NodeIDs.KSAMPLER in workflow:
-            workflow[NodeIDs.KSAMPLER]["inputs"]["seed"] = request.seed
-            workflow[NodeIDs.KSAMPLER]["inputs"]["steps"] = request.steps
+            ks = workflow[NodeIDs.KSAMPLER]["inputs"]
+            ks["seed"] = request.seed
+            ks["steps"] = request.steps
+            ks["cfg"] = request.cfg
+            ks["sampler_name"] = request.sampler
+            ks["scheduler"] = request.scheduler
+            ks["denoise"] = request.denoise
 
         # Apply output filename prefix
         if NodeIDs.SAVE_IMAGE in workflow:

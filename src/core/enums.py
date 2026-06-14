@@ -124,27 +124,20 @@ class AspectRatio(StrEnum):
     RATIO_16_9 = "16:9"
     RATIO_3_4 = "3:4"
     RATIO_4_3 = "4:3"
-    # RATIO_21_9 = "21:9"
 
     def calculate_width(self, height: int) -> int:
         """Calculate width from height based on aspect ratio.
 
         Returns width rounded to nearest multiple of 8 for latent space compatibility.
         """
-        ratio_map = {
-            "1:1": 1.0,
-            "4:3": 4 / 3,
-            "3:4": 3 / 4,
-            "16:9": 16 / 9,
-            "9:16": 9 / 16,
-            "2:3": 2 / 3,
-            "3:2": 3 / 2,
-            # "21:9": 21 / 9,
-        }
-        ratio = ratio_map[self.value]
-        width = int(height * ratio)
-        # Round to nearest multiple of 8
+        rw, rh = self.as_fraction()
+        width = int(height * rw / rh)
         return (width + 4) // 8 * 8
+
+    def as_fraction(self) -> tuple[int, int]:
+        """Return (w, h) integer ratio components, e.g. RATIO_3_4 -> (3, 4)."""
+        w_str, h_str = self.value.split(":")
+        return int(w_str), int(h_str)
 
 
 class VideoResolution(StrEnum):
@@ -152,6 +145,51 @@ class VideoResolution(StrEnum):
 
     RES_480P = "480p"
     RES_720P = "720p"
+
+
+class Resolution(StrEnum):
+    """Image quality tier (maps to a target megapixel budget; see core.resolution)."""
+
+    DRAFT = "draft"
+    STANDARD = "standard"
+    HIGH = "high"
+    ULTRA = "ultra"
+
+
+class Sampler(StrEnum):
+    """ComfyUI sampler names (common subset)."""
+
+    EULER = "euler"
+    EULER_ANCESTRAL = "euler_ancestral"
+    EULER_CFG_PP = "euler_cfg_pp"
+    HEUN = "heun"
+    DPM_2 = "dpm_2"
+    DPM_2_ANCESTRAL = "dpm_2_ancestral"
+    LMS = "lms"
+    DPMPP_2S_ANCESTRAL = "dpmpp_2s_ancestral"
+    DPMPP_SDE = "dpmpp_sde"
+    DPMPP_2M = "dpmpp_2m"
+    DPMPP_2M_SDE = "dpmpp_2m_sde"
+    DPMPP_3M_SDE = "dpmpp_3m_sde"
+    DDIM = "ddim"
+    UNI_PC = "uni_pc"
+    UNI_PC_BH2 = "uni_pc_bh2"
+    LCM = "lcm"
+    RES_MULTISTEP = "res_multistep"
+
+
+class Scheduler(StrEnum):
+    """ComfyUI scheduler names (common subset)."""
+
+    NORMAL = "normal"
+    KARRAS = "karras"
+    EXPONENTIAL = "exponential"
+    SGM_UNIFORM = "sgm_uniform"
+    SIMPLE = "simple"
+    DDIM_UNIFORM = "ddim_uniform"
+    BETA = "beta"
+    LINEAR_QUADRATIC = "linear_quadratic"
+    KL_OPTIMAL = "kl_optimal"
 
 
 class MediaFormat(StrEnum):

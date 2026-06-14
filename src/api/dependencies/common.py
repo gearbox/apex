@@ -617,6 +617,7 @@ async def init_services(settings: Settings) -> JWTService:
             max_member_count=settings.ai_bundles_max_member_count,
             max_member_size_bytes=settings.ai_bundles_max_member_size_bytes,
             max_uncompressed_bytes=settings.ai_bundles_max_uncompressed_bytes,
+            settings=settings,
         )
         await _services.bundle_index.start()
 

@@ -354,6 +354,63 @@ class TestValidateWorkflow:
             svc.validate_workflow({"1": {"class_type": "SomeNode", "inputs": {}}})
 
 
+class TestApplyParametersFullSamplerInjection:
+    """apply_parameters injects cfg, sampler_name, scheduler, denoise into KSampler."""
+
+    def test_injects_all_sampler_params(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        request = GenerationRequest(
+            prompt="test",
+            seed=99,
+            steps=20,
+            cfg=3.5,
+            sampler="dpmpp_2m",
+            scheduler="karras",
+            denoise=0.8,
+        )
+        result = svc.apply_parameters(workflow=workflow, request=request)
+        ks = result[NodeIDs.KSAMPLER]["inputs"]
+
+        assert ks["seed"] == 99
+        assert ks["steps"] == 20
+        assert ks["cfg"] == pytest.approx(3.5)
+        assert ks["sampler_name"] == "dpmpp_2m"
+        assert ks["scheduler"] == "karras"
+        assert ks["denoise"] == pytest.approx(0.8)
+
+    def test_injects_explicit_width(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        request = GenerationRequest(
+            prompt="test",
+            height=768,
+            width=1024,  # explicit; should override calculated
+        )
+        result = svc.apply_parameters(workflow=workflow, request=request)
+        latent = result[NodeIDs.EMPTY_LATENT]["inputs"]
+        assert latent["width"] == 1024
+        assert latent["height"] == 768
+
+    def test_defaults_injected_when_not_overridden(self, tmp_path: Path) -> None:
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        request = GenerationRequest(prompt="test")
+        result = svc.apply_parameters(workflow=workflow, request=request)
+        ks = result[NodeIDs.KSAMPLER]["inputs"]
+
+        assert ks["cfg"] == pytest.approx(1.1)  # GenerationRequest default
+        assert ks["sampler_name"] == "euler"
+        assert ks["scheduler"] == "beta"
+        assert ks["denoise"] == pytest.approx(1.0)
+
+
 class TestGuiToApiConversion:
     """GUI → API workflow format conversion."""
 

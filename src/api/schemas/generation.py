@@ -49,6 +49,11 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     max_images: MaxImages = 1
     seed: int | None = None
     steps: Steps = 12
+    width: int | None = None  # resolved width; None => get_calculated_width()
+    cfg: float = 1.1
+    sampler: str = "euler"
+    scheduler: str = "beta"
+    denoise: float = 1.0
 
     def __post_init__(self) -> None:
         """Generate name from prompt and seed if not provided."""
@@ -64,7 +69,9 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
             self.seed = random.randint(0, 2**31 - 1)  # noqa: S311, It's just a random generation seed
 
     def get_calculated_width(self) -> int:
-        """Calculate width from height and aspect ratio."""
+        """Return resolved width, or derive from height + aspect ratio as fallback."""
+        if self.width is not None:
+            return self.width
         return self.aspect_ratio.calculate_width(self.height)
 
 

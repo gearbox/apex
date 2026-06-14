@@ -29,6 +29,7 @@ from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import GenerationType, ModelType, Provider
 from src.core.model_registry import get_model_meta
 from src.core.product import ProductConfig
+from src.core.resolution import TIER_MEGAPIXELS
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 
@@ -72,6 +73,19 @@ def _build_model_info(mt: ModelType, record: object) -> ModelInfo:
                 output_resolutions=(
                     list(meta.image.output_resolutions)
                     if meta.image.output_resolutions is not None
+                    else None
+                ),
+                supported_tiers=(
+                    [t.value for t in meta.image.supported_tiers]
+                    if meta.image.supported_tiers is not None
+                    else None
+                ),
+                default_tier=(
+                    meta.image.default_tier.value if meta.image.default_tier is not None else None
+                ),
+                tier_megapixels=(
+                    {t.value: mp for t, mp in TIER_MEGAPIXELS.items()}
+                    if meta.image.supported_tiers is not None
                     else None
                 ),
             )
