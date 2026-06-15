@@ -1627,3 +1627,160 @@ class TestOnResyncCallbacks:
         await svc._fetch_and_extract()
 
         assert results == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# TestGetCheckpointFilenames
+# ---------------------------------------------------------------------------
+
+
+def _write_bundle_yaml_with_models(
+    bundle_path: Path,
+    checkpoint_filenames: list[str],
+    *,
+    bundle_version: str = "current",
+) -> None:
+    """Create {bundle_path}/{bundle_version}/bundle.yaml with hardware + models sections."""
+    version_dir = bundle_path / bundle_version
+    version_dir.mkdir(parents=True, exist_ok=True)
+    data: dict[str, object] = {
+        "hardware": _HW_YAML,
+        "models": [
+            {
+                "model_type": "checkpoints",
+                "files": [{"filename": fn} for fn in checkpoint_filenames],
+            }
+        ],
+    }
+    (version_dir / "bundle.yaml").write_text(yaml.dump(data))
+
+
+class TestGetCheckpointFilenames:
+    """BundleIndexService.get_checkpoint_filenames() contract tests."""
+
+    def _make_populated_service(
+        self,
+        tmp_path: Path,
+        bundle_name: str,
+        checkpoint_filenames: list[str],
+        *,
+        bundle_version: str = "current",
+    ) -> BundleIndexService:
+        """Build a BundleIndexService with the named bundle in its index."""
+        bundle_rel = f"bundles/{bundle_name}"
+        bundle_abs = tmp_path / bundle_rel
+        _write_bundle_yaml_with_models(
+            bundle_abs, checkpoint_filenames, bundle_version=bundle_version
+        )
+        # Also create 'current' symlink when a versioned dir is requested.
+        if bundle_version != "current":
+            current = bundle_abs / "current"
+            if not current.exists():
+                current.symlink_to(bundle_version)
+        _write_index(
+            tmp_path,
+            [
+                {
+                    "name": bundle_name,
+                    "path": bundle_rel,
+                    "model_type": "aisha-image",
+                    "default_bundle": True,
+                }
+            ],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        return svc
+
+    def test_returns_declared_single_checkpoint(self, tmp_path: Path) -> None:
+        svc = self._make_populated_service(
+            tmp_path, "qwen_rapid_aio", ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
+        )
+        result = svc.get_checkpoint_filenames("qwen_rapid_aio")
+        assert result == ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
+
+    def test_returns_multiple_checkpoints(self, tmp_path: Path) -> None:
+        svc = self._make_populated_service(
+            tmp_path, "multi_ckpt", ["model_a.safetensors", "model_b.safetensors"]
+        )
+        result = svc.get_checkpoint_filenames("multi_ckpt")
+        assert result == ["model_a.safetensors", "model_b.safetensors"]
+
+    def test_returns_empty_for_missing_bundle(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path)
+        # No index populated — bundle_index is empty.
+        result = svc.get_checkpoint_filenames("nonexistent_bundle")
+        assert result == []
+
+    def test_returns_empty_for_malformed_yaml(self, tmp_path: Path) -> None:
+        bundle_name = "bad_yaml_bundle"
+        bundle_rel = f"bundles/{bundle_name}"
+        bundle_abs = tmp_path / bundle_rel
+        current_dir = bundle_abs / "current"
+        current_dir.mkdir(parents=True)
+        # Write valid hardware so _parse_index succeeds (it reads bundle.yaml for hardware).
+        (current_dir / "bundle.yaml").write_text(yaml.dump({"hardware": _HW_YAML}))
+        _write_index(
+            tmp_path,
+            [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        # Now replace bundle.yaml with malformed YAML to test get_checkpoint_filenames's
+        # yaml.YAMLError exception path.
+        (current_dir / "bundle.yaml").write_text("models: [[[invalid")
+        # Must return [] without raising.
+        result = svc.get_checkpoint_filenames(bundle_name)
+        assert result == []
+
+    def test_returns_empty_when_no_checkpoint_models(self, tmp_path: Path) -> None:
+        """Bundle with no 'checkpoints' model_type entries → empty list."""
+        bundle_name = "no_ckpt"
+        bundle_rel = f"bundles/{bundle_name}"
+        bundle_abs = tmp_path / bundle_rel
+        current_dir = bundle_abs / "current"
+        current_dir.mkdir(parents=True)
+        data: dict[str, object] = {
+            "hardware": _HW_YAML,
+            "models": [{"model_type": "loras", "files": [{"filename": "style.safetensors"}]}],
+        }
+        (current_dir / "bundle.yaml").write_text(yaml.dump(data))
+        _write_index(
+            tmp_path,
+            [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        assert svc.get_checkpoint_filenames(bundle_name) == []
+
+    def test_uses_version_subdir_when_specified(self, tmp_path: Path) -> None:
+        """bundle_version='260105-01' resolves to that subdir, not 'current'."""
+        svc = self._make_populated_service(
+            tmp_path,
+            "versioned_bundle",
+            ["versioned.safetensors"],
+            bundle_version="260105-01",
+        )
+        result = svc.get_checkpoint_filenames("versioned_bundle", "260105-01")
+        assert result == ["versioned.safetensors"]
+
+    def test_never_raises_on_missing_bundle_yaml(self, tmp_path: Path) -> None:
+        """If bundle.yaml is missing, return [] without raising."""
+        bundle_name = "missing_yaml"
+        bundle_rel = f"bundles/{bundle_name}"
+        bundle_abs = tmp_path / bundle_rel
+        # Create hardware YAML at current/ for _parse_index, but omit models.
+        current_dir = bundle_abs / "current"
+        current_dir.mkdir(parents=True)
+        data: dict[str, object] = {"hardware": _HW_YAML}
+        (current_dir / "bundle.yaml").write_text(yaml.dump(data))
+        _write_index(
+            tmp_path,
+            [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        # Now remove the bundle.yaml so get_checkpoint_filenames hits OSError.
+        (current_dir / "bundle.yaml").unlink()
+        result = svc.get_checkpoint_filenames(bundle_name)
+        assert result == []

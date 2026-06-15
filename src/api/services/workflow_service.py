@@ -5,12 +5,14 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
-import yaml
 
 from src.api.schemas.generation import GenerationRequest, GenerationType
+
+if TYPE_CHECKING:
+    from src.api.services.bundle_index import BundleIndexService
 
 logger = structlog.get_logger(__name__)
 
@@ -50,8 +52,9 @@ class WorkflowService:
     - Converting GUI workflow format to API format
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bundle_index: BundleIndexService | None = None) -> None:
         self._workflow_cache: dict[str, dict[str, Any]] = {}
+        self._bundles = bundle_index
 
     def invalidate_cache(self) -> None:
         """Drop all cached workflows. Call when the bundle cache is refreshed."""
@@ -110,7 +113,7 @@ class WorkflowService:
     def inject_checkpoint(
         self,
         workflow: dict[str, Any],
-        bundle_dir: Path,
+        bundle_name: str,
         bundle_version: str | None,
         *,
         session_id: str,
@@ -123,32 +126,19 @@ class WorkflowService:
 
         Args:
             workflow: API-format workflow dict to modify in-place.
-            bundle_dir: Path to the bundle root directory.
+            bundle_name: Bundle name (e.g. "qwen_rapid_aio") for checkpoint lookup.
             bundle_version: Specific version. None uses the "current" symlink.
             session_id: Session ID for log context.
         """
-        bundle_yaml_path = self._bundle_version_dir(bundle_dir, bundle_version) / "bundle.yaml"
-
-        ckpt_files: list[str] = []
-        try:
-            with bundle_yaml_path.open() as f:
-                bundle_data = yaml.safe_load(f)
-            if isinstance(bundle_data, dict):
-                for model in bundle_data.get("models", []) or []:
-                    if isinstance(model, dict) and model.get("model_type") == "checkpoints":
-                        ckpt_files.extend(
-                            str(file_entry["filename"])
-                            for file_entry in model.get("files", []) or []
-                            if isinstance(file_entry, dict) and "filename" in file_entry
-                        )
-        except (OSError, yaml.YAMLError) as exc:
-            logger.warning(
+        if self._bundles is None:
+            logger.info(
                 "workflow.checkpoint_injection_skipped",
                 session_id=session_id,
-                reason="bundle_yaml_read_error",
-                error=str(exc),
+                reason="no_bundle_index",
             )
             return
+
+        ckpt_files = self._bundles.get_checkpoint_filenames(bundle_name, bundle_version)
 
         ckpt_nodes = [
             (node_id, node)

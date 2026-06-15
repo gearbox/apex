@@ -296,6 +296,51 @@ class BundleIndexService:
             readiness_marker=entry.mapping.readiness_marker,
         )
 
+    def get_checkpoint_filenames(
+        self, bundle_name: str, bundle_version: str | None = None
+    ) -> list[str]:
+        """Return checkpoint filenames declared in the bundle's bundle.yaml.
+
+        Source of truth: models[] entries with model_type == "checkpoints",
+        flattened over files[].filename. Returns [] on any read/parse error
+        (callers decide how to degrade). Never raises for a missing/malformed file.
+        """
+        try:
+            bundle_dir = self.get_bundle_path(bundle_name)
+        except BundleNotFoundError:
+            logger.debug(
+                "bundle_index.checkpoint_filenames.bundle_not_found",
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+            )
+            return []
+
+        bundle_yaml_path = bundle_dir / (bundle_version or "current") / "bundle.yaml"
+        try:
+            with bundle_yaml_path.open() as fh:
+                data = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.info(
+                "bundle_index.checkpoint_filenames.read_error",
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                error=str(exc),
+            )
+            return []
+
+        if not isinstance(data, dict):
+            return []
+
+        ckpt_files: list[str] = []
+        for model in data.get("models", []) or []:
+            if isinstance(model, dict) and model.get("model_type") == "checkpoints":
+                ckpt_files.extend(
+                    str(file_entry["filename"])
+                    for file_entry in model.get("files", []) or []
+                    if isinstance(file_entry, dict) and "filename" in file_entry
+                )
+        return ckpt_files
+
     def get_generation_config(
         self, bundle_name: str, bundle_version: str | None
     ) -> BundleGenerationConfig:

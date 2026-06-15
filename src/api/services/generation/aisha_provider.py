@@ -434,7 +434,7 @@ class AishaGenerationProvider:
             self._workflow.validate_workflow(workflow)
             self._workflow.inject_checkpoint(
                 workflow,
-                bundle_dir,
+                gpu_session.bundle_name,
                 gpu_session.bundle_version,
                 session_id=str(gpu_session.id),
             )

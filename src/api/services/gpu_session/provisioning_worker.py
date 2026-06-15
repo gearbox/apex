@@ -353,6 +353,15 @@ class GpuProvisioningWorker:
         reachable = await self._probe_comfyui(session)
         if reachable:
             await self._mark_active(session)
+        elif session.provisioning_phase == "ready":
+            # Node reported terminal-ready but our authoritative probe disagrees:
+            # strong signal of a provisioning defect (e.g. wrong/absent checkpoint).
+            logger.warning(
+                "gpu_session.provision.ready_probe_mismatch",
+                session_id=str(session.id),
+                bundle_name=session.bundle_name,
+                bundle_version=session.bundle_version,
+            )
 
     async def _advance_resuming(self, session: GpuSession) -> None:
         """Probe ComfyUI; on success → active; on timeout → fail (no retry for resume)."""
@@ -413,10 +422,13 @@ class GpuProvisioningWorker:
     async def _probe_comfyui(self, session: GpuSession) -> bool:
         """Probe ComfyUI for readiness via the CF tunnel.
 
-        Returns True iff:
-        - HTTP 200, AND
-        - either session.readiness_marker_node_class is None (with ERROR log),
-          OR the marker class is present in the /object_info JSON response.
+        Returns True only when all applicable conditions hold:
+        1. HTTP 200 from /object_info.
+        2. Checkpoint presence (when bundle declares exactly one checkpoint):
+           the declared filename must appear in ComfyUI's available list.
+        3. Node-class marker (when configured): the marker class must be registered.
+        4. Degradation backstop: if neither check is applicable, log a WARNING
+           and return True on the 200 (unverifiable bundle, gap made loud).
         """
         if session.tunnel_hostname is None:
             logger.warning(
@@ -448,19 +460,34 @@ class GpuProvisioningWorker:
             )
             return False
 
+        # Determine which checks are applicable before parsing JSON.
+        expected = self._bundles.get_checkpoint_filenames(
+            session.bundle_name, session.bundle_version
+        )
+        checkpoint_check_applicable = len(expected) == 1
         marker = session.readiness_marker_node_class
-        if marker is None:
-            logger.error(
-                "gpu_session.provision.probe_no_marker_configured",
+        marker_check_applicable = marker is not None
+
+        if not checkpoint_check_applicable:
+            logger.info(
+                "gpu_session.provision.probe_checkpoint_check_skipped",
                 session_id=str(session.id),
                 bundle_name=session.bundle_name,
                 bundle_version=session.bundle_version,
-                tunnel_hostname=session.tunnel_hostname,
+                declared_count=len(expected),
             )
-            return True  # fall back to 200-OK reachability
+            # Degradation backstop: nothing concrete to verify → return on 200 alone.
+            if not marker_check_applicable:
+                logger.warning(
+                    "gpu_session.provision.probe_unverifiable",
+                    session_id=str(session.id),
+                    bundle_name=session.bundle_name,
+                    bundle_version=session.bundle_version,
+                    hostname=session.tunnel_hostname,
+                )
+                return True
 
-        # Parse the response body as JSON; ComfyUI's /object_info returns a
-        # dict where top-level keys are class names.
+        # At least one check is applicable — parse the JSON body.
         try:
             parsed = msgspec.json.decode(resp.content)
         except msgspec.DecodeError as exc:
@@ -479,25 +506,73 @@ class GpuProvisioningWorker:
             )
             return False
 
-        if marker in parsed:
+        # Step 2: checkpoint presence (single-checkpoint bundles only).
+        if checkpoint_check_applicable:
+            # Defensively extract available list; /object_info shape:
+            # parsed["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+            # is the list of filenames available to ComfyUI.
+            shape_ok = True
+            available: list[Any] = []
+            ckpt_info = parsed.get("CheckpointLoaderSimple")
+            if not isinstance(ckpt_info, dict):
+                shape_ok = False
+            else:
+                inputs = ckpt_info.get("input")
+                if not isinstance(inputs, dict):
+                    shape_ok = False
+                else:
+                    required = inputs.get("required")
+                    if not isinstance(required, dict):
+                        shape_ok = False
+                    else:
+                        ckpt_name_entry = required.get("ckpt_name")
+                        if not isinstance(ckpt_name_entry, list) or len(ckpt_name_entry) < 1:
+                            shape_ok = False
+                        else:
+                            available = ckpt_name_entry[0]
+                            if not isinstance(available, list):
+                                shape_ok = False
+
+            if not shape_ok:
+                logger.info(
+                    "gpu_session.provision.probe_object_info_shape",
+                    session_id=str(session.id),
+                    bundle_name=session.bundle_name,
+                    expected_checkpoint=expected[0],
+                )
+                return False
+
+            if expected[0] not in available:
+                logger.info(
+                    "gpu_session.provision.probe_checkpoint_missing",
+                    session_id=str(session.id),
+                    bundle_name=session.bundle_name,
+                    expected=expected[0],
+                    available_count=len(available),
+                    available_sample=available[:5],
+                )
+                return False
+
+        # Step 3: node-class marker (when configured).
+        if marker_check_applicable:
+            if marker not in parsed:
+                class_names = list(parsed.keys())
+                logger.info(
+                    "gpu_session.provision.probe_marker_missing",
+                    session_id=str(session.id),
+                    marker=marker,
+                    total_classes_registered=len(class_names),
+                    sample_classes=class_names[:5],
+                )
+                return False
             logger.info(
                 "gpu_session.provision.probe_marker_found",
                 session_id=str(session.id),
                 marker=marker,
                 latency_ms=latency_ms,
             )
-            return True
 
-        # Marker missing — log enough to diagnose without flooding logs.
-        class_names = list(parsed.keys())
-        logger.info(
-            "gpu_session.provision.probe_marker_missing",
-            session_id=str(session.id),
-            marker=marker,
-            total_classes_registered=len(class_names),
-            sample_classes=class_names[:5],
-        )
-        return False
+        return True
 
     # ------------------------------------------------------------------
     # Retry logic
