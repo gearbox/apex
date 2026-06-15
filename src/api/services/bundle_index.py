@@ -298,12 +298,17 @@ class BundleIndexService:
 
     def get_checkpoint_filenames(
         self, bundle_name: str, bundle_version: str | None = None
-    ) -> list[str]:
+    ) -> list[str] | None:
         """Return checkpoint filenames declared in the bundle's bundle.yaml.
 
         Source of truth: models[] entries with model_type == "checkpoints",
-        flattened over files[].filename. Returns [] on any read/parse error
-        (callers decide how to degrade). Never raises for a missing/malformed file.
+        flattened over files[].filename.
+
+        Returns:
+            A list of checkpoint filenames (possibly empty when the bundle
+            genuinely declares zero checkpoints). Returns None on any lookup
+            or read/parse error so callers can distinguish a transient failure
+            from a deliberate zero-checkpoint bundle. Never raises.
         """
         try:
             bundle_dir = self.get_bundle_path(bundle_name)
@@ -313,7 +318,7 @@ class BundleIndexService:
                 bundle_name=bundle_name,
                 bundle_version=bundle_version,
             )
-            return []
+            return None
 
         bundle_yaml_path = bundle_dir / (bundle_version or "current") / "bundle.yaml"
         try:
@@ -326,10 +331,10 @@ class BundleIndexService:
                 bundle_version=bundle_version,
                 error=str(exc),
             )
-            return []
+            return None
 
         if not isinstance(data, dict):
-            return []
+            return None
 
         ckpt_files: list[str] = []
         for model in data.get("models", []) or []:

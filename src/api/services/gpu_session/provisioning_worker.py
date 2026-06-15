@@ -464,6 +464,14 @@ class GpuProvisioningWorker:
         expected = self._bundles.get_checkpoint_filenames(
             session.bundle_name, session.bundle_version
         )
+        if expected is None:
+            logger.warning(
+                "gpu_session.provision.probe_checkpoint_lookup_failed",
+                session_id=str(session.id),
+                bundle_name=session.bundle_name,
+                bundle_version=session.bundle_version,
+            )
+            return False
         checkpoint_check_applicable = len(expected) == 1
         marker = session.readiness_marker_node_class
         marker_check_applicable = marker is not None
@@ -572,6 +580,13 @@ class GpuProvisioningWorker:
                 latency_ms=latency_ms,
             )
 
+        logger.info(
+            "gpu_session.provision.probe_ready",
+            session_id=str(session.id),
+            latency_ms=latency_ms,
+            checkpoint_verified=checkpoint_check_applicable,
+            marker_verified=marker_check_applicable,
+        )
         return True
 
     # ------------------------------------------------------------------

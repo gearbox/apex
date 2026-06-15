@@ -16,6 +16,7 @@ from src.api.schemas.generation import (
 )
 from src.api.services.workflow_service import (
     NodeIDs,
+    WorkflowConfigError,
     WorkflowNotFoundError,
     WorkflowService,
     WorkflowValidationError,
@@ -154,17 +155,23 @@ class TestInjectCheckpoint:
         assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == original_ckpt
         assert any(e["event"] == "workflow.checkpoint_injection_skipped" for e in cap)
 
-    def test_injection_skipped_when_no_bundle_index(self, tmp_path: Path) -> None:
-        """When WorkflowService has no bundle_index, injection is skipped."""
+    def test_injection_raises_when_no_bundle_index_and_single_loader(self, tmp_path: Path) -> None:
+        """When WorkflowService has no bundle_index and workflow has 1 loader, raise WorkflowConfigError."""
         bundle_root, _ = make_bundle_dir(tmp_path)
         svc = WorkflowService()  # no bundle_index
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
-        original_ckpt = workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"]
 
-        with structlog.testing.capture_logs() as cap:
+        with pytest.raises(WorkflowConfigError, match="bundle index is not configured"):
             svc.inject_checkpoint(workflow, "qwen_rapid_aio", "260103-19", session_id="no-idx")
 
-        assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == original_ckpt
+    def test_injection_skipped_when_no_bundle_index_and_no_loader_nodes(self) -> None:
+        """When WorkflowService has no bundle_index and workflow has 0 loader nodes, info-skip."""
+        svc = WorkflowService()  # no bundle_index
+        workflow: dict[str, object] = {}  # no CheckpointLoaderSimple nodes
+
+        with structlog.testing.capture_logs() as cap:
+            svc.inject_checkpoint(workflow, "some_bundle", None, session_id="no-idx")
+
         assert any(e["event"] == "workflow.checkpoint_injection_skipped" for e in cap)
 
 

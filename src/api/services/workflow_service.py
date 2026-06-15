@@ -29,6 +29,10 @@ class WorkflowValidationError(WorkflowError):
     """Raised when workflow validation fails."""
 
 
+class WorkflowConfigError(WorkflowError):
+    """Raised when checkpoint injection is required but cannot proceed."""
+
+
 class NodeIDs:
     """Node IDs for qwen_rapid_aio workflow."""
 
@@ -131,6 +135,16 @@ class WorkflowService:
             session_id: Session ID for log context.
         """
         if self._bundles is None:
+            # Count loader nodes to decide whether injection was actually needed.
+            ckpt_node_count = sum(
+                isinstance(node, dict) and node.get("class_type") == "CheckpointLoaderSimple"
+                for node in workflow.values()
+            )
+            if ckpt_node_count == 1:
+                raise WorkflowConfigError(
+                    f"Cannot inject checkpoint for session {session_id}: "
+                    "bundle index is not configured"
+                )
             logger.info(
                 "workflow.checkpoint_injection_skipped",
                 session_id=session_id,
@@ -139,6 +153,15 @@ class WorkflowService:
             return
 
         ckpt_files = self._bundles.get_checkpoint_filenames(bundle_name, bundle_version)
+
+        if ckpt_files is None:
+            logger.warning(
+                "workflow.checkpoint_injection_skipped",
+                session_id=session_id,
+                bundle_name=bundle_name,
+                reason="checkpoint_lookup_failed",
+            )
+            return
 
         ckpt_nodes = [
             (node_id, node)

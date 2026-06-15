@@ -50,6 +50,8 @@ def _make_active_gpu_session() -> MagicMock:
     gs = MagicMock()
     gs.id = uuid4()
     gs.tunnel_hostname = "01abcdef.gpu.test"
+    gs.bundle_name = "test_bundle"
+    gs.bundle_version = None
     return gs
 
 
@@ -778,6 +780,14 @@ class TestAishaProviderI2IBridge:
         # Workflow received None for input_image_1.
         ap_kwargs = mocks["workflow"].apply_parameters.call_args.kwargs
         assert ap_kwargs["input_image_1"] is None
+        # inject_checkpoint must receive bundle_name as str, not a Path.
+        mocks["workflow"].inject_checkpoint.assert_called_once()
+        ic_args, _ic_kwargs = mocks["workflow"].inject_checkpoint.call_args
+        assert isinstance(ic_args[1], str), (
+            "inject_checkpoint second arg must be bundle_name (str), not Path"
+        )
+        gpu_session = mocks["gpu_session_service"].get_active_session_for_model.return_value
+        assert ic_args[1] == gpu_session.bundle_name
 
 
 class TestSanitizeFilename:

@@ -428,8 +428,12 @@ class TestAdvanceProvisioning:
         return resp
 
     async def test_probe_200_transitions_to_active_and_sets_started_at(self) -> None:
+        """Unverifiable bundle (zero declared checkpoints) + probe 200 → active via degradation backstop."""
         worker, mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
+        mocks[
+            "bundle_index"
+        ].get_checkpoint_filenames.return_value = []  # zero-checkpoint: unverifiable
         mocks["http_client"].get.return_value = self._mock_ok_response()
 
         with patch(_REPO_PATH) as MockRepo:
@@ -444,6 +448,26 @@ class TestAdvanceProvisioning:
         call_kwargs = mock_repo.update_status.call_args[1]
         assert "started_at" in call_kwargs
         assert call_kwargs["started_at"] is not None
+
+    async def test_probe_checkpoint_verified_transitions_to_active(self) -> None:
+        """Checkpoint present in /object_info + matches bundle declaration → active via real readiness pass."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
+        ckpt = "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = [ckpt]
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint([ckpt])
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            reloaded = _make_gpu_session(status=GpuSessionStatus.provisioning)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._advance_provisioning(session)
+
+        mock_repo.update_status.assert_called_once()
+        call_args = mock_repo.update_status.call_args[0]  # positional args
+        assert call_args[1] == GpuSessionStatus.active
 
     async def test_probe_500_is_noop(self) -> None:
         worker, mocks = _make_worker()
@@ -640,7 +664,7 @@ class TestAdvanceResuming:
         return resp
 
     async def test_probe_200_transitions_to_active_keeps_started_at(self) -> None:
-        """started_at must NOT be overwritten when transitioning resuming → active."""
+        """Unverifiable bundle + probe 200 → active via degradation backstop; started_at preserved."""
         worker, mocks = _make_worker()
         original_start = datetime.now(UTC) - timedelta(hours=5)
         session = _make_gpu_session(
@@ -648,6 +672,9 @@ class TestAdvanceResuming:
             started_at=original_start,
             resumed_at=datetime.now(UTC) - timedelta(minutes=1),
         )
+        mocks[
+            "bundle_index"
+        ].get_checkpoint_filenames.return_value = []  # zero-checkpoint: unverifiable
         mocks["http_client"].get.return_value = self._mock_ok_response()
 
         with patch(_REPO_PATH) as MockRepo:
@@ -1726,6 +1753,26 @@ class TestProbeComfyui:
         ]
         assert unverifiable_logs, "expected probe_unverifiable log"
         assert unverifiable_logs[0].get("log_level") == "warning"
+
+    async def test_checkpoint_lookup_failed_returns_false(self) -> None:
+        """get_checkpoint_filenames returning None (lookup/read error) → return False, not unverifiable."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = None
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        mocks["http_client"].get.return_value = _make_object_info_response(
+            ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
+        )
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is False
+        assert any(
+            log.get("event") == "gpu_session.provision.probe_checkpoint_lookup_failed"
+            for log in logs
+        ), "expected probe_checkpoint_lookup_failed warning"
 
     async def test_invalid_json_returns_false(self) -> None:
         worker, mocks = _make_worker()

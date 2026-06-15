@@ -1577,7 +1577,7 @@ class TestOnResyncCallbacks:
         tarball = self._minimal_tarball()
         call_count = 0
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(_request: httpx.Request) -> httpx.Response:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1710,7 +1710,7 @@ class TestGetCheckpointFilenames:
         svc = _make_service(tmp_path)
         # No index populated — bundle_index is empty.
         result = svc.get_checkpoint_filenames("nonexistent_bundle")
-        assert result == []
+        assert result is None
 
     def test_returns_empty_for_malformed_yaml(self, tmp_path: Path) -> None:
         bundle_name = "bad_yaml_bundle"
@@ -1729,9 +1729,9 @@ class TestGetCheckpointFilenames:
         # Now replace bundle.yaml with malformed YAML to test get_checkpoint_filenames's
         # yaml.YAMLError exception path.
         (current_dir / "bundle.yaml").write_text("models: [[[invalid")
-        # Must return [] without raising.
+        # Must return None without raising.
         result = svc.get_checkpoint_filenames(bundle_name)
-        assert result == []
+        assert result is None
 
     def test_returns_empty_when_no_checkpoint_models(self, tmp_path: Path) -> None:
         """Bundle with no 'checkpoints' model_type entries → empty list."""
@@ -1765,7 +1765,7 @@ class TestGetCheckpointFilenames:
         assert result == ["versioned.safetensors"]
 
     def test_never_raises_on_missing_bundle_yaml(self, tmp_path: Path) -> None:
-        """If bundle.yaml is missing, return [] without raising."""
+        """If bundle.yaml is missing, return None without raising."""
         bundle_name = "missing_yaml"
         bundle_rel = f"bundles/{bundle_name}"
         bundle_abs = tmp_path / bundle_rel
@@ -1783,4 +1783,4 @@ class TestGetCheckpointFilenames:
         # Now remove the bundle.yaml so get_checkpoint_filenames hits OSError.
         (current_dir / "bundle.yaml").unlink()
         result = svc.get_checkpoint_filenames(bundle_name)
-        assert result == []
+        assert result is None
