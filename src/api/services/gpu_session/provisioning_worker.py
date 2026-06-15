@@ -19,6 +19,7 @@ import hashlib
 import secrets
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -71,6 +72,23 @@ _TERMINAL_ACTUAL_STATUSES = frozenset({"exited", "unknown", "offline"})
 # instance is dead. Observed empirically when a container fails to start (port allocation
 # error etc.): actual_status='created' with cur_state='stopped'.
 _TERMINAL_CUR_STATES = frozenset({"stopped", "exited"})
+
+
+def _match_checkpoint(expected: str, available: list[str]) -> tuple[bool, bool]:
+    """Return (matched, exact).
+
+    ComfyUI lists checkpoints relative to the checkpoints dir, so a nested file
+    appears as 'subdir/name.safetensors' while bundle.yaml declares the basename.
+    Match exactly first; fall back to basename comparison (which also absorbs any
+    stray './' or category prefix). exact=False on a basename-only match signals
+    a subfolder placement that inject_checkpoint does NOT yet handle.
+    """
+    if expected in available:
+        return True, True
+    exp_base = PurePosixPath(expected).name
+    if any(PurePosixPath(a).name == exp_base for a in available):
+        return True, False
+    return False, False
 
 
 def _classify_terminal_state(instance: VastAIInstance) -> str | None:
@@ -499,7 +517,7 @@ class GpuProvisioningWorker:
         try:
             parsed = msgspec.json.decode(resp.content)
         except msgspec.DecodeError as exc:
-            logger.info(
+            logger.warning(
                 "gpu_session.provision.probe_invalid_json",
                 session_id=str(session.id),
                 error=str(exc),
@@ -507,7 +525,7 @@ class GpuProvisioningWorker:
             return False
 
         if not isinstance(parsed, dict):
-            logger.info(
+            logger.warning(
                 "gpu_session.provision.probe_unexpected_response",
                 session_id=str(session.id),
                 response_type=type(parsed).__name__,
@@ -542,7 +560,7 @@ class GpuProvisioningWorker:
                                 shape_ok = False
 
             if not shape_ok:
-                logger.info(
+                logger.warning(
                     "gpu_session.provision.probe_object_info_shape",
                     session_id=str(session.id),
                     bundle_name=session.bundle_name,
@@ -550,7 +568,8 @@ class GpuProvisioningWorker:
                 )
                 return False
 
-            if expected[0] not in available:
+            matched, exact = _match_checkpoint(expected[0], available)
+            if not matched:
                 logger.info(
                     "gpu_session.provision.probe_checkpoint_missing",
                     session_id=str(session.id),
@@ -560,6 +579,16 @@ class GpuProvisioningWorker:
                     available_sample=available[:5],
                 )
                 return False
+            if not exact:
+                # Readiness passes on basename, but inject_checkpoint sends the basename while
+                # ComfyUI exposes a subpath — generation will fail until injection is aligned.
+                logger.warning(
+                    "gpu_session.provision.probe_checkpoint_path_mismatch",
+                    session_id=str(session.id),
+                    bundle_name=session.bundle_name,
+                    expected=expected[0],
+                    available_sample=available[:5],
+                )
 
         # Step 3: node-class marker (when configured).
         if marker_check_applicable:

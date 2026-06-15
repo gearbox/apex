@@ -1784,3 +1784,90 @@ class TestGetCheckpointFilenames:
         (current_dir / "bundle.yaml").unlink()
         result = svc.get_checkpoint_filenames(bundle_name)
         assert result is None
+
+    def test_cache_hit_parses_yaml_only_once(self, tmp_path: Path) -> None:
+        """Two calls with the same bundle → YAML parsed once, both calls return same list."""
+        from unittest.mock import patch
+
+        svc = self._make_populated_service(tmp_path, "cache_test_bundle", ["cached.safetensors"])
+
+        parse_count = 0
+        original_safe_load = yaml.safe_load
+
+        def counting_safe_load(stream: Any) -> Any:
+            nonlocal parse_count
+            parse_count += 1
+            return original_safe_load(stream)
+
+        with patch("yaml.safe_load", side_effect=counting_safe_load):
+            r1 = svc.get_checkpoint_filenames("cache_test_bundle")
+            r2 = svc.get_checkpoint_filenames("cache_test_bundle")
+
+        assert r1 == ["cached.safetensors"]
+        assert r2 == ["cached.safetensors"]
+        assert parse_count == 1, f"expected yaml.safe_load called once, got {parse_count}"
+
+    def test_cache_cleared_on_resync(self, tmp_path: Path) -> None:
+        """Clearing _checkpoint_filenames_cache forces re-parse on next call."""
+        from unittest.mock import patch
+
+        svc = self._make_populated_service(tmp_path, "resync_bundle", ["before_resync.safetensors"])
+
+        # Warm the cache.
+        r1 = svc.get_checkpoint_filenames("resync_bundle")
+        assert r1 == ["before_resync.safetensors"]
+        assert svc._checkpoint_filenames_cache, "cache should be populated"
+
+        # Simulate the swap clearing both caches.
+        svc._checkpoint_filenames_cache.clear()
+
+        parse_count = 0
+        original_safe_load = yaml.safe_load
+
+        def counting_safe_load(stream: Any) -> Any:
+            nonlocal parse_count
+            parse_count += 1
+            return original_safe_load(stream)
+
+        with patch("yaml.safe_load", side_effect=counting_safe_load):
+            r2 = svc.get_checkpoint_filenames("resync_bundle")
+
+        assert r2 == ["before_resync.safetensors"]
+        assert parse_count == 1, "expected re-parse after cache clear"
+
+    def test_none_result_not_cached(self, tmp_path: Path) -> None:
+        """A read error (→ None) must not be pinned in the cache; next call re-tries."""
+        bundle_name = "transient_error_bundle"
+        bundle_rel = f"bundles/{bundle_name}"
+        bundle_abs = tmp_path / bundle_rel
+        current_dir = bundle_abs / "current"
+        current_dir.mkdir(parents=True)
+        data: dict[str, object] = {
+            "hardware": _HW_YAML,
+            "models": [
+                {
+                    "model_type": "checkpoints",
+                    "files": [{"filename": "recovered.safetensors"}],
+                }
+            ],
+        }
+        (current_dir / "bundle.yaml").write_text(yaml.dump(data))
+        _write_index(
+            tmp_path,
+            [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+
+        yaml_path = current_dir / "bundle.yaml"
+
+        # First call: file is missing → None (transient error).
+        yaml_path.unlink()
+        r1 = svc.get_checkpoint_filenames(bundle_name)
+        assert r1 is None
+        assert not svc._checkpoint_filenames_cache, "None must not be cached"
+
+        # Second call: file restored → should parse successfully.
+        yaml_path.write_text(yaml.dump(data))
+        r2 = svc.get_checkpoint_filenames(bundle_name)
+        assert r2 == ["recovered.safetensors"]

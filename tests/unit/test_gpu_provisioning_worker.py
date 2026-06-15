@@ -19,6 +19,7 @@ from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PROVISIONING_TIMEOUT,
     GpuProvisioningWorker,
     _classify_terminal_state,
+    _match_checkpoint,
 )
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
@@ -1851,6 +1852,8 @@ class TestProbeComfyui:
 
     async def test_checkpoint_present_no_marker_returns_true(self) -> None:
         """Single-checkpoint bundle, checkpoint in /object_info, no marker → True (happy path)."""
+        from structlog.testing import capture_logs
+
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_checkpoint_filenames.return_value = [
             "Qwen-Rapid-AIO-NSFW-v19.safetensors"
@@ -1860,9 +1863,38 @@ class TestProbeComfyui:
             available_checkpoints=["Qwen-Rapid-AIO-NSFW-v19.safetensors", "some_other.safetensors"]
         )
 
-        result = await worker._probe_comfyui(session)
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
 
         assert result is True
+        assert not any(
+            log.get("event") == "gpu_session.provision.probe_checkpoint_path_mismatch"
+            for log in logs
+        ), "exact match must not fire probe_checkpoint_path_mismatch"
+
+    async def test_checkpoint_subfolder_returns_true_and_warns(self) -> None:
+        """Checkpoint exposed as 'sub/Model.safetensors', bundle declares 'Model.safetensors'
+        → True (basename match), but probe_checkpoint_path_mismatch WARNING is logged."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Model.safetensors"]
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["sub/Model.safetensors"]
+        )
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is True
+        mismatch_logs = [
+            log
+            for log in logs
+            if log.get("event") == "gpu_session.provision.probe_checkpoint_path_mismatch"
+        ]
+        assert mismatch_logs, "expected probe_checkpoint_path_mismatch warning"
+        assert mismatch_logs[0].get("log_level") == "warning"
 
     async def test_checkpoint_absent_returns_false_and_logs(self) -> None:
         """Regression: checkpoint declared but absent in ComfyUI → False (the incident root cause)."""
@@ -1891,7 +1923,7 @@ class TestProbeComfyui:
         assert missing_logs[0]["expected"] == "Qwen-Rapid-AIO-NSFW-v19.safetensors"
 
     async def test_malformed_object_info_returns_false_and_logs_shape(self) -> None:
-        """200 but /object_info missing CheckpointLoaderSimple shape → False, probe_object_info_shape."""
+        """200 but /object_info missing CheckpointLoaderSimple shape → False, probe_object_info_shape at WARNING."""
         import json
 
         from structlog.testing import capture_logs
@@ -1915,6 +1947,7 @@ class TestProbeComfyui:
             if log.get("event") == "gpu_session.provision.probe_object_info_shape"
         ]
         assert shape_logs, "expected probe_object_info_shape log"
+        assert shape_logs[0].get("log_level") == "warning"
 
     async def test_checkpoint_and_marker_both_present_returns_true(self) -> None:
         """Both checkpoint and marker checks pass → True."""
@@ -1943,6 +1976,33 @@ class TestProbeComfyui:
         result = await worker._probe_comfyui(session)
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# TestMatchCheckpoint — unit tests for _match_checkpoint helper
+# ---------------------------------------------------------------------------
+
+
+class TestMatchCheckpoint:
+    def test_exact_match_returns_true_exact(self) -> None:
+        matched, exact = _match_checkpoint("model.safetensors", ["model.safetensors", "other.ckpt"])
+        assert matched is True
+        assert exact is True
+
+    def test_subfolder_exposure_basename_match(self) -> None:
+        matched, exact = _match_checkpoint("model.safetensors", ["sub/model.safetensors"])
+        assert matched is True
+        assert exact is False
+
+    def test_genuinely_absent_returns_false(self) -> None:
+        matched, exact = _match_checkpoint("wanted.safetensors", ["other.safetensors"])
+        assert matched is False
+        assert exact is False
+
+    def test_empty_available_returns_false(self) -> None:
+        matched, exact = _match_checkpoint("model.safetensors", [])
+        assert matched is False
+        assert exact is False
 
 
 # ---------------------------------------------------------------------------

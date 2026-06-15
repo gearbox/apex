@@ -159,6 +159,7 @@ class BundleIndexService:
             self._owned_client = httpx.AsyncClient()
         self._settings = settings
         self._generation_config_cache: dict[str, BundleGenerationConfig] = {}
+        self._checkpoint_filenames_cache: dict[str, list[str]] = {}
         self._on_resync: list[Callable[[], None]] = []
 
     def register_on_resync(self, callback: Callable[[], None]) -> None:
@@ -321,6 +322,11 @@ class BundleIndexService:
             return None
 
         bundle_yaml_path = bundle_dir / (bundle_version or "current") / "bundle.yaml"
+        cache_key = str(bundle_yaml_path)
+        cached = self._checkpoint_filenames_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
             with bundle_yaml_path.open() as fh:
                 data = yaml.safe_load(fh)
@@ -344,6 +350,7 @@ class BundleIndexService:
                     for file_entry in model.get("files", []) or []
                     if isinstance(file_entry, dict) and "filename" in file_entry
                 )
+        self._checkpoint_filenames_cache[cache_key] = ckpt_files
         return ckpt_files
 
     def get_generation_config(
@@ -770,6 +777,7 @@ class BundleIndexService:
             shutil.rmtree(trash)
 
         self._generation_config_cache.clear()
+        self._checkpoint_filenames_cache.clear()
         logger.info("bundle_index.generation_config_cache_cleared")
         for cb in self._on_resync:
             try:
