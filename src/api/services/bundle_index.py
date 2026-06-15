@@ -159,6 +159,7 @@ class BundleIndexService:
             self._owned_client = httpx.AsyncClient()
         self._settings = settings
         self._generation_config_cache: dict[str, BundleGenerationConfig] = {}
+        self._checkpoint_filenames_cache: dict[str, list[str]] = {}
         self._on_resync: list[Callable[[], None]] = []
 
     def register_on_resync(self, callback: Callable[[], None]) -> None:
@@ -295,6 +296,62 @@ class BundleIndexService:
             hardware=entry.mapping.hardware,
             readiness_marker=entry.mapping.readiness_marker,
         )
+
+    def get_checkpoint_filenames(
+        self, bundle_name: str, bundle_version: str | None = None
+    ) -> list[str] | None:
+        """Return checkpoint filenames declared in the bundle's bundle.yaml.
+
+        Source of truth: models[] entries with model_type == "checkpoints",
+        flattened over files[].filename.
+
+        Returns:
+            A list of checkpoint filenames (possibly empty when the bundle
+            genuinely declares zero checkpoints). Returns None on any lookup
+            or read/parse error so callers can distinguish a transient failure
+            from a deliberate zero-checkpoint bundle. Never raises.
+        """
+        try:
+            bundle_dir = self.get_bundle_path(bundle_name)
+        except BundleNotFoundError:
+            logger.debug(
+                "bundle_index.checkpoint_filenames.bundle_not_found",
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+            )
+            return None
+
+        bundle_yaml_path = bundle_dir / (bundle_version or "current") / "bundle.yaml"
+        cache_key = str(bundle_yaml_path)
+        cached = self._checkpoint_filenames_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            with bundle_yaml_path.open() as fh:
+                data = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.info(
+                "bundle_index.checkpoint_filenames.read_error",
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+                error=str(exc),
+            )
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        ckpt_files: list[str] = []
+        for model in data.get("models", []) or []:
+            if isinstance(model, dict) and model.get("model_type") == "checkpoints":
+                ckpt_files.extend(
+                    str(file_entry["filename"])
+                    for file_entry in model.get("files", []) or []
+                    if isinstance(file_entry, dict) and "filename" in file_entry
+                )
+        self._checkpoint_filenames_cache[cache_key] = ckpt_files
+        return ckpt_files
 
     def get_generation_config(
         self, bundle_name: str, bundle_version: str | None
@@ -720,6 +777,7 @@ class BundleIndexService:
             shutil.rmtree(trash)
 
         self._generation_config_cache.clear()
+        self._checkpoint_filenames_cache.clear()
         logger.info("bundle_index.generation_config_cache_cleared")
         for cb in self._on_resync:
             try:

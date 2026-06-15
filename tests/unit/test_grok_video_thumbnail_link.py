@@ -33,12 +33,17 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
 
     grok_client = MagicMock()
     svc = GrokJobService(grok_client=grok_client, storage=storage, retention_days=7)
-    svc._http_client = AsyncMock()
+
+    video_data = b"\x00\x01video"
+    http_mock = AsyncMock()
+    response_mock = MagicMock()
+    response_mock.raise_for_status = MagicMock()  # sync, as on a real httpx.Response
+    response_mock.content = video_data
+    http_mock.get = AsyncMock(return_value=response_mock)
+    svc._http_client = http_mock
 
     output_repo = _make_output_repo()
     session = AsyncMock()
-
-    _video_data = b"\x00\x01video"
     jpeg_bytes = b"\xff\xd8\xff\xe0jpeg"
 
     thumb_dims = MagicMock()

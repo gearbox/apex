@@ -19,6 +19,7 @@ from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PROVISIONING_TIMEOUT,
     GpuProvisioningWorker,
     _classify_terminal_state,
+    _match_checkpoint,
 )
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
@@ -428,8 +429,12 @@ class TestAdvanceProvisioning:
         return resp
 
     async def test_probe_200_transitions_to_active_and_sets_started_at(self) -> None:
+        """Unverifiable bundle (zero declared checkpoints) + probe 200 → active via degradation backstop."""
         worker, mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
+        mocks[
+            "bundle_index"
+        ].get_checkpoint_filenames.return_value = []  # zero-checkpoint: unverifiable
         mocks["http_client"].get.return_value = self._mock_ok_response()
 
         with patch(_REPO_PATH) as MockRepo:
@@ -444,6 +449,26 @@ class TestAdvanceProvisioning:
         call_kwargs = mock_repo.update_status.call_args[1]
         assert "started_at" in call_kwargs
         assert call_kwargs["started_at"] is not None
+
+    async def test_probe_checkpoint_verified_transitions_to_active(self) -> None:
+        """Checkpoint present in /object_info + matches bundle declaration → active via real readiness pass."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
+        ckpt = "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = [ckpt]
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint([ckpt])
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            reloaded = _make_gpu_session(status=GpuSessionStatus.provisioning)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._advance_provisioning(session)
+
+        mock_repo.update_status.assert_called_once()
+        call_args = mock_repo.update_status.call_args[0]  # positional args
+        assert call_args[1] == GpuSessionStatus.active
 
     async def test_probe_500_is_noop(self) -> None:
         worker, mocks = _make_worker()
@@ -640,7 +665,7 @@ class TestAdvanceResuming:
         return resp
 
     async def test_probe_200_transitions_to_active_keeps_started_at(self) -> None:
-        """started_at must NOT be overwritten when transitioning resuming → active."""
+        """Unverifiable bundle + probe 200 → active via degradation backstop; started_at preserved."""
         worker, mocks = _make_worker()
         original_start = datetime.now(UTC) - timedelta(hours=5)
         session = _make_gpu_session(
@@ -648,6 +673,9 @@ class TestAdvanceResuming:
             started_at=original_start,
             resumed_at=datetime.now(UTC) - timedelta(minutes=1),
         )
+        mocks[
+            "bundle_index"
+        ].get_checkpoint_filenames.return_value = []  # zero-checkpoint: unverifiable
         mocks["http_client"].get.return_value = self._mock_ok_response()
 
         with patch(_REPO_PATH) as MockRepo:
@@ -1657,6 +1685,34 @@ def _make_object_info_response(classes: list[str]) -> MagicMock:
     return resp
 
 
+def _make_object_info_with_checkpoint(
+    available_checkpoints: list[str],
+    extra_classes: list[str] | None = None,
+) -> MagicMock:
+    """Build a mock /object_info response with a proper CheckpointLoaderSimple shape.
+
+    Produces the nested structure ComfyUI actually returns:
+        {"CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [<list>, {}]}}}, ...}
+    """
+    import json
+
+    body: dict[str, Any] = {
+        "CheckpointLoaderSimple": {
+            "input": {
+                "required": {
+                    "ckpt_name": [available_checkpoints, {}],
+                }
+            }
+        }
+    }
+    for cls in extra_classes or []:
+        body[cls] = {}
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.content = json.dumps(body).encode()
+    return resp
+
+
 class TestProbeComfyui:
     async def test_marker_present_class_in_response_returns_true(self) -> None:
         worker, mocks = _make_worker()
@@ -1680,10 +1736,12 @@ class TestProbeComfyui:
 
         assert result is False
 
-    async def test_marker_none_with_200_logs_error_and_returns_true(self) -> None:
+    async def test_no_checkpoint_no_marker_logs_unverifiable_and_returns_true(self) -> None:
+        """Zero-checkpoint bundle + no marker → probe_unverifiable at WARNING, returns True."""
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = []
         session = _make_gpu_session(readiness_marker_node_class=None)
         mocks["http_client"].get.return_value = _make_object_info_response(["KSampler"])
 
@@ -1691,13 +1749,31 @@ class TestProbeComfyui:
             result = await worker._probe_comfyui(session)
 
         assert result is True
-        error_logs = [
-            log
-            for log in logs
-            if log.get("event") == "gpu_session.provision.probe_no_marker_configured"
+        unverifiable_logs = [
+            log for log in logs if log.get("event") == "gpu_session.provision.probe_unverifiable"
         ]
-        assert error_logs, "expected probe_no_marker_configured log"
-        assert error_logs[0].get("log_level") == "error"
+        assert unverifiable_logs, "expected probe_unverifiable log"
+        assert unverifiable_logs[0].get("log_level") == "warning"
+
+    async def test_checkpoint_lookup_failed_returns_false(self) -> None:
+        """get_checkpoint_filenames returning None (lookup/read error) → return False, not unverifiable."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = None
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        mocks["http_client"].get.return_value = _make_object_info_response(
+            ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
+        )
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is False
+        assert any(
+            log.get("event") == "gpu_session.provision.probe_checkpoint_lookup_failed"
+            for log in logs
+        ), "expected probe_checkpoint_lookup_failed warning"
 
     async def test_invalid_json_returns_false(self) -> None:
         worker, mocks = _make_worker()
@@ -1769,6 +1845,228 @@ class TestProbeComfyui:
         sample = log.get("sample_classes")
         assert isinstance(sample, list)
         assert len(sample) == 5
+
+    # ------------------------------------------------------------------
+    # Checkpoint-presence tests (the fix for the 2026-06 production incident)
+    # ------------------------------------------------------------------
+
+    async def test_checkpoint_present_no_marker_returns_true(self) -> None:
+        """Single-checkpoint bundle, checkpoint in /object_info, no marker → True (happy path)."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = [
+            "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+        ]
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["Qwen-Rapid-AIO-NSFW-v19.safetensors", "some_other.safetensors"]
+        )
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is True
+        assert not any(
+            log.get("event") == "gpu_session.provision.probe_checkpoint_path_mismatch"
+            for log in logs
+        ), "exact match must not fire probe_checkpoint_path_mismatch"
+
+    async def test_checkpoint_subfolder_returns_true_and_warns(self) -> None:
+        """Checkpoint exposed as 'sub/Model.safetensors', bundle declares 'Model.safetensors'
+        → True (basename match), but probe_checkpoint_path_mismatch WARNING is logged."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Model.safetensors"]
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["sub/Model.safetensors"]
+        )
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is True
+        mismatch_logs = [
+            log
+            for log in logs
+            if log.get("event") == "gpu_session.provision.probe_checkpoint_path_mismatch"
+        ]
+        assert mismatch_logs, "expected probe_checkpoint_path_mismatch warning"
+        assert mismatch_logs[0].get("log_level") == "warning"
+
+    async def test_checkpoint_absent_returns_false_and_logs(self) -> None:
+        """Regression: checkpoint declared but absent in ComfyUI → False (the incident root cause)."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = [
+            "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+        ]
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        # ComfyUI only has a stock SD1.5 ckpt, not the declared Qwen checkpoint
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["v1-5-pruned-emaonly.safetensors"]
+        )
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is False
+        missing_logs = [
+            log
+            for log in logs
+            if log.get("event") == "gpu_session.provision.probe_checkpoint_missing"
+        ]
+        assert missing_logs, "expected probe_checkpoint_missing log"
+        assert missing_logs[0]["expected"] == "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+
+    async def test_malformed_object_info_returns_false_and_logs_shape(self) -> None:
+        """200 but /object_info missing CheckpointLoaderSimple shape → False, probe_object_info_shape at WARNING."""
+        import json
+
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(readiness_marker_node_class=None)
+        # Response has CheckpointLoaderSimple but with wrong shape (empty dict instead of nested)
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = json.dumps({"CheckpointLoaderSimple": {}}).encode()
+        mocks["http_client"].get.return_value = resp
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(session)
+
+        assert result is False
+        shape_logs = [
+            log
+            for log in logs
+            if log.get("event") == "gpu_session.provision.probe_object_info_shape"
+        ]
+        assert shape_logs, "expected probe_object_info_shape log"
+        assert shape_logs[0].get("log_level") == "warning"
+
+    async def test_checkpoint_and_marker_both_present_returns_true(self) -> None:
+        """Both checkpoint and marker checks pass → True."""
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["Qwen.safetensors"],
+            extra_classes=["WanVideoSampler"],
+        )
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is True
+
+    async def test_checkpoint_present_but_marker_missing_returns_false(self) -> None:
+        """Checkpoint passes, but marker class absent → False."""
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["Qwen.safetensors"]
+            # WanVideoSampler NOT in extra_classes
+        )
+
+        result = await worker._probe_comfyui(session)
+
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# TestMatchCheckpoint — unit tests for _match_checkpoint helper
+# ---------------------------------------------------------------------------
+
+
+class TestMatchCheckpoint:
+    def test_exact_match_returns_true_exact(self) -> None:
+        matched, exact = _match_checkpoint("model.safetensors", ["model.safetensors", "other.ckpt"])
+        assert matched is True
+        assert exact is True
+
+    def test_subfolder_exposure_basename_match(self) -> None:
+        matched, exact = _match_checkpoint("model.safetensors", ["sub/model.safetensors"])
+        assert matched is True
+        assert exact is False
+
+    def test_genuinely_absent_returns_false(self) -> None:
+        matched, exact = _match_checkpoint("wanted.safetensors", ["other.safetensors"])
+        assert matched is False
+        assert exact is False
+
+    def test_empty_available_returns_false(self) -> None:
+        matched, exact = _match_checkpoint("model.safetensors", [])
+        assert matched is False
+        assert exact is False
+
+
+# ---------------------------------------------------------------------------
+# TestReadyProbeMismatch — _advance_provisioning warns when node says ready but probe disagrees
+# ---------------------------------------------------------------------------
+
+
+class TestReadyProbeMismatch:
+    async def test_probe_false_with_ready_phase_logs_mismatch(self) -> None:
+        """When provisioning_phase='ready' but probe returns False → log ready_probe_mismatch."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            provisioning_phase="ready",
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        # Probe returns False (checkpoint not yet present or ComfyUI not up)
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with capture_logs() as logs:
+                await worker._advance_provisioning(session)
+
+        # Must log the mismatch
+        mismatch_logs = [
+            log for log in logs if log.get("event") == "gpu_session.provision.ready_probe_mismatch"
+        ]
+        assert mismatch_logs, "expected ready_probe_mismatch warning log"
+        assert mismatch_logs[0].get("log_level") == "warning"
+        # Must NOT mark the session active
+        mock_repo.update_status.assert_not_called()
+
+    async def test_probe_false_with_non_ready_phase_no_mismatch_log(self) -> None:
+        """When phase is 'downloading' (not 'ready'), probe=False is normal — no mismatch log."""
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            provisioning_phase="downloading",
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with capture_logs() as logs:
+                await worker._advance_provisioning(session)
+
+        mismatch_logs = [
+            log for log in logs if log.get("event") == "gpu_session.provision.ready_probe_mismatch"
+        ]
+        assert not mismatch_logs, "ready_probe_mismatch must not fire for non-ready phase"
 
 
 # ---------------------------------------------------------------------------
@@ -2109,4 +2407,4 @@ class TestNodeReportedFailure:
         mocks["vastai_client"].create_instance.assert_called_once()
         # update_status should set pending, not failed
         update_calls = [str(c) for c in mock_repo.update_status.call_args_list]
-        assert not any("failed" in c for c in update_calls)
+        assert all("failed" not in c for c in update_calls)

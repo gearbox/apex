@@ -474,9 +474,6 @@ async def init_services(settings: Settings) -> JWTService:
     # Initialize rate limiter
     init_rate_limiter(settings)
 
-    # Initialize workflow service
-    _services.workflow_service = WorkflowService()
-
     # Initialize R2 storage (if configured)
     if settings.r2_configured:
         r2_settings = R2StorageSettings(
@@ -619,8 +616,8 @@ async def init_services(settings: Settings) -> JWTService:
             max_uncompressed_bytes=settings.ai_bundles_max_uncompressed_bytes,
             settings=settings,
         )
-        if _services.workflow_service is not None:
-            _services.bundle_index.register_on_resync(_services.workflow_service.invalidate_cache)
+        _services.workflow_service = WorkflowService(bundle_index=_services.bundle_index)
+        _services.bundle_index.register_on_resync(_services.workflow_service.invalidate_cache)
         await _services.bundle_index.start()
 
         billing_service_for_worker = BillingService(event_bus=_services.event_bus)
@@ -691,6 +688,7 @@ async def init_services(settings: Settings) -> JWTService:
             hint="Ensure bundle indexing is set up if AISHA should be available",
         )
     else:
+        assert _services.workflow_service is not None  # set together with bundle_index above
         generation_providers[Provider.AISHA] = AishaGenerationProvider(
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,

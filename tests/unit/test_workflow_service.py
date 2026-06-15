@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import structlog.testing
-import yaml
 
 from src.api.schemas.generation import (
     AspectRatio,
@@ -16,6 +16,7 @@ from src.api.schemas.generation import (
 )
 from src.api.services.workflow_service import (
     NodeIDs,
+    WorkflowConfigError,
     WorkflowNotFoundError,
     WorkflowService,
     WorkflowValidationError,
@@ -81,61 +82,40 @@ class TestInjectCheckpoint:
     """WorkflowService.inject_checkpoint() — single source of truth for ckpt_name."""
 
     def test_ckpt_name_from_bundle_yaml_overrides_stale_widget(self, tmp_path: Path) -> None:
-        """Checkpoint filename from bundle.yaml replaces whatever is baked in the workflow."""
-        bundle_root, _ = make_bundle_dir(
-            tmp_path,
-            version="260103-19",
-            ckpt_name="Qwen-Rapid-AIO-NSFW-v19.safetensors",
-        )
-        svc = WorkflowService()
+        """Checkpoint filename from BundleIndexService replaces whatever is baked in the workflow."""
+        bundle_root, _ = make_bundle_dir(tmp_path, version="260103-19")
+        mock_bundles = MagicMock()
+        mock_bundles.get_checkpoint_filenames.return_value = ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
+        svc = WorkflowService(bundle_index=mock_bundles)
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
         # The workflow bakes "STALE.safetensors" as the checkpoint name
         assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == "STALE.safetensors"
 
         with structlog.testing.capture_logs() as cap:
-            svc.inject_checkpoint(workflow, bundle_root, "260103-19", session_id="test-session")
+            svc.inject_checkpoint(
+                workflow, "qwen_rapid_aio", "260103-19", session_id="test-session"
+            )
 
         assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == (
             "Qwen-Rapid-AIO-NSFW-v19.safetensors"
         )
+        mock_bundles.get_checkpoint_filenames.assert_called_once_with("qwen_rapid_aio", "260103-19")
         assert any(e["event"] == "workflow.checkpoint_injected" for e in cap)
         injected = next(e for e in cap if e["event"] == "workflow.checkpoint_injected")
         assert injected["ckpt_name"] == "Qwen-Rapid-AIO-NSFW-v19.safetensors"
 
     def test_injection_skipped_when_multiple_checkpoint_files(self, tmp_path: Path) -> None:
-        """Guard: two checkpoint files → no injection, skipped log emitted."""
-        bundle_root = tmp_path / "bundles" / "multi"
-        version_dir = bundle_root / "v1"
-        version_dir.mkdir(parents=True)
-        bundle_yaml = {
-            "hardware": {
-                "gpu_whitelist": [],
-                "min_disk_gb": 100,
-                "min_network_upload_mbps": 100,
-                "min_network_download_mbps": 100,
-                "cuda_min_version": "12.1",
-                "num_gpus": 1,
-            },
-            "models": [
-                {
-                    "model_type": "checkpoints",
-                    "files": [
-                        {"filename": "high.safetensors"},
-                        {"filename": "low.safetensors"},
-                    ],
-                }
-            ],
-        }
-        (version_dir / "bundle.yaml").write_text(yaml.dump(bundle_yaml))
-        (version_dir / "workflow.json").write_text(json.dumps(_MINIMAL_GUI_WORKFLOW))
-
-        svc = WorkflowService()
-        workflow = svc.load_workflow_from_bundle(bundle_root, "v1")
+        """Guard: two checkpoint files reported by BundleIndexService → no injection."""
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        mock_bundles = MagicMock()
+        mock_bundles.get_checkpoint_filenames.return_value = ["high.safetensors", "low.safetensors"]
+        svc = WorkflowService(bundle_index=mock_bundles)
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
         original_ckpt = workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"]
 
         with structlog.testing.capture_logs() as cap:
-            svc.inject_checkpoint(workflow, bundle_root, "v1", session_id="s1")
+            svc.inject_checkpoint(workflow, "qwen_rapid_aio", "260103-19", session_id="s1")
 
         # Widget value unchanged
         assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == original_ckpt
@@ -161,30 +141,37 @@ class TestInjectCheckpoint:
         bundle_root = tmp_path / "bundles" / "multi_loader"
         version_dir = bundle_root / "v1"
         version_dir.mkdir(parents=True)
-        bundle_yaml = {
-            "hardware": {
-                "gpu_whitelist": [],
-                "min_disk_gb": 100,
-                "min_network_upload_mbps": 100,
-                "min_network_download_mbps": 100,
-                "cuda_min_version": "12.1",
-                "num_gpus": 1,
-            },
-            "models": [
-                {"model_type": "checkpoints", "files": [{"filename": "single.safetensors"}]}
-            ],
-        }
-        (version_dir / "bundle.yaml").write_text(yaml.dump(bundle_yaml))
         (version_dir / "workflow.json").write_text(json.dumps(multi_loader_workflow))
 
-        svc = WorkflowService()
+        mock_bundles = MagicMock()
+        mock_bundles.get_checkpoint_filenames.return_value = ["single.safetensors"]
+        svc = WorkflowService(bundle_index=mock_bundles)
         workflow = svc.load_workflow_from_bundle(bundle_root, "v1")
         original_ckpt = workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"]
 
         with structlog.testing.capture_logs() as cap:
-            svc.inject_checkpoint(workflow, bundle_root, "v1", session_id="s2")
+            svc.inject_checkpoint(workflow, "multi_loader", "v1", session_id="s2")
 
         assert workflow[NodeIDs.CHECKPOINT_LOADER]["inputs"]["ckpt_name"] == original_ckpt
+        assert any(e["event"] == "workflow.checkpoint_injection_skipped" for e in cap)
+
+    def test_injection_raises_when_no_bundle_index_and_single_loader(self, tmp_path: Path) -> None:
+        """When WorkflowService has no bundle_index and workflow has 1 loader, raise WorkflowConfigError."""
+        bundle_root, _ = make_bundle_dir(tmp_path)
+        svc = WorkflowService()  # no bundle_index
+        workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
+
+        with pytest.raises(WorkflowConfigError, match="bundle index is not configured"):
+            svc.inject_checkpoint(workflow, "qwen_rapid_aio", "260103-19", session_id="no-idx")
+
+    def test_injection_skipped_when_no_bundle_index_and_no_loader_nodes(self) -> None:
+        """When WorkflowService has no bundle_index and workflow has 0 loader nodes, info-skip."""
+        svc = WorkflowService()  # no bundle_index
+        workflow: dict[str, object] = {}  # no CheckpointLoaderSimple nodes
+
+        with structlog.testing.capture_logs() as cap:
+            svc.inject_checkpoint(workflow, "some_bundle", None, session_id="no-idx")
+
         assert any(e["event"] == "workflow.checkpoint_injection_skipped" for e in cap)
 
 
@@ -209,14 +196,12 @@ class TestEndToEndAishaImage:
 
     def test_final_workflow_has_correct_ckpt_and_wired_save_image(self, tmp_path: Path) -> None:
         """After load + inject + apply_parameters, ckpt_name is v19 and SaveImage is wired."""
-        bundle_root, _ = make_bundle_dir(
-            tmp_path,
-            version="260103-19",
-            ckpt_name="Qwen-Rapid-AIO-NSFW-v19.safetensors",
-        )
-        svc = WorkflowService()
+        bundle_root, _ = make_bundle_dir(tmp_path, version="260103-19")
+        mock_bundles = MagicMock()
+        mock_bundles.get_checkpoint_filenames.return_value = ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
+        svc = WorkflowService(bundle_index=mock_bundles)
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
-        svc.inject_checkpoint(workflow, bundle_root, "260103-19", session_id="e2e")
+        svc.inject_checkpoint(workflow, "qwen_rapid_aio", "260103-19", session_id="e2e")
 
         request = GenerationRequest(
             prompt="A ginger cat on grass",
