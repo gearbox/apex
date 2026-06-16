@@ -26,6 +26,7 @@ from src.api.dependencies.common import dependencies, init_services, shutdown_se
 from src.api.middleware.logging import RequestLoggingMiddleware
 from src.api.middleware.product import ProductMiddleware
 from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_config
+from src.api.responses import error_response as _error
 from src.api.routes.admin import AdminController
 from src.api.routes.admin_management import AdminManagementController
 from src.api.routes.auth import AuthController
@@ -76,15 +77,6 @@ _STATUS_TO_ERROR_CODE: dict[int, str] = {
     500: "internal_error",
     503: "service_unavailable",
 }
-
-
-def _error(
-    error: str, message: str, status_code: int, detail: dict[str, Any] | None = None
-) -> Response[Any]:
-    return Response(
-        content=ErrorEnvelope(error=error, message=message, status_code=status_code, detail=detail),
-        status_code=status_code,
-    )
 
 
 def _log_handler_event(

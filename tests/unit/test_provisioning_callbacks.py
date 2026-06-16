@@ -185,25 +185,31 @@ class TestCallbackAuth:
         mock_repo.update_provisioning_progress.assert_not_called()
 
     async def test_session_not_found_returns_401(self) -> None:
+        from structlog.testing import capture_logs
+
         svc, db = _make_service()
         missing_id = uuid4()
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = None  # not found
-            authorized, status = await svc.handle_callback(
-                session_id=missing_id,
-                bearer_token=_VALID_TOKEN,
-                phase="downloading",
-                message="test",
-                download=None,
-                error=None,
-                elapsed_seconds=0,
-                ts=_TS,
-            )
+            with capture_logs() as cap:
+                authorized, status = await svc.handle_callback(
+                    session_id=missing_id,
+                    bearer_token=_VALID_TOKEN,
+                    phase="downloading",
+                    message="test",
+                    download=None,
+                    error=None,
+                    elapsed_seconds=0,
+                    ts=_TS,
+                )
 
         assert authorized is False
         assert status == 401
+        rejected = [r for r in cap if r.get("event") == "gpu_session.callback.rejected"]
+        assert len(rejected) == 1
+        assert rejected[0]["reason"] == "session_not_found"
 
     def test_hash_stored_is_sha256_not_plaintext(self) -> None:
         """Verify no plaintext is ever equal to the stored value."""
@@ -535,3 +541,56 @@ class TestProvisioningCallbackController:
 
         assert resp.status_code == HTTP_400_BAD_REQUEST
         svc.handle_callback.assert_not_called()  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Fix 2: unified gpu_session.callback.rejected log event
+    # ------------------------------------------------------------------
+
+    def test_missing_bearer_logs_rejected_reason(self) -> None:
+        """Missing Authorization header must log gpu_session.callback.rejected reason=missing_bearer."""
+        from structlog.testing import capture_logs
+
+        svc = _build_callback_service()
+        app = _create_callback_app(svc)
+
+        with capture_logs() as cap, TestClient(app=app) as client:
+            client.post(_CALLBACK_PATH, json=_VALID_BODY)
+
+        rejected = [r for r in cap if r.get("event") == "gpu_session.callback.rejected"]
+        assert len(rejected) == 1
+        assert rejected[0]["reason"] == "missing_bearer"
+        assert rejected[0]["session_id"] == str(_SESSION_UUID)
+
+    def test_empty_bearer_logs_rejected_reason(self) -> None:
+        """Empty Bearer token must log gpu_session.callback.rejected reason=empty_bearer."""
+        from structlog.testing import capture_logs
+
+        svc = _build_callback_service()
+        app = _create_callback_app(svc)
+
+        with capture_logs() as cap, TestClient(app=app) as client:
+            client.post(_CALLBACK_PATH, json=_VALID_BODY, headers={"Authorization": "Bearer "})
+
+        rejected = [r for r in cap if r.get("event") == "gpu_session.callback.rejected"]
+        assert len(rejected) == 1
+        assert rejected[0]["reason"] == "empty_bearer"
+
+    def test_session_id_mismatch_logs_rejected_reason(self) -> None:
+        """session_id path/body mismatch must log gpu_session.callback.rejected reason=session_id_mismatch."""
+        from structlog.testing import capture_logs
+
+        svc = _build_callback_service()
+        app = _create_callback_app(svc)
+        different_id = str(uuid4())
+
+        with capture_logs() as cap, TestClient(app=app) as client:
+            client.post(
+                _CALLBACK_PATH,
+                json={**_VALID_BODY, "session_id": different_id},
+                headers={"Authorization": f"Bearer {_CALLBACK_BEARER}"},
+            )
+
+        rejected = [r for r in cap if r.get("event") == "gpu_session.callback.rejected"]
+        assert len(rejected) == 1
+        assert rejected[0]["reason"] == "session_id_mismatch"
+        assert rejected[0]["body_session_id"] == different_id

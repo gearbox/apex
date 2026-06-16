@@ -64,11 +64,14 @@ class RequestLoggingMiddleware(AbstractMiddleware):
         start = time.perf_counter()
         logger.info("request.started")
 
-        # Wrap send to inject X-Request-Id into the response
+        # Wrap send to inject X-Request-Id into the response and capture the status code.
         rid_header_value = request_id.encode()
+        status_code: int | None = None
 
         async def send_with_request_id(message: dict) -> None:  # type: ignore[type-arg]
+            nonlocal status_code
             if message["type"] == "http.response.start":
+                status_code = message["status"]
                 headers_list = list(message.get("headers", []))
                 headers_list.append((b"x-request-id", rid_header_value))
                 message = {**message, "headers": headers_list}
@@ -80,7 +83,12 @@ class RequestLoggingMiddleware(AbstractMiddleware):
             completed = True
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
-            logger.info("request.finished", duration_ms=duration_ms)
+            # 5xx are server faults → warning; everything else (incl. expected 4xx) stays info.
+            # status_code is None only if the app never sent http.response.start (e.g. disconnect).
+            if status_code is not None and status_code >= 500:
+                logger.warning("request.finished", duration_ms=duration_ms, status_code=status_code)
+            else:
+                logger.info("request.finished", duration_ms=duration_ms, status_code=status_code)
             if completed:
                 # Success path only: clear context so it doesn't leak to the next request.
                 # On exception we intentionally preserve context — Litestar's
