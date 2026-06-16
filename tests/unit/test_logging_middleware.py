@@ -271,3 +271,79 @@ class TestRequestLoggingMiddleware:
         header_dict = dict(start_msg["headers"])
         assert b"content-type" in header_dict
         assert b"x-request-id" in header_dict
+
+    # ------------------------------------------------------------------
+    # Fix 1: status_code propagation in request.finished
+    # ------------------------------------------------------------------
+
+    @pytest.mark.anyio
+    async def test_status_code_200_in_finished_event(self) -> None:
+        """request.finished must carry status_code=200 for a normal response."""
+        scope = _make_scope()
+
+        async def fake_app(_scope: Any, _receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        mw = RequestLoggingMiddleware(app=fake_app)  # type: ignore[arg-type]
+
+        with capture_logs() as cap:
+            await mw(scope, _noop_receive, _CaptureSend())
+
+        finished = next(r for r in cap if r["event"] == "request.finished")
+        assert finished["status_code"] == 200
+        assert finished["log_level"] == "info"
+
+    @pytest.mark.anyio
+    async def test_status_code_401_returned_response_in_finished_event(self) -> None:
+        """Regression: returned Response(401) must appear in request.finished, not just raised exceptions."""
+        scope = _make_scope()
+
+        async def fake_app(_scope: Any, _receive: Any, send: Any) -> None:
+            # Simulates a handler that returns _error(...) instead of raising HTTPException
+            await send({"type": "http.response.start", "status": 401, "headers": []})
+            await send({"type": "http.response.body", "body": b'{"error": "unauthorized"}'})
+
+        mw = RequestLoggingMiddleware(app=fake_app)  # type: ignore[arg-type]
+
+        with capture_logs() as cap:
+            await mw(scope, _noop_receive, _CaptureSend())
+
+        finished = next(r for r in cap if r["event"] == "request.finished")
+        assert finished["status_code"] == 401
+        assert finished["log_level"] == "info"
+
+    @pytest.mark.anyio
+    async def test_status_code_500_logs_warning(self) -> None:
+        """5xx responses must emit request.finished at warning level."""
+        scope = _make_scope()
+
+        async def fake_app(_scope: Any, _receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 500, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        mw = RequestLoggingMiddleware(app=fake_app)  # type: ignore[arg-type]
+
+        with capture_logs() as cap:
+            await mw(scope, _noop_receive, _CaptureSend())
+
+        finished = next(r for r in cap if r["event"] == "request.finished")
+        assert finished["status_code"] == 500
+        assert finished["log_level"] == "warning"
+
+    @pytest.mark.anyio
+    async def test_status_code_none_when_no_response_start(self) -> None:
+        """If the app never sends http.response.start, status_code is None (e.g. client disconnect)."""
+        scope = _make_scope()
+
+        async def fake_app(_scope: Any, _receive: Any, _send: Any) -> None:
+            pass  # never sends http.response.start
+
+        mw = RequestLoggingMiddleware(app=fake_app)  # type: ignore[arg-type]
+
+        with capture_logs() as cap:
+            await mw(scope, _noop_receive, _CaptureSend())
+
+        finished = next(r for r in cap if r["event"] == "request.finished")
+        assert finished["status_code"] is None
+        assert finished["log_level"] == "info"

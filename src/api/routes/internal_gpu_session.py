@@ -22,7 +22,7 @@ from litestar import Controller, Request, Response, post
 from litestar.params import Body
 from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED
 
-from src.api.schemas.errors import ErrorEnvelope
+from src.api.responses import error_response as _error
 from src.api.schemas.gpu_session import DownloadProgressBody
 from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
 
@@ -39,13 +39,6 @@ class ProvisioningCallbackBody(msgspec.Struct, kw_only=True, forbid_unknown_fiel
     elapsed_seconds: int = 0
     error: str | None = None
     ts: datetime
-
-
-def _error(status_code: int, error: str, message: str) -> Response[Any]:
-    return Response(
-        content=ErrorEnvelope(error=error, message=message, status_code=status_code),
-        status_code=status_code,
-    )
 
 
 class InternalGpuSessionController(Controller):
@@ -72,19 +65,30 @@ class InternalGpuSessionController(Controller):
         """
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            return _error(HTTP_401_UNAUTHORIZED, "unauthorized", "Missing Bearer token")
+            logger.warning(
+                "gpu_session.callback.rejected",
+                session_id=str(session_id),
+                reason="missing_bearer",
+            )
+            return _error("unauthorized", "Missing Bearer token", HTTP_401_UNAUTHORIZED)
         bearer_token = auth_header[len("Bearer ") :]
 
         if not bearer_token:
-            return _error(HTTP_401_UNAUTHORIZED, "unauthorized", "Empty Bearer token")
+            logger.warning(
+                "gpu_session.callback.rejected",
+                session_id=str(session_id),
+                reason="empty_bearer",
+            )
+            return _error("unauthorized", "Empty Bearer token", HTTP_401_UNAUTHORIZED)
 
         if data.session_id != session_id:
             logger.warning(
-                "gpu_session.callback.session_id_mismatch",
-                path_session_id=str(session_id),
+                "gpu_session.callback.rejected",
+                session_id=str(session_id),
+                reason="session_id_mismatch",
                 body_session_id=str(data.session_id),
             )
-            return _error(HTTP_400_BAD_REQUEST, "bad_request", "session_id mismatch")
+            return _error("bad_request", "session_id mismatch", HTTP_400_BAD_REQUEST)
 
         authorized, _status = await provisioning_callback_service.handle_callback(
             session_id=session_id,
@@ -98,6 +102,6 @@ class InternalGpuSessionController(Controller):
         )
 
         if not authorized:
-            return _error(HTTP_401_UNAUTHORIZED, "unauthorized", "Invalid callback token")
+            return _error("unauthorized", "Invalid callback token", HTTP_401_UNAUTHORIZED)
 
         return Response(content={"ok": True}, status_code=HTTP_200_OK)
