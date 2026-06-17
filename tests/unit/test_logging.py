@@ -18,9 +18,35 @@ _DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
 
 @pytest.fixture
 def _reset_structlog() -> Generator[None]:
-    """Reset structlog defaults and context after each test."""
+    """Reset structlog configuration to pre-test state after each test.
+
+    Restores the processors list IN-PLACE (same object, original contents) rather
+    than calling reset_defaults(), which creates a NEW list and silently breaks any
+    BoundLogger that was cached while cache_logger_on_first_use=True: the cached
+    logger holds a reference to the OLD list, so capture_logs() — which modifies
+    the NEW list — never reaches it.
+
+    Root cause: app = create_app() runs at collection time, calling configure_logging()
+    (cache_logger_on_first_use=True). In make test-all, integration tests exercise
+    the service logger first, caching it against list_A. reset_defaults() creates
+    list_C; capture_logs() patches list_C; the cached logger still uses list_A.
+    In-place restoration keeps list_A as the live list throughout the session.
+    """
+    old_config = structlog.get_config()
+    old_procs_list = old_config["processors"]  # reference to the actual list object
+    old_procs_snapshot = list(old_procs_list)  # copy of its current contents
     yield
-    structlog.reset_defaults()
+    # Restore the list contents in-place so cached loggers (which hold a reference
+    # to this same list object) continue to work correctly with capture_logs().
+    old_procs_list.clear()
+    old_procs_list.extend(old_procs_snapshot)
+    structlog.configure(
+        processors=old_procs_list,
+        wrapper_class=old_config["wrapper_class"],
+        context_class=old_config["context_class"],
+        logger_factory=old_config["logger_factory"],
+        cache_logger_on_first_use=old_config["cache_logger_on_first_use"],
+    )
     clear_contextvars()
 
 

@@ -15,10 +15,7 @@ from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_503_SERVICE_UNAVAI
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.schemas.events import (
-    EventEnvelope,
-    SSETicketResponse,
-)
+from src.api.schemas.events import SSETicketResponse
 from src.api.security import auth_guard
 from src.api.services.event_bus import EventBus
 from src.api.services.sse_ticket import SSETicketService
@@ -99,32 +96,23 @@ class SSEController(Controller):
 
         async def event_generator() -> AsyncGenerator[dict[str, str]]:
             """Yield SSE-formatted events from the EventBus."""
-            heartbeat_interval = settings.sse_heartbeat_interval
+            heartbeat_interval = float(settings.sse_heartbeat_interval)
 
             try:
-                sub = event_bus.subscribe(user_id)
-                sub_iter = sub.__aiter__()
-
-                while True:
-                    try:
-                        envelope: EventEnvelope = await asyncio.wait_for(
-                            sub_iter.__anext__(),
-                            timeout=float(heartbeat_interval),
-                        )
-                        # Forward the pre-encoded inner payload directly
-                        yield {
-                            "event": envelope.event_type.value,
-                            "id": envelope.event_id,
-                            "data": bytes(envelope.payload).decode(),
-                        }
-                    except TimeoutError:
-                        # Send SSE comment as keepalive
+                async for item in event_bus.subscribe(
+                    user_id, heartbeat_interval=heartbeat_interval
+                ):
+                    if item is None:
                         yield {"comment": "keepalive"}
-                    except StopAsyncIteration:
-                        break
-
+                    else:
+                        yield {
+                            "event": item.event_type.value,
+                            "id": item.event_id,
+                            "data": bytes(item.payload).decode(),
+                        }
             except asyncio.CancelledError:
                 logger.info("sse.client_disconnected", user_id=str(user_id))
+                raise  # never swallow cancellation
             except Exception:
                 logger.exception("sse.stream_error", user_id=str(user_id))
 

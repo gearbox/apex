@@ -65,7 +65,7 @@ class ProvisioningCallbackService:
             returns 200 regardless of whether the write was applied (status-gated
             and stale-ts callbacks return 200 with no write per the design spec).
         """
-        async with self._session_factory() as db:
+        async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             session = await repo.get_by_id(session_id)
 
@@ -129,13 +129,12 @@ class ProvisioningCallbackService:
                 progress["error"] = error
 
             now = datetime.now(UTC)
-            async with db.begin():
-                await repo.update_provisioning_progress(
-                    session_id,
-                    phase=phase,
-                    progress=progress,
-                    last_progress_at=now,
-                )
+            await repo.update_provisioning_progress(
+                session_id,
+                phase=phase,
+                progress=progress,
+                last_progress_at=now,
+            )
 
         logger.info(
             "gpu_session.callback.received",

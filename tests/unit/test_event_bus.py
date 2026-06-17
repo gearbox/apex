@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -18,6 +19,8 @@ from src.api.services.event_bus import EventBus
 
 _encoder = msgspec.json.Encoder()
 _decoder = msgspec.json.Decoder(EventEnvelope)
+
+_HEARTBEAT_INTERVAL = 15.0
 
 
 @pytest.fixture
@@ -41,6 +44,41 @@ def job_status_payload():  # type: ignore[no-untyped-def]
     )
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_wire(payload: object, event_type: EventType = EventType.JOB_STATUS_CHANGED) -> bytes:
+    import datetime
+
+    envelope = EventEnvelope(
+        event_type=event_type,
+        payload=msgspec.Raw(_encoder.encode(payload)),
+        timestamp=datetime.datetime(2026, 3, 17, 12, tzinfo=datetime.UTC),
+        event_id="evt-1",
+    )
+    return _encoder.encode(envelope)
+
+
+def _mock_pubsub(get_message_side_effect: object) -> AsyncMock:
+    """Return a mock pubsub whose get_message is pre-configured."""
+    mock_pubsub = AsyncMock()
+    mock_pubsub.get_message = AsyncMock(side_effect=get_message_side_effect)
+    return mock_pubsub
+
+
+def _mock_client(pubsub: AsyncMock) -> AsyncMock:
+    mock_client = AsyncMock()
+    mock_client.pubsub = MagicMock(return_value=pubsub)
+    return mock_client
+
+
+# ---------------------------------------------------------------------------
+# Publish
+# ---------------------------------------------------------------------------
+
+
 class TestEventBusPublish:
     @patch("src.api.services.event_bus.get_redis_client")
     async def test_publish_calls_redis_publish(
@@ -58,7 +96,6 @@ class TestEventBusPublish:
         mock_client.publish.assert_awaited_once()
         mock_client.aclose.assert_not_awaited()
 
-        # Check channel name
         channel_arg = mock_client.publish.call_args[0][0]
         assert channel_arg == f"user:{user_id}"
 
@@ -96,8 +133,12 @@ class TestEventBusPublish:
                 payload=job_status_payload,
             )
 
-        # aclose must NOT be called — closing the client would tear down the shared pool
         mock_client.aclose.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Publish system
+# ---------------------------------------------------------------------------
 
 
 class TestEventBusPublishSystem:
@@ -136,94 +177,141 @@ class TestEventBusPublishSystem:
         assert inner.level == "critical"
 
 
+# ---------------------------------------------------------------------------
+# Subscribe — get_message-based implementation
+# ---------------------------------------------------------------------------
+
+
 class TestEventBusSubscribe:
     @patch("src.api.services.event_bus.get_redis_client")
-    async def test_subscribe_yields_decoded_envelopes(
+    async def test_subscribe_yields_decoded_envelope(
         self, mock_get_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
     ) -> None:
-        import datetime
-
-        # Build a wire-format message as Redis would deliver it
-        envelope = EventEnvelope(
-            event_type=EventType.JOB_STATUS_CHANGED,
-            payload=msgspec.Raw(_encoder.encode(job_status_payload)),
-            timestamp=datetime.datetime(2026, 3, 17, 12, tzinfo=datetime.UTC),
-            event_id="evt-1",
-        )
-        wire = _encoder.encode(envelope)
-
-        # Mock Redis pubsub — listen() returns an async iterable directly (not a coroutine)
-        mock_pubsub = AsyncMock()
-        mock_pubsub.listen = MagicMock(
-            return_value=aiter_from_list(
-                [
-                    {"type": "subscribe", "data": 1},
-                    {"type": "message", "channel": f"user:{user_id}", "data": wire},
-                ]
-            )
-        )
-
-        # pubsub() is a sync call on the client (not awaited)
-        mock_client = AsyncMock()
-        mock_client.pubsub = MagicMock(return_value=mock_pubsub)
-        mock_get_client.return_value = mock_client
+        wire = _make_wire(job_status_payload)
+        pubsub = _mock_pubsub([{"type": "message", "channel": f"user:{user_id}", "data": wire}])
+        mock_get_client.return_value = _mock_client(pubsub)
 
         results = []
-        async for evt in event_bus.subscribe(user_id):
-            results.append(evt)
-            break  # Stop after first message
+        async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+            if item is not None:
+                results.append(item)
+                break
 
         assert len(results) == 1
         assert results[0].event_type == EventType.JOB_STATUS_CHANGED
 
     @patch("src.api.services.event_bus.get_redis_client")
-    async def test_subscribe_skips_decode_errors(
+    async def test_subscribe_yields_none_on_get_message_timeout(
         self, mock_get_client: MagicMock, event_bus: EventBus, user_id
     ) -> None:
-        mock_pubsub = AsyncMock()
-        mock_pubsub.listen = MagicMock(
-            return_value=aiter_from_list(
-                [
-                    {"type": "message", "channel": f"user:{user_id}", "data": b"not-valid-json"},
-                ]
-            )
-        )
-
-        mock_client = AsyncMock()
-        mock_client.pubsub = MagicMock(return_value=mock_pubsub)
-        mock_get_client.return_value = mock_client
+        """get_message returning None (no message in interval) → subscribe yields None."""
+        pubsub = _mock_pubsub([None])
+        mock_get_client.return_value = _mock_client(pubsub)
 
         results = []
-        # Should not raise — decode errors are logged and skipped
-        async for evt in event_bus.subscribe(user_id):
-            results.append(evt)
+        async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+            results.append(item)
+            break  # stop after first heartbeat tick
 
-        assert not results
+        assert results == [None]
 
     @patch("src.api.services.event_bus.get_redis_client")
-    async def test_subscribe_unsubscribes_on_exit(
+    async def test_subscribe_get_message_called_with_heartbeat_interval(
         self, mock_get_client: MagicMock, event_bus: EventBus, user_id
     ) -> None:
-        mock_pubsub = AsyncMock()
-        mock_pubsub.listen = MagicMock(return_value=aiter_from_list([]))
+        """get_message must be called with timeout=heartbeat_interval."""
+        pubsub = _mock_pubsub([None])
+        mock_get_client.return_value = _mock_client(pubsub)
 
-        mock_client = AsyncMock()
-        mock_client.pubsub = MagicMock(return_value=mock_pubsub)
-        mock_get_client.return_value = mock_client
+        async for _ in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+            break
 
-        async for _ in event_bus.subscribe(user_id):
-            pass
+        pubsub.get_message.assert_awaited_with(
+            ignore_subscribe_messages=True, timeout=_HEARTBEAT_INTERVAL
+        )
 
-        mock_pubsub.unsubscribe.assert_awaited_once()
-        mock_pubsub.aclose.assert_awaited_once()
-        mock_client.aclose.assert_not_awaited()
+    @patch("src.api.services.event_bus.get_redis_client")
+    async def test_subscribe_skips_decode_errors_and_continues(
+        self, mock_get_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
+    ) -> None:
+        """A bad message is skipped and the next good message is still yielded."""
+        wire = _make_wire(job_status_payload)
+        pubsub = _mock_pubsub(
+            [
+                {"type": "message", "channel": f"user:{user_id}", "data": b"not-valid-json"},
+                {"type": "message", "channel": f"user:{user_id}", "data": wire},
+            ]
+        )
+        mock_get_client.return_value = _mock_client(pubsub)
 
+        results = []
+        async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+            if item is not None:
+                results.append(item)
+                break
 
-# ---------------------------------------------------------------------------
-# Helper: turn a plain list into an async iterator
-# ---------------------------------------------------------------------------
+        assert len(results) == 1
+        assert results[0].event_type == EventType.JOB_STATUS_CHANGED
 
+    @patch("src.api.services.event_bus.get_redis_client")
+    async def test_subscribe_skips_non_message_type(
+        self, mock_get_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
+    ) -> None:
+        """Messages with type != 'message' are skipped."""
+        wire = _make_wire(job_status_payload)
+        pubsub = _mock_pubsub(
+            [
+                {"type": "psubscribe", "data": 1},  # skipped
+                {"type": "message", "channel": f"user:{user_id}", "data": wire},
+            ]
+        )
+        mock_get_client.return_value = _mock_client(pubsub)
 
-async def aiter_from_list(items):  # type: ignore[no-untyped-def]
-    for item in items:
-        yield item
+        results = []
+        async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+            if item is not None:
+                results.append(item)
+                break
+
+        assert len(results) == 1
+
+    @patch("src.api.services.event_bus.get_redis_client")
+    async def test_subscribe_unsubscribes_and_closes_on_exit(
+        self, mock_get_client: MagicMock, event_bus: EventBus, user_id
+    ) -> None:
+        pubsub = _mock_pubsub([None])
+        mock_get_client.return_value = _mock_client(pubsub)
+
+        gen = event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL)
+        async for _ in gen:
+            break
+        # Python defers async-generator finalization after break; drive it now
+        await gen.aclose()
+
+        pubsub.unsubscribe.assert_awaited_once()
+        pubsub.aclose.assert_awaited_once()
+        # shared pool client must NOT be closed
+        mock_get_client.return_value.aclose.assert_not_awaited()
+
+    @patch("src.api.services.event_bus.get_redis_client")
+    async def test_subscribe_unsubscribes_on_cancellation(
+        self, mock_get_client: MagicMock, event_bus: EventBus, user_id
+    ) -> None:
+        """Cleanup (unsubscribe + aclose) runs even when the generator is cancelled."""
+
+        async def cancel_on_second(*_args: object, **_kwargs: object) -> None:
+            cancel_on_second.calls = getattr(cancel_on_second, "calls", 0) + 1  # type: ignore[attr-defined]
+            if cancel_on_second.calls >= 2:  # type: ignore[attr-defined]
+                raise asyncio.CancelledError
+            return None  # type: ignore[return-value]
+
+        pubsub = AsyncMock()
+        pubsub.get_message = AsyncMock(side_effect=cancel_on_second)
+        mock_get_client.return_value = _mock_client(pubsub)
+
+        with pytest.raises(asyncio.CancelledError):
+            async for _ in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+                pass
+
+        pubsub.unsubscribe.assert_awaited_once()
+        pubsub.aclose.assert_awaited_once()

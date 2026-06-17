@@ -94,11 +94,15 @@ class EventBus:
     async def subscribe(
         self,
         user_id: UUID,
-    ) -> AsyncGenerator[EventEnvelope]:
+        *,
+        heartbeat_interval: float,
+    ) -> AsyncGenerator[EventEnvelope | None]:
         """Subscribe to a user's channel + system broadcast.
 
-        Yields EventEnvelope instances. Caller is responsible for
-        converting to SSE format or WebSocket frames.
+        Yields EventEnvelope on a message, or None on heartbeat timeout.
+        Uses get_message() so the read is never cancelled mid-flight —
+        avoids the redis-py CancelledError→TimeoutError conversion that
+        caused SSE stream drops on idle periods.
         """
         client = get_redis_client()
         pubsub: PubSub = client.pubsub()
@@ -111,7 +115,13 @@ class EventBus:
                 channels=[user_channel, self.SYSTEM_CHANNEL],
             )
 
-            async for message in pubsub.listen():
+            while True:
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=heartbeat_interval
+                )
+                if message is None:
+                    yield None  # heartbeat tick — no event within the interval
+                    continue
                 if message["type"] != "message":
                     continue
                 try:

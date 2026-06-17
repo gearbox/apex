@@ -836,6 +836,14 @@ async def shutdown_services() -> None:
         await _services.aisha_job_poller.stop()
         logger.info("aisha_job_poller.stopped")
 
+    # Stop DB-dependent workers before closing the pool so their cancellation
+    # cleanup (rollback + session.close) can still return connections cleanly.
+    if _services.token_cleanup_worker is not None:
+        await _services.token_cleanup_worker.stop()
+
+    if _services.health_snapshot_worker is not None:
+        await _services.health_snapshot_worker.stop()
+
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
         logger.info("r2.closed")
@@ -848,17 +856,11 @@ async def shutdown_services() -> None:
         await _services.grok_job_service.close()
         logger.info("grok.closed")
 
-    if _services.token_cleanup_worker is not None:
-        await _services.token_cleanup_worker.stop()
-
     settings = get_settings()
     if settings.grok_configured and settings.grok_video_worker_in_process:
         from src.api.services.grok.video_worker import GrokVideoWorkerManager
 
         await GrokVideoWorkerManager.stop()
-
-    if _services.health_snapshot_worker is not None:
-        await _services.health_snapshot_worker.stop()
 
     if _services.health_http_client is not None:
         await _services.health_http_client.aclose()
