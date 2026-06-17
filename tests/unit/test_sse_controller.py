@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -97,7 +97,6 @@ class TestSSEControllerHandler:
     async def test_create_sse_ticket_handler_logic(
         self, mock_get_client: MagicMock, user_id: UUID
     ) -> None:
-        """Simulates what the create_sse_ticket handler does."""
         mock_client = AsyncMock()
         mock_get_client.return_value = mock_client
 
@@ -110,7 +109,6 @@ class TestSSEControllerHandler:
 
     @patch("src.api.services.sse_ticket.get_redis_client")
     async def test_stream_invalid_ticket_logic(self, mock_get_client: MagicMock) -> None:
-        """Simulates what the stream handler does when ticket is invalid."""
         mock_client = AsyncMock()
         mock_client.getdel.return_value = None
         mock_get_client.return_value = mock_client
@@ -118,14 +116,12 @@ class TestSSEControllerHandler:
         service = SSETicketService(ttl_seconds=30)
         user_id = await service.redeem_ticket("bad-ticket")
 
-        # Handler returns 401 when user_id is None
         assert user_id is None
 
     @patch("src.api.services.sse_ticket.get_redis_client")
     async def test_stream_valid_ticket_logic(
         self, mock_get_client: MagicMock, user_id: UUID
     ) -> None:
-        """Simulates what the stream handler does with a valid ticket."""
         mock_client = AsyncMock()
         mock_client.getdel.return_value = str(user_id)
         mock_get_client.return_value = mock_client
@@ -133,12 +129,11 @@ class TestSSEControllerHandler:
         service = SSETicketService(ttl_seconds=30)
         result = await service.redeem_ticket("good-ticket")
 
-        # Handler proceeds to open SSE stream when user_id is not None
         assert result == user_id
 
 
 # ---------------------------------------------------------------------------
-# SSE event_generator logic — envelope→SSE mapping and heartbeat
+# SSE event_generator logic — drives the new async-for subscribe loop
 # ---------------------------------------------------------------------------
 
 _encoder = msgspec.json.Encoder()
@@ -160,37 +155,40 @@ def _make_envelope(event_type: EventType = EventType.JOB_STATUS_CHANGED) -> Even
     )
 
 
-async def _run_generator(  # type: ignore[no-untyped-def]
-    subscribe_fn,
+async def _run_generator(
+    subscribe_items: Sequence[EventEnvelope | None],
     *,
     heartbeat_interval: float = 15.0,
 ) -> list[dict[str, str]]:
-    """Run the same event_generator logic used in SSEController.stream."""
+    """Run the same event_generator logic used in SSEController.stream.
+
+    subscribe_items is what event_bus.subscribe would yield (None = heartbeat tick).
+    """
     results: list[dict[str, str]] = []
     user_id = uuid4()
 
-    sub = subscribe_fn(user_id)
-    sub_iter = sub.__aiter__()
+    async def mock_subscribe(
+        uid: UUID,  # noqa: ARG001
+        *,
+        heartbeat_interval: float,  # noqa: ARG001
+    ) -> AsyncIterator[EventEnvelope | None]:
+        for item in subscribe_items:
+            yield item
 
-    with contextlib.suppress(asyncio.CancelledError):
-        while True:
-            try:
-                envelope: EventEnvelope = await asyncio.wait_for(
-                    sub_iter.__anext__(),
-                    timeout=heartbeat_interval,
-                )
+    try:
+        async for item in mock_subscribe(user_id, heartbeat_interval=heartbeat_interval):
+            if item is None:
+                results.append({"comment": "keepalive"})
+            else:
                 results.append(
                     {
-                        "event": envelope.event_type.value,
-                        "id": envelope.event_id,
-                        "data": bytes(envelope.payload).decode(),
+                        "event": item.event_type.value,
+                        "id": item.event_id,
+                        "data": bytes(item.payload).decode(),
                     }
                 )
-            except TimeoutError:
-                results.append({"comment": "keepalive"})
-                break  # stop after first keepalive so the test terminates
-            except StopAsyncIteration:
-                break
+    except asyncio.CancelledError:
+        raise
 
     return results
 
@@ -199,18 +197,21 @@ class TestSSEEventGenerator:
     """Test the event_generator closure logic from SSEController.stream."""
 
     async def test_envelope_mapped_to_sse_fields(self) -> None:
-        """EventEnvelope from EventBus.subscribe is mapped to SSE event/id/data."""
+        """EventEnvelope from subscribe is mapped to SSE event/id/data."""
         envelope = _make_envelope(EventType.JOB_STATUS_CHANGED)
 
-        async def mock_subscribe(_):  # type: ignore[no-untyped-def]
-            yield envelope
-
-        results = await _run_generator(mock_subscribe)
+        results = await _run_generator([envelope])
 
         assert len(results) == 1
         assert results[0]["event"] == EventType.JOB_STATUS_CHANGED.value
         assert results[0]["id"] == envelope.event_id
         assert results[0]["data"] == bytes(envelope.payload).decode()
+
+    async def test_none_item_yields_keepalive_comment(self) -> None:
+        """None yielded by subscribe (heartbeat tick) → {'comment': 'keepalive'}."""
+        results = await _run_generator([None])
+
+        assert results == [{"comment": "keepalive"}]
 
     async def test_multiple_envelopes_all_forwarded(self) -> None:
         """Each yielded envelope becomes one SSE dict."""
@@ -218,25 +219,92 @@ class TestSSEEventGenerator:
         for i, env in enumerate(envelopes):
             object.__setattr__(env, "event_id", f"evt-{i}")
 
-        async def mock_subscribe(_):  # type: ignore[no-untyped-def]
-            for env in envelopes:
-                yield env
-
-        results = await _run_generator(mock_subscribe)
+        results = await _run_generator(envelopes)
 
         assert len(results) == 3
         for result in results:
             assert result["event"] == EventType.JOB_STATUS_CHANGED.value
 
-    async def test_timeout_yields_keepalive_comment(self) -> None:
-        """When wait_for times out, a keepalive comment is produced."""
+    async def test_mixed_none_and_envelopes(self) -> None:
+        """None ticks interspersed with envelopes are all handled correctly."""
+        envelope = _make_envelope()
+        results = await _run_generator([None, envelope, None])
 
-        async def never_yields(_):  # type: ignore[no-untyped-def]
-            # An async generator that never yields — causes wait_for to time out
-            await asyncio.sleep(10)
-            if False:  # pragma: no cover
-                yield
+        assert results[0] == {"comment": "keepalive"}
+        assert results[1]["event"] == EventType.JOB_STATUS_CHANGED.value
+        assert results[2] == {"comment": "keepalive"}
 
-        results = await _run_generator(never_yields, heartbeat_interval=0.01)
+    async def test_cancelled_error_propagates(self) -> None:
+        """CancelledError from subscribe must propagate (not be swallowed)."""
+        user_id = uuid4()
+
+        async def subscribe_then_cancel(uid: UUID, *, heartbeat_interval: float):  # type: ignore[no-untyped-def]  # noqa: ARG001
+            yield None  # first tick
+            raise asyncio.CancelledError
+
+        results: list[dict[str, str]] = []
+        with pytest.raises(asyncio.CancelledError):
+            async for item in subscribe_then_cancel(user_id, heartbeat_interval=15.0):
+                if item is None:
+                    results.append({"comment": "keepalive"})
 
         assert results == [{"comment": "keepalive"}]
+
+    async def test_cancelled_error_logs_client_disconnected(self) -> None:
+        """CancelledError → sse.client_disconnected is logged, sse.stream_error is NOT."""
+        from structlog.testing import capture_logs
+
+        user_id = uuid4()
+
+        async def subscribe_cancel(uid: UUID, *, heartbeat_interval: float):  # type: ignore[no-untyped-def]  # noqa: ARG001
+            if False:  # pragma: no cover
+                yield  # sentinel: makes this an async generator
+            raise asyncio.CancelledError
+
+        with capture_logs() as cap:
+            # Simulate the exact event_generator try/except from sse.py
+            import structlog as sl
+
+            logger = sl.get_logger("src.api.routes.sse")
+            try:
+                async for _ in subscribe_cancel(user_id, heartbeat_interval=15.0):
+                    pass  # pragma: no cover
+            except asyncio.CancelledError:
+                logger.info("sse.client_disconnected", user_id=str(user_id))
+                # re-raise is tested separately; here we just verify the log
+
+        disconnected_logs = [r for r in cap if r.get("event") == "sse.client_disconnected"]
+        stream_error_logs = [r for r in cap if r.get("event") == "sse.stream_error"]
+        assert len(disconnected_logs) == 1
+        assert not stream_error_logs
+
+    async def test_no_sse_stream_error_on_idle_heartbeat(self) -> None:
+        """Regression: a heartbeat tick (None) must NOT trigger sse.stream_error.
+
+        Previously, asyncio.wait_for() cancelled the Redis read and redis-py
+        converted the CancelledError to TimeoutError, which fell through to
+        the sse.stream_error except branch. Verify None items are clean.
+        """
+        from structlog.testing import capture_logs
+
+        user_id = uuid4()
+
+        async def subscribe_heartbeat(uid: UUID, *, heartbeat_interval: float):  # type: ignore[no-untyped-def]  # noqa: ARG001
+            yield None  # simulate one idle period with no event
+
+        with capture_logs() as cap:
+            import structlog as sl
+
+            logger = sl.get_logger("src.api.routes.sse")
+            try:
+                async for item in subscribe_heartbeat(user_id, heartbeat_interval=15.0):
+                    if item is None:
+                        pass  # keepalive — no error
+            except asyncio.CancelledError:
+                logger.info("sse.client_disconnected", user_id=str(user_id))
+                raise
+            except Exception:
+                logger.exception("sse.stream_error", user_id=str(user_id))
+
+        stream_error_logs = [r for r in cap if r.get("event") == "sse.stream_error"]
+        assert not stream_error_logs

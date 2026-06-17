@@ -26,6 +26,9 @@ _TEST_SETTINGS = Settings(
     rate_limit_forgot_password="3/hour",
     rate_limit_resend_verification="3/hour",
     rate_limit_sse_ticket="10/minute",
+    # Disable the 1-second-tick DB poller so test cycles don't accumulate
+    # open connections that may race against shutdown_services().
+    aisha_poller_enabled=False,
 )
 
 
