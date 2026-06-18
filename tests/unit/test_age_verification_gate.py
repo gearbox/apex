@@ -95,19 +95,23 @@ def _make_user_mock(*, age_verified_at: datetime | None) -> MagicMock:
 
 
 class TestGenerationAgeGate:
-    async def test_unverified_user_aisha_image_raises(self) -> None:
+    @pytest.mark.parametrize(
+        ("model", "gen_type"),
+        [
+            (ModelType.AISHA_IMAGE, GenerationType.T2I),
+            (ModelType.AISHA_VIDEO, GenerationType.T2V),
+        ],
+    )
+    async def test_unverified_user_aisha_raises(
+        self, model: ModelType, gen_type: GenerationType
+    ) -> None:
         service = _make_generation_service()
-        request = UnifiedGenerationRequest(
-            prompt="test",
-            generation_type=GenerationType.T2I,
-            model=ModelType.AISHA_IMAGE,
-        )
+        request = UnifiedGenerationRequest(prompt="test", generation_type=gen_type, model=model)
         with (
             patch(
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=_make_enabled_model_mock()),
             ),
-            # UserRepository is imported lazily; patch at the source module
             patch(
                 "src.db.repositories.user.UserRepository.get_user",
                 new=AsyncMock(return_value=_make_user_mock(age_verified_at=None)),
@@ -116,15 +120,19 @@ class TestGenerationAgeGate:
         ):
             await service.generate(request, user_id=uuid4(), session=AsyncMock())
 
-    async def test_verified_user_aisha_image_passes_gate(self) -> None:
+    @pytest.mark.parametrize(
+        ("model", "gen_type"),
+        [
+            (ModelType.AISHA_IMAGE, GenerationType.T2I),
+            (ModelType.AISHA_VIDEO, GenerationType.T2V),
+        ],
+    )
+    async def test_verified_user_aisha_passes_gate(
+        self, model: ModelType, gen_type: GenerationType
+    ) -> None:
         service = _make_generation_service()
-        request = UnifiedGenerationRequest(
-            prompt="test",
-            generation_type=GenerationType.T2I,
-            model=ModelType.AISHA_IMAGE,
-        )
+        request = UnifiedGenerationRequest(prompt="test", generation_type=gen_type, model=model)
         verified_at = datetime.now(UTC)
-        session_mock = AsyncMock()
 
         with (
             patch(
@@ -136,10 +144,9 @@ class TestGenerationAgeGate:
                 new=AsyncMock(return_value=_make_user_mock(age_verified_at=verified_at)),
             ),
         ):
-            # Should pass the gate (and complete the full pipeline with mocks)
-            result = await service.generate(request, user_id=uuid4(), session=session_mock)
+            result = await service.generate(request, user_id=uuid4(), session=AsyncMock())
 
-        assert result.model == ModelType.AISHA_IMAGE.value
+        assert result.model == model.value
 
     async def test_unverified_user_grok_image_not_gated(self) -> None:
         """Grok models never hit the age gate regardless of user verification status."""

@@ -17,6 +17,7 @@ from src.api.services.pricing import PricingService
 from src.core.enums import JobStatus, Provider
 from src.core.product import ProductConfig
 from src.db.repositories.generation_model import GenerationModelRepository
+from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
@@ -105,8 +106,6 @@ class GenerationService:
 
         # 1.6. Per-model age verification gate (authoritative regardless of product age_gate policy)
         if request.model.requires_age_verification:
-            from src.db.repositories.user import UserRepository
-
             age_user = await UserRepository(session).get_user(user_id)
             if age_user is None or age_user.age_verified_at is None:
                 raise AgeVerificationRequiredError(

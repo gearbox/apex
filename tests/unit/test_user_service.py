@@ -161,7 +161,8 @@ class TestUpdateProfile:
         # age_verified_at was not passed to the repo
         repo.update_user.assert_awaited_once()
         call_kwargs = repo.update_user.call_args.kwargs
-        assert call_kwargs.get("age_verified_at") is None
+        assert call_kwargs["age_verified_at"] is None
+        assert call_kwargs["date_of_birth"] is None
 
     async def test_first_age_confirmed_sets_verified_at(self) -> None:
         user = _make_user(age_verified_at=None)
@@ -194,7 +195,7 @@ class TestUpdateProfile:
         )
         call_kwargs = repo.update_user.call_args.kwargs
         # Must NOT pass a new timestamp — would overwrite the original
-        assert call_kwargs.get("age_verified_at") is None
+        assert call_kwargs["age_verified_at"] is None
 
     async def test_age_confirmed_false_raises(self) -> None:
         user = _make_user(age_verified_at=None)
