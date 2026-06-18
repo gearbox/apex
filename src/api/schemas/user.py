@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import msgspec
 
@@ -22,6 +22,8 @@ class UpdateProfileRequest(msgspec.Struct, kw_only=True):
     display_name: str | None = None
     email: str | None = None
     locale: SupportedLocale | None = None
+    age_confirmed: bool | None = None
+    date_of_birth: date | None = None
 
 
 class ChangePasswordRequest(msgspec.Struct, kw_only=True):
@@ -48,6 +50,9 @@ class UserProfileResponse(msgspec.Struct, kw_only=True):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    age_verified: bool
+    age_verified_at: datetime | None = None
+    date_of_birth: date | None = None
 
 
 class UserStatsResponse(msgspec.Struct, kw_only=True):

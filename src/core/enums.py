@@ -70,6 +70,13 @@ class ModelType(StrEnum):
 
         return get_model_meta(self).max_concurrent_outputs
 
+    @property
+    def requires_age_verification(self) -> bool:
+        """Check if this model requires age verification before generation."""
+        from src.core.model_registry import get_model_meta
+
+        return get_model_meta(self).requires_age_verification
+
 
 class GenerationType(StrEnum):
     """Generation type - text-to-image or image-to-image."""

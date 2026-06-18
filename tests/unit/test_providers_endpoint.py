@@ -151,6 +151,53 @@ class TestProviderInfoSchema:
         assert provider.models == []
 
 
+class TestRequiresAgeVerification:
+    def test_default_is_false(self) -> None:
+        info = ModelInfo(
+            model_key="grok-imagine-image",
+            name="Grok",
+            description="",
+            capabilities=["t2i"],
+            is_enabled=True,
+            max_images=10,
+            max_prompt_length=4096,
+            supports_negative_prompt=False,
+            aspect_ratios=["1:1"],
+        )
+        assert info.requires_age_verification is False
+
+    def test_aisha_models_have_flag_true_via_registry(self) -> None:
+        for mt in [ModelType.AISHA_IMAGE, ModelType.AISHA_VIDEO]:
+            meta = get_model_meta(mt)
+            assert meta.requires_age_verification is True
+
+    def test_grok_models_have_flag_false_via_registry(self) -> None:
+        grok_models = [
+            ModelType.GROK_IMAGINE_IMAGE,
+            ModelType.GROK_2_IMAGE,
+            ModelType.GROK_IMAGINE_VIDEO,
+        ]
+        for mt in grok_models:
+            meta = get_model_meta(mt)
+            assert meta.requires_age_verification is False
+
+    def test_roundtrip_preserves_flag(self) -> None:
+        info = ModelInfo(
+            model_key="aisha-image",
+            name="Aisha",
+            description="",
+            capabilities=["t2i"],
+            is_enabled=True,
+            max_images=4,
+            max_prompt_length=4096,
+            supports_negative_prompt=True,
+            aspect_ratios=["1:1"],
+            requires_age_verification=True,
+        )
+        decoded = msgspec.json.decode(msgspec.json.encode(info), type=ModelInfo)
+        assert decoded.requires_age_verification is True
+
+
 class TestCapabilitiesDerivation:
     """Verify capabilities list matches ModelType enum properties."""
 

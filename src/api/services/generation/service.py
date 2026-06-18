@@ -40,6 +40,10 @@ class ModelNotAllowedError(GenerationError):
     """Raised when the model is not available on the current product."""
 
 
+class AgeVerificationRequiredError(GenerationError):
+    """Raised when the model requires age verification and the user is not verified."""
+
+
 class ProviderResponseError(GenerationError):
     """Raised when a generation backend returned a malformed or unexpected response.
 
@@ -98,6 +102,16 @@ class GenerationService:
             raise ModelNotAllowedError(
                 f"Model '{request.model.value}' is not available on {product_config.display_name}"
             )
+
+        # 1.6. Per-model age verification gate (authoritative regardless of product age_gate policy)
+        if request.model.requires_age_verification:
+            from src.db.repositories.user import UserRepository
+
+            age_user = await UserRepository(session).get_user(user_id)
+            if age_user is None or age_user.age_verified_at is None:
+                raise AgeVerificationRequiredError(
+                    f"Model '{request.model.value}' requires age verification"
+                )
 
         # 2. Cross-cutting input validation
         self._validate_inputs(request)

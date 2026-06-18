@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -13,10 +13,12 @@ from src.api.schemas.user import (
     UserStatsResponse,
 )
 from src.api.security import PasswordService
+from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
 from src.db.repositories import UserRepository
 
 if TYPE_CHECKING:
     from src.api.services.storage import R2StorageService
+    from src.core.product import ProductConfig
     from src.db.models import User
 
 logger = structlog.get_logger(__name__)
@@ -56,6 +58,7 @@ class UserService:
         self,
         repository: UserRepository,
         password_service: PasswordService,
+        age_verification_service: AgeVerificationService,
         r2_storage: R2StorageService | None = None,
     ) -> None:
         """Initialize user service.
@@ -63,10 +66,12 @@ class UserService:
         Args:
             repository: User repository.
             password_service: Password hashing service.
+            age_verification_service: Age gate claim validator.
             r2_storage: R2 storage service for presigned URL generation (optional).
         """
         self._repo = repository
         self._password = password_service
+        self._age_verification = age_verification_service
         self._r2 = r2_storage
 
     async def get_profile(self, user_id: UUID) -> UserProfileResponse:
@@ -91,16 +96,23 @@ class UserService:
         self,
         user_id: UUID,
         *,
+        product_config: ProductConfig,
         display_name: str | None = None,
         email: str | None = None,
         locale: str | None = None,
+        age_confirmed: bool | None = None,
+        date_of_birth: date | None = None,
     ) -> UserProfileResponse:
         """Update user profile.
 
         Args:
             user_id: User ID.
+            product_config: Active product config (used for age gate policy).
             display_name: New display name (optional).
             email: New email (optional).
+            locale: New locale (optional).
+            age_confirmed: Age checkbox value (optional, for CHECKBOX products).
+            date_of_birth: Date of birth (optional, for DATE_OF_BIRTH products).
 
         Returns:
             Updated UserProfileResponse.
@@ -108,6 +120,7 @@ class UserService:
         Raises:
             UserNotFoundError: If user not found.
             EmailAlreadyExistsError: If new email is taken.
+            AgeVerificationError: If age claim is invalid or DOB conflicts.
         """
         user = await self._repo.get_user(user_id)
         if user is None:
@@ -121,12 +134,33 @@ class UserService:
         ):
             raise EmailAlreadyExistsError(f"Email {email} is already taken")
 
-        # Update fields
+        # Validate age claim and compute desired values
+        desired_verified_at, desired_dob = self._age_verification.verify(
+            product_config,
+            age_confirmed=age_confirmed,
+            date_of_birth=date_of_birth,
+        )
+
+        # Monotonic: only set age_verified_at on first verification
+        new_age_verified_at: datetime | None = None
+        if desired_verified_at is not None and user.age_verified_at is None:
+            new_age_verified_at = desired_verified_at
+
+        # Write-once: reject a different DOB if one is already stored
+        new_dob: date | None = None
+        if desired_dob is not None:
+            if user.date_of_birth is not None and desired_dob != user.date_of_birth:
+                raise AgeVerificationError("date_of_birth cannot be changed once set")
+            if user.date_of_birth is None:
+                new_dob = desired_dob
+
         updated_user = await self._repo.update_user(
             user_id,
             email=email,
             display_name=display_name,
             locale=locale,
+            age_verified_at=new_age_verified_at,
+            date_of_birth=new_dob,
         )
 
         if updated_user is None:
@@ -247,4 +281,7 @@ class UserService:
             is_active=user.is_active,
             created_at=user.created_at,
             updated_at=user.updated_at,
+            age_verified=user.age_verified_at is not None,
+            age_verified_at=user.age_verified_at,
+            date_of_birth=user.date_of_birth,
         )

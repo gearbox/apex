@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
+from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
 from src.api.services.user import (
     EmailAlreadyExistsError,
     InvalidPasswordError,
     UserNotFoundError,
     UserService,
 )
+from src.core.product import AgeGatePolicy, ProductConfig
 
 pytestmark = pytest.mark.unit
+
+
+def _make_product_config(policy: AgeGatePolicy = AgeGatePolicy.CHECKBOX) -> ProductConfig:
+    cfg = MagicMock(spec=ProductConfig)
+    cfg.age_gate = policy
+    return cfg
 
 
 def _make_user(**kwargs: object) -> MagicMock:
@@ -30,12 +38,15 @@ def _make_user(**kwargs: object) -> MagicMock:
     u.password_hash = "hashed_pw"
     u.created_at = datetime.now(UTC)
     u.updated_at = datetime.now(UTC)
+    u.age_verified_at = kwargs.get("age_verified_at")
+    u.date_of_birth = kwargs.get("date_of_birth")
     return u
 
 
 def _make_service(
     user: MagicMock | None = None,
     password_verify: bool = True,
+    age_verification_service: AgeVerificationService | None = None,
 ) -> tuple[UserService, AsyncMock, MagicMock]:
     repo = AsyncMock()
     pwd = MagicMock()
@@ -47,7 +58,8 @@ def _make_service(
     else:
         repo.get_user = AsyncMock(return_value=None)
 
-    svc = UserService(repository=repo, password_service=pwd)
+    age_svc = age_verification_service or AgeVerificationService()
+    svc = UserService(repository=repo, password_service=pwd, age_verification_service=age_svc)
     return svc, repo, pwd
 
 
@@ -64,6 +76,23 @@ class TestGetProfile:
         with pytest.raises(UserNotFoundError):
             await svc.get_profile(uuid4())
 
+    async def test_age_fields_in_response(self) -> None:
+        ts = datetime.now(UTC)
+        dob = date(1990, 6, 15)
+        user = _make_user(age_verified_at=ts, date_of_birth=dob)
+        svc, _, _ = _make_service(user)
+        profile = await svc.get_profile(user.id)
+        assert profile.age_verified is True
+        assert profile.age_verified_at == ts
+        assert profile.date_of_birth == dob
+
+    async def test_age_verified_false_when_not_set(self) -> None:
+        user = _make_user(age_verified_at=None)
+        svc, _, _ = _make_service(user)
+        profile = await svc.get_profile(user.id)
+        assert profile.age_verified is False
+        assert profile.age_verified_at is None
+
 
 class TestUpdateProfile:
     async def test_updates_display_name(self) -> None:
@@ -73,13 +102,17 @@ class TestUpdateProfile:
         repo.email_exists = AsyncMock(return_value=False)
         repo.update_user = AsyncMock(return_value=updated)
 
-        result = await svc.update_profile(user.id, display_name="New Name")
+        result = await svc.update_profile(
+            user.id, product_config=_make_product_config(), display_name="New Name"
+        )
         assert result.display_name == "New Name"
 
     async def test_raises_when_user_not_found(self) -> None:
         svc, _, _ = _make_service(user=None)
         with pytest.raises(UserNotFoundError):
-            await svc.update_profile(uuid4(), display_name="X")
+            await svc.update_profile(
+                uuid4(), product_config=_make_product_config(), display_name="X"
+            )
 
     async def test_raises_when_email_already_taken(self) -> None:
         user = _make_user(email="old@example.com")
@@ -87,7 +120,9 @@ class TestUpdateProfile:
         repo.email_exists = AsyncMock(return_value=True)
 
         with pytest.raises(EmailAlreadyExistsError):
-            await svc.update_profile(user.id, email="taken@example.com")
+            await svc.update_profile(
+                user.id, product_config=_make_product_config(), email="taken@example.com"
+            )
 
     async def test_no_email_uniqueness_check_when_email_unchanged(self) -> None:
         user = _make_user(email="same@example.com")
@@ -95,8 +130,9 @@ class TestUpdateProfile:
         repo.email_exists = AsyncMock(return_value=False)
         repo.update_user = AsyncMock(return_value=user)
 
-        # Same email (lowercased comparison) — should NOT check email_exists
-        await svc.update_profile(user.id, email="same@example.com")
+        await svc.update_profile(
+            user.id, product_config=_make_product_config(), email="same@example.com"
+        )
         repo.email_exists.assert_not_called()
 
     async def test_raises_when_update_returns_none(self) -> None:
@@ -106,7 +142,102 @@ class TestUpdateProfile:
         repo.update_user = AsyncMock(return_value=None)
 
         with pytest.raises(UserNotFoundError):
-            await svc.update_profile(user.id, display_name="X")
+            await svc.update_profile(
+                user.id, product_config=_make_product_config(), display_name="X"
+            )
+
+    async def test_no_age_fields_leaves_age_state_untouched(self) -> None:
+        """PATCH without age fields must not touch age state and must still update other fields."""
+        user = _make_user(display_name="Old", age_verified_at=None)
+        updated = _make_user(id=user.id, display_name="New", age_verified_at=None)
+        svc, repo, _ = _make_service(user)
+        repo.email_exists = AsyncMock(return_value=False)
+        repo.update_user = AsyncMock(return_value=updated)
+
+        result = await svc.update_profile(
+            user.id, product_config=_make_product_config(), display_name="New"
+        )
+        assert result.display_name == "New"
+        # age_verified_at was not passed to the repo
+        repo.update_user.assert_awaited_once()
+        call_kwargs = repo.update_user.call_args.kwargs
+        assert call_kwargs.get("age_verified_at") is None
+
+    async def test_first_age_confirmed_sets_verified_at(self) -> None:
+        user = _make_user(age_verified_at=None)
+        verified_user = _make_user(id=user.id, age_verified_at=datetime.now(UTC))
+        svc, repo, _ = _make_service(user)
+        repo.email_exists = AsyncMock(return_value=False)
+        repo.update_user = AsyncMock(return_value=verified_user)
+
+        result = await svc.update_profile(
+            user.id,
+            product_config=_make_product_config(AgeGatePolicy.CHECKBOX),
+            age_confirmed=True,
+        )
+        assert result.age_verified is True
+        call_kwargs = repo.update_user.call_args.kwargs
+        assert call_kwargs["age_verified_at"] is not None
+
+    async def test_second_confirmation_is_idempotent(self) -> None:
+        """Re-confirming on an already-verified account must not update the timestamp."""
+        existing_ts = datetime(2024, 1, 1, tzinfo=UTC)
+        user = _make_user(age_verified_at=existing_ts)
+        svc, repo, _ = _make_service(user)
+        repo.email_exists = AsyncMock(return_value=False)
+        repo.update_user = AsyncMock(return_value=user)
+
+        await svc.update_profile(
+            user.id,
+            product_config=_make_product_config(AgeGatePolicy.CHECKBOX),
+            age_confirmed=True,
+        )
+        call_kwargs = repo.update_user.call_args.kwargs
+        # Must NOT pass a new timestamp — would overwrite the original
+        assert call_kwargs.get("age_verified_at") is None
+
+    async def test_age_confirmed_false_raises(self) -> None:
+        user = _make_user(age_verified_at=None)
+        svc, repo, _ = _make_service(user)
+        repo.email_exists = AsyncMock(return_value=False)
+
+        with pytest.raises(AgeVerificationError, match="18 or older"):
+            await svc.update_profile(
+                user.id,
+                product_config=_make_product_config(AgeGatePolicy.CHECKBOX),
+                age_confirmed=False,
+            )
+
+    async def test_dob_write_once_same_value_is_noop(self) -> None:
+        dob = date(1990, 6, 15)
+        user = _make_user(date_of_birth=dob, age_verified_at=datetime.now(UTC))
+        svc, repo, _ = _make_service(user)
+        repo.email_exists = AsyncMock(return_value=False)
+        repo.update_user = AsyncMock(return_value=user)
+
+        # Same DOB → no-op, no raise
+        await svc.update_profile(
+            user.id,
+            product_config=_make_product_config(AgeGatePolicy.DATE_OF_BIRTH),
+            date_of_birth=dob,
+        )
+        call_kwargs = repo.update_user.call_args.kwargs
+        assert call_kwargs.get("date_of_birth") is None  # same → not re-written
+
+    async def test_dob_write_once_different_value_raises(self) -> None:
+        user = _make_user(
+            date_of_birth=date(1990, 6, 15),
+            age_verified_at=datetime.now(UTC),
+        )
+        svc, repo, _ = _make_service(user)
+        repo.email_exists = AsyncMock(return_value=False)
+
+        with pytest.raises(AgeVerificationError, match="cannot be changed"):
+            await svc.update_profile(
+                user.id,
+                product_config=_make_product_config(AgeGatePolicy.DATE_OF_BIRTH),
+                date_of_birth=date(1991, 1, 1),
+            )
 
 
 class TestChangePassword:

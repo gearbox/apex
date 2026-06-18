@@ -26,6 +26,7 @@ from src.api.schemas.user import (
     UserStatsResponse,
 )
 from src.api.security import auth_guard
+from src.api.services.age_verification import AgeVerificationError
 from src.api.services.auth import AuthService
 from src.api.services.user import (
     EmailAlreadyExistsError,
@@ -33,6 +34,7 @@ from src.api.services.user import (
     UserNotFoundError,
     UserService,
 )
+from src.core.product import ProductConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -83,14 +85,18 @@ class UserController(Controller):
         current_user_id: UUID,
         data: Annotated[UpdateProfileRequest, Body()],
         user_service: UserService,
+        product_config: ProductConfig,
     ) -> Response[UserProfileResponse | ErrorEnvelope]:
         """Update current user's profile."""
         try:
             profile = await user_service.update_profile(
                 current_user_id,
+                product_config=product_config,
                 display_name=data.display_name,
                 email=data.email,
                 locale=data.locale.value if data.locale is not None else None,
+                age_confirmed=data.age_confirmed,
+                date_of_birth=data.date_of_birth,
             )
             return Response(content=profile, status_code=HTTP_200_OK)
 
@@ -101,6 +107,16 @@ class UserController(Controller):
             return Response(
                 content=ErrorEnvelope(
                     error="email_exists",
+                    message=str(e),
+                    status_code=HTTP_400_BAD_REQUEST,
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        except AgeVerificationError as e:
+            return Response(
+                content=ErrorEnvelope(
+                    error="validation_error",
                     message=str(e),
                     status_code=HTTP_400_BAD_REQUEST,
                 ),
