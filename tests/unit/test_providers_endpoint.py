@@ -18,6 +18,8 @@ from src.api.schemas.providers import (
 )
 from src.api.services.generation.service import GenerationService
 from src.core.enums import (
+    STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
+    TERMINAL_GPU_SESSION_STATUSES,
     GenerationType,
     GpuSessionStatus,
     ModelSessionState,
@@ -325,7 +327,7 @@ class TestSessionStateFromStatus:
             (GpuSessionStatus.resuming, ModelSessionState.PROVISIONING),
             (GpuSessionStatus.paused, ModelSessionState.PAUSED),
             (GpuSessionStatus.stale, ModelSessionState.STALE),
-            (GpuSessionStatus.stopping, ModelSessionState.NONE),
+            (GpuSessionStatus.stopping, ModelSessionState.STOPPING),
             (GpuSessionStatus.stopped, ModelSessionState.NONE),
             (GpuSessionStatus.failed, ModelSessionState.NONE),
         ],
@@ -338,6 +340,30 @@ class TestSessionStateFromStatus:
         for status in GpuSessionStatus:
             result = session_state_from_status(status)
             assert isinstance(result, ModelSessionState)
+
+
+class TestGpuSessionStatusSets:
+    """Invariants for TERMINAL_GPU_SESSION_STATUSES and STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES.
+
+    These lock the membership that prevents double-start: `stopping` must never
+    be terminal at the repo layer (or a second session can be created mid-teardown).
+    """
+
+    def test_stopping_not_in_terminal(self) -> None:
+        assert GpuSessionStatus.stopping not in TERMINAL_GPU_SESSION_STATUSES
+
+    def test_stopping_in_stopping_or_terminal(self) -> None:
+        assert GpuSessionStatus.stopping in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES
+
+    def test_stopped_and_failed_in_terminal(self) -> None:
+        assert GpuSessionStatus.stopped in TERMINAL_GPU_SESSION_STATUSES
+        assert GpuSessionStatus.failed in TERMINAL_GPU_SESSION_STATUSES
+
+    def test_stopping_or_terminal_is_superset(self) -> None:
+        assert (
+            TERMINAL_GPU_SESSION_STATUSES | {GpuSessionStatus.stopping}
+            == STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES
+        )
 
 
 class TestProviderTableCompleteness:

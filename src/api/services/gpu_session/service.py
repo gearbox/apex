@@ -19,7 +19,7 @@ from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError
 from src.api.services.vastai.schemas import VastAIOffer
-from src.core.enums import GpuSessionStatus, ModelType
+from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus, ModelType
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.repositories.billing import BillingRepository
@@ -61,16 +61,6 @@ _STOPPABLE_STATUSES = frozenset(
         GpuSessionStatus.active,
         GpuSessionStatus.stale,
         GpuSessionStatus.paused,
-    }
-)
-
-# Terminal statuses: stop is idempotent here, returns the existing session row.
-# `stopping` is already on the path to terminal — re-stopping risks double-cleanup.
-_TERMINAL_STATUSES = frozenset(
-    {
-        GpuSessionStatus.stopping,
-        GpuSessionStatus.stopped,
-        GpuSessionStatus.failed,
     }
 )
 
@@ -655,7 +645,7 @@ class GpuSessionService:
             raise GpuSessionError(f"Session {session_id} not found or not accessible")
 
         # Terminal states: idempotent return — no work needed.
-        if session_row.status in _TERMINAL_STATUSES:
+        if session_row.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
             logger.info(
                 "gpu_session.stop.idempotent_terminal",
                 session_id=str(session_id),
@@ -989,7 +979,7 @@ class GpuSessionService:
                 product_id,
             )
             # Re-check status under lock — another stop may have beaten us.
-            if session_row.status in _TERMINAL_STATUSES:
+            if session_row.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
                 logger.info(
                     "gpu_session.stop_pre_active.raced_to_terminal",
                     session_id=str(session_id),
@@ -1097,7 +1087,7 @@ class GpuSessionService:
             # If the row raced to terminal between routing-read and this lock,
             # return idempotently. Matches stop_session's contract: stop always
             # succeeds; terminal states are no-ops.
-            if session_row.status in _TERMINAL_STATUSES:
+            if session_row.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
                 logger.info(
                     "gpu_session.stop.raced_to_terminal",
                     session_id=str(session_id),

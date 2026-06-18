@@ -12,7 +12,7 @@ Each model card is a pure function of three catalog fields plus the client's aut
 |---|---|---|
 | `provider.available` | `ProviderInfo.available` | Provider is **configured and serviceable in this deployment**. For `always_on` → cloud API wired (incl. storage). For `on_demand` → GPU stack wired (bundle index + workflow service). **Process-level**, identical for all users. |
 | `provider.provisioning_mode` | `ProviderInfo.provisioning_mode` | `"always_on"` (cloud API, usable whenever available) or `"on_demand"` (requires a per-user GPU session before generating). |
-| `model.session_state` | `ModelInfo.session_state` | Per-user readiness of an on-demand model: `null` \| `"none"` \| `"provisioning"` \| `"active"` \| `"paused"` \| `"stale"`. **Non-null only for `on_demand` models on an authenticated request.** |
+| `model.session_state` | `ModelInfo.session_state` | Per-user readiness of an on-demand model: `null` \| `"none"` \| `"provisioning"` \| `"active"` \| `"paused"` \| `"stale"` \| `"stopping"`. **Non-null only for `on_demand` models on an authenticated request.** |
 
 ### The orthogonality rule (folded from review finding #3)
 
@@ -40,6 +40,7 @@ Evaluate top-down; first match wins. `isAuthenticated` is the client's own auth 
 | 7 | `on_demand` && auth && `session_state === "active"` | `READY` |
 | 8 | `on_demand` && auth && `session_state === "paused"` | `PAUSED` |
 | 9 | `on_demand` && auth && `session_state === "stale"` | `STALE` |
+| 10 | `on_demand` && auth && `session_state === "stopping"` | `STOPPING` |
 
 Invariant to lean on: for an `on_demand` model that is `available` and authenticated, the backend always sets `session_state` to at least `"none"` (never `null`). So `null` `session_state` on an `on_demand` card ⟺ unauthenticated (row 4). Passing `isAuthenticated` explicitly is still clearer than inferring.
 
@@ -56,7 +57,8 @@ Invariant to lean on: for an `on_demand` model that is `available` and authentic
 | `NEEDS_SESSION` | "Needs GPU session" | disabled | **Start session** → `POST /v1/sessions { model }` (201) | cost/latency hint | SSE after start |
 | `PROVISIONING` | "Starting…" + spinner (+ phase if fetched) | disabled | `Cancel` → `POST /v1/sessions/{id}/stop` | — | SSE |
 | `PAUSED` | "Paused" | disabled | **Resume** → `POST /v1/sessions/{id}/resume` | `Stop` | SSE after resume |
-| `STALE` | "Session unreachable" (warning) | disabled | **Stop & start new** → `POST …/stop` then `POST /v1/sessions { model }` | show `error_message` if present | SSE / manual |
+| `STALE` | "Session unreachable" (warning) | disabled | **Stop** → `POST …/stop` (card transitions to `STOPPING` → SSE `stopped` → `NEEDS_SESSION`) | show `error_message` if present | SSE / manual |
+| `STOPPING` | "Stopping…" (muted) | disabled | — *(no Start CTA — slot still occupied)* | — | SSE `stopped` → `NEEDS_SESSION` |
 | `SIGN_IN_REQUIRED` | "Sign in to use" | disabled | **Sign in** → auth flow, return to generate screen | — | — |
 | `UNAVAILABLE` | "Temporarily unavailable" (muted) | disabled | none | optional tooltip: provider not configured | — |
 | `DISABLED` | hidden/greyed | disabled | none | — | — |
@@ -70,11 +72,11 @@ Notes:
 
 ## Shared status → state mapping (must mirror the backend)
 
-The SSE payload carries the **raw `GpuSessionStatus`**, not the derived `ModelSessionState`. To keep SSE-driven and catalog-driven cards in agreement, the frontend needs the exact same mapping as backend `session_state_from_status`, **including `stopping → none`**:
+The SSE payload carries the **raw `GpuSessionStatus`**, not the derived `ModelSessionState`. To keep SSE-driven and catalog-driven cards in agreement, the frontend needs the exact same mapping as backend `session_state_from_status`:
 
 ```ts
 // Mirror of backend ModelSessionState
-export type SessionState = "none" | "provisioning" | "active" | "paused" | "stale";
+export type SessionState = "none" | "provisioning" | "active" | "paused" | "stale" | "stopping";
 
 // Raw lifecycle status as it arrives on SSE (GpuSessionStatus)
 export type SessionStatus =
@@ -89,7 +91,7 @@ export function sessionStateFromStatus(s: SessionStatus): SessionState {
     case "resuming":                                  return "provisioning";
     case "paused":                                    return "paused";
     case "stale":                                     return "stale";
-    case "stopping":
+    case "stopping":                                  return "stopping";
     case "stopped":
     case "failed":                                    return "none";
     // exhaustive: add a case if backend GpuSessionStatus grows
@@ -142,6 +144,7 @@ On each event: `card[payload.model_type].session_state = sessionStateFromStatus(
 
 ## Acceptance checks
 
+- A model whose session is in `stopping` renders `STOPPING` — badge "Stopping…", `Generate` disabled, **no Start CTA** — and never triggers a 409 `session_already_exists` on Start (because Start is disabled until the SSE `stopped` event arrives and the card transitions to `NEEDS_SESSION`).
 - A card with `provisioning_mode="on_demand"`, `available=false` renders `UNAVAILABLE` with **no** Start CTA (the finding-#3 regression: must not show "Start session").
 - Anonymous load: every on-demand card is `SIGN_IN_REQUIRED`; every `always_on` available card is `READY`.
 - Authenticated, no session: on-demand card is `NEEDS_SESSION`; pressing Start and receiving SSE `pending→provisioning→active` walks the card `NEEDS_SESSION → PROVISIONING → READY` with no manual refresh.

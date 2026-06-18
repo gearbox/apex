@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.enums import GpuSessionStatus
+from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 
 if TYPE_CHECKING:
@@ -19,8 +19,6 @@ PROVISIONING_STATUSES = frozenset(
     {GpuSessionStatus.pending, GpuSessionStatus.provisioning, GpuSessionStatus.resuming}
 )
 _PROVISIONING_STATUSES = PROVISIONING_STATUSES  # backward-compat alias
-
-_TERMINAL_STATUSES = (GpuSessionStatus.stopped, GpuSessionStatus.failed)
 
 
 class GpuSessionRepository:
@@ -194,7 +192,7 @@ class GpuSessionRepository:
                 GpuSession.user_id == user_id,
                 GpuSession.product_id == product_id,
                 GpuSession.model_type == model_type,
-                GpuSession.status.not_in(_TERMINAL_STATUSES),
+                GpuSession.status.not_in(tuple(TERMINAL_GPU_SESSION_STATUSES)),
             )
         )
         return result.scalar_one_or_none()
@@ -221,7 +219,7 @@ class GpuSessionRepository:
             GpuSession.product_id == product_id,
         )
         if not include_terminal:
-            query = query.where(GpuSession.status.not_in(_TERMINAL_STATUSES))
+            query = query.where(GpuSession.status.not_in(tuple(TERMINAL_GPU_SESSION_STATUSES)))
 
         result = await self._session.execute(query.order_by(GpuSession.created_at.desc()))
         return result.scalars().all()
@@ -380,7 +378,7 @@ class GpuSessionRepository:
     async def list_orphaned_instance_candidates(
         self,
         *,
-        terminal_statuses: list[GpuSessionStatus],
+        terminal_statuses: Sequence[GpuSessionStatus],
         stopped_before: datetime,
         created_after: datetime,
         limit: int = 50,

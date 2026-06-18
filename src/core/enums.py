@@ -403,14 +403,31 @@ class GpuSessionStatus(StrEnum):
     failed = "failed"  # provisioning or runtime failure
 
 
+# True lifecycle end. A session in one of these states no longer exists for
+# routing purposes and FREES the (user, product, model_type) slot, so a new
+# session may be started. `stopping` is deliberately EXCLUDED — teardown is in
+# progress and the slot is still occupied.
+TERMINAL_GPU_SESSION_STATUSES: frozenset[GpuSessionStatus] = frozenset(
+    {GpuSessionStatus.stopped, GpuSessionStatus.failed}
+)
+
+# Teardown-in-progress OR ended. Used where `stop()` must be idempotent and where
+# provisioning transitions must abort. Does NOT free the slot. This is the strict
+# superset that ADDS `stopping`.
+STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES: frozenset[GpuSessionStatus] = (
+    TERMINAL_GPU_SESSION_STATUSES | {GpuSessionStatus.stopping}
+)
+
+
 class ModelSessionState(StrEnum):
     """Per-user readiness of an on-demand model, derived from GpuSessionStatus."""
 
-    NONE = "none"  # no non-terminal session for this model
+    NONE = "none"  # no session occupying this model's slot
     PROVISIONING = "provisioning"  # pending / provisioning / resuming
     ACTIVE = "active"  # session active — ready to generate
     PAUSED = "paused"  # paused — needs resume
     STALE = "stale"  # was active, now unreachable
+    STOPPING = "stopping"  # teardown in progress — not usable, cannot start a new one yet
 
 
 def session_state_from_status(status: GpuSessionStatus) -> ModelSessionState:
@@ -424,7 +441,9 @@ def session_state_from_status(status: GpuSessionStatus) -> ModelSessionState:
             return ModelSessionState.PAUSED
         case GpuSessionStatus.stale:
             return ModelSessionState.STALE
-        case GpuSessionStatus.stopping | GpuSessionStatus.stopped | GpuSessionStatus.failed:
+        case GpuSessionStatus.stopping:
+            return ModelSessionState.STOPPING
+        case GpuSessionStatus.stopped | GpuSessionStatus.failed:
             return ModelSessionState.NONE
 
 
