@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-import msgspec
+from unittest.mock import MagicMock
 
+import msgspec
+import pytest
+
+from src.api.routes.providers import PROVIDER_DISPLAY_NAMES
 from src.api.schemas.providers import (
     ImageConstraints,
     ModelInfo,
@@ -12,7 +16,16 @@ from src.api.schemas.providers import (
     UserContext,
     VideoConstraints,
 )
-from src.core.enums import GenerationType, ModelType
+from src.api.services.generation.service import GenerationService
+from src.core.enums import (
+    GenerationType,
+    GpuSessionStatus,
+    ModelSessionState,
+    ModelType,
+    Provider,
+    ProvisioningMode,
+    session_state_from_status,
+)
 from src.core.model_registry import get_model_meta
 
 
@@ -117,6 +130,51 @@ class TestModelInfoSchema:
         assert decoded.video is not None
         assert decoded.video.resolutions == ["480p", "720p"]
 
+    def test_session_state_default_is_none(self) -> None:
+        info = ModelInfo(
+            model_key="aisha-image",
+            name="Aisha",
+            description="",
+            capabilities=["t2i"],
+            is_enabled=True,
+            max_images=4,
+            max_prompt_length=4096,
+            supports_negative_prompt=True,
+            aspect_ratios=["1:1"],
+        )
+        assert info.session_state is None
+
+    def test_session_state_explicit_value(self) -> None:
+        info = ModelInfo(
+            model_key="aisha-image",
+            name="Aisha",
+            description="",
+            capabilities=["t2i"],
+            is_enabled=True,
+            max_images=4,
+            max_prompt_length=4096,
+            supports_negative_prompt=True,
+            aspect_ratios=["1:1"],
+            session_state="active",
+        )
+        assert info.session_state == "active"
+
+    def test_session_state_roundtrip(self) -> None:
+        info = ModelInfo(
+            model_key="aisha-image",
+            name="Aisha",
+            description="",
+            capabilities=["t2i"],
+            is_enabled=True,
+            max_images=4,
+            max_prompt_length=4096,
+            supports_negative_prompt=True,
+            aspect_ratios=["1:1"],
+            session_state="provisioning",
+        )
+        decoded = msgspec.json.decode(msgspec.json.encode(info), type=ModelInfo)
+        assert decoded.session_state == "provisioning"
+
 
 class TestProviderInfoSchema:
     def test_provider_with_models(self) -> None:
@@ -135,20 +193,35 @@ class TestProviderInfoSchema:
             provider="aisha",
             name="Aisha",
             available=True,
+            provisioning_mode="on_demand",
             models=[model],
         )
         assert len(provider.models) == 1
         assert provider.models[0].supports_negative_prompt is True
+        assert provider.provisioning_mode == "on_demand"
 
     def test_provider_with_empty_models(self) -> None:
         provider = ProviderInfo(
             provider="grok",
             name="xAI Grok",
             available=False,
+            provisioning_mode="always_on",
             models=[],
         )
         assert provider.available is False
         assert provider.models == []
+        assert provider.provisioning_mode == "always_on"
+
+    def test_provisioning_mode_roundtrip(self) -> None:
+        provider = ProviderInfo(
+            provider="grok",
+            name="xAI Grok",
+            available=True,
+            provisioning_mode="always_on",
+            models=[],
+        )
+        decoded = msgspec.json.decode(msgspec.json.encode(provider), type=ProviderInfo)
+        assert decoded.provisioning_mode == "always_on"
 
 
 class TestRequiresAgeVerification:
@@ -238,3 +311,134 @@ class TestCapabilitiesDerivation:
                 f"{mt.value} has invalid aspect ratios: {model_values - all_values}"
             )
             assert len(meta.aspect_ratios) > 0, f"{mt.value} has no aspect ratios"
+
+
+class TestSessionStateFromStatus:
+    """Exhaustive mapping of every GpuSessionStatus → ModelSessionState."""
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (GpuSessionStatus.active, ModelSessionState.ACTIVE),
+            (GpuSessionStatus.pending, ModelSessionState.PROVISIONING),
+            (GpuSessionStatus.provisioning, ModelSessionState.PROVISIONING),
+            (GpuSessionStatus.resuming, ModelSessionState.PROVISIONING),
+            (GpuSessionStatus.paused, ModelSessionState.PAUSED),
+            (GpuSessionStatus.stale, ModelSessionState.STALE),
+            (GpuSessionStatus.stopping, ModelSessionState.NONE),
+            (GpuSessionStatus.stopped, ModelSessionState.NONE),
+            (GpuSessionStatus.failed, ModelSessionState.NONE),
+        ],
+    )
+    def test_mapping(self, status: GpuSessionStatus, expected: ModelSessionState) -> None:
+        assert session_state_from_status(status) is expected
+
+    def test_all_statuses_covered(self) -> None:
+        """Fails if a new GpuSessionStatus member is added without a mapping."""
+        for status in GpuSessionStatus:
+            result = session_state_from_status(status)
+            assert isinstance(result, ModelSessionState)
+
+
+class TestProviderTableCompleteness:
+    """Guard: every Provider member must have an entry in both per-provider tables."""
+
+    def test_every_provider_has_provisioning_mode(self) -> None:
+        for p in Provider:
+            # Raises RuntimeError if undeclared — that's a test failure
+            mode = p.provisioning_mode
+            assert isinstance(mode, ProvisioningMode), f"{p.value} returned non-ProvisioningMode"
+
+    def test_every_provider_has_display_name(self) -> None:
+        for p in Provider:
+            assert p in PROVIDER_DISPLAY_NAMES, (
+                f"Provider {p.value!r} has no entry in PROVIDER_DISPLAY_NAMES"
+            )
+            assert PROVIDER_DISPLAY_NAMES[p], f"Provider {p.value!r} has an empty display name"
+
+    def test_known_provisioning_modes(self) -> None:
+        assert Provider.GROK.provisioning_mode is ProvisioningMode.ALWAYS_ON
+        assert Provider.AISHA.provisioning_mode is ProvisioningMode.ON_DEMAND
+
+
+class TestConfiguredProvidersAccessor:
+    """GenerationService.configured_providers returns the exact registered key set."""
+
+    def test_empty_registry(self) -> None:
+        svc = GenerationService(
+            providers={},
+            billing_service=MagicMock(),
+            pricing_service=MagicMock(),
+            rate_limiter=MagicMock(),
+        )
+        assert svc.configured_providers == frozenset()
+
+    def test_single_provider(self) -> None:
+        stub = MagicMock()
+        svc = GenerationService(
+            providers={Provider.GROK: stub},
+            billing_service=MagicMock(),
+            pricing_service=MagicMock(),
+            rate_limiter=MagicMock(),
+        )
+        assert svc.configured_providers == frozenset({Provider.GROK})
+
+    def test_multiple_providers(self) -> None:
+        svc = GenerationService(
+            providers={Provider.GROK: MagicMock(), Provider.AISHA: MagicMock()},
+            billing_service=MagicMock(),
+            pricing_service=MagicMock(),
+            rate_limiter=MagicMock(),
+        )
+        assert svc.configured_providers == frozenset({Provider.GROK, Provider.AISHA})
+
+    def test_returns_frozenset(self) -> None:
+        svc = GenerationService(
+            providers={Provider.GROK: MagicMock()},
+            billing_service=MagicMock(),
+            pricing_service=MagicMock(),
+            rate_limiter=MagicMock(),
+        )
+        result = svc.configured_providers
+        assert isinstance(result, frozenset)
+
+
+class TestNoHardcodedProviderNames:
+    """Regression: providers.py must not branch on provider names in logic."""
+
+    def test_no_provider_literals_in_route_module(self) -> None:
+        """Module-level explicit lookup tables (PROVIDER_DISPLAY_NAMES) are allowed;
+        provider literals must not appear as discriminators inside function bodies."""
+        import ast
+        import pathlib
+
+        source = pathlib.Path("src/api/routes/providers.py").read_text()
+        tree = ast.parse(source)
+
+        # Collect line ranges covered by function/async-function bodies so we can
+        # restrict the check to function scope (dict keys in module-level constants are fine).
+        function_lines: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for child in ast.walk(node):
+                    if hasattr(child, "lineno"):
+                        function_lines.add(getattr(child, "lineno"))  # noqa: B009
+
+        for node in ast.walk(tree):
+            if not hasattr(node, "lineno") or getattr(node, "lineno") not in function_lines:  # noqa: B009
+                continue
+            if isinstance(node, ast.Constant) and node.value in {"grok", "aisha"}:
+                raise AssertionError(
+                    f"Literal {node.value!r} found inside a function in providers.py "
+                    f"at line {node.lineno}; no provider name may be used as a discriminator"
+                )
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "Provider"
+                and node.attr in {"GROK", "AISHA"}
+            ):
+                raise AssertionError(
+                    f"Provider.{node.attr} reference found inside a function in providers.py "
+                    f"at line {node.lineno}; no provider name may be used as a discriminator"
+                )

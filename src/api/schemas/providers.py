@@ -83,6 +83,10 @@ class ModelInfo(msgspec.Struct, kw_only=True):
     video: VideoConstraints | None = None
     """Video constraints. None for image-only models."""
 
+    session_state: str | None = None
+    """Per-user readiness for on-demand models (none/provisioning/active/paused/stale).
+    Populated only for authenticated requests on on_demand provider models; null otherwise."""
+
 
 class ProviderInfo(msgspec.Struct, kw_only=True):
     """A provider with its grouped models."""
@@ -94,7 +98,11 @@ class ProviderInfo(msgspec.Struct, kw_only=True):
     """Human-readable provider name."""
 
     available: bool
-    """Whether this provider's backend is reachable and configured."""
+    """Whether this provider is configured and able to serve requests (registry membership)."""
+
+    provisioning_mode: str
+    """How the provider's compute is made available: always_on (cloud API) or on_demand
+    (requires a per-user GPU session via POST /v1/sessions before generation)."""
 
     models: list[ModelInfo]
     """Models offered by this provider."""

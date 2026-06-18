@@ -1040,8 +1040,11 @@ class TestProvidersRouteHandlers:
         from unittest.mock import patch
 
         from src.api.routes.providers import ProvidersController
+        from src.core.enums import Provider
 
         session = AsyncMock()
+        generation_service = MagicMock()
+        generation_service.configured_providers = frozenset()
 
         with patch("src.api.routes.providers.GenerationModelRepository") as repo_cls:
             repo = MagicMock()
@@ -1054,30 +1057,42 @@ class TestProvidersRouteHandlers:
             result = await ProvidersController.list_providers.fn(  # type: ignore[attr-defined]
                 MagicMock(),
                 session=session,
-                grok_job_service=None,
+                generation_service=generation_service,
                 current_user_id=None,
                 product_config=product_config,
+                product_id="vex",
             )
 
         assert result.user_context is None
+        grok_provider = next(p for p in result.providers if p.provider == Provider.GROK.value)
+        assert grok_provider.available is False
 
     async def test_list_providers_with_authenticated_user(self) -> None:
         from unittest.mock import patch
 
         from src.api.routes.providers import ProvidersController
+        from src.core.enums import Provider
 
         session = AsyncMock()
         user = MagicMock()
         user.subscription_tier = MagicMock()
         user.subscription_tier.value = "free"
 
+        generation_service = MagicMock()
+        generation_service.configured_providers = frozenset({Provider.GROK})
+
         with (
             patch("src.api.routes.providers.GenerationModelRepository") as repo_cls,
+            patch("src.api.routes.providers.GpuSessionRepository") as gpu_repo_cls,
             patch("src.api.routes.providers.UserRepository") as user_repo_cls,
         ):
             repo = MagicMock()
             repo.list_enabled_for_product = AsyncMock(return_value=[])
             repo_cls.return_value = repo
+
+            gpu_repo = MagicMock()
+            gpu_repo.list_by_user = AsyncMock(return_value=[])
+            gpu_repo_cls.return_value = gpu_repo
 
             user_repo = MagicMock()
             user_repo.get_active_user = AsyncMock(return_value=user)
@@ -1089,20 +1104,29 @@ class TestProvidersRouteHandlers:
             result = await ProvidersController.list_providers.fn(  # type: ignore[attr-defined]
                 MagicMock(),
                 session=session,
-                grok_job_service=MagicMock(),  # grok configured
+                generation_service=generation_service,
                 current_user_id=uuid4(),
                 product_config=product_config,
+                product_id="vex",
             )
 
         assert result.user_context is not None
+        grok_provider = next(p for p in result.providers if p.provider == Provider.GROK.value)
+        assert grok_provider.available is True
 
-    def test_is_provider_available_grok_with_service(self) -> None:
-        from src.api.routes.providers import _is_provider_available
+    def test_configured_providers_controls_availability(self) -> None:
         from src.core.enums import Provider
+        from src.api.services.generation.service import GenerationService
+        from unittest.mock import MagicMock
 
-        assert _is_provider_available(Provider.GROK, grok_configured=True) is True
-        assert _is_provider_available(Provider.GROK, grok_configured=False) is False
-        assert _is_provider_available(Provider.AISHA, grok_configured=False) is True
+        svc = GenerationService(
+            providers={Provider.GROK: MagicMock()},
+            billing_service=MagicMock(),
+            pricing_service=MagicMock(),
+            rate_limiter=MagicMock(),
+        )
+        assert Provider.GROK in svc.configured_providers
+        assert Provider.AISHA not in svc.configured_providers
 
     async def test_list_providers_with_valid_model_record(self) -> None:
         from unittest.mock import patch
@@ -1116,6 +1140,9 @@ class TestProvidersRouteHandlers:
         record.description = "Aisha image model"
         record.is_enabled = True
 
+        generation_service = MagicMock()
+        generation_service.configured_providers = frozenset()
+
         with patch("src.api.routes.providers.GenerationModelRepository") as repo_cls:
             repo = MagicMock()
             repo.list_enabled_for_product = AsyncMock(return_value=[record])
@@ -1127,9 +1154,10 @@ class TestProvidersRouteHandlers:
             result = await ProvidersController.list_providers.fn(  # type: ignore[attr-defined]
                 MagicMock(),
                 session=session,
-                grok_job_service=None,
+                generation_service=generation_service,
                 current_user_id=None,
                 product_config=product_config,
+                product_id="vex",
             )
 
         # Verify model was built and grouped by provider
@@ -1146,6 +1174,9 @@ class TestProvidersRouteHandlers:
         record = MagicMock()
         record.model_key = "unknown-model-xyz"
 
+        generation_service = MagicMock()
+        generation_service.configured_providers = frozenset()
+
         with patch("src.api.routes.providers.GenerationModelRepository") as repo_cls:
             repo = MagicMock()
             repo.list_enabled_for_product = AsyncMock(return_value=[record])
@@ -1157,9 +1188,10 @@ class TestProvidersRouteHandlers:
             result = await ProvidersController.list_providers.fn(  # type: ignore[attr-defined]
                 MagicMock(),
                 session=session,
-                grok_job_service=None,
+                generation_service=generation_service,
                 current_user_id=None,
                 product_config=product_config,
+                product_id="vex",
             )
 
         # Unknown key skipped — all providers have 0 models
@@ -1172,14 +1204,21 @@ class TestProvidersRouteHandlers:
         from src.api.routes.providers import ProvidersController
 
         session = AsyncMock()
+        generation_service = MagicMock()
+        generation_service.configured_providers = frozenset()
 
         with (
             patch("src.api.routes.providers.GenerationModelRepository") as repo_cls,
+            patch("src.api.routes.providers.GpuSessionRepository") as gpu_repo_cls,
             patch("src.api.routes.providers.UserRepository") as user_repo_cls,
         ):
             repo = MagicMock()
             repo.list_enabled_for_product = AsyncMock(return_value=[])
             repo_cls.return_value = repo
+
+            gpu_repo = MagicMock()
+            gpu_repo.list_by_user = AsyncMock(return_value=[])
+            gpu_repo_cls.return_value = gpu_repo
 
             user_repo = MagicMock()
             user_repo.get_active_user = AsyncMock(return_value=None)
@@ -1191,9 +1230,10 @@ class TestProvidersRouteHandlers:
             result = await ProvidersController.list_providers.fn(  # type: ignore[attr-defined]
                 MagicMock(),
                 session=session,
-                grok_job_service=None,
+                generation_service=generation_service,
                 current_user_id=uuid4(),  # authenticated but user deleted
                 product_config=product_config,
+                product_id="vex",
             )
 
         assert result.user_context is None

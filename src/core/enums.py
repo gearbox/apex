@@ -16,6 +16,30 @@ class Provider(StrEnum):
     AISHA = "aisha"
     GROK = "grok"
 
+    @property
+    def provisioning_mode(self) -> ProvisioningMode:
+        """Provisioning mode for this provider. Raises if undeclared."""
+        try:
+            return _PROVISIONING_MODE_BY_PROVIDER[self]
+        except KeyError as exc:  # pragma: no cover - guarded by completeness test
+            raise RuntimeError(
+                f"No provisioning mode declared for provider {self.value!r}; "
+                f"add an entry to _PROVISIONING_MODE_BY_PROVIDER"
+            ) from exc
+
+
+class ProvisioningMode(StrEnum):
+    """How a provider's compute is made available."""
+
+    ALWAYS_ON = "always_on"  # cloud API; usable whenever the provider is configured
+    ON_DEMAND = "on_demand"  # requires a per-user GPU session before generation
+
+
+_PROVISIONING_MODE_BY_PROVIDER: dict[Provider, ProvisioningMode] = {
+    Provider.AISHA: ProvisioningMode.ON_DEMAND,
+    Provider.GROK: ProvisioningMode.ALWAYS_ON,
+}
+
 
 class ModelType(StrEnum):
     """Available model types."""
@@ -377,6 +401,31 @@ class GpuSessionStatus(StrEnum):
     stopping = "stopping"  # user requested stop, teardown in progress
     stopped = "stopped"  # session ended normally
     failed = "failed"  # provisioning or runtime failure
+
+
+class ModelSessionState(StrEnum):
+    """Per-user readiness of an on-demand model, derived from GpuSessionStatus."""
+
+    NONE = "none"  # no non-terminal session for this model
+    PROVISIONING = "provisioning"  # pending / provisioning / resuming
+    ACTIVE = "active"  # session active — ready to generate
+    PAUSED = "paused"  # paused — needs resume
+    STALE = "stale"  # was active, now unreachable
+
+
+def session_state_from_status(status: GpuSessionStatus) -> ModelSessionState:
+    """Map a GpuSessionStatus to the UI-facing ModelSessionState."""
+    match status:
+        case GpuSessionStatus.active:
+            return ModelSessionState.ACTIVE
+        case GpuSessionStatus.pending | GpuSessionStatus.provisioning | GpuSessionStatus.resuming:
+            return ModelSessionState.PROVISIONING
+        case GpuSessionStatus.paused:
+            return ModelSessionState.PAUSED
+        case GpuSessionStatus.stale:
+            return ModelSessionState.STALE
+        case GpuSessionStatus.stopping | GpuSessionStatus.stopped | GpuSessionStatus.failed:
+            return ModelSessionState.NONE
 
 
 class SupportedLocale(StrEnum):

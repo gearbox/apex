@@ -2,7 +2,7 @@
 
 Returns provider-grouped, capability-rich model catalog.
 Auth-optional: unauthenticated callers get the full catalog;
-authenticated callers additionally receive user_context.
+authenticated callers additionally receive user_context and per-model session_state.
 """
 
 from __future__ import annotations
@@ -25,34 +25,44 @@ from src.api.schemas.providers import (
     VideoConstraints,
 )
 from src.api.security import optional_auth_guard
-from src.api.services.grok.job_service import GrokJobService
-from src.core.enums import GenerationType, ModelType, Provider
+from src.api.services.generation.service import GenerationService
+from src.core.enums import (
+    GenerationType,
+    GpuSessionStatus,
+    ModelSessionState,
+    ModelType,
+    Provider,
+    ProvisioningMode,
+    session_state_from_status,
+)
 from src.core.model_registry import get_model_meta
 from src.core.product import ProductConfig
 from src.core.resolution import TIER_MEGAPIXELS
 from src.db.repositories.generation_model import GenerationModelRepository
+from src.db.repositories.gpu_session import GpuSessionRepository
 from src.db.repositories.user import UserRepository
 
 logger = structlog.get_logger(__name__)
 
-# Provider display names — single source of truth
+# Provider display names — single source of truth; a missing entry raises KeyError (completeness test guards this)
 PROVIDER_DISPLAY_NAMES: dict[Provider, str] = {
     Provider.AISHA: "Aisha",
     Provider.GROK: "xAI Grok",
 }
 
 
-def _is_provider_available(provider: Provider, *, grok_configured: bool) -> bool:
-    """Determine if a provider's backend is currently available."""
-    return grok_configured if provider == Provider.GROK else True
-
-
-def _build_model_info(mt: ModelType, record: object) -> ModelInfo:
+def _build_model_info(
+    mt: ModelType,
+    record: object,
+    *,
+    session_state: ModelSessionState | None,
+) -> ModelInfo:
     """Build ModelInfo from ModelType enum properties + model registry metadata.
 
     Args:
         mt: The ModelType enum member.
         record: The GenerationModel DB record (has .name, .description, .is_enabled).
+        session_state: Per-user readiness; None for always-on providers or unauthenticated.
     """
     meta = get_model_meta(mt)
     return ModelInfo(
@@ -101,6 +111,7 @@ def _build_model_info(mt: ModelType, record: object) -> ModelInfo:
             if meta.video is not None
             else None
         ),
+        session_state=session_state.value if session_state is not None else None,
     )
 
 
@@ -116,20 +127,36 @@ class ProvidersController(Controller):
     async def list_providers(
         self,
         session: AsyncSession,
-        grok_job_service: GrokJobService | None,
+        generation_service: GenerationService,
         current_user_id: UUID | None,
         product_config: ProductConfig,
+        product_id: str,
     ) -> ProvidersResponse:
         """List available providers and their models.
 
         Returns provider-grouped model catalog with capability metadata.
-        When authenticated, includes user_context with subscription tier.
+        When authenticated, includes user_context with subscription tier and
+        per-model session_state for on-demand providers.
         Models are filtered by the current product's allowlist/blocklist.
         """
         repo = GenerationModelRepository(session)
         db_models = await repo.list_enabled_for_product(product_config)
 
+        # Build per-user session state map in a single bulk query (authenticated only)
+        session_state_by_model: dict[str, ModelSessionState] = {}
+        if current_user_id is not None:
+            sessions = await GpuSessionRepository(session).list_by_user(
+                current_user_id, product_id, include_terminal=False
+            )
+            # list is created_at DESC; prefer an active session, else keep the newest seen
+            for s in sessions:
+                s_state = session_state_from_status(GpuSessionStatus(s.status))
+                existing = session_state_by_model.get(s.model_type)
+                if existing is None or s_state is ModelSessionState.ACTIVE:
+                    session_state_by_model[s.model_type] = s_state
+
         # Group models by provider
+        configured = generation_service.configured_providers
         provider_models: dict[Provider, list[ModelInfo]] = {}
         for record in db_models:
             try:
@@ -141,16 +168,22 @@ class ProvidersController(Controller):
                 )
                 continue
 
-            info = _build_model_info(mt, record)
+            mode = mt.provider.provisioning_mode
+            state: ModelSessionState | None = (
+                session_state_by_model.get(mt.value, ModelSessionState.NONE)
+                if mode is ProvisioningMode.ON_DEMAND and current_user_id is not None
+                else None
+            )
+            info = _build_model_info(mt, record, session_state=state)
             provider_models.setdefault(mt.provider, []).append(info)
 
         # Build provider list — include all known providers even with 0 models
-        grok_configured = grok_job_service is not None
         providers = [
             ProviderInfo(
                 provider=p.value,
                 name=PROVIDER_DISPLAY_NAMES[p],
-                available=_is_provider_available(p, grok_configured=grok_configured),
+                available=(p in configured),
+                provisioning_mode=p.provisioning_mode.value,
                 models=provider_models.get(p, []),
             )
             for p in Provider
