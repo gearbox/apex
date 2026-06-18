@@ -106,6 +106,9 @@ class ModelMeta:
     rate_limit: RateLimitMeta | None = None
     """Global rate limit. None means unlimited."""
 
+    requires_age_verification: bool = False
+    """Whether users must be age-verified before generating with this model."""
+
 
 # -------------------------------------------------------------------
 # Registry — every ModelType member MUST have an entry here
@@ -193,6 +196,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             default_tier=Resolution.STANDARD,
         ),
         rate_limit=None,
+        requires_age_verification=True,
     ),
     ModelType.AISHA_VIDEO: ModelMeta(
         provider=Provider.AISHA,
@@ -217,6 +221,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             ),
         ),
         rate_limit=None,
+        requires_age_verification=True,
     ),
 }
 

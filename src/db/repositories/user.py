@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
@@ -165,6 +165,8 @@ class UserRepository:
         subscription_tier: str | None = None,
         is_active: bool | None = None,
         locale: str | None = None,
+        age_verified_at: datetime | None = None,
+        date_of_birth: date | None = None,
     ) -> User | None:
         """Update user fields.
 
@@ -175,6 +177,9 @@ class UserRepository:
             display_name: New display name (optional).
             subscription_tier: New subscription tier (optional).
             is_active: New active status (optional).
+            locale: New locale (optional).
+            age_verified_at: Timestamp to set on first verification (optional).
+            date_of_birth: Date of birth to store (optional, write-once enforced upstream).
 
         Returns:
             Updated User if found, None otherwise.
@@ -195,6 +200,10 @@ class UserRepository:
             user.is_active = is_active
         if locale is not None:
             user.locale = locale
+        if age_verified_at is not None:
+            user.age_verified_at = age_verified_at
+        if date_of_birth is not None:
+            user.date_of_birth = date_of_birth
 
         user.updated_at = datetime.now(UTC)
         await self._session.flush()

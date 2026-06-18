@@ -65,6 +65,7 @@ def _build_model_info(mt: ModelType, record: object) -> ModelInfo:
         max_prompt_length=meta.max_prompt_length,
         supports_negative_prompt=meta.supports_negative_prompt,
         aspect_ratios=[ar.value for ar in meta.aspect_ratios],
+        requires_age_verification=meta.requires_age_verification,
         image=(
             ImageConstraints(
                 min_height=meta.image.min_height,

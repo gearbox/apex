@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from src.api.security import JWTConfig, JWTService, PasswordService
+from src.api.services.age_verification import AgeVerificationService
 from src.api.services.auth import AuthService
 from src.api.services.user import UserService
 from src.api.services.workflow_service import WorkflowService
@@ -235,6 +236,7 @@ def user_service(
     return UserService(
         repository=mock_user_repository,
         password_service=password_service,
+        age_verification_service=AgeVerificationService(),
     )
 
 

@@ -74,6 +74,9 @@ class ModelInfo(msgspec.Struct, kw_only=True):
     aspect_ratios: list[str]
     """Allowed aspect ratios, e.g. ["1:1", "16:9"]."""
 
+    requires_age_verification: bool = False
+    """Whether users must be age-verified before generating with this model."""
+
     image: ImageConstraints | None = None
     """Image constraints. None for video-only models."""
 

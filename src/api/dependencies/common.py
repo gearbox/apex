@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.rate_limit import init_rate_limiter
 from src.api.security import JWTConfig, JWTService, PasswordService
+from src.api.services.age_verification import AgeVerificationService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
 from src.api.services.bundle_index import BundleIndexService
@@ -238,6 +239,7 @@ def get_user_service(session: AsyncSession) -> UserService:
     return UserService(
         repository=repository,
         password_service=get_password_service(),
+        age_verification_service=AgeVerificationService(),
         r2_storage=_services.r2_storage,
     )
 

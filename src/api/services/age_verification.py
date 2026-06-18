@@ -1,11 +1,8 @@
 """Age verification service.
 
-Enforces per-product age gate policies during registration.
-
-Currently supports:
-- NONE: No age verification required (skip entirely).
-- CHECKBOX: User confirms age via a boolean flag.
-- DATE_OF_BIRTH: User provides DOB, validated server-side (age >= 18).
+Validates age claims on demand (at profile-update time) and computes the
+desired (age_verified_at, date_of_birth) values to persist. Stateless —
+monotonic / write-once enforcement lives in UserService which owns the row.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ class AgeVerificationError(Exception):
 
 
 class AgeVerificationService:
-    """Service for age gate enforcement at registration time.
+    """Validates age claims according to the product's age-gate policy.
 
     Stateless — all state is passed in per call.
     """
@@ -32,33 +29,33 @@ class AgeVerificationService:
         age_confirmed: bool | None = None,
         date_of_birth: date | None = None,
     ) -> tuple[datetime | None, date | None]:
-        """Verify age according to product policy.
+        """Validate an age claim and return values to persist.
 
         Args:
             product_config: Product configuration with age_gate policy.
             age_confirmed: Whether user checked the "I am 18+" checkbox.
-                           Required for CHECKBOX policy.
+                           Required for CHECKBOX policy when any age input is provided.
             date_of_birth: User's date of birth.
-                           Required for DATE_OF_BIRTH policy.
+                           Required for DATE_OF_BIRTH policy when any age input is provided.
 
         Returns:
-            Tuple of (age_verified_at, date_of_birth) to set on the User record.
-            Both will be None if the product has no age gate.
+            Tuple of (age_verified_at, date_of_birth) to apply to the User record.
+            (None, None) when no age input was supplied or the product has no age gate.
 
         Raises:
             AgeVerificationError: If the user does not meet age requirements.
-            ValueError: If required fields are missing for the policy.
         """
+        # No age input at all — no-op regardless of policy.
+        # Allows profile PATCHes that don't touch age fields to pass through.
+        if age_confirmed is None and date_of_birth is None:
+            return None, None
+
         policy = product_config.age_gate
 
         if policy == AgeGatePolicy.NONE:
             return None, None
 
         if policy == AgeGatePolicy.CHECKBOX:
-            if age_confirmed is None:
-                raise AgeVerificationError(
-                    "You must confirm you are 18 or older to use this platform"
-                )
             if not age_confirmed:
                 raise AgeVerificationError(
                     "You must confirm you are 18 or older to use this platform"
@@ -69,7 +66,7 @@ class AgeVerificationService:
             if date_of_birth is None:
                 raise AgeVerificationError("Date of birth is required to verify your age")
             today = datetime.now(UTC).date()
-            # Calculate age: compare (year, month, day) tuples to handle leap years
+            # Compare (month, day) tuples to handle leap-year boundaries correctly
             age = (
                 today.year
                 - date_of_birth.year

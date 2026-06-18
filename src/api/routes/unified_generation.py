@@ -28,6 +28,7 @@ from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.security import auth_guard
 from src.api.services.generation.rate_limiter import RateLimitExceededError
 from src.api.services.generation.service import (
+    AgeVerificationRequiredError,
     GenerationError,
     GenerationService,
     ModelDisabledError,
@@ -153,6 +154,18 @@ class UnifiedGenerationController(Controller):
                     status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        except AgeVerificationRequiredError as exc:
+            await idempotency_service.fail(record_id, session=session)
+            logger.info("generation.age_verification_required", error=str(exc))
+            return Response(
+                content=ErrorEnvelope(
+                    error="age_verification_required",
+                    message=str(exc),
+                    status_code=HTTP_403_FORBIDDEN,
+                ),
+                status_code=HTTP_403_FORBIDDEN,
             )
 
         except ModelNotAllowedError as exc:

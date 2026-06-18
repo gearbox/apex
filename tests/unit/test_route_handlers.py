@@ -212,6 +212,15 @@ class TestUserRouteHandlers:
                 user_service=user_service,
             )
 
+    def _make_data(self, **overrides: object) -> MagicMock:
+        data = MagicMock()
+        data.display_name = overrides.get("display_name")
+        data.email = overrides.get("email")
+        data.locale = overrides.get("locale")
+        data.age_confirmed = overrides.get("age_confirmed")
+        data.date_of_birth = overrides.get("date_of_birth")
+        return data
+
     async def test_update_profile_success(self) -> None:
         from src.api.routes.user import UserController
 
@@ -219,16 +228,12 @@ class TestUserRouteHandlers:
         user_service = AsyncMock()
         user_service.update_profile = AsyncMock(return_value=profile)
 
-        data = MagicMock()
-        data.display_name = "Alice"
-        data.email = "alice@example.com"
-        data.locale = None
-
         response = await UserController.update_profile.fn(  # type: ignore[attr-defined]
             MagicMock(),
             current_user_id=uuid4(),
-            data=data,
+            data=self._make_data(display_name="Alice", email="alice@example.com"),
             user_service=user_service,
+            product_config=MagicMock(),
         )
         assert response.status_code == HTTP_200_OK
 
@@ -241,17 +246,13 @@ class TestUserRouteHandlers:
         user_service = AsyncMock()
         user_service.update_profile = AsyncMock(side_effect=UserNotFoundError("no user"))
 
-        data = MagicMock()
-        data.display_name = None
-        data.email = None
-        data.locale = None
-
         with pytest.raises(NotFoundException):
             await UserController.update_profile.fn(  # type: ignore[attr-defined]
                 MagicMock(),
                 current_user_id=uuid4(),
-                data=data,
+                data=self._make_data(),
                 user_service=user_service,
+                product_config=MagicMock(),
             )
 
     async def test_update_profile_returns_400_on_email_exists(self) -> None:
@@ -263,16 +264,32 @@ class TestUserRouteHandlers:
         user_service = AsyncMock()
         user_service.update_profile = AsyncMock(side_effect=EmailAlreadyExistsError("email taken"))
 
-        data = MagicMock()
-        data.display_name = None
-        data.email = "taken@example.com"
-        data.locale = None
+        response = await UserController.update_profile.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            data=self._make_data(email="taken@example.com"),
+            user_service=user_service,
+            product_config=MagicMock(),
+        )
+        assert response.status_code == HTTP_400_BAD_REQUEST
+
+    async def test_update_profile_returns_400_on_age_verification_error(self) -> None:
+        from litestar.status_codes import HTTP_400_BAD_REQUEST
+
+        from src.api.routes.user import UserController
+        from src.api.services.age_verification import AgeVerificationError
+
+        user_service = AsyncMock()
+        user_service.update_profile = AsyncMock(
+            side_effect=AgeVerificationError("age claim failed")
+        )
 
         response = await UserController.update_profile.fn(  # type: ignore[attr-defined]
             MagicMock(),
             current_user_id=uuid4(),
-            data=data,
+            data=self._make_data(age_confirmed=False),
             user_service=user_service,
+            product_config=MagicMock(),
         )
         assert response.status_code == HTTP_400_BAD_REQUEST
 
