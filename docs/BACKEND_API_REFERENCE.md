@@ -1,12 +1,13 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-05-09 — adds GPU Sessions API (§7), `gpu_session.status_changed` SSE event, and related enums/error codes._
-
+> _Last updated: 2026-06-18 — adds provider provisioning mode + per-user session state to the model catalog: `provisioning_mode` on `ProviderInfo`, `session_state` on `ModelInfo`, new `ProvisioningMode` and `ModelSessionState` enums (§5, §17). `available` now reflects configured-provider registry membership (no longer hardcoded). Prior: per-model age-verification gate (§3, §4, §5, §17, §18)._
+>
+> _Prior (2026-06-17): synced the doc with `master` after a long gap — Aisha generation parameter system (§4), quality-tier capabilities (§5), per-output `thumbnail_url` (§6), GPU-session provisioning fields + internal callback (§7), corrected billing public-endpoint behaviour (§11), corrected model-capability matrix and new enums (§17), corrected `POST /v1/auth/register` contract (§2)._
 
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-04-01
+> **Last synced:** 2026-06-18 — `master` @ `4ffc1c7f18954f1520a0333f38d5965f84b55708`
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -14,7 +15,7 @@ This document captures the API surface that the frontend depends on. It is a **s
 
 ## Idempotency
 
-Three mutation endpoints require an `Idempotency-Key` header to prevent duplicate operations on network retries:
+Four mutation endpoints require an `Idempotency-Key` header to prevent duplicate operations on network retries:
 
 - `POST /v1/generate/`
 - `POST /v1/billing/topup/stripe`
@@ -137,11 +138,16 @@ Note:     Public endpoint — no auth needed. Frontend calls this on load.
 #### `POST /v1/auth/register`
 
 ```
-Request:  { email: string, password: string, display_name?: string, age_confirmed?: bool, date_of_birth?: date }
+Request:  { email: string, password: string, display_name?: string }
 Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime }
 Status:   201 Created
-Errors:   400 (validation), 409 email_exists, 403 age_verification_required
-Note:     age_confirmed required for vex.pics (age_gate=checkbox). date_of_birth for date_of_birth mode.
+Errors:   400 (validation_error | email_exists)
+Note:     The request body no longer carries age fields — `age_confirmed` / `date_of_birth`
+          are NOT accepted by this endpoint anymore, and the previous
+          `403 age_verification_required` response is no longer emitted here.
+          Age-gate requirements are still advertised via GET /v1/auth/product-info
+          (`age_gate`) for the frontend to enforce client-side before submitting.
+          `email_exists` is returned as 400 (not 409).
 ```
 
 #### `POST /v1/auth/login`
@@ -217,16 +223,34 @@ Response: {
   role: UserRole,
   is_active: bool,
   created_at: datetime,
-  updated_at: datetime
+  updated_at: datetime,
+  age_verified: bool,                  // true once the user has passed the age gate
+  age_verified_at: datetime | null,    // timestamp of first successful verification; null if never
+  date_of_birth: date | null           // stored only for DATE_OF_BIRTH-policy products; else null
 }
 ```
 
 #### `PATCH /v1/users/me`
 
 ```
-Request:  { display_name?: string | null, email?: string, locale?: SupportedLocale }
+Request:  {
+  display_name?: string | null,
+  email?: string,
+  locale?: SupportedLocale,
+  age_confirmed?: bool,        // "I am 18+" checkbox — for CHECKBOX-policy products (e.g. vex)
+  date_of_birth?: date         // for DATE_OF_BIRTH-policy products
+}
 Response: same as GET /v1/users/me
-Errors:   400 email_exists
+Errors:   400 (email_exists | validation_error)
+Note:     Age capture is policy-driven by the active product's age_gate (see GET /v1/auth/product-info):
+            • Omitting both age fields is a no-op — ordinary profile edits never touch age state.
+            • CHECKBOX product: age_confirmed=true sets age_verified_at=now(); age_confirmed=false → 400 validation_error.
+            • DATE_OF_BIRTH product: a DOB computing to ≥18 verifies; <18 → 400 validation_error.
+          Verification is monotonic: once age_verified_at is set it is never cleared, and re-confirming
+          is an idempotent 200 (the original timestamp is preserved).
+          date_of_birth is write-once: submitting a different value once one is stored → 400 validation_error
+          (an identical value is a no-op).
+          This is the capture path for the per-model age gate enforced at POST /v1/generate (§4).
 ```
 
 #### `POST /v1/users/me/password`
@@ -287,25 +311,52 @@ Request: {
   source_output_id?: UUID,        // alternative to input_image_id — use an existing generation output as input
                                   // mutually exclusive with input_image_id
   input_video_url?: string,       // required for v2v (public URL)
-  negative_prompt?: string,
+  negative_prompt?: string (≤2048 chars),  // applied by Aisha; stored but ignored by Grok
   aspect_ratio?: AspectRatio (default "1:1"),
-  n?: int (1–10, default 1),      // number of outputs
-  name?: string,
-  duration?: int (1–15, default 5),          // video only
-  resolution?: VideoResolution (default "720p"),  // video only
-  height?: int,                   // ComfyUI only
-  seed?: int,                     // ComfyUI only
-  steps?: int (1–20)              // ComfyUI only
+  n?: int (1–10, default 1),      // number of outputs; clamped to model max (see ModelType.max_images)
+  name?: string,                  // auto-generated from prompt[:50] if omitted
+
+  // --- Video-only (ignored for image generation) ---
+  duration?: int (1–15, default 5),
+  resolution?: VideoResolution (default "720p"),
+
+  // --- Aisha image sizing (image models only). Tier XOR explicit width+height. ---
+  image_resolution?: Resolution,  // quality tier: "draft" | "standard" | "high" | "ultra"
+                                  //   → maps to a target megapixel budget (see §17 Resolution)
+                                  //   mutually exclusive with width+height; omit both ⇒ model's default tier
+  width?: int (256–4096),         // explicit width; MUST be paired with height
+  height?: int (256–4096),        // explicit height; MUST be paired with width
+
+  // --- Aisha sampler overrides (image models only). Omit ⇒ per-model bundle default. ---
+  seed?: int,                     // reproducibility seed; auto-generated if omitted
+  steps?: int (1–150),            // inference steps; bundle clamps per-model max
+  cfg?: float (0.0–30.0),         // CFG scale
+  sampler?: Sampler,              // ComfyUI sampler name (see §17 Sampler)
+  scheduler?: Scheduler,          // ComfyUI scheduler name (see §17 Scheduler)
+  denoise?: float (0.0–1.0)       // denoise strength
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 model_not_allowed (model unavailable on this product), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from gallery" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
           Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
           Aisha (ComfyUI) models require an active GPU session — start one via
           POST /v1/sessions before submitting an Aisha generation, otherwise 409 no_active_gpu_session is returned.
+
+          Aisha sizing rules (enforced server-side; violations return 400 validation_error):
+            • width and height must be supplied together (one without the other is rejected).
+            • image_resolution and explicit width/height are mutually exclusive.
+            • Omitting all three uses the model's default tier (aisha-image default: "standard").
+          The Aisha sampler/sizing fields above are accepted only for Aisha image models; for Grok
+          models they are ignored (Grok determines sizing/sampling server-side).
+
+          Age-verification gate: models with requires_age_verification=true (currently aisha-image and
+          aisha-video — see GET /v1/providers) require the user to be age-verified. If age_verified_at
+          is not set, the request returns 403 age_verification_required and no job is created / no tokens
+          are charged. Capture verification first via PATCH /v1/users/me (§3). The gate is per-model and
+          authoritative regardless of the product's age_gate policy.
 ```
 
 ### JobCreatedResponse Schema
@@ -341,9 +392,12 @@ Response: {
 }
 
 ProviderInfo: {
-  provider: string,       // e.g. "aisha", "grok"
-  name: string,           // e.g. "Aisha", "xAI Grok"
-  available: bool,        // whether provider backend is reachable
+  provider: string,             // e.g. "aisha", "grok"
+  name: string,                 // e.g. "Aisha", "xAI Grok"
+  available: bool,              // true when the provider is fully configured and able to serve requests
+                                // (registry membership — e.g. Grok requires both XAI_API_KEY and R2)
+  provisioning_mode: string,    // "always_on" — cloud API, usable immediately when available
+                                // "on_demand" — requires a per-user GPU session (POST /v1/sessions)
   models: ModelInfo[]
 }
 
@@ -357,15 +411,28 @@ ModelInfo: {
   max_prompt_length: int,
   supports_negative_prompt: bool,
   aspect_ratios: string[],           // e.g. ["1:1", "16:9"]
+  requires_age_verification: bool,   // true ⇒ user must be age-verified (PATCH /v1/users/me) before
+                                     //   generating; enforced at POST /v1/generate. Collect the 18+
+                                     //   confirmation before starting a (billable) GPU session.
   image: ImageConstraints | null,    // null for video-only models
-  video: VideoConstraints | null     // null for image-only models
+  video: VideoConstraints | null,    // null for image-only models
+  session_state: string | null       // per-user readiness; only populated for authenticated requests
+                                     //   on on_demand provider models. Values: ModelSessionState.
+                                     //   null when unauthenticated or for always_on providers.
+                                     //   "none" → no live session; start one via POST /v1/sessions.
+                                     //   "active" → ready to generate; submit POST /v1/generate.
 }
 
 ImageConstraints: {
   min_height: int | null,            // null = not user-controllable
   max_height: int | null,
   default_height: int | null,
-  output_resolutions: string[] | null  // informational; null = backend-determined
+  output_resolutions: string[] | null,  // informational; null = backend-determined
+  supported_tiers: string[] | null,  // image quality tiers, e.g. ["draft","standard","high","ultra"]
+                                      // null for models with fixed sizing (e.g. Grok)
+  default_tier: string | null,       // default quality tier; null for fixed-sizing models
+  tier_megapixels: { [tier: string]: number } | null  // target megapixel budget per tier
+                                      // actual W×H depends on model + aspect ratio
 }
 
 VideoConstraints: {
@@ -446,14 +513,22 @@ Note:     Soft-hide from history
 
 JobOutputItem: {
   id: UUID,
-  url: string,              // presigned URL, valid ~1 hour
+  url: string,              // presigned URL for the full-resolution output, valid ~1 hour
   content_type: string,     // "image/jpeg", "video/mp4", etc.
   format: string,           // "jpeg", "webp", "mp4"
   size_bytes: int,
-  output_index: int,        // 0-based; -1 for thumbnails
-  is_thumbnail: bool
+  output_index: int,        // 0-based position within the batch
+  thumbnail_url: string | null,  // presigned URL of a WEBP thumbnail of this output
+                                  // (image) or its poster frame (video); null if none
+  is_thumbnail: bool        // true for the extracted first-frame/poster image of a video
 }
 ```
+
+> **Thumbnail model change:** each output now carries its own `thumbnail_url` (server-side
+> WEBP, quality 80, 512px longest edge). Thumbnails are no longer surfaced as separate
+> outputs with `output_index = -1`. `is_thumbnail` now flags only the extracted poster-frame
+> output of a video. `UnifiedJobResponse.thumbnail_url` remains a convenience shortcut to the
+> job's cover thumbnail.
 
 ---
 
@@ -513,8 +588,12 @@ GpuSessionResponse: {
   resumed_at: datetime | null,
   stopped_at: datetime | null,
   error_message: string | null,                // populated when status == "failed"
-  in_flight_job_count: int                     // queued+running Aisha jobs on this session
+  in_flight_job_count: int,                    // queued+running Aisha jobs on this session
                                                // — non-zero only for active sessions; 0 otherwise
+  provisioning_phase: string | null,           // latest phase reported via the node callback
+                                               // (e.g. "downloading", "ready"); null before first callback
+  provisioning_progress: object | null         // latest progress blob from the node callback
+                                               // (download bytes/files, message, etc.); null before first callback
 }
 
 ListSessionsResponse: { sessions: GpuSessionResponse[] }
@@ -654,6 +733,40 @@ const preview = await api.post<StopConfirmationResponse>(
 );
 // ...show preview to user, get confirmation...
 await api.post(`/v1/sessions/${session.id}/stop`, { confirmed: true });
+```
+
+### Internal — GPU node provisioning callback *(node-to-backend; not for frontend use)*
+
+GPU nodes (Aisha's `ProvisioningReporter`) push provisioning progress to the backend over this internal endpoint. It is **not** part of the authenticated frontend surface and is documented here only for completeness — the frontend observes provisioning progress via the `provisioning_phase` / `provisioning_progress` fields on `GpuSessionResponse` (poll `GET /v1/sessions/{id}` or react to the `gpu_session.status_changed` SSE event).
+
+#### `POST /v1/internal/gpu-sessions/{session_id}/provisioning`
+
+```
+Auth:    Authorization: Bearer <node callback token>
+         The controller has NO JWT guard. The presented token is validated in-handler by
+         comparing its SHA-256 hash against the session's stored callback_token_hash
+         (constant-time compare). Each session has its own single-purpose callback token.
+
+Request: {
+  session_id: UUID,           // MUST equal the {session_id} path param
+  phase: string,              // e.g. "starting", "downloading", "ready", "failed"
+  message?: string,           // human-readable status (default "")
+  download?: {                // present during the "downloading" phase
+    bytes_done: int,
+    bytes_total: int,
+    files_done: int,
+    files_total: int
+  },
+  elapsed_seconds?: int,      // default 0
+  error?: string | null,      // populated on failure
+  ts: datetime                // event timestamp (used for stale-callback rejection)
+}
+
+Response: { ok: true }
+Status:   200 OK   — for ALL non-auth outcomes, including status-gated and stale-ts no-ops,
+                     so the node never retries on a benign race.
+Errors:   401 unauthorized (missing / empty / invalid Bearer token),
+          400 bad_request   (body session_id does not match the path session_id)
 ```
 
 ---
@@ -1034,25 +1147,16 @@ Errors:   409 idempotency_conflict
 
 ### Billing — Public (no auth)
 
-#### `GET /v1/billing/packages`
-
-Same response as authenticated version.
-
-#### `GET /v1/billing/pricing`
-
-```
-Response: {
-  packages: TokenPackageResponse[],
-  prices: PricingRulePublicResponse[]
-}
-
-PricingRulePublicResponse: {
-  provider: string,
-  generation_type: string,
-  model: string | null,
-  token_cost: int
-}
-```
+> **Correction (was inaccurate):** there are currently **no unauthenticated billing endpoints**.
+> The `PublicBillingController` exists in the codebase but is **not mounted** in the app, and the
+> `{ packages, prices }` / `PricingRulePublicResponse` shape it described is **not exposed** by the
+> running API.
+>
+> `GET /v1/billing/packages` and `GET /v1/billing/pricing` live on the authenticated
+> `BillingController` (whole controller is behind `auth_guard`) and require
+> `Authorization: Bearer <access_token>`. Their responses are exactly the authenticated shapes
+> documented at the top of this section (`TokenPackageResponse[]` and `PricingRuleResponse[]`).
+> If a genuinely public pricing surface is needed, it must be mounted first.
 
 ### Billing — Webhooks (no auth)
 
@@ -1670,15 +1774,32 @@ Values: `"sfw"`, `"permissive"`
 
 ### ModelType
 
-| Value | Provider | T2I | I2I | T2V | I2V | V2V | FLF2V | Max Images |
-|-------|----------|-----|-----|-----|-----|-----|-------|-----------|
-| `grok-imagine-image` | grok | ✓ | ✓ | | | | | 10 |
-| `grok-2-image-1212` | grok | ✓ | | | | | | 10 |
-| `grok-imagine-video` | grok | | | ✓ | ✓ | ✓ | ✓ | 1 |
-| `aisha-image` | aisha | ✓ | ✓ | | | | | 4 |
-| `aisha-video` | aisha | | | ✓ | ✓ | ✓ | ✓ | 1 |
+| Value | Provider | T2I | I2I | T2V | I2V | V2V | FLF2V | Max Images | Age-gated |
+|-------|----------|-----|-----|-----|-----|-----|-------|-----------|-----------|
+| `grok-imagine-image` | grok | ✓ | ✓ | | | | | 10 | |
+| `grok-2-image-1212` | grok | ✓ | | | | | | 10 | |
+| `grok-imagine-video` | grok | | | ✓ | ✓ | ✓ | | 1 | |
+| `aisha-image` | aisha | ✓ | ✓ | | | | | 4 | ✓ |
+| `aisha-video` | aisha | | | ✓ | ✓ | | ✓ | 1 | ✓ |
 
-> `aisha-video` is seeded as disabled until the video workflow is production-ready.
+**Age-gated** = `requires_age_verification=true` (exposed on `GET /v1/providers` → `ModelInfo`). The user must be age-verified via `PATCH /v1/users/me` before `POST /v1/generate` will accept the model; otherwise `403 age_verification_required`. The flag is per-model and authoritative regardless of the product's `age_gate` policy.
+
+**Capability corrections vs. the previous revision of this doc:**
+- `grok-imagine-video` does **not** support `flf2v` (Grok has no first-last-frame mode). Max video duration 15 s.
+- `aisha-video` does **not** support `v2v` yet. It supports `t2v`, `i2v`, `flf2v`; max duration 10 s; aspect ratios limited to `1:1`, `16:9`, `9:16`.
+- `aisha-image` exposes quality tiers (`draft`/`standard`/`high`/`ultra`, default `standard`) plus explicit `width`/`height`; `min_height` 256, `max_height` 2048, `default_height` 1024.
+
+**Seeded enablement (default `is_enabled`; admins toggle via `PATCH /v1/admin/models/{model_key}`):**
+
+| Model | Seeded `is_enabled` | Reason |
+|-------|---------------------|--------|
+| `grok-imagine-image` | `true` | Flagship image model |
+| `grok-imagine-video` | `true` | Active video model |
+| `grok-2-image-1212` | `false` | EOL after Grok Imagine Image; kept for reference/fallback |
+| `aisha-image` | `false` | Seeded off; enable once the GPU image workflow is signed off |
+| `aisha-video` | `false` | Seeded off until the video workflow is production-ready |
+
+> `GET /v1/providers` reflects the **live** `is_enabled` value (not the seed), filtered by product.
 
 ### GenerationType
 
@@ -1721,6 +1842,29 @@ Values: `"sfw"`, `"permissive"`
 
 > Use the `gpu_session.status_changed` SSE event for real-time UI updates rather than polling.
 
+### ProvisioningMode
+
+How a provider's compute is made available. Surfaced as `ProviderInfo.provisioning_mode` on `GET /v1/providers`.
+
+| Value | Description |
+|-------|-------------|
+| `always_on` | Cloud API — usable immediately whenever the provider is configured (e.g. Grok / xAI) |
+| `on_demand` | Per-user GPU session required — start one via `POST /v1/sessions` before generating (e.g. Aisha / ComfyUI) |
+
+### ModelSessionState
+
+Per-user readiness of an `on_demand` model. Surfaced as `ModelInfo.session_state` on `GET /v1/providers` for authenticated requests only. Always `null` for `always_on` providers and unauthenticated callers.
+
+| Value | Description |
+|-------|-------------|
+| `none` | No live session for this model — start one via `POST /v1/sessions` |
+| `provisioning` | Session exists and is starting up (`pending` / `provisioning` / `resuming`) |
+| `active` | Session is active and ComfyUI is reachable — generations can be submitted |
+| `paused` | Session is paused (instance stopped, disk retained) — resume via `POST /v1/sessions/{id}/resume` |
+| `stale` | Session was active but the last health probe failed; may self-recover |
+
+> Prefer the `gpu_session.status_changed` SSE event for real-time state changes rather than polling `GET /v1/providers`.
+
 ### AspectRatio
 
 Values: `"1:1"`, `"16:9"`, `"9:16"`, `"4:3"`, `"3:4"`, `"2:3"`, `"3:2"`
@@ -1728,6 +1872,39 @@ Values: `"1:1"`, `"16:9"`, `"9:16"`, `"4:3"`, `"3:4"`, `"2:3"`, `"3:2"`
 ### VideoResolution
 
 Values: `"480p"`, `"720p"`
+
+> Used for the `resolution` field on video generations. Distinct from the image-quality `Resolution` tier below.
+
+### Resolution *(image quality tier)*
+
+Image quality tier for Aisha image generation. Sent as `image_resolution` on `POST /v1/generate`. Each tier maps to a target **megapixel budget**; the backend computes concrete `width × height` for the requested aspect ratio (snapped to the model's latent multiple and clamped to its max edge / max megapixels).
+
+| Value | Target megapixels |
+|-------|-------------------|
+| `draft` | 0.25 MP |
+| `standard` | 1.0 MP (default) |
+| `high` | 2.0 MP |
+| `ultra` | 4.0 MP |
+
+> `tier_megapixels` in `GET /v1/providers` → `ImageConstraints` echoes this mapping per model. Mutually exclusive with explicit `width`/`height`.
+
+### Sampler *(Aisha sampler override)*
+
+ComfyUI sampler names accepted on `POST /v1/generate` (`sampler`, Aisha image only):
+
+`euler`, `euler_ancestral`, `euler_cfg_pp`, `heun`, `dpm_2`, `dpm_2_ancestral`, `lms`, `dpmpp_2s_ancestral`, `dpmpp_sde`, `dpmpp_2m`, `dpmpp_2m_sde`, `dpmpp_3m_sde`, `ddim`, `uni_pc`, `uni_pc_bh2`, `lcm`, `res_multistep`
+
+### Scheduler *(Aisha scheduler override)*
+
+ComfyUI scheduler names accepted on `POST /v1/generate` (`scheduler`, Aisha image only):
+
+`normal`, `karras`, `exponential`, `sgm_uniform`, `simple`, `ddim_uniform`, `beta`, `linear_quadratic`, `kl_optimal`
+
+### MediaFormat
+
+Values: `"png"`, `"jpeg"`, `"webp"` (images), `"mp4"` (video)
+
+> Surfaced as the `format` field on job/gallery outputs. Generated image thumbnails are `webp`.
 
 ### AccountType
 
@@ -1809,7 +1986,7 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed`, `unknown_product` | — |
 | 401 | `unauthorized`, `invalid_credentials`, `account_inactive`, `token_reuse_detected` | — |
 | 402 | `insufficient_balance` | `balance`, `required` |
-| 403 | `forbidden`, `account_inactive`, `permission_denied`, `age_verification_required`, `model_not_allowed` | — |
+| 403 | `forbidden`, `account_inactive`, `permission_denied`, `model_not_allowed`, `age_verification_required` | — |
 | 404 | `not_found`, `account_not_found`, `price_not_found` | — |
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero`, `no_active_gpu_session`, `session_already_exists`, `invalid_state`, `jobs_in_flight` | `balance`, `in_flight_count` |
 | 422 | `validation_error`, `moderation` | `provider`, `policy` |

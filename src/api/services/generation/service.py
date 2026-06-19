@@ -83,6 +83,11 @@ class GenerationService:
         self._rate_limiter = rate_limiter
         self._event_bus = event_bus
 
+    @property
+    def configured_providers(self) -> frozenset[Provider]:
+        """Providers that are fully wired and able to serve requests."""
+        return frozenset(self._providers)
+
     async def generate(
         self,
         request: UnifiedGenerationRequest,

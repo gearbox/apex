@@ -24,7 +24,7 @@ import structlog
 
 from src.api.services.cloudflare.schemas import TunnelListEntry
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIRateLimitError
-from src.core.enums import GpuSessionStatus
+from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
 
 if TYPE_CHECKING:
@@ -47,8 +47,6 @@ _LIVE_STATUSES = (
     GpuSessionStatus.stale,
     GpuSessionStatus.stopping,
 )
-
-_TERMINAL_STATUSES = [GpuSessionStatus.stopped, GpuSessionStatus.failed]
 
 
 class OrphanedTunnelCleanupWorker:
@@ -222,7 +220,7 @@ class OrphanedTunnelCleanupWorker:
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
             candidates = await repo.list_orphaned_instance_candidates(
-                terminal_statuses=_TERMINAL_STATUSES,
+                terminal_statuses=tuple(TERMINAL_GPU_SESSION_STATUSES),
                 stopped_before=stopped_before,
                 created_after=created_after,
             )

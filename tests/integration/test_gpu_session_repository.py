@@ -282,3 +282,39 @@ async def test_unique_index_allows_terminal_then_new(
         model_type="aisha-image",
     )
     assert new_session.id != stopped.id
+
+
+# ---------------------------------------------------------------------------
+# Tests: stopping is non-terminal at the repo layer (regression)
+# ---------------------------------------------------------------------------
+
+
+async def test_stopping_is_non_terminal_get_non_terminal_for_model(
+    gpu_repo: GpuSessionRepository,
+    make_gpu_session: GpuSessionFactory,
+) -> None:
+    """A session in `stopping` must still be returned by get_non_terminal_for_model.
+
+    Guards against a future consolidation that wrongly adds `stopping` to
+    TERMINAL_GPU_SESSION_STATUSES — which would let a second session start
+    mid-teardown and cause overlapping Vast.ai billing.
+    """
+    row = await make_gpu_session(status=GpuSessionStatus.stopping)
+    found = await gpu_repo.get_non_terminal_for_model(row.user_id, row.product_id, row.model_type)
+    assert found is not None, "stopping session must block the start guard"
+    assert found.id == row.id
+
+
+async def test_stopping_is_non_terminal_list_by_user(
+    gpu_repo: GpuSessionRepository,
+    make_gpu_session: GpuSessionFactory,
+) -> None:
+    """A session in `stopping` must appear in list_by_user(include_terminal=False).
+
+    Guards the catalog path: the frontend must see `session_state="stopping"` so
+    it can show "Stopping…" and disable the Start CTA.
+    """
+    row = await make_gpu_session(status=GpuSessionStatus.stopping)
+    rows = await gpu_repo.list_by_user(row.user_id, row.product_id, include_terminal=False)
+    ids = {r.id for r in rows}
+    assert row.id in ids, "stopping session must appear in the non-terminal catalog"

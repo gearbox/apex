@@ -16,6 +16,30 @@ class Provider(StrEnum):
     AISHA = "aisha"
     GROK = "grok"
 
+    @property
+    def provisioning_mode(self) -> ProvisioningMode:
+        """Provisioning mode for this provider. Raises if undeclared."""
+        try:
+            return _PROVISIONING_MODE_BY_PROVIDER[self]
+        except KeyError as exc:  # pragma: no cover - guarded by completeness test
+            raise RuntimeError(
+                f"No provisioning mode declared for provider {self.value!r}; "
+                f"add an entry to _PROVISIONING_MODE_BY_PROVIDER"
+            ) from exc
+
+
+class ProvisioningMode(StrEnum):
+    """How a provider's compute is made available."""
+
+    ALWAYS_ON = "always_on"  # cloud API; usable whenever the provider is configured
+    ON_DEMAND = "on_demand"  # requires a per-user GPU session before generation
+
+
+_PROVISIONING_MODE_BY_PROVIDER: dict[Provider, ProvisioningMode] = {
+    Provider.AISHA: ProvisioningMode.ON_DEMAND,
+    Provider.GROK: ProvisioningMode.ALWAYS_ON,
+}
+
 
 class ModelType(StrEnum):
     """Available model types."""
@@ -377,6 +401,50 @@ class GpuSessionStatus(StrEnum):
     stopping = "stopping"  # user requested stop, teardown in progress
     stopped = "stopped"  # session ended normally
     failed = "failed"  # provisioning or runtime failure
+
+
+# True lifecycle end. A session in one of these states no longer exists for
+# routing purposes and FREES the (user, product, model_type) slot, so a new
+# session may be started. `stopping` is deliberately EXCLUDED — teardown is in
+# progress and the slot is still occupied.
+TERMINAL_GPU_SESSION_STATUSES: frozenset[GpuSessionStatus] = frozenset(
+    {GpuSessionStatus.stopped, GpuSessionStatus.failed}
+)
+
+# Teardown-in-progress OR ended. Used where `stop()` must be idempotent and where
+# provisioning transitions must abort. Does NOT free the slot. This is the strict
+# superset that ADDS `stopping`.
+STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES: frozenset[GpuSessionStatus] = (
+    TERMINAL_GPU_SESSION_STATUSES | {GpuSessionStatus.stopping}
+)
+
+
+class ModelSessionState(StrEnum):
+    """Per-user readiness of an on-demand model, derived from GpuSessionStatus."""
+
+    NONE = "none"  # no session occupying this model's slot
+    PROVISIONING = "provisioning"  # pending / provisioning / resuming
+    ACTIVE = "active"  # session active — ready to generate
+    PAUSED = "paused"  # paused — needs resume
+    STALE = "stale"  # was active, now unreachable
+    STOPPING = "stopping"  # teardown in progress — not usable, cannot start a new one yet
+
+
+def session_state_from_status(status: GpuSessionStatus) -> ModelSessionState:
+    """Map a GpuSessionStatus to the UI-facing ModelSessionState."""
+    match status:
+        case GpuSessionStatus.active:
+            return ModelSessionState.ACTIVE
+        case GpuSessionStatus.pending | GpuSessionStatus.provisioning | GpuSessionStatus.resuming:
+            return ModelSessionState.PROVISIONING
+        case GpuSessionStatus.paused:
+            return ModelSessionState.PAUSED
+        case GpuSessionStatus.stale:
+            return ModelSessionState.STALE
+        case GpuSessionStatus.stopping:
+            return ModelSessionState.STOPPING
+        case GpuSessionStatus.stopped | GpuSessionStatus.failed:
+            return ModelSessionState.NONE
 
 
 class SupportedLocale(StrEnum):

@@ -28,7 +28,7 @@ import structlog
 
 from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.api.services.vastai.schemas import VastAIInstance
-from src.core.enums import GpuSessionStatus
+from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
 
 from ._env_builder import build_acs_env
@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _PROBE_TIMEOUT_SECONDS = 10.0
-_TERMINAL_STATUSES = frozenset({GpuSessionStatus.stopped, GpuSessionStatus.failed})
 
 # Reason strings passed to _retry_or_fail — defined as constants so the terminal guard
 # and every call site share a single source of truth (no typo risk, grep-friendly).
@@ -766,7 +765,7 @@ class GpuProvisioningWorker:
             current = await repo.get_by_id(session.id, for_update=True)
             if current is None:
                 return
-            if current.status in _TERMINAL_STATUSES | {GpuSessionStatus.stopping}:
+            if current.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
                 # User stopped the session mid-retry — clean up the new instance
                 with contextlib.suppress(Exception):
                     await self._vastai.destroy_instance(instance_id)
@@ -811,7 +810,7 @@ class GpuProvisioningWorker:
             current = await repo.get_by_id(session.id, for_update=True)
             if current is None:
                 return
-            if current.status in _TERMINAL_STATUSES | {GpuSessionStatus.stopping}:
+            if current.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
                 logger.info(
                     "gpu_session.provision.skip_transition_stale",
                     session_id=str(session.id),
