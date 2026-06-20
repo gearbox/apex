@@ -1115,9 +1115,10 @@ class TestProvidersRouteHandlers:
         assert grok_provider.available is True
 
     def test_configured_providers_controls_availability(self) -> None:
-        from src.core.enums import Provider
-        from src.api.services.generation.service import GenerationService
         from unittest.mock import MagicMock
+
+        from src.api.services.generation.service import GenerationService
+        from src.core.enums import Provider
 
         svc = GenerationService(
             providers={Provider.GROK: MagicMock()},

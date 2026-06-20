@@ -5,14 +5,32 @@ from __future__ import annotations
 import pytest
 
 from src.core.enums import ModelType, Product
-from src.core.product import PaymentProvider
+from src.core.product import AgeGatePolicy, PaymentProvider
 from src.core.product_registry import (
+    PRODUCT_REGISTRY,
     SYNTHARA_CONFIG,
     VEX_CONFIG,
     extract_apex_domain,
     resolve_product_by_domain,
     resolve_product_by_slug,
 )
+
+
+class TestAgeGatePolicy:
+    def test_vex_uses_date_of_birth(self) -> None:
+        # vex verifies age via DOB entry, not a bare self-attestation checkbox.
+        assert VEX_CONFIG.age_gate is AgeGatePolicy.DATE_OF_BIRTH
+
+    def test_synthara_has_no_age_gate(self) -> None:
+        assert SYNTHARA_CONFIG.age_gate is AgeGatePolicy.NONE
+
+    def test_no_product_uses_checkbox(self) -> None:
+        # CHECKBOX is reserved (dormant) for a future ID-backed verification flow.
+        # No product may route a bare self-attestation checkbox to verification.
+        assert all(
+            cfg.age_gate is not AgeGatePolicy.CHECKBOX
+            for cfg in PRODUCT_REGISTRY.values()
+        )
 
 
 class TestExtractApexDomain:

@@ -33,7 +33,7 @@ VEX_CONFIG = ProductConfig(
             "vex.pics",
         }
     ),
-    age_gate=AgeGatePolicy.CHECKBOX,
+    age_gate=AgeGatePolicy.DATE_OF_BIRTH,
     allowed_auth_methods=frozenset(
         {
             AuthMethod.EMAIL_PASSWORD,
