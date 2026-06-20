@@ -1,6 +1,6 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-06-18 — adds provider provisioning mode + per-user session state to the model catalog: `provisioning_mode` on `ProviderInfo`, `session_state` on `ModelInfo`, new `ProvisioningMode` and `ModelSessionState` enums (§5, §17). `available` now reflects configured-provider registry membership (no longer hardcoded). Prior: per-model age-verification gate (§3, §4, §5, §17, §18)._
+> _Last updated: 2026-06-20 — vex age gate switched from `checkbox` to `date_of_birth` (§3, §16); DOB point-of-use capture flow documented in §3 PATCH /v1/users/me. Prior: provider provisioning mode + per-user session state (§5, §17)._
 >
 > _Prior (2026-06-17): synced the doc with `master` after a long gap — Aisha generation parameter system (§4), quality-tier capabilities (§5), per-output `thumbnail_url` (§6), GPU-session provisioning fields + internal callback (§7), corrected billing public-endpoint behaviour (§11), corrected model-capability matrix and new enums (§17), corrected `POST /v1/auth/register` contract (§2)._
 
@@ -237,15 +237,16 @@ Request:  {
   display_name?: string | null,
   email?: string,
   locale?: SupportedLocale,
-  age_confirmed?: bool,        // "I am 18+" checkbox — for CHECKBOX-policy products (e.g. vex)
-  date_of_birth?: date         // for DATE_OF_BIRTH-policy products
+  age_confirmed?: bool,        // "I am 18+" checkbox — for CHECKBOX-policy products
+  date_of_birth?: date         // for DATE_OF_BIRTH-policy products (e.g. vex)
 }
 Response: same as GET /v1/users/me
 Errors:   400 (email_exists | validation_error)
 Note:     Age capture is policy-driven by the active product's age_gate (see GET /v1/auth/product-info):
             • Omitting both age fields is a no-op — ordinary profile edits never touch age state.
             • CHECKBOX product: age_confirmed=true sets age_verified_at=now(); age_confirmed=false → 400 validation_error.
-            • DATE_OF_BIRTH product: a DOB computing to ≥18 verifies; <18 → 400 validation_error.
+            • DATE_OF_BIRTH product (vex): a DOB computing to ≥18 verifies; <18 → 400 validation_error.
+              DOB is captured at point of use — never at registration — when POST /v1/generate returns 403 age_verification_required.
           Verification is monotonic: once age_verified_at is set it is never cleared, and re-confirming
           is an idempotent 200 (the original timestamp is preserved).
           date_of_birth is write-once: submitting a different value once one is stored → 400 validation_error
@@ -1757,7 +1758,7 @@ async function openEventStream(apiFetch: Fetcher) {
 
 | Slug | Display Name | Domains | Content Rating | Age Gate | Payment Providers | Org Feature |
 |------|-------------|---------|---------------|----------|------------------|-------------|
-| `vex` | vex.pics | vex.pics, www.vex.pics, app.vex.pics | permissive | checkbox | Stripe + NowPayments | No |
+| `vex` | vex.pics | vex.pics, www.vex.pics, app.vex.pics | permissive | date_of_birth | Stripe + NowPayments | No |
 | `synthara` | Synthara | synthara.app, www.synthara.app, app.synthara.app | sfw | none | Stripe only | Yes |
 
 ### AgeGatePolicy
