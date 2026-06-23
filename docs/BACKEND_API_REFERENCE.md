@@ -709,6 +709,30 @@ Note:     The two-call pattern is stateless on the server — the first call doe
           with `confirmed: true` to actually stop.
 ```
 
+### Billing & Credit Guard
+
+GPU sessions are billed by uptime. All debit transactions carry a `metadata.type` field identifying the charge kind:
+
+| `metadata.type` | When created |
+|-----------------|-------------|
+| `generation` | Aisha or Grok generation charged at submission |
+| `gpu_session_reservation` | Base reservation debit when session starts |
+| `gpu_session_metered` | Per-cycle metered debit from `SessionCreditGuard` (clamped to balance) |
+| `gpu_session_overage` | Finalization overage — additional tokens owed at session stop |
+
+**Credit guard cycle** (`SessionCreditGuard`, runs on the health-snapshot worker cadence):
+
+1. For each `active` or `stale` session, settle a metered debit equal to `ceil(interval_min × rate)` tokens — clamped to the current balance (never goes negative).
+2. Compute a **floor** = `ceil(interval_min × rate × safety_factor)` (default safety factor 1.5). Sessions with `balance ≤ floor` are auto-terminated.
+3. Classify the warning level:
+   - `balance ≤ floor` → terminate immediately (emits `critical` warning then stops)
+   - `balance ≤ critical_threshold` (default 10-min runway) → `critical`
+   - `balance ≤ warning_threshold` (default 20-min runway) → `warning`
+   - otherwise → no warning
+4. Emit `gpu_session.credit_warning` SSE events **once per upward transition** (de-escalates when balance recovers, e.g. after a top-up).
+
+**Finalization** (runs after the session reaches `stopped`): computes total billable minutes, compares against total settled tokens (base reservation + all metered debits), then either settles any remaining overage or issues a partial refund — no debt invariant holds throughout.
+
 ### Frontend Usage Pattern
 
 ```typescript
@@ -1623,6 +1647,7 @@ data: <JSON-encoded inner payload>
 | `job.status_changed` | Job moved to a new status | `JobStatusPayload` |
 | `job.progress` | Job progress update | `JobProgressPayload` |
 | `gpu_session.status_changed` | GPU session moved to a new status (e.g. provisioning → active, active → paused, paused → resuming → active, → stopped) | `GpuSessionStatusPayload` |
+| `gpu_session.credit_warning` | Session balance is low; emitted once per upward level transition (no warning → warning → critical). Cleared on balance recovery or termination. | `GpuSessionCreditWarningPayload` |
 | `balance.updated` | Token balance changed (debit, credit, refund) | `BalanceUpdatedPayload` |
 | `system.notification` | Broadcast system message (maintenance, outage) | `SystemNotificationPayload` |
 
@@ -1654,6 +1679,16 @@ interface GpuSessionStatusPayload {
   bundle_name: string;
   tunnel_hostname: string | null;
   error_message: string | null;  // populated when status == "failed"
+  reason: string | null;         // machine-readable stop reason, e.g. "insufficient_credits"
+}
+
+// gpu_session.credit_warning
+interface GpuSessionCreditWarningPayload {
+  session_id: string;            // UUID
+  level: "warning" | "critical"; // severity; only emitted on upward transitions
+  minutes_remaining: number;     // estimated minutes left at current burn rate
+  terminate_at: string | null;   // ISO datetime when session will auto-terminate (null if >24h)
+  balance: number;               // current token balance at time of emission
 }
 
 // balance.updated
@@ -1677,7 +1712,7 @@ interface SystemNotificationPayload {
 
 | Channel | Subscribers | Events |
 |---------|-------------|--------|
-| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `balance.updated` |
+| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `gpu_session.credit_warning`, `balance.updated` |
 | `system:broadcast` | All connected clients | `system.notification` |
 
 Each SSE connection subscribes to both the per-user channel and `system:broadcast`.
@@ -1692,7 +1727,8 @@ Events are automatically published by the backend at:
 | `job.status_changed` | Grok video job completes, fails, or times out |
 | `job.progress` | Grok video job enters `running` state |
 | `gpu_session.status_changed` | GPU session transitions between any two states (start/provision/active/pause/resume/stop/fail) |
-| `balance.updated` | `check_and_reserve` (debit), `refund`, `credit`, `admin_adjustment` |
+| `gpu_session.credit_warning` | `SessionCreditGuard` cycle detects balance at warning or critical level (emitted once per upward transition) |
+| `balance.updated` | `check_and_reserve` (debit), `refund`, `credit`, `admin_adjustment`, `settle_session_usage` |
 | `system.notification` | Admin calls `POST /v1/admin/broadcast` |
 
 ### Admin Broadcast
@@ -1910,6 +1946,12 @@ Values: `"png"`, `"jpeg"`, `"webp"` (images), `"mp4"` (video)
 ### AccountType
 
 Values: `"personal"`, `"enterprise"`
+
+### NotificationLevel
+
+Values: `"info"`, `"warning"`, `"critical"`
+
+> Shared severity enum used in `SystemNotificationPayload` (admin broadcast) and `GpuSessionCreditWarningPayload` (credit guard).
 
 ### TransactionType
 

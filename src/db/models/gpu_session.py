@@ -277,6 +277,18 @@ class GpuSession(Base):
         ),
     )
 
+    # Credit guard warning state (set by SessionCreditGuard)
+    credit_warning_level: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
+        comment="Current credit warning level (NotificationLevel value); NULL = not warned",
+    )
+    credit_warned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When credit_warning_level was last set",
+    )
+
     __table_args__ = (
         Index("ix_gpu_sessions_status_product", "status", "product_id"),
         Index(

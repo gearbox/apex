@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, literal, select, tuple_
+from sqlalchemy import func, literal, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -186,6 +186,27 @@ class BillingRepository:
             select(func.coalesce(func.sum(TokenTransaction.amount), 0)).where(
                 TokenTransaction.job_id == job_id,
                 TokenTransaction.transaction_type == TransactionType.REFUND.value,
+            )
+        )
+        return int(result.scalar_one())
+
+    async def get_settled_tokens_for_session(self, session_id: UUID) -> int:
+        """Sum all DEBIT amounts linked to a GPU session.
+
+        Covers both the base reservation (job_id = session_id) and metered
+        debits from SessionCreditGuard (metadata->>'session_id' = session_id).
+        Returns the total tokens already charged (positive integer, 0 if none).
+        Used by SessionCreditGuard and _apply_finalize_billing to avoid
+        double-charging usage already settled during the session lifetime.
+        """
+        session_id_str = str(session_id)
+        result = await self._session.execute(
+            select(func.coalesce(func.sum(func.abs(TokenTransaction.amount)), 0)).where(
+                TokenTransaction.transaction_type == TransactionType.DEBIT.value,
+                or_(
+                    TokenTransaction.job_id == session_id,
+                    TokenTransaction.metadata_["session_id"].as_string() == session_id_str,
+                ),
             )
         )
         return int(result.scalar_one())

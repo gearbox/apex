@@ -216,10 +216,12 @@ class GrokJobService:
                 token_cost,
                 job_id,
                 metadata={
+                    "type": "generation",
                     "provider": "grok",
                     "generation_type": generation_type.value,
                     "model": model.value,
                 },
+                description="Generation charge",
                 session=session,
                 product_id=product_id,
             )
@@ -482,10 +484,12 @@ class GrokJobService:
                 token_cost,
                 job_id,
                 metadata={
+                    "type": "generation",
                     "provider": "grok",
                     "generation_type": generation_type.value,
                     "model": model.value,
                 },
+                description="Generation charge",
                 session=session,
                 product_id=product_id,
             )

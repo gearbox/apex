@@ -8,6 +8,8 @@ from uuid import UUID
 
 import msgspec
 
+from src.core.enums import NotificationLevel
+
 
 class EventType(StrEnum):
     """Server-sent event types."""
@@ -17,6 +19,7 @@ class EventType(StrEnum):
     BALANCE_UPDATED = "balance.updated"
     SYSTEM_NOTIFICATION = "system.notification"
     GPU_SESSION_STATUS_CHANGED = "gpu_session.status_changed"
+    GPU_SESSION_CREDIT_WARNING = "gpu_session.credit_warning"
 
 
 # --- Payloads ---
@@ -44,7 +47,7 @@ class BalanceUpdatedPayload(msgspec.Struct, kw_only=True):
 
 
 class SystemNotificationPayload(msgspec.Struct, kw_only=True):
-    level: str  # "info" | "warning" | "critical"
+    level: NotificationLevel
     title: str
     message: str
     expires_at: datetime | None = None
@@ -60,6 +63,17 @@ class GpuSessionStatusPayload(msgspec.Struct, kw_only=True):
     bundle_name: str
     tunnel_hostname: str | None = None
     error_message: str | None = None
+    reason: str | None = None
+
+
+class GpuSessionCreditWarningPayload(msgspec.Struct, kw_only=True):
+    """Emitted when a GPU session balance falls below warning thresholds."""
+
+    session_id: UUID
+    level: NotificationLevel
+    minutes_remaining: int
+    terminate_at: datetime | None
+    balance: int
 
 
 # --- Envelope ---
@@ -88,7 +102,7 @@ class SSETicketResponse(msgspec.Struct, kw_only=True):
 
 
 class SystemBroadcastRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
-    level: str  # "info" | "warning" | "critical"
+    level: NotificationLevel
     title: str
     message: str
     expires_at: datetime | None = None

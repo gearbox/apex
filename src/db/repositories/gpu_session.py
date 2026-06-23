@@ -421,6 +421,23 @@ class GpuSessionRepository:
         )
         await self._session.flush()
 
+    async def update_credit_warning(
+        self,
+        session_id: UUID,
+        level: str | None,
+        warned_at: datetime | None,
+    ) -> None:
+        """Persist the current credit warning level and timestamp.
+
+        Pass level=None to clear the warning (de-escalate on top-up).
+        """
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(credit_warning_level=level, credit_warned_at=warned_at)
+        )
+        await self._session.flush()
+
     async def update_callback_token_hash(self, session_id: UUID, token_hash: str) -> None:
         """Replace the stored callback token hash (called on provisioning retry)."""
         await self._session.execute(

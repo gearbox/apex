@@ -346,10 +346,12 @@ class AishaGenerationProvider:
             token_cost,
             job_id,
             metadata={
+                "type": "generation",
                 "provider": Provider.AISHA.value,
                 "generation_type": request.generation_type.value,
                 "model": request.model.value,
             },
+            description="Generation charge",
             session=session,
             product_id=product_id,
         )

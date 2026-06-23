@@ -422,10 +422,11 @@ class GpuSessionService:
                     token_cost,
                     session_id,
                     metadata={
-                        "type": "gpu_session_base",
+                        "type": "gpu_session_reservation",
                         "model_type": model_type.value,
                         "bundle_name": bundle.bundle_name,
                     },
+                    description="GPU session base reservation",
                     session=db,
                     product_id=product_id,
                     user_id=user_id,
@@ -589,6 +590,7 @@ class GpuSessionService:
         user_id: UUID,
         product_id: str,
         confirmed: bool = False,
+        reason: str | None = None,
     ) -> GpuSession | StopConfirmation:
         """Stop a session permanently. Always succeeds for any non-terminal state;
         idempotent for terminal states.
@@ -656,13 +658,13 @@ class GpuSessionService:
         # Pre-active sessions never reached 'active', so started_at is NULL.
         # Skip the confirmation dialog — no billable usage occurred — and refund fully.
         if session_row.started_at is None:
-            return await self._stop_pre_active(session_id, user_id, product_id)
+            return await self._stop_pre_active(session_id, user_id, product_id, reason=reason)
 
         # Active/stale/paused/resuming with started_at IS NOT NULL: normal
         # two-call confirmation flow.
         if not confirmed:
             return await self._stop_confirmation(session_id, user_id, product_id)
-        return await self._stop_confirmed(session_id, user_id, product_id)
+        return await self._stop_confirmed(session_id, user_id, product_id, reason=reason)
 
     async def get_session(
         self,
@@ -953,6 +955,8 @@ class GpuSessionService:
         session_id: UUID,
         user_id: UUID,
         product_id: str,
+        *,
+        reason: str | None = None,
     ) -> GpuSession:
         """Stop a session that never became active (started_at IS NULL).
 
@@ -999,7 +1003,7 @@ class GpuSessionService:
 
         # If the session raced to active under the lock, use the normal stop path.
         if session_row.started_at is not None:
-            return await self._stop_confirmed(session_id, user_id, product_id)
+            return await self._stop_confirmed(session_id, user_id, product_id, reason=reason)
 
         await self._publish_status_event(session_row, previous_status=previous_status)
 
@@ -1043,7 +1047,7 @@ class GpuSessionService:
             await repo.mark_billing_finalized(session_id, stop_now)
 
         logger.info("gpu_session.stop_pre_active.success", session_id=str(session_id))
-        await self._publish_status_event(session_row, previous_status="stopping")
+        await self._publish_status_event(session_row, previous_status="stopping", reason=reason)
         return session_row
 
     async def _stop_confirmed(
@@ -1051,6 +1055,8 @@ class GpuSessionService:
         session_id: UUID,
         user_id: UUID,
         product_id: str,
+        *,
+        reason: str | None = None,
     ) -> GpuSession:
         """Execute confirmed stop: teardown external resources and mark stopped.
 
@@ -1120,7 +1126,9 @@ class GpuSessionService:
 
             await self._set_status(repo, session_row, GpuSessionStatus.stopping)
 
-        await self._publish_status_event(session_row, previous_status=previous_status)
+        await self._publish_status_event(
+            session_row, previous_status=previous_status, reason=reason
+        )
 
         # Sweep in-flight jobs immediately after TX1 commits.
         #
@@ -1164,7 +1172,7 @@ class GpuSessionService:
             session_id=str(session_id),
             teardown_had_errors=teardown_had_errors,
         )
-        await self._publish_status_event(session_row, previous_status="stopping")
+        await self._publish_status_event(session_row, previous_status="stopping", reason=reason)
 
         # Billing finalization — runs AFTER TX2 commits, outside any transaction.
         # If this fails the session is already stopped; billing drift is reconciled separately.
@@ -1275,13 +1283,23 @@ class GpuSessionService:
     ) -> None:
         """One finalization attempt — isolates the transactional work.
 
-        Compares ``billable_tokens`` against the actual debit on the ledger
-        (not a recomputed reservation) and creates an overage debit or partial
-        refund as appropriate. Stamps ``billing_finalized_at`` on success so
-        the reconciler knows to skip this session.
+        Compares ``billable_tokens`` against total settled tokens for the session
+        (base reservation + any metered debits from SessionCreditGuard) and creates
+        a clamped overage debit or partial refund as appropriate.
+
+        Uses ``get_settled_tokens_for_session`` rather than just the base reservation
+        amount so that metered debits during the session lifetime are not double-charged.
+
+        Overage debits are clamped via ``settle_session_usage`` so that the no-debt
+        invariant holds at finalization: balance can reach zero but never go negative.
+
+        Stamps ``billing_finalized_at`` on success so the reconciler knows to skip
+        this session.
         """
         async with self._session_factory() as db, db.begin():
             repo = BillingRepository(db)
+
+            # Look up the base reservation to find the account and original debit amount.
             debit = await repo.get_debit_for_job(session_row.id)
             if debit is None:
                 # No base reservation found. This can happen if the reservation
@@ -1296,55 +1314,63 @@ class GpuSessionService:
                 )
                 return
 
+            account_id = debit.account_id
             original_debit = abs(debit.amount)
 
-            if billable_tokens > original_debit:
-                overage = billable_tokens - original_debit
-                # Overage debit: job_id=None to preserve one-debit-per-job on
-                # the base reservation. Link via metadata for reconciliation.
-                await self._billing_service.check_and_reserve(
-                    debit.account_id,
+            # Total settled = base reservation + all metered debits from credit guard.
+            # This is the authoritative "already charged" figure.
+            total_settled = await repo.get_settled_tokens_for_session(session_row.id)
+
+            if billable_tokens > total_settled:
+                # Remaining overage after metered debits — settle clamped (no-debt invariant).
+                overage = billable_tokens - total_settled
+                settled, _, _ = await self._billing_service.settle_session_usage(
+                    account_id,
                     overage,
-                    None,
-                    metadata={
-                        "type": "gpu_session_overage",
-                        "session_id": str(session_row.id),
-                        "model_type": session_row.model_type,
-                        "bundle_name": session_row.bundle_name,
-                        "billable_minutes": billable_minutes,
-                    },
+                    session_id=session_row.id,
+                    model_type=session_row.model_type,
                     session=db,
                     product_id=session_row.product_id,
                     user_id=session_row.user_id,
+                    extra_metadata={
+                        "type": "gpu_session_overage",
+                        "bundle_name": session_row.bundle_name,
+                        "billable_minutes": billable_minutes,
+                    },
                 )
                 logger.info(
                     "gpu_session.billing.overage_charged",
                     session_id=str(session_row.id),
                     overage_tokens=overage,
+                    settled_tokens=settled,
                     billable_minutes=billable_minutes,
+                    total_settled=total_settled,
                     original_debit=original_debit,
                 )
-            elif billable_tokens < original_debit:
-                # Partial refund capped by actual debit. Cannot over-refund
-                # even if rate/reservation settings drifted mid-session.
-                refund_amount = original_debit - billable_tokens
-                await self._billing_service.partial_refund(
-                    session_row.id,
-                    refund_amount,
-                    description=(
-                        f"GPU session partial refund: used {billable_minutes}min at current rate"
-                    ),
-                    session=db,
-                    product_id=session_row.product_id,
-                    user_id=session_row.user_id,
-                )
-                logger.info(
-                    "gpu_session.billing.partial_refund",
-                    session_id=str(session_row.id),
-                    refund_tokens=refund_amount,
-                    billable_minutes=billable_minutes,
-                    original_debit=original_debit,
-                )
+            elif billable_tokens < total_settled:
+                # Over-charged relative to actual usage (e.g. short session with metered debits).
+                # Refund against the base reservation; cap at original_debit to prevent over-refund.
+                overpaid = total_settled - billable_tokens
+                refund_amount = min(overpaid, original_debit)
+                if refund_amount > 0:
+                    await self._billing_service.partial_refund(
+                        session_row.id,
+                        refund_amount,
+                        description=(
+                            f"GPU session partial refund: used {billable_minutes}min at current rate"
+                        ),
+                        session=db,
+                        product_id=session_row.product_id,
+                        user_id=session_row.user_id,
+                    )
+                    logger.info(
+                        "gpu_session.billing.partial_refund",
+                        session_id=str(session_row.id),
+                        refund_tokens=refund_amount,
+                        billable_minutes=billable_minutes,
+                        total_settled=total_settled,
+                        original_debit=original_debit,
+                    )
 
             await GpuSessionRepository(db).mark_billing_finalized(session_row.id, datetime.now(UTC))
 
@@ -1353,6 +1379,7 @@ class GpuSessionService:
         session: GpuSession,
         previous_status: str,
         error_message: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Fire-and-forget SSE publish. Delegates to the shared helper."""
         await publish_status_event(
@@ -1360,6 +1387,7 @@ class GpuSessionService:
             session,
             previous_status=previous_status,
             error_message=error_message,
+            reason=reason,
         )
 
     async def _delete_tunnel_best_effort(self, tunnel_id: str, dns_record_id: str) -> None:
