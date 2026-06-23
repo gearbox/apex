@@ -208,7 +208,7 @@ class SessionCreditGuard:
         rate = self._settings.gpu_session_tokens_per_minute
 
         # --- Metered settlement (nets base reservation; idempotent) ---
-        settled, new_balance, _ = await self._settle_metered(session, consumed_tokens)
+        _settled, new_balance, _ = await self._settle_metered(session, consumed_tokens)
 
         # --- Classify warning level ---
         new_level = self._classify_level(new_balance, floor_tokens)
