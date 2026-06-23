@@ -30,6 +30,7 @@ async def publish_status_event(
     *,
     previous_status: str,
     error_message: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Fire-and-forget SSE publish. Failures are logged but never propagate.
 
@@ -57,6 +58,7 @@ async def publish_status_event(
                     bundle_name=session.bundle_name,
                     tunnel_hostname=session.tunnel_hostname,
                     error_message=error_message,
+                    reason=reason,
                 ),
             ),
             timeout=FIRE_AND_FORGET_TIMEOUT_SECS,

@@ -25,6 +25,7 @@ from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
+from src.api.services.gpu_session.credit_guard import SessionCreditGuard
 from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
 from src.api.services.gpu_session.service import GpuSessionService
@@ -793,6 +794,18 @@ async def init_services(settings: Settings) -> JWTService:
     )
     logger.info("health_service.initialized")
 
+    # Build credit guard only when the GPU session stack is available.
+    session_credit_guard: SessionCreditGuard | None = None
+    if _services.gpu_session_service is not None:
+        session_credit_guard = SessionCreditGuard(
+            session_factory=_services.db_manager.session_factory,
+            billing_service=BillingService(event_bus=_services.event_bus),
+            gpu_session_service=_services.gpu_session_service,
+            settings=settings,
+            event_bus=_services.event_bus,
+        )
+        logger.info("session_credit_guard.initialized")
+
     # Initialize and start health snapshot worker
     _services.health_snapshot_worker = HealthSnapshotWorker(
         health_service=_services.health_service,
@@ -800,6 +813,7 @@ async def init_services(settings: Settings) -> JWTService:
         interval_seconds=settings.health_snapshot_interval_seconds,
         retention_days=settings.health_snapshot_retention_days,
         redis_url=settings.redis_url,
+        session_credit_guard=session_credit_guard,
     )
     await _services.health_snapshot_worker.start()
 

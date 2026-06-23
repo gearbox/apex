@@ -197,6 +197,7 @@ class BillingService:
         session: AsyncSession,
         product_id: str,
         user_id: UUID | None = None,
+        description: str = "Generation charge",
     ) -> TokenTransaction:
         """Atomically check balance and create a debit transaction.
 
@@ -240,7 +241,7 @@ class BillingService:
             amount=-token_cost,
             balance_after=new_balance,
             job_id=job_id,
-            description="Generation charge",
+            description=description,
             metadata=metadata,
             product_id=product_id,
         )
@@ -265,6 +266,96 @@ class BillingService:
         )
 
         return txn
+
+    async def settle_session_usage(
+        self,
+        account_id: UUID,
+        owed: int,
+        *,
+        session_id: UUID,
+        model_type: str,
+        session: AsyncSession,
+        product_id: str,
+        user_id: UUID | None = None,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> tuple[int, int, bool]:
+        """Clamped debit for GPU session metered usage. Never raises InsufficientBalanceError.
+
+        Debits ``min(max(0, owed), balance)`` tokens — always non-negative and always
+        within available balance. This is the no-debt invariant: a user can never be
+        charged more than their remaining balance, regardless of how long the session ran.
+
+        Metered debits use ``job_id=None`` and link to the session via
+        ``metadata['session_id']`` so that ``get_settled_tokens_for_session`` covers them
+        while preserving the one-debit-per-job invariant on the base reservation.
+
+        Returns:
+            Tuple of (settled_tokens, new_balance, fully_settled) where:
+            - settled_tokens: actual tokens debited (may be < owed if balance insufficient)
+            - new_balance: balance after the debit
+            - fully_settled: True when owed == 0 or balance covered the full amount
+        """
+        if owed <= 0:
+            repo = BillingRepository(session)
+            balance = await repo.get_balance(account_id)
+            return 0, balance, True
+
+        repo = BillingRepository(session)
+
+        # Lock account row
+        account = await repo.get_account_for_update(account_id)
+        if account is None:
+            raise AccountNotFoundError(f"Token account {account_id} not found")
+
+        balance = await repo.get_balance(account_id)
+        to_debit = min(owed, max(0, balance))
+
+        if to_debit <= 0:
+            return 0, balance, False
+
+        new_balance = balance - to_debit
+        base_metadata: dict[str, Any] = {
+            "type": "gpu_session_metered",
+            "session_id": str(session_id),
+            "model_type": model_type,
+        }
+        if extra_metadata:
+            base_metadata.update(extra_metadata)
+        description = (
+            extra_metadata.get("description", f"GPU session metered usage ({model_type})")
+            if extra_metadata
+            else f"GPU session metered usage ({model_type})"
+        )
+        await repo.create_transaction(
+            id=new_id(),
+            account_id=account_id,
+            transaction_type=TransactionType.DEBIT.value,
+            amount=-to_debit,
+            balance_after=new_balance,
+            job_id=None,
+            description=description,
+            metadata=base_metadata,
+            product_id=product_id,
+        )
+
+        logger.info(
+            "billing.gpu_session_metered",
+            account_id=str(account_id),
+            session_id=str(session_id),
+            owed=owed,
+            settled=to_debit,
+            balance_after=new_balance,
+        )
+
+        await self._publish_balance_update(
+            user_ids=[user_id] if user_id is not None else [],
+            account_id=account_id,
+            balance=new_balance,
+            delta=-to_debit,
+            transaction_type=TransactionType.DEBIT.value,
+        )
+
+        return to_debit, new_balance, to_debit == owed
 
     async def refund(
         self,

@@ -370,6 +370,14 @@ class AdminPermission(StrEnum):
     BILLING_ADJUST = "billing_adjust"
 
 
+class NotificationLevel(StrEnum):
+    """Severity level for system notifications and credit warnings."""
+
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
 class ComponentStatus(StrEnum):
     """Health status of a single component."""
 

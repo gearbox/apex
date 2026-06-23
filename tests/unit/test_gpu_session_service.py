@@ -7,6 +7,7 @@ required; GpuSessionRepository is patched at the service module level.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -57,6 +58,8 @@ def _make_billing_mock() -> MagicMock:
     m.check_and_reserve = AsyncMock(return_value=None)
     m.refund = AsyncMock(return_value=None)
     m.partial_refund = AsyncMock(return_value=None)
+    # (settled_tokens, new_balance, fully_settled) — overridden per-test as needed
+    m.settle_session_usage = AsyncMock(return_value=(0, 0, True))
     return m
 
 
@@ -113,7 +116,7 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.cf_tunnel_id = "tunnel-abc123"
     session.cf_dns_record_id = "dns-abc123"
     session.tunnel_hostname = "gpu-01234567.gpu-domain.com"
-    session.callback_token = "test-callback-token"
+    session.callback_token_hash = hashlib.sha256(b"test-callback-token").hexdigest()
     session.stale_detected_at = None
     session.stale_notified = False
     session.paused_at = None
@@ -811,7 +814,7 @@ class TestStartSession:
         assert call_args.kwargs["product_id"] == "vex"
         assert call_args.kwargs["user_id"] == user_id
         metadata = call_args.kwargs["metadata"]
-        assert metadata["type"] == "gpu_session_base"
+        assert metadata["type"] == "gpu_session_reservation"
         assert metadata["model_type"] == ModelType.AISHA_IMAGE.value
         assert metadata["bundle_name"] == _make_bundle_mapping().bundle_name
 
@@ -1516,6 +1519,8 @@ class TestFinalizeBilling:
                 amount=-existing_debit_amount,  # debits are stored negative
                 account_id=mocks["account_id"],
             )
+            # Simulate no prior metered debits — total settled equals base reservation.
+            mock_billing_repo.get_settled_tokens_for_session.return_value = existing_debit_amount
 
             result = await service.stop_session(
                 session_id=session.id,
@@ -1543,20 +1548,18 @@ class TestFinalizeBilling:
             total_paused_seconds=0,
         )
 
-        billing.check_and_reserve.assert_awaited_once()
-        args = billing.check_and_reserve.await_args.args
-        kwargs = billing.check_and_reserve.await_args.kwargs
+        billing.settle_session_usage.assert_awaited_once()
+        args = billing.settle_session_usage.await_args.args
+        kwargs = billing.settle_session_usage.await_args.kwargs
         assert args[0] == session.account_id
         assert args[1] == 500  # overage = 1000 billable - 500 reserved
-        # CRITICAL: overage debit must NOT reuse the session's job_id — that would
-        # create two debits with the same job_id and break get_debit_for_job().
-        assert args[2] is None
-        metadata = kwargs["metadata"]
-        assert metadata["type"] == "gpu_session_overage"
-        assert metadata["session_id"] == str(session.id)  # link via metadata
-        assert metadata["billable_minutes"] == 10
-        assert metadata["bundle_name"] == session.bundle_name
-        assert metadata["model_type"] == session.model_type
+        # session_id is a direct kwarg; extra_metadata carries the charge-type metadata
+        assert kwargs["session_id"] == session.id
+        assert kwargs["model_type"] == session.model_type
+        extra = kwargs["extra_metadata"]
+        assert extra["type"] == "gpu_session_overage"
+        assert extra["billable_minutes"] == 10
+        assert extra["bundle_name"] == session.bundle_name
         # No refund in overage branch
         billing.partial_refund.assert_not_called()
 
@@ -1576,14 +1579,12 @@ class TestFinalizeBilling:
             total_paused_seconds=0,
         )
 
-        billing.check_and_reserve.assert_awaited_once()
-        args = billing.check_and_reserve.await_args.args
+        billing.settle_session_usage.assert_awaited_once()
+        args = billing.settle_session_usage.await_args.args
+        kwargs = billing.settle_session_usage.await_args.kwargs
         assert args[1] == 100  # overage = (6 × 100) - 500 reserved
-        metadata = billing.check_and_reserve.await_args.kwargs["metadata"]
-        assert metadata["billable_minutes"] == 6
-        # Overage debit not linked to a job
-        assert args[2] is None
-        assert metadata["session_id"] == str(session.id)
+        assert kwargs["session_id"] == session.id
+        assert kwargs["extra_metadata"]["billable_minutes"] == 6
 
     async def test_partial_refund_when_billable_below_reservation(self) -> None:
         """5 min floor @ 80 tok/min = 400 tokens, reserved 500 → 100 refund.
@@ -1612,7 +1613,7 @@ class TestFinalizeBilling:
         assert kwargs["user_id"] == session.user_id
         assert "used 5min" in kwargs["description"]
         # No overage debit
-        billing.check_and_reserve.assert_not_called()
+        billing.settle_session_usage.assert_not_called()
 
     async def test_exact_match_creates_neither_debit_nor_refund(self) -> None:
         """5 min active @ 100 tok/min = 500 tokens, reserved 500 → no-op."""
@@ -1625,7 +1626,7 @@ class TestFinalizeBilling:
             total_paused_seconds=0,
         )
 
-        billing.check_and_reserve.assert_not_called()
+        billing.settle_session_usage.assert_not_called()
         billing.partial_refund.assert_not_called()
 
     async def test_paused_seconds_excluded_from_billable_duration(self) -> None:
@@ -1640,7 +1641,7 @@ class TestFinalizeBilling:
         )
 
         # 20 min total - 15 min paused = 5 min active → 500 tokens = reservation → no-op
-        billing.check_and_reserve.assert_not_called()
+        billing.settle_session_usage.assert_not_called()
         billing.partial_refund.assert_not_called()
 
     async def test_paused_seconds_exclusion_plus_overage(self) -> None:
@@ -1654,13 +1655,13 @@ class TestFinalizeBilling:
             total_paused_seconds=10 * 60,
         )
 
-        billing.check_and_reserve.assert_awaited_once()
-        args = billing.check_and_reserve.await_args.args
+        billing.settle_session_usage.assert_awaited_once()
+        args = billing.settle_session_usage.await_args.args
+        kwargs = billing.settle_session_usage.await_args.kwargs
         assert args[1] == 1500  # 2000 billable - 500 reserved
-        assert args[2] is None  # overage debit still not linked by job_id
-        kwargs = billing.check_and_reserve.await_args.kwargs
-        assert kwargs["metadata"]["billable_minutes"] == 20
-        assert kwargs["metadata"]["session_id"] == str(session.id)
+        assert kwargs["session_id"] == session.id
+        assert kwargs["extra_metadata"]["billable_minutes"] == 20
+        assert kwargs["extra_metadata"]["type"] == "gpu_session_overage"
 
 
 # ---------------------------------------------------------------------------
@@ -1959,6 +1960,7 @@ class TestStopFromPausedRollup:
             mock_billing_repo.get_debit_for_job.return_value = MagicMock(
                 amount=-500, account_id=mocks["account_id"]
             )
+            mock_billing_repo.get_settled_tokens_for_session.return_value = 500
 
             await service.stop_session(
                 session_id=session.id,
@@ -1970,11 +1972,13 @@ class TestStopFromPausedRollup:
         billing = mocks["billing_service"]
         # 10 min active @ 100 tok/min = 1000 tokens billable
         # Original debit 500 → overage of 500 tokens
-        billing.check_and_reserve.assert_awaited_once()
-        args = billing.check_and_reserve.await_args.args
+        billing.settle_session_usage.assert_awaited_once()
+        args = billing.settle_session_usage.await_args.args
         assert args[1] == 500  # overage amount
-        metadata = billing.check_and_reserve.await_args.kwargs["metadata"]
-        assert metadata["billable_minutes"] == 10
+        assert (
+            billing.settle_session_usage.await_args.kwargs["extra_metadata"]["billable_minutes"]
+            == 10
+        )
 
     async def test_stop_from_paused_with_prior_pause_accumulates(self) -> None:
         """Session was previously paused+resumed, now paused again and stopped.
@@ -2018,6 +2022,7 @@ class TestStopFromPausedRollup:
             mock_billing_repo.get_debit_for_job.return_value = MagicMock(
                 amount=-500, account_id=mocks["account_id"]
             )
+            mock_billing_repo.get_settled_tokens_for_session.return_value = 500
 
             await service.stop_session(
                 session_id=session.id,
@@ -2034,11 +2039,13 @@ class TestStopFromPausedRollup:
         billing = mocks["billing_service"]
         # 35 min wall - 20 min paused = 15 min active
         # 15 × 100 = 1500 billable, debit 500 → 1000 overage
-        billing.check_and_reserve.assert_awaited_once()
-        args = billing.check_and_reserve.await_args.args
+        billing.settle_session_usage.assert_awaited_once()
+        args = billing.settle_session_usage.await_args.args
         assert args[1] == 1000
-        metadata = billing.check_and_reserve.await_args.kwargs["metadata"]
-        assert metadata["billable_minutes"] == 15
+        assert (
+            billing.settle_session_usage.await_args.kwargs["extra_metadata"]["billable_minutes"]
+            == 15
+        )
 
     async def test_stopping_from_active_does_not_call_add_paused_seconds(self) -> None:
         """Regression guard: the rollup only triggers from 'paused'."""
@@ -2180,12 +2187,13 @@ class TestLedgerAuthorityForBilling:
             mock_billing_repo.get_debit_for_job.return_value = MagicMock(
                 amount=-500, account_id=mocks["account_id"]
             )
+            mock_billing_repo.get_settled_tokens_for_session.return_value = 500
             MockSessionRepo.return_value = AsyncMock()
 
             await service._finalize_billing(session)
 
         billing.partial_refund.assert_not_awaited()
-        billing.check_and_reserve.assert_not_awaited()
+        billing.settle_session_usage.assert_not_awaited()
 
     async def test_refund_uses_ledger_debit_not_settings(self) -> None:
         """Original debit > what current settings would produce → refund the diff.
@@ -2220,6 +2228,7 @@ class TestLedgerAuthorityForBilling:
             mock_billing_repo.get_debit_for_job.return_value = MagicMock(
                 amount=-800, account_id=mocks["account_id"]
             )
+            mock_billing_repo.get_settled_tokens_for_session.return_value = 800
             MockSessionRepo.return_value = AsyncMock()
 
             await service._finalize_billing(session)

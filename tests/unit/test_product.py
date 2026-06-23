@@ -27,10 +27,7 @@ class TestAgeGatePolicy:
     def test_no_product_uses_checkbox(self) -> None:
         # CHECKBOX is reserved (dormant) for a future ID-backed verification flow.
         # No product may route a bare self-attestation checkbox to verification.
-        assert all(
-            cfg.age_gate is not AgeGatePolicy.CHECKBOX
-            for cfg in PRODUCT_REGISTRY.values()
-        )
+        assert all(cfg.age_gate is not AgeGatePolicy.CHECKBOX for cfg in PRODUCT_REGISTRY.values())
 
 
 class TestExtractApexDomain:

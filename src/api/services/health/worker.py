@@ -19,6 +19,7 @@ from src.api.services.health import HEALTH_STREAM_CHANNEL
 from src.db.repositories.health import HealthSnapshotRepository
 
 if TYPE_CHECKING:
+    from src.api.services.gpu_session.credit_guard import SessionCreditGuard
     from src.api.services.health.service import HealthService
     from src.db.session import DatabaseManager
 
@@ -44,12 +45,14 @@ class HealthSnapshotWorker:
         interval_seconds: int,
         retention_days: int,
         redis_url: str | None = None,
+        session_credit_guard: SessionCreditGuard | None = None,
     ) -> None:
         self._health_service = health_service
         self._db_manager = db_manager
         self._interval = interval_seconds
         self._retention_days = retention_days
         self._redis_url = redis_url
+        self._session_credit_guard = session_credit_guard
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
@@ -127,6 +130,14 @@ class HealthSnapshotWorker:
             status=detailed["status"],
             duration_ms=duration_ms,
         )
+
+        # Run credit guard after health checks — outside the timed section so
+        # its latency doesn't inflate the reported health check duration.
+        if self._session_credit_guard is not None:
+            try:
+                await self._session_credit_guard.run_cycle()
+            except Exception:
+                logger.exception("health.snapshot_worker.credit_guard_error")
 
     async def _persist_snapshot(self, detailed: dict[str, Any]) -> None:
         """Write health snapshot to the database."""

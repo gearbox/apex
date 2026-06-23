@@ -436,6 +436,33 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- GPU Session Credit Guard ---
+    gpu_session_credit_safety_factor: float = Field(
+        default=1.5,
+        ge=1.0,
+        description=(
+            "Multiplier applied to the per-cycle token cost to derive the floor_tokens threshold. "
+            "A session is terminated when balance ≤ floor_tokens. "
+            "Higher values (e.g. 2.0) trigger earlier termination to avoid billing in arrears."
+        ),
+    )
+    gpu_session_credit_warning_minutes: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Balance threshold (in equivalent minutes of GPU time) below which a WARNING "
+            "credit event is emitted. Must be > gpu_session_credit_critical_minutes."
+        ),
+    )
+    gpu_session_credit_critical_minutes: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Balance threshold (in equivalent minutes of GPU time) below which a CRITICAL "
+            "credit event is emitted. Must be < gpu_session_credit_warning_minutes."
+        ),
+    )
+
     # --- Phase 2 Callback (pre-wired) ---
     apex_callback_url: str = Field(
         default="",
@@ -844,6 +871,18 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def validate_credit_warning_thresholds(self) -> "Settings":
+        """Assert critical threshold is strictly below warning threshold."""
+        if self.gpu_session_credit_critical_minutes >= self.gpu_session_credit_warning_minutes:
+            raise ValueError(
+                "gpu_session_credit_critical_minutes must be less than "
+                "gpu_session_credit_warning_minutes "
+                f"(got critical={self.gpu_session_credit_critical_minutes}, "
+                f"warning={self.gpu_session_credit_warning_minutes})"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_jwt_secret_key(self) -> "Settings":

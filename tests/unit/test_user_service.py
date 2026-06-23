@@ -242,7 +242,9 @@ class TestUpdateProfile:
 
     async def test_dob_over_18_first_time_verifies_and_stores(self) -> None:
         user = _make_user(age_verified_at=None, date_of_birth=None)
-        verified_user = _make_user(id=user.id, age_verified_at=datetime.now(UTC), date_of_birth=date(1999, 9, 9))
+        verified_user = _make_user(
+            id=user.id, age_verified_at=datetime.now(UTC), date_of_birth=date(1999, 9, 9)
+        )
         svc, mock_repo, _ = _make_service(user)
         mock_repo.email_exists = AsyncMock(return_value=False)
         mock_repo.update_user = AsyncMock(return_value=verified_user)
@@ -260,7 +262,9 @@ class TestUpdateProfile:
         today = date.today()
         dob_exactly_18 = today.replace(year=today.year - 18)
         user = _make_user(age_verified_at=None, date_of_birth=None)
-        verified_user = _make_user(id=user.id, age_verified_at=datetime.now(UTC), date_of_birth=dob_exactly_18)
+        verified_user = _make_user(
+            id=user.id, age_verified_at=datetime.now(UTC), date_of_birth=dob_exactly_18
+        )
         svc, mock_repo, _ = _make_service(user)
         mock_repo.email_exists = AsyncMock(return_value=False)
         mock_repo.update_user = AsyncMock(return_value=verified_user)
