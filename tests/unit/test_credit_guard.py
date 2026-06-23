@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -51,6 +53,9 @@ def _make_session(
     s.bundle_name = "wan_2.2_i2v"
     s.status = status
     s.started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    s.stopped_at = None
+    s.paused_at = None
+    s.total_paused_seconds = 0
     s.credit_warning_level = warning_level
     s.credit_warned_at = None
     return s
@@ -60,6 +65,47 @@ def _make_account(is_active: bool = True) -> MagicMock:
     a = MagicMock()
     a.is_active = is_active
     return a
+
+
+def _make_db_factory() -> tuple[AsyncMock, MagicMock]:
+    """Return (db_mock, session_factory) supporting 'async with factory() as db, db.begin()'."""
+    begin_cm = AsyncMock()
+    db_mock = AsyncMock()
+    db_mock.begin = MagicMock(return_value=begin_cm)
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=db_mock)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    factory = MagicMock()
+    factory.return_value = session_cm
+    return db_mock, factory
+
+
+class _FakeBillingRepo:
+    """Stateful billing ledger for integration tests."""
+
+    def __init__(self, initial_balance: int, initial_settled: int) -> None:
+        self.balance = initial_balance
+        self.settled = initial_settled
+        self.transaction_count = 0
+
+    async def get_account_for_update(self, account_id: UUID) -> MagicMock:  # noqa: ARG002
+        a = MagicMock()
+        a.is_active = True
+        return a
+
+    async def get_balance(self, account_id: UUID) -> int:  # noqa: ARG002
+        return self.balance
+
+    async def get_settled_tokens_for_session(self, session_id: UUID) -> int:  # noqa: ARG002
+        return self.settled
+
+    async def create_transaction(self, *, amount: int, **kwargs: Any) -> MagicMock:  # noqa: ARG002
+        self.balance += amount
+        self.settled += abs(amount)
+        self.transaction_count += 1
+        return MagicMock()
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +325,7 @@ class TestSessionCreditGuardClassifyLevel:
 
     def test_at_floor_is_critical(self) -> None:
         guard = self._guard()
-        # Exactly at floor → terminate path, but classify returns CRITICAL
+        # Exactly at floor → terminate path, but classify returns CRITICAL (150 <= critical=1000)
         assert guard._classify_level(150, floor_tokens=150) == NotificationLevel.CRITICAL
 
 
@@ -371,14 +417,12 @@ class TestSessionCreditGuardTerminateAtFloor:
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
 
         # Use asyncio.create_task; patch the terminate function to track calls
-        terminate_calls: list[MagicMock] = []
+        terminate_calls: list[object] = []
 
-        async def mock_terminate(s: MagicMock) -> None:
+        async def mock_terminate(s: object) -> None:
             terminate_calls.append(s)
 
-        guard._terminate_session = mock_terminate  # type: ignore[method-assign]
-
-        import asyncio
+        guard._terminate_session = mock_terminate  # type: ignore[assignment]
 
         # Run evaluate and let pending tasks flush
         await guard._evaluate_session(session)
@@ -428,7 +472,8 @@ class TestSessionCreditGuardDeEscalation:
 
         # Session previously warned (WARNING level stored)
         session = _make_session(warning_level=NotificationLevel.WARNING.value)
-        # After settle, balance is still 4900 — well above warning (2000)
+        # After settle, balance is 4900 — well above warning (2000) + hysteresis
+        # minutes_remaining = (4900-150)//100 = 47 > 20+1 = 21 → de-escalate
         guard._settle_metered = AsyncMock(return_value=(100, 4900, True))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
@@ -494,3 +539,379 @@ class TestSessionCreditGuardSkips:
 
         await guard._evaluate_session(session)
         guard._settle_metered.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: F1 — proportional metering (fails pre-fix, passes post-fix)
+# ---------------------------------------------------------------------------
+
+
+class TestProportionalMetering:
+    """Guard meters proportional to active runtime, netting the base reservation."""
+
+    def _guard(self, tokens_per_minute: int = 100) -> SessionCreditGuard:
+        return SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=tokens_per_minute),
+        )
+
+    def test_compute_owed_6min_active(self) -> None:
+        """6 minutes of active runtime → 600 consumed tokens (6 * 100)."""
+        guard = self._guard()
+        session = _make_session()
+        now = datetime(2026, 1, 1, 12, 6, 0, tzinfo=UTC)
+        assert guard._compute_owed(session, now=now) == 600
+
+    def test_compute_owed_5min_active(self) -> None:
+        """5 minutes → 500 consumed tokens (floor=5 min matches base reservation)."""
+        guard = self._guard()
+        session = _make_session()
+        now = datetime(2026, 1, 1, 12, 5, 0, tzinfo=UTC)
+        assert guard._compute_owed(session, now=now) == 500
+
+    @pytest.mark.asyncio
+    async def test_settle_metered_nets_base_reservation(self) -> None:
+        """consumed=600, settled=500 (base) → owed=100 passed to settle_session_usage."""
+        _, factory = _make_db_factory()
+
+        billing_repo = MagicMock()
+        billing_repo.get_settled_tokens_for_session = AsyncMock(return_value=500)
+        billing_repo.get_account_for_update = AsyncMock(return_value=_make_account())
+        billing_repo.get_balance = AsyncMock(return_value=1000)
+        billing_repo.create_transaction = AsyncMock(return_value=MagicMock())
+
+        guard = SessionCreditGuard(
+            session_factory=factory,
+            billing_service=BillingService(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=100),
+        )
+        session = _make_session()
+
+        with (
+            patch(
+                "src.api.services.gpu_session.credit_guard.BillingRepository",
+                return_value=billing_repo,
+            ),
+            patch("src.api.services.billing.BillingRepository", return_value=billing_repo),
+        ):
+            settled, balance_after, _ = await guard._settle_metered(session, 600)
+
+        # owed = max(0, 600 - 500) = 100; debit amount = -100
+        billing_repo.create_transaction.assert_called_once()
+        assert billing_repo.create_transaction.call_args.kwargs["amount"] == -100
+        assert settled == 100
+
+    @pytest.mark.asyncio
+    async def test_settle_metered_5min_no_additional_owed(self) -> None:
+        """consumed=500 == settled=500 → owed=0 → no create_transaction."""
+        _, factory = _make_db_factory()
+
+        billing_repo = MagicMock()
+        billing_repo.get_settled_tokens_for_session = AsyncMock(return_value=500)
+        billing_repo.get_balance = AsyncMock(return_value=1000)
+
+        guard = SessionCreditGuard(
+            session_factory=factory,
+            billing_service=BillingService(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=100),
+        )
+        session = _make_session()
+
+        with (
+            patch(
+                "src.api.services.gpu_session.credit_guard.BillingRepository",
+                return_value=billing_repo,
+            ),
+            patch("src.api.services.billing.BillingRepository", return_value=billing_repo),
+        ):
+            settled, _, fully = await guard._settle_metered(session, 500)
+
+        billing_repo.create_transaction.assert_not_called()
+        assert settled == 0
+        assert fully is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: F1 — no premature termination
+# ---------------------------------------------------------------------------
+
+
+class TestNoPrematureTermination:
+    """Session funded for N minutes is not terminated before N - floor/rate minutes."""
+
+    @pytest.mark.asyncio
+    async def test_funded_15min_not_terminated_at_8min(self) -> None:
+        """Funded for 15 min (balance well above floor); session not terminated at 8 min."""
+        # floor = ceil(1 * 100 * 1.5) = 150; 15 min = 1500 tokens reserve
+        # After 8 min guard cycle: balance = 1650 (well above floor)
+        settings = _make_settings(interval_seconds=60, tokens_per_minute=100, safety_factor=1.5)
+
+        gpu_svc = MagicMock()
+        gpu_svc.stop_session = AsyncMock()
+
+        guard = SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=gpu_svc,
+            settings=settings,
+        )
+        session = _make_session()
+        guard._settle_metered = AsyncMock(return_value=(300, 1650, True))  # type: ignore[method-assign]
+        guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._terminate_session = AsyncMock()  # type: ignore[method-assign]
+
+        await guard._evaluate_session(session)
+
+        guard._terminate_session.assert_not_called()
+        assert session.id not in guard._terminating
+
+
+# ---------------------------------------------------------------------------
+# Tests: F1a — idempotent settle
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentSettle:
+    """Two evaluate passes at same active_seconds → second settles 0 (create_transaction once)."""
+
+    @pytest.mark.asyncio
+    async def test_two_evaluations_same_consumed_settle_once(self) -> None:
+        """_settle_metered called twice with same consumed_tokens → debit issued once."""
+        _, factory = _make_db_factory()
+
+        # First call: total_settled=500 → owed=100
+        # Second call: total_settled=600 (500 base + 100 metered) → owed=0
+        billing_repo = MagicMock()
+        billing_repo.get_settled_tokens_for_session = AsyncMock(side_effect=[500, 600])
+        billing_repo.get_account_for_update = AsyncMock(return_value=_make_account())
+        billing_repo.get_balance = AsyncMock(return_value=1000)
+        billing_repo.create_transaction = AsyncMock(return_value=MagicMock())
+
+        guard = SessionCreditGuard(
+            session_factory=factory,
+            billing_service=BillingService(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=100),
+        )
+        session = _make_session()
+
+        with (
+            patch(
+                "src.api.services.gpu_session.credit_guard.BillingRepository",
+                return_value=billing_repo,
+            ),
+            patch("src.api.services.billing.BillingRepository", return_value=billing_repo),
+        ):
+            await guard._settle_metered(session, 600)
+            await guard._settle_metered(session, 600)
+
+        # Only the first pass issues a transaction
+        billing_repo.create_transaction.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: F1 — pause awareness
+# ---------------------------------------------------------------------------
+
+
+class TestPauseNotBilled:
+    """Paused time is excluded from billable consumption."""
+
+    def test_pause_excluded_from_owed(self) -> None:
+        """12 min wall-clock, 6 min paused → billed for 6 active min only."""
+        guard = SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=100),
+        )
+        session = _make_session()
+        session.total_paused_seconds = 360  # 6 min paused
+        now = datetime(2026, 1, 1, 12, 12, 0, tzinfo=UTC)  # 12 min after started_at
+
+        consumed = guard._compute_owed(session, now=now)
+        # active = 720 - 360 = 360 s → 6 billable min → 600 tokens
+        assert consumed == 600
+
+    def test_no_pause_bills_full_runtime(self) -> None:
+        """Without pause, 12 min active → 1200 tokens consumed."""
+        guard = SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=100),
+        )
+        session = _make_session()
+        now = datetime(2026, 1, 1, 12, 12, 0, tzinfo=UTC)
+
+        consumed = guard._compute_owed(session, now=now)
+        assert consumed == 1200
+
+
+# ---------------------------------------------------------------------------
+# Tests: F2 — no re-termination
+# ---------------------------------------------------------------------------
+
+
+class TestNoReTerminate:
+    """Guard dispatches stop_session at most once per session lifetime."""
+
+    @pytest.mark.asyncio
+    async def test_two_cycles_below_floor_stop_dispatched_once(self) -> None:
+        """When balance is at floor across two evaluation cycles, stop is dispatched once."""
+        settings = _make_settings(interval_seconds=60, tokens_per_minute=100, safety_factor=1.5)
+
+        stop_calls: list[object] = []
+
+        async def mock_terminate(s: object) -> None:
+            stop_calls.append(getattr(s, "id", s))
+
+        guard = SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            settings=settings,
+        )
+        session = _make_session()
+        guard._settle_metered = AsyncMock(return_value=(50, 100, False))  # type: ignore[method-assign]
+        guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._terminate_session = mock_terminate  # type: ignore[assignment]
+
+        # First cycle — triggers termination
+        await guard._evaluate_session(session)
+        await asyncio.sleep(0)
+
+        # Second cycle — session in _terminating, should be skipped entirely
+        await guard._evaluate_session(session)
+        await asyncio.sleep(0)
+
+        assert len(stop_calls) == 1, "stop_session must be dispatched exactly once"
+        assert guard._publish_warning.call_count == 1, "terminal CRITICAL emitted exactly once"
+
+
+# ---------------------------------------------------------------------------
+# Tests: F4 — de-escalation hysteresis
+# ---------------------------------------------------------------------------
+
+
+class TestDeEscalationHysteresis:
+    """Balance oscillating near warning threshold does not flap emit/clear."""
+
+    @pytest.mark.asyncio
+    async def test_balance_just_above_warning_does_not_clear(self) -> None:
+        """Balance above warning_tokens but within hysteresis band → no clear."""
+        # warning=20 min, rate=100, interval=60s → hysteresis=1 min
+        # de-escalate only when minutes_remaining > 21
+        # minutes_remaining at balance=2050: (2050-150)//100 = 19 → NOT cleared
+        settings = _make_settings(
+            interval_seconds=60,
+            tokens_per_minute=100,
+            safety_factor=1.5,
+            warning_minutes=20,
+            critical_minutes=10,
+        )
+        guard = SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            settings=settings,
+        )
+        session = _make_session(warning_level=NotificationLevel.WARNING.value)
+        # Balance just above warning (2050 > 2000) but not past hysteresis band
+        guard._settle_metered = AsyncMock(return_value=(0, 2050, True))  # type: ignore[method-assign]
+        guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._terminate_session = AsyncMock()  # type: ignore[method-assign]
+
+        await guard._evaluate_session(session)
+
+        guard._clear_warning.assert_not_called()
+        guard._publish_warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_balance_well_above_warning_clears(self) -> None:
+        """Balance well past warning+hysteresis → de-escalate."""
+        # minutes_remaining at 4900: (4900-150)//100 = 47 > 21 → cleared
+        settings = _make_settings(
+            interval_seconds=60,
+            tokens_per_minute=100,
+            safety_factor=1.5,
+            warning_minutes=20,
+            critical_minutes=10,
+        )
+        guard = SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            settings=settings,
+        )
+        session = _make_session(warning_level=NotificationLevel.WARNING.value)
+        guard._settle_metered = AsyncMock(return_value=(0, 4900, True))  # type: ignore[method-assign]
+        guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._terminate_session = AsyncMock()  # type: ignore[method-assign]
+
+        await guard._evaluate_session(session)
+
+        guard._clear_warning.assert_called_once_with(session)
+
+
+# ---------------------------------------------------------------------------
+# Tests: integration — session outruns funding
+# ---------------------------------------------------------------------------
+
+
+class TestIntegrationSessionOutrunsFunding:
+    """End-to-end billing: guard metering + settle invariants hold across cycles."""
+
+    @pytest.mark.asyncio
+    async def test_session_outruns_funding_balance_nonneg_no_double_charge(self) -> None:
+        """Guard settlement clamps to available balance; re-run is idempotent; balance ≥ 0.
+
+        Scenario:
+            initial_balance=700, base_reservation=500 already debited → remaining=200
+            Guard cycle (consumed=800): owed=300, clamped to 200 → balance=0 → terminate
+            Re-run (idempotent, consumed=800): owed=0 → no additional charge
+            Final: total_settled=700, balance=0 ≥ 0.
+        """
+        _, factory = _make_db_factory()
+        fake_repo = _FakeBillingRepo(initial_balance=200, initial_settled=500)
+
+        guard = SessionCreditGuard(
+            session_factory=factory,
+            billing_service=BillingService(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=100),
+        )
+        session = _make_session()
+
+        with (
+            patch(
+                "src.api.services.gpu_session.credit_guard.BillingRepository",
+                return_value=fake_repo,
+            ),
+            patch("src.api.services.billing.BillingRepository", return_value=fake_repo),
+        ):
+            # First guard cycle: consumed=800, settled=500, owed=300, clamped to 200
+            await guard._settle_metered(session, 800)
+            assert fake_repo.balance >= 0
+
+            # Second guard cycle (idempotent): consumed=800, settled=700, owed=0
+            await guard._settle_metered(session, 800)
+            assert fake_repo.balance >= 0
+
+        # Only one transaction created (first cycle only)
+        assert fake_repo.transaction_count == 1
+        assert fake_repo.balance == 0
+        # total settled = 500 (base reservation) + 200 (metered, clamped)
+        assert fake_repo.settled == 700

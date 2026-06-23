@@ -10,17 +10,18 @@ Runs on the HealthSnapshotWorker cadence. Each cycle:
 Key invariants:
 - Never raises InsufficientBalanceError (settle_session_usage is clamped).
 - Emits each level at most once per upward transition (state stored on DB row).
-- De-escalates (clears warning) when balance rises above warning threshold
-  (e.g. user tops up).
+- De-escalates (clears warning) when balance rises well above warning threshold
+  (e.g. user tops up), with a hysteresis band to prevent flapping.
 - Termination is dispatched via asyncio.create_task (fire-and-forget) so the
   guard cycle completes quickly regardless of stop latency.
+- Each session is terminated at most once per guard lifetime (_terminating set).
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -29,6 +30,10 @@ import structlog
 from sqlalchemy import select
 
 from src.api.schemas.events import EventType, GpuSessionCreditWarningPayload
+from src.api.services.gpu_session.service import (
+    billable_minutes_for_active_seconds,
+    compute_session_durations,
+)
 from src.core.enums import GpuSessionStatus, NotificationLevel
 from src.db.models.gpu_session import GpuSession
 from src.db.repositories.billing import BillingRepository
@@ -80,6 +85,10 @@ class SessionCreditGuard:
         self._gpu_session_service = gpu_session_service
         self._settings = settings
         self._event_bus = event_bus
+        # Sessions currently being torn down — skip re-evaluation until done.
+        self._terminating: set[UUID] = set()
+        # Keep strong references to fire-and-forget tasks so GC can't collect them mid-flight.
+        self._terminate_tasks: set[asyncio.Task[None]] = set()
 
     async def run_cycle(self) -> None:
         """Execute one guard cycle. Never raises — all errors are logged."""
@@ -115,7 +124,15 @@ class SessionCreditGuard:
                 .limit(_MAX_GUARD_SESSIONS)
             )
             result = await db.execute(stmt)
-            return list(result.scalars().all())
+            sessions = list(result.scalars().all())
+
+        if len(sessions) == _MAX_GUARD_SESSIONS:
+            logger.warning(
+                "credit_guard.session_cap_reached",
+                count=_MAX_GUARD_SESSIONS,
+                note="sessions beyond cap are not metered this cycle",
+            )
+        return sessions
 
     def _compute_floor_tokens(self) -> int:
         """Derived floor: ceil(interval_minutes) × rate × safety_factor.
@@ -129,25 +146,24 @@ class SessionCreditGuard:
         safety = self._settings.gpu_session_credit_safety_factor
         return int(ceil(interval_minutes * rate * safety))
 
-    def _compute_owed_since_last_cycle(self, session: GpuSession) -> int:  # noqa: ARG002
-        """Compute tokens owed for the current monitor interval.
+    def _compute_owed(self, session: GpuSession, *, now: datetime) -> int:
+        """Compute cumulative tokens consumed by the session up to now.
 
-        Returns the per-cycle token cost — a fixed amount regardless of
-        when exactly we last settled. The guard settles this amount each
-        cycle for any active/stale session that has been running.
+        Uses billable_minutes_for_active_seconds for per-started-minute parity
+        with finalize. The caller's _settle_metered subtracts already-settled
+        tokens (including the base reservation) within the same DB transaction,
+        so this value is the gross consumed amount, not the delta.
         """
-        interval_minutes = self._settings.health_snapshot_interval_seconds / 60.0
+        durations = compute_session_durations(session, now=now)
         rate = self._settings.gpu_session_tokens_per_minute
-        return int(ceil(interval_minutes * rate))
+        return billable_minutes_for_active_seconds(durations.active_seconds) * rate
 
-    def _classify_level(self, balance: int, floor_tokens: int) -> NotificationLevel | None:
+    def _classify_level(self, balance: int, floor_tokens: int) -> NotificationLevel | None:  # noqa: ARG002
         """Return the warning level for the given balance, or None if no warning needed."""
         rate = self._settings.gpu_session_tokens_per_minute
         warning_tokens = self._settings.gpu_session_credit_warning_minutes * rate
         critical_tokens = self._settings.gpu_session_credit_critical_minutes * rate
 
-        if balance <= floor_tokens:
-            return NotificationLevel.CRITICAL
         if balance <= critical_tokens:
             return NotificationLevel.CRITICAL
         if balance <= warning_tokens:
@@ -176,6 +192,9 @@ class SessionCreditGuard:
 
     async def _evaluate_session(self, session: GpuSession) -> None:
         """Evaluate and settle one session. Core logic of the guard."""
+        if session.id in self._terminating:
+            return
+
         if session.account_id is None:
             return
 
@@ -185,11 +204,11 @@ class SessionCreditGuard:
 
         now = datetime.now(UTC)
         floor_tokens = self._compute_floor_tokens()
-        owed = self._compute_owed_since_last_cycle(session)
+        consumed_tokens = self._compute_owed(session, now=now)
         rate = self._settings.gpu_session_tokens_per_minute
 
-        # --- Metered settlement ---
-        settled, new_balance, _ = await self._settle_metered(session, owed)
+        # --- Metered settlement (nets base reservation; idempotent) ---
+        settled, new_balance, _ = await self._settle_metered(session, consumed_tokens)
 
         # --- Classify warning level ---
         new_level = self._classify_level(new_balance, floor_tokens)
@@ -197,27 +216,30 @@ class SessionCreditGuard:
 
         # --- Terminate if at/below floor ---
         if new_balance <= floor_tokens:
-            logger.warning(
-                "credit_guard.terminating_session",
-                session_id=str(session.id),
-                balance=new_balance,
-                floor_tokens=floor_tokens,
-            )
-            # Publish terminal credit warning before terminating
-            await self._publish_warning(
-                session,
-                level=NotificationLevel.CRITICAL,
-                balance=new_balance,
-                floor_tokens=floor_tokens,
-                rate=rate,
-                now=now,
-            )
-            await self._clear_warning(session)
-            # Fire-and-forget: stop the session asynchronously
-            asyncio.create_task(
-                self._terminate_session(session),
-                name=f"credit_guard_terminate_{session.id}",
-            )
+            if session.id not in self._terminating:
+                logger.warning(
+                    "credit_guard.terminating_session",
+                    session_id=str(session.id),
+                    balance=new_balance,
+                    floor_tokens=floor_tokens,
+                )
+                # Publish terminal credit warning before terminating
+                await self._publish_warning(
+                    session,
+                    level=NotificationLevel.CRITICAL,
+                    balance=new_balance,
+                    floor_tokens=floor_tokens,
+                    rate=rate,
+                    now=now,
+                )
+                await self._clear_warning(session)
+                self._terminating.add(session.id)
+                task = asyncio.create_task(
+                    self._terminate_session(session),
+                    name=f"credit_guard_terminate_{session.id}",
+                )
+                self._terminate_tasks.add(task)
+                task.add_done_callback(self._terminate_tasks.discard)
             return
 
         # --- Warning ladder ---
@@ -232,12 +254,28 @@ class SessionCreditGuard:
             )
             await self._persist_warning(session, new_level, now)
         elif new_level is None and current_level is not None:
-            # Balance recovered above warning threshold — de-escalate
-            await self._clear_warning(session)
+            # De-escalate only when balance is well above warning threshold (hysteresis).
+            # Prevents emit/clear flapping when balance oscillates near the boundary.
+            warning_minutes = self._settings.gpu_session_credit_warning_minutes
+            interval_minutes = self._settings.health_snapshot_interval_seconds / 60.0
+            hysteresis_minutes = ceil(interval_minutes)
+            minutes_remaining = max(0, (new_balance - floor_tokens) // rate) if rate > 0 else 0
+            if minutes_remaining > warning_minutes + hysteresis_minutes:
+                await self._clear_warning(session)
 
-    async def _settle_metered(self, session: GpuSession, owed: int) -> tuple[int, int, bool]:
-        """Run settle_session_usage inside its own transaction."""
+    async def _settle_metered(
+        self, session: GpuSession, consumed_tokens: int
+    ) -> tuple[int, int, bool]:
+        """Settle metered usage for the session, netting the base reservation.
+
+        Computes owed = max(0, consumed_tokens - total_settled) within the same
+        DB transaction as the debit, making this idempotent: a re-run with the
+        same consumed_tokens yields owed == 0.
+        """
         async with self._session_factory() as db, db.begin():
+            billing_repo = BillingRepository(db)
+            total_settled = await billing_repo.get_settled_tokens_for_session(session.id)
+            owed = max(0, consumed_tokens - total_settled)
             return await self._billing_service.settle_session_usage(
                 session.account_id,  # type: ignore[arg-type]  # guarded by caller
                 owed,
@@ -284,13 +322,11 @@ class SessionCreditGuard:
             return
 
         # minutes_remaining: how many more full minutes the session can run
-        # terminate_at: estimated stop time if balance doesn't change
+        # terminate_at: estimated stop time if balance doesn't change (always set for > 0)
         minutes_remaining = max(0, (balance - floor_tokens) // rate) if rate > 0 else 0
         terminate_at: datetime | None = None
-        if minutes_remaining > 0 and minutes_remaining < 60 * 24:
-            from datetime import timedelta
-
-            terminate_at = now + timedelta(minutes=minutes_remaining)
+        if minutes_remaining > 0:
+            terminate_at = now + timedelta(minutes=min(minutes_remaining, 60 * 24))
 
         try:
             await self._event_bus.publish(
@@ -318,6 +354,8 @@ class SessionCreditGuard:
         """Terminate the session due to insufficient credits.
 
         Called as asyncio.create_task so it doesn't block the guard cycle.
+        Discards session.id from _terminating in finally so any lingering
+        row (if stop fails) can be re-evaluated next cycle.
         """
         try:
             await self._gpu_session_service.stop_session(
@@ -333,9 +371,5 @@ class SessionCreditGuard:
             )
         except Exception:
             logger.exception("credit_guard.terminate_failed", session_id=str(session.id))
-
-    async def get_settled_tokens(self, session_id: UUID) -> int:
-        """Return total tokens settled for a session (delegation to billing repo)."""
-        async with self._session_factory() as db:
-            repo = BillingRepository(db)
-            return await repo.get_settled_tokens_for_session(session_id)
+        finally:
+            self._terminating.discard(session.id)
