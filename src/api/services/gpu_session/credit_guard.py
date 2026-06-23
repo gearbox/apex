@@ -158,7 +158,7 @@ class SessionCreditGuard:
         rate = self._settings.gpu_session_tokens_per_minute
         return billable_minutes_for_active_seconds(durations.active_seconds) * rate
 
-    def _classify_level(self, balance: int, floor_tokens: int) -> NotificationLevel | None:  # noqa: ARG002
+    def _classify_level(self, balance: int) -> NotificationLevel | None:
         """Return the warning level for the given balance, or None if no warning needed."""
         rate = self._settings.gpu_session_tokens_per_minute
         warning_tokens = self._settings.gpu_session_credit_warning_minutes * rate
@@ -211,7 +211,7 @@ class SessionCreditGuard:
         _settled, new_balance, _ = await self._settle_metered(session, consumed_tokens)
 
         # --- Classify warning level ---
-        new_level = self._classify_level(new_balance, floor_tokens)
+        new_level = self._classify_level(new_balance)
         current_level = session.credit_warning_level
 
         # --- Terminate if at/below floor ---

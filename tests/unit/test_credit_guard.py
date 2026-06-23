@@ -311,22 +311,22 @@ class TestSessionCreditGuardClassifyLevel:
     def test_no_warning_well_funded(self) -> None:
         guard = self._guard()
         # 2100 tokens > warning threshold (20*100=2000)
-        assert guard._classify_level(2100, floor_tokens=150) is None
+        assert guard._classify_level(2100) is None
 
     def test_warning_level(self) -> None:
         guard = self._guard()
         # 1500 tokens <= 2000 (warning) but > 1000 (critical) and > floor
-        assert guard._classify_level(1500, floor_tokens=150) == NotificationLevel.WARNING
+        assert guard._classify_level(1500) == NotificationLevel.WARNING
 
     def test_critical_level(self) -> None:
         guard = self._guard()
         # 800 tokens <= 1000 (critical) but > floor
-        assert guard._classify_level(800, floor_tokens=150) == NotificationLevel.CRITICAL
+        assert guard._classify_level(800) == NotificationLevel.CRITICAL
 
     def test_at_floor_is_critical(self) -> None:
         guard = self._guard()
         # Exactly at floor → terminate path, but classify returns CRITICAL (150 <= critical=1000)
-        assert guard._classify_level(150, floor_tokens=150) == NotificationLevel.CRITICAL
+        assert guard._classify_level(150) == NotificationLevel.CRITICAL
 
 
 class TestSessionCreditGuardShouldEmit:
