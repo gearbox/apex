@@ -161,7 +161,7 @@ jobs:
         run: uv sync --frozen --extra dev
 
       - name: Run database migrations
-        run: uv run --no-build alembic upgrade head
+        run: uv run alembic upgrade head
         env:
           DATABASE_URL: postgresql+asyncpg://apex_test:apex_test@localhost:5432/apex_test
           JWT_SECRET_KEY: "ci-integration-test-secret-32-bytes"
