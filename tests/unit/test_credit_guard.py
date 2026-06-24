@@ -134,7 +134,7 @@ class TestSettleSessionUsage:
             "src.api.services.billing.BillingRepository",
             return_value=self._make_repo(1000),
         ):
-            settled, new_balance, fully = await svc.settle_session_usage(
+            settled, new_balance = await svc.settle_session_usage(
                 uuid4(),
                 100,
                 session_id=uuid4(),
@@ -145,10 +145,9 @@ class TestSettleSessionUsage:
 
         assert settled == 100
         assert new_balance == 900
-        assert fully is True
 
     @pytest.mark.asyncio
-    async def test_settle_clamped_to_balance(self) -> None:
+    async def test_settle_records_debt_when_owed_exceeds_balance(self) -> None:
         """When owed > balance, settle full owed — balance goes negative (debt recorded)."""
         svc = BillingService()
         mock_session = AsyncMock()
@@ -159,7 +158,7 @@ class TestSettleSessionUsage:
             "src.api.services.billing.BillingRepository",
             return_value=repo,
         ):
-            settled, new_balance, fully = await svc.settle_session_usage(
+            settled, new_balance = await svc.settle_session_usage(
                 uuid4(),
                 100,
                 session_id=uuid4(),
@@ -170,7 +169,6 @@ class TestSettleSessionUsage:
 
         assert settled == 100
         assert new_balance == -70  # 30 - 100
-        assert fully is True
         call_kwargs = repo.create_transaction.call_args.kwargs
         assert call_kwargs["amount"] == -100
         assert call_kwargs["balance_after"] == -70
@@ -183,7 +181,7 @@ class TestSettleSessionUsage:
         repo = self._make_repo(0)
 
         with patch("src.api.services.billing.BillingRepository", return_value=repo):
-            settled, new_balance, fully = await svc.settle_session_usage(
+            settled, new_balance = await svc.settle_session_usage(
                 uuid4(),
                 50,
                 session_id=uuid4(),
@@ -194,7 +192,6 @@ class TestSettleSessionUsage:
 
         assert settled == 50
         assert new_balance == -50
-        assert fully is True
         repo.create_transaction.assert_called_once()
         assert repo.create_transaction.call_args.kwargs["balance_after"] == -50
 
@@ -206,7 +203,7 @@ class TestSettleSessionUsage:
         repo = self._make_repo(500)
 
         with patch("src.api.services.billing.BillingRepository", return_value=repo):
-            settled, new_balance, fully = await svc.settle_session_usage(
+            settled, new_balance = await svc.settle_session_usage(
                 uuid4(),
                 0,
                 session_id=uuid4(),
@@ -216,7 +213,6 @@ class TestSettleSessionUsage:
             )
 
         assert settled == 0
-        assert fully is True
         repo.get_account_for_update.assert_not_called()
 
     @pytest.mark.asyncio
@@ -391,7 +387,7 @@ class TestSessionCreditGuardTerminateAtFloor:
         settings = _make_settings(interval_seconds=60, tokens_per_minute=100, safety_factor=1.5)
         # floor = 150; session balance after settle = 100 (below floor)
         mock_billing = MagicMock()
-        mock_billing.settle_session_usage = AsyncMock(return_value=(50, 100, False))
+        mock_billing.settle_session_usage = AsyncMock(return_value=(50, 100))
 
         mock_gpu_svc = MagicMock()
         mock_gpu_svc.stop_session = AsyncMock()
@@ -415,8 +411,8 @@ class TestSessionCreditGuardTerminateAtFloor:
 
         session = _make_session()
 
-        # Patch _settle_metered to return (settled, balance_after, fully_settled)
-        guard._settle_metered = AsyncMock(return_value=(50, 100, True))  # type: ignore[method-assign]
+        # Patch _settle_metered to return (settled, balance_after)
+        guard._settle_metered = AsyncMock(return_value=(50, 100))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -451,7 +447,7 @@ class TestSessionCreditGuardTerminateAtFloor:
         )
 
         session = _make_session()
-        guard._settle_metered = AsyncMock(return_value=(100, 2000, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(100, 2000))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -479,7 +475,7 @@ class TestSessionCreditGuardDeEscalation:
         session = _make_session(warning_level=NotificationLevel.WARNING.value)
         # After settle, balance is 4900 — well above warning (2000) + hysteresis
         # minutes_remaining = (4900-150)//100 = 47 > 20+1 = 21 → de-escalate
-        guard._settle_metered = AsyncMock(return_value=(100, 4900, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(100, 4900))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -501,7 +497,7 @@ class TestSessionCreditGuardDeEscalation:
         )
 
         session = _make_session(warning_level=None)
-        guard._settle_metered = AsyncMock(return_value=(100, 4900, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(100, 4900))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -602,7 +598,7 @@ class TestProportionalMetering:
             ),
             patch("src.api.services.billing.BillingRepository", return_value=billing_repo),
         ):
-            settled, balance_after, _ = await guard._settle_metered(session, 600)
+            settled, balance_after = await guard._settle_metered(session, 600)
 
         # owed = max(0, 600 - 500) = 100; debit amount = -100
         billing_repo.create_transaction.assert_called_once()
@@ -633,11 +629,10 @@ class TestProportionalMetering:
             ),
             patch("src.api.services.billing.BillingRepository", return_value=billing_repo),
         ):
-            settled, _, fully = await guard._settle_metered(session, 500)
+            settled, _ = await guard._settle_metered(session, 500)
 
         billing_repo.create_transaction.assert_not_called()
         assert settled == 0
-        assert fully is True
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +660,7 @@ class TestNoPrematureTermination:
             settings=settings,
         )
         session = _make_session()
-        guard._settle_metered = AsyncMock(return_value=(300, 1650, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(300, 1650))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -784,7 +779,7 @@ class TestNoReTerminate:
             settings=settings,
         )
         session = _make_session()
-        guard._settle_metered = AsyncMock(return_value=(50, 100, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(50, 100))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -831,7 +826,7 @@ class TestDeEscalationHysteresis:
         )
         session = _make_session(warning_level=NotificationLevel.WARNING.value)
         # Balance just above warning (2050 > 2000) but not past hysteresis band
-        guard._settle_metered = AsyncMock(return_value=(0, 2050, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(0, 2050))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -860,7 +855,7 @@ class TestDeEscalationHysteresis:
             settings=settings,
         )
         session = _make_session(warning_level=NotificationLevel.WARNING.value)
-        guard._settle_metered = AsyncMock(return_value=(0, 4900, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(0, 4900))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -908,16 +903,14 @@ class TestIntegrationSessionOutrunsFunding:
             patch("src.api.services.billing.BillingRepository", return_value=fake_repo),
         ):
             # First guard cycle: consumed=800, settled=500, owed=300, recorded in full
-            settled, balance_after, fully = await guard._settle_metered(session, 800)
+            settled, balance_after = await guard._settle_metered(session, 800)
             assert settled == 300
             assert balance_after == -100
-            assert fully is True
             assert fake_repo.balance < 0  # debt recorded
 
             # Second guard cycle (idempotent): consumed=800, settled=800, owed=0
-            settled2, balance_after2, fully2 = await guard._settle_metered(session, 800)
+            settled2, balance_after2 = await guard._settle_metered(session, 800)
             assert settled2 == 0
-            assert fully2 is True
 
         # Only one transaction created (first cycle only)
         assert fake_repo.transaction_count == 1
@@ -1023,7 +1016,7 @@ class TestDebtBlocksNewWork:
 # ---------------------------------------------------------------------------
 
 
-class TestMedetteredSettleIdempotentAfterNegative:
+class TestMeteredSettleIdempotentAfterNegative:
     """Re-running _settle_metered with same consumed_tokens after a debt-recording settle → owed=0."""
 
     @pytest.mark.asyncio
@@ -1055,15 +1048,13 @@ class TestMedetteredSettleIdempotentAfterNegative:
             patch("src.api.services.billing.BillingRepository", return_value=billing_repo),
         ):
             # First pass: consumed=800, settled=500 → owed=300; balance=200 → balance_after=-100
-            settled, balance_after, fully = await guard._settle_metered(session, 800)
+            settled, balance_after = await guard._settle_metered(session, 800)
             assert settled == 300
             assert balance_after == -100
-            assert fully is True
 
             # Second pass: consumed=800, settled=800 → owed=0 (idempotent, no new debit)
-            settled2, balance_after2, fully2 = await guard._settle_metered(session, 800)
+            settled2, balance_after2 = await guard._settle_metered(session, 800)
             assert settled2 == 0
-            assert fully2 is True
 
         billing_repo.create_transaction.assert_called_once()
 
@@ -1119,7 +1110,7 @@ class TestIntegrationGuardNegativeBalance:
         )
         session = _make_session()
         # _settle_metered returns negative balance: debt was recorded
-        guard._settle_metered = AsyncMock(return_value=(300, -100, True))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(300, -100))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]

@@ -292,7 +292,7 @@ class BillingService:
         product_id: str,
         user_id: UUID | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> tuple[int, int, bool]:
+    ) -> tuple[int, int]:
         """Record already-incurred GPU session usage; may drive balance negative.
 
         Records the full ``owed`` cost unconditionally — this is the *recording*
@@ -305,15 +305,14 @@ class BillingService:
         while preserving the one-debit-per-job invariant on the base reservation.
 
         Returns:
-            Tuple of (settled_tokens, new_balance, fully_settled) where:
+            Tuple of (settled_tokens, new_balance) where:
             - settled_tokens: tokens debited (== owed; full incurred cost recorded)
             - new_balance: balance after the debit (may be negative)
-            - fully_settled: always True when owed > 0 (full cost recorded)
         """
         if owed <= 0:
             repo = BillingRepository(session)
             balance = await repo.get_balance(account_id)
-            return 0, balance, True
+            return 0, balance
 
         repo = BillingRepository(session)
 
@@ -375,7 +374,7 @@ class BillingService:
             transaction_type=TransactionType.DEBIT.value,
         )
 
-        return owed, new_balance, True
+        return owed, new_balance
 
     async def refund(
         self,

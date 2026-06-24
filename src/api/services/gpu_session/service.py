@@ -1325,7 +1325,7 @@ class GpuSessionService:
             if billable_tokens > total_settled:
                 # Remaining overage after metered debits — record full cost; may drive balance negative.
                 overage = billable_tokens - total_settled
-                settled, _, _ = await self._billing_service.settle_session_usage(
+                settled, _ = await self._billing_service.settle_session_usage(
                     account_id,
                     overage,
                     session_id=session_row.id,
