@@ -32,7 +32,21 @@ logger = structlog.get_logger(__name__)
 
 
 class BillingService:
-    """Service for token account and transaction operations."""
+    """Service for token account and transaction operations.
+
+    Debit paths — every writer of a DEBIT/negative-amount transaction:
+
+    | Path                       | Class      | Behaviour                                                  |
+    |----------------------------|------------|------------------------------------------------------------|
+    | ``check_and_reserve``      | **Refuse** | raises ``InsufficientBalanceError`` when balance < cost.   |
+    | ``admin_adjust`` (negative)| **Refuse** | raises when ``new_balance < 0``. Unchanged.                |
+    | ``settle_session_usage``   | **Record** | records full incurred usage; may drive balance negative.   |
+    | ``refund`` / ``partial_refund`` / ``credit`` | n/a | credits only; never create debt. |
+
+    No other code path calls ``create_transaction`` with a negative amount.
+    A future chargeback/clawback handler MUST route through a *recording* primitive
+    (extend ``settle_session_usage`` or add a sibling), never a refusing one.
+    """
 
     def __init__(self, event_bus: EventBus | None = None) -> None:
         self._event_bus = event_bus
@@ -279,11 +293,12 @@ class BillingService:
         user_id: UUID | None = None,
         extra_metadata: dict[str, Any] | None = None,
     ) -> tuple[int, int, bool]:
-        """Clamped debit for GPU session metered usage. Never raises InsufficientBalanceError.
+        """Record already-incurred GPU session usage; may drive balance negative.
 
-        Debits ``min(max(0, owed), balance)`` tokens — always non-negative and always
-        within available balance. This is the no-debt invariant: a user can never be
-        charged more than their remaining balance, regardless of how long the session ran.
+        Records the full ``owed`` cost unconditionally — this is the *recording*
+        primitive for costs already physically incurred (GPU minutes consumed).
+        Balance may go negative; that is intentional and visible. Prevention of new
+        work lives in ``check_and_reserve``, not here.
 
         Metered debits use ``job_id=None`` and link to the session via
         ``metadata['session_id']`` so that ``get_settled_tokens_for_session`` covers them
@@ -291,9 +306,9 @@ class BillingService:
 
         Returns:
             Tuple of (settled_tokens, new_balance, fully_settled) where:
-            - settled_tokens: actual tokens debited (may be < owed if balance insufficient)
-            - new_balance: balance after the debit
-            - fully_settled: True when owed == 0 or balance covered the full amount
+            - settled_tokens: tokens debited (== owed; full incurred cost recorded)
+            - new_balance: balance after the debit (may be negative)
+            - fully_settled: always True when owed > 0 (full cost recorded)
         """
         if owed <= 0:
             repo = BillingRepository(session)
@@ -308,12 +323,8 @@ class BillingService:
             raise AccountNotFoundError(f"Token account {account_id} not found")
 
         balance = await repo.get_balance(account_id)
-        to_debit = min(owed, max(0, balance))
+        new_balance = balance - owed  # may be negative — recording, not preventing
 
-        if to_debit <= 0:
-            return 0, balance, False
-
-        new_balance = balance - to_debit
         base_metadata: dict[str, Any] = {
             "type": "gpu_session_metered",
             "session_id": str(session_id),
@@ -330,7 +341,7 @@ class BillingService:
             id=new_id(),
             account_id=account_id,
             transaction_type=TransactionType.DEBIT.value,
-            amount=-to_debit,
+            amount=-owed,
             balance_after=new_balance,
             job_id=None,
             description=description,
@@ -343,19 +354,28 @@ class BillingService:
             account_id=str(account_id),
             session_id=str(session_id),
             owed=owed,
-            settled=to_debit,
+            settled=owed,
             balance_after=new_balance,
         )
+
+        if new_balance < 0:
+            logger.warning(
+                "billing.balance_negative",
+                account_id=str(account_id),
+                session_id=str(session_id),
+                balance=new_balance,
+                incurred=owed,
+            )
 
         await self._publish_balance_update(
             user_ids=[user_id] if user_id is not None else [],
             account_id=account_id,
             balance=new_balance,
-            delta=-to_debit,
+            delta=-owed,
             transaction_type=TransactionType.DEBIT.value,
         )
 
-        return to_debit, new_balance, to_debit == owed
+        return owed, new_balance, True
 
     async def refund(
         self,

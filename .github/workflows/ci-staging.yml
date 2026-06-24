@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -58,21 +58,21 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           enable-cache: true           # Cache uv's package cache between runs
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev  # Include dev extras (ruff, mypy, pytest-cov)
+        run: uv sync --no-build --frozen --extra dev  # Include dev extras (ruff, mypy, pytest-cov)
 
       - name: Run ruff linter
-        run: uv run ruff check src/
+        run: uv run --no-build ruff check src/
 
       - name: Run ruff formatter check
-        run: uv run ruff format --check src/
+        run: uv run --no-build ruff format --check src/
 
       - name: Run mypy type checker
-        run: uv run mypy src/ --ignore-missing-imports
+        run: uv run --no-build mypy src/ --ignore-missing-imports --strict
 
   # ---------------------------------------------------------------------------
   # Job 2: Unit Tests
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -91,12 +91,12 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev
+        run: uv sync --no-build --frozen --extra dev
 
       - name: Run unit tests
         run: |
@@ -145,7 +145,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -153,15 +153,15 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
         with:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev
+        run: uv sync --no-build --frozen --extra dev
 
       - name: Run database migrations
-        run: uv run alembic upgrade head
+        run: uv run --no-build alembic upgrade head
         env:
           DATABASE_URL: postgresql+asyncpg://apex_test:apex_test@localhost:5432/apex_test
           JWT_SECRET_KEY: "ci-integration-test-secret-32-bytes"
@@ -204,7 +204,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
 
@@ -221,7 +221,7 @@ jobs:
           path: .
 
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v8.2.0
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
@@ -249,14 +249,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7
 
       # Speeds up multi-platform builds significantly
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4.2.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -265,7 +265,7 @@ jobs:
       # Generates image tags and labels from git metadata
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v6.1.0
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -279,7 +279,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
         with:
           context: .
           file: Dockerfile

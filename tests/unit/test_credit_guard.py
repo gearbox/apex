@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from src.api.services.billing import BillingService
-from src.api.services.billing_errors import AccountNotFoundError
+from src.api.services.billing_errors import AccountNotFoundError, InsufficientBalanceError
 from src.api.services.gpu_session.credit_guard import SessionCreditGuard
 from src.core.config import Settings
 from src.core.enums import GpuSessionStatus, NotificationLevel, TransactionType
@@ -114,7 +114,7 @@ class _FakeBillingRepo:
 
 
 class TestSettleSessionUsage:
-    """BillingService.settle_session_usage never goes negative."""
+    """BillingService.settle_session_usage records full incurred cost; may drive balance negative."""
 
     def _make_repo(self, balance: int, is_active: bool = True) -> MagicMock:
         repo = MagicMock()
@@ -149,14 +149,15 @@ class TestSettleSessionUsage:
 
     @pytest.mark.asyncio
     async def test_settle_clamped_to_balance(self) -> None:
-        """When balance < owed, settle only what is available (no-debt invariant)."""
+        """When owed > balance, settle full owed — balance goes negative (debt recorded)."""
         svc = BillingService()
         mock_session = AsyncMock()
         mock_session.flush = AsyncMock()
+        repo = self._make_repo(30)
 
         with patch(
             "src.api.services.billing.BillingRepository",
-            return_value=self._make_repo(30),
+            return_value=repo,
         ):
             settled, new_balance, fully = await svc.settle_session_usage(
                 uuid4(),
@@ -167,13 +168,16 @@ class TestSettleSessionUsage:
                 product_id="vex",
             )
 
-        assert settled == 30
-        assert new_balance == 0
-        assert fully is False
+        assert settled == 100
+        assert new_balance == -70  # 30 - 100
+        assert fully is True
+        call_kwargs = repo.create_transaction.call_args.kwargs
+        assert call_kwargs["amount"] == -100
+        assert call_kwargs["balance_after"] == -70
 
     @pytest.mark.asyncio
     async def test_settle_zero_balance(self) -> None:
-        """When balance is 0, settle 0 tokens — no transaction created."""
+        """When balance is 0, settle full owed — balance goes negative (debt recorded)."""
         svc = BillingService()
         mock_session = AsyncMock()
         repo = self._make_repo(0)
@@ -188,10 +192,11 @@ class TestSettleSessionUsage:
                 product_id="vex",
             )
 
-        assert settled == 0
-        assert new_balance == 0
-        assert fully is False
-        repo.create_transaction.assert_not_called()
+        assert settled == 50
+        assert new_balance == -50
+        assert fully is True
+        repo.create_transaction.assert_called_once()
+        assert repo.create_transaction.call_args.kwargs["balance_after"] == -50
 
     @pytest.mark.asyncio
     async def test_settle_owed_zero_is_noop(self) -> None:
@@ -411,7 +416,7 @@ class TestSessionCreditGuardTerminateAtFloor:
         session = _make_session()
 
         # Patch _settle_metered to return (settled, balance_after, fully_settled)
-        guard._settle_metered = AsyncMock(return_value=(50, 100, False))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(50, 100, True))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -779,7 +784,7 @@ class TestNoReTerminate:
             settings=settings,
         )
         session = _make_session()
-        guard._settle_metered = AsyncMock(return_value=(50, 100, False))  # type: ignore[method-assign]
+        guard._settle_metered = AsyncMock(return_value=(50, 100, True))  # type: ignore[method-assign]
         guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
         guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
         guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
@@ -875,14 +880,14 @@ class TestIntegrationSessionOutrunsFunding:
     """End-to-end billing: guard metering + settle invariants hold across cycles."""
 
     @pytest.mark.asyncio
-    async def test_session_outruns_funding_balance_nonneg_no_double_charge(self) -> None:
-        """Guard settlement clamps to available balance; re-run is idempotent; balance ≥ 0.
+    async def test_session_outruns_funding_records_debt_no_double_charge(self) -> None:
+        """Full owed cost is recorded; re-run is idempotent; balance goes negative.
 
         Scenario:
-            initial_balance=700, base_reservation=500 already debited → remaining=200
-            Guard cycle (consumed=800): owed=300, clamped to 200 → balance=0 → terminate
+            initial_balance=200 (remaining after base reservation of 500)
+            Guard cycle (consumed=800): owed=300, recorded in full → balance=-100
             Re-run (idempotent, consumed=800): owed=0 → no additional charge
-            Final: total_settled=700, balance=0 ≥ 0.
+            Final: total_settled=800, balance=-100 < 0.
         """
         _, factory = _make_db_factory()
         fake_repo = _FakeBillingRepo(initial_balance=200, initial_settled=500)
@@ -902,16 +907,231 @@ class TestIntegrationSessionOutrunsFunding:
             ),
             patch("src.api.services.billing.BillingRepository", return_value=fake_repo),
         ):
-            # First guard cycle: consumed=800, settled=500, owed=300, clamped to 200
-            await guard._settle_metered(session, 800)
-            assert fake_repo.balance >= 0
+            # First guard cycle: consumed=800, settled=500, owed=300, recorded in full
+            settled, balance_after, fully = await guard._settle_metered(session, 800)
+            assert settled == 300
+            assert balance_after == -100
+            assert fully is True
+            assert fake_repo.balance < 0  # debt recorded
 
-            # Second guard cycle (idempotent): consumed=800, settled=700, owed=0
-            await guard._settle_metered(session, 800)
-            assert fake_repo.balance >= 0
+            # Second guard cycle (idempotent): consumed=800, settled=800, owed=0
+            settled2, balance_after2, fully2 = await guard._settle_metered(session, 800)
+            assert settled2 == 0
+            assert fully2 is True
 
         # Only one transaction created (first cycle only)
         assert fake_repo.transaction_count == 1
-        assert fake_repo.balance == 0
-        # total settled = 500 (base reservation) + 200 (metered, clamped)
-        assert fake_repo.settled == 700
+        assert fake_repo.balance == -100
+        # total settled = 500 (base reservation) + 300 (metered, full owed)
+        assert fake_repo.settled == 800
+
+
+# ---------------------------------------------------------------------------
+# Tests: debt visibility and recovery via top-up
+# ---------------------------------------------------------------------------
+
+
+class TestTopupNetsAgainstDebt:
+    """credit() uses SUM(ledger) netting — no special debt-payment logic needed."""
+
+    def _make_repo(self, balance: int) -> MagicMock:
+        repo = MagicMock()
+        a = MagicMock()
+        a.is_active = True
+        a.user_id = None
+        a.organization_id = None
+        repo.get_account_for_update = AsyncMock(return_value=a)
+        repo.get_balance = AsyncMock(return_value=balance)
+        repo.create_transaction = AsyncMock(return_value=MagicMock())
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_topup_nets_against_debt_to_zero(self) -> None:
+        """From -2500 with credit +2500 → balance 0."""
+        svc = BillingService()
+        mock_session = AsyncMock()
+        repo = self._make_repo(-2500)
+
+        with patch("src.api.services.billing.BillingRepository", return_value=repo):
+            await svc.credit(
+                uuid4(),
+                2500,
+                uuid4(),
+                description="top-up",
+                session=mock_session,
+                product_id="vex",
+            )
+
+        assert repo.create_transaction.call_args.kwargs["balance_after"] == 0
+
+    @pytest.mark.asyncio
+    async def test_topup_nets_against_debt_to_positive(self) -> None:
+        """From -2500 with credit +3000 → balance 500."""
+        svc = BillingService()
+        mock_session = AsyncMock()
+        repo = self._make_repo(-2500)
+
+        with patch("src.api.services.billing.BillingRepository", return_value=repo):
+            await svc.credit(
+                uuid4(),
+                3000,
+                uuid4(),
+                description="top-up",
+                session=mock_session,
+                product_id="vex",
+            )
+
+        assert repo.create_transaction.call_args.kwargs["balance_after"] == 500
+
+
+# ---------------------------------------------------------------------------
+# Tests: negative balance blocks new work
+# ---------------------------------------------------------------------------
+
+
+class TestDebtBlocksNewWork:
+    """Negative balance → check_and_reserve raises InsufficientBalanceError."""
+
+    @pytest.mark.asyncio
+    async def test_debt_blocks_new_work(self) -> None:
+        """check_and_reserve refuses when balance is negative (debtor locked out)."""
+        svc = BillingService()
+        mock_session = AsyncMock()
+
+        repo = MagicMock()
+        a = MagicMock()
+        a.is_active = True
+        repo.get_account_for_update = AsyncMock(return_value=a)
+        repo.get_balance = AsyncMock(return_value=-500)
+
+        with (
+            patch("src.api.services.billing.BillingRepository", return_value=repo),
+            pytest.raises(InsufficientBalanceError),
+        ):
+            await svc.check_and_reserve(
+                uuid4(),
+                100,
+                None,
+                metadata={},
+                session=mock_session,
+                product_id="vex",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests: idempotent settle after negative balance
+# ---------------------------------------------------------------------------
+
+
+class TestMedetteredSettleIdempotentAfterNegative:
+    """Re-running _settle_metered with same consumed_tokens after a debt-recording settle → owed=0."""
+
+    @pytest.mark.asyncio
+    async def test_metered_settle_idempotent_after_negative(self) -> None:
+        """Re-run at same consumed_tokens after negative-recording settle → owed=0, no new DEBIT."""
+        _, factory = _make_db_factory()
+
+        billing_repo = MagicMock()
+        # First call: settled=500; second call: settled=800 (500 base + 300 metered)
+        billing_repo.get_settled_tokens_for_session = AsyncMock(side_effect=[500, 800])
+        billing_repo.get_account_for_update = AsyncMock(return_value=_make_account())
+        # First call: balance=200; second call (owed=0 early-return): balance=-100
+        billing_repo.get_balance = AsyncMock(side_effect=[200, -100])
+        billing_repo.create_transaction = AsyncMock(return_value=MagicMock())
+
+        guard = SessionCreditGuard(
+            session_factory=factory,
+            billing_service=BillingService(),
+            gpu_session_service=MagicMock(),
+            settings=_make_settings(tokens_per_minute=100),
+        )
+        session = _make_session()
+
+        with (
+            patch(
+                "src.api.services.gpu_session.credit_guard.BillingRepository",
+                return_value=billing_repo,
+            ),
+            patch("src.api.services.billing.BillingRepository", return_value=billing_repo),
+        ):
+            # First pass: consumed=800, settled=500 → owed=300; balance=200 → balance_after=-100
+            settled, balance_after, fully = await guard._settle_metered(session, 800)
+            assert settled == 300
+            assert balance_after == -100
+            assert fully is True
+
+            # Second pass: consumed=800, settled=800 → owed=0 (idempotent, no new debit)
+            settled2, balance_after2, fully2 = await guard._settle_metered(session, 800)
+            assert settled2 == 0
+            assert fully2 is True
+
+        billing_repo.create_transaction.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: balance surface returns signed sum (regression guard against max(0, …))
+# ---------------------------------------------------------------------------
+
+
+class TestBalanceSignedSum:
+    """BillingService.get_balance must return the raw signed ledger SUM."""
+
+    @pytest.mark.asyncio
+    async def test_balance_route_returns_signed_sum(self) -> None:
+        """get_balance() returns negative when ledger SUM is negative — no max(0, …) re-hiding."""
+        svc = BillingService()
+        mock_session = AsyncMock()
+
+        repo = MagicMock()
+        repo.get_balance = AsyncMock(return_value=-3000)
+
+        with patch("src.api.services.billing.BillingRepository", return_value=repo):
+            balance = await svc.get_balance(uuid4(), session=mock_session)
+
+        assert balance == -3000
+        assert balance < 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: guard integration — session outruns balance live → negative, terminates
+# ---------------------------------------------------------------------------
+
+
+class TestIntegrationGuardNegativeBalance:
+    """Guard terminates session after metered settle drives balance negative."""
+
+    @pytest.mark.asyncio
+    async def test_guard_terminates_after_negative_settle(self) -> None:
+        """Session outruns balance: settle records debt, guard terminates, balance stays negative."""
+        settings = _make_settings(interval_seconds=60, tokens_per_minute=100, safety_factor=1.5)
+        # floor = 150; balance after settle = -100 (below floor) → terminate
+
+        terminate_calls: list[object] = []
+
+        async def mock_terminate(s: object) -> None:
+            terminate_calls.append(s)
+
+        guard = SessionCreditGuard(
+            session_factory=AsyncMock(),
+            billing_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            settings=settings,
+        )
+        session = _make_session()
+        # _settle_metered returns negative balance: debt was recorded
+        guard._settle_metered = AsyncMock(return_value=(300, -100, True))  # type: ignore[method-assign]
+        guard._publish_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._clear_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._persist_warning = AsyncMock()  # type: ignore[method-assign]
+        guard._terminate_session = mock_terminate  # type: ignore[assignment]
+
+        await guard._evaluate_session(session)
+        await asyncio.sleep(0)
+
+        # Session terminated, warning published, balance NOT clamped by guard
+        assert len(terminate_calls) == 1
+        guard._clear_warning.assert_called_once()
+        guard._publish_warning.assert_called_once()
+        # Confirm the recorded (negative) balance was used for the termination decision
+        publish_call = guard._publish_warning.call_args
+        assert publish_call.kwargs["balance"] == -100

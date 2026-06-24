@@ -2,13 +2,13 @@
 
 Runs on the HealthSnapshotWorker cadence. Each cycle:
 1. Loads active/stale sessions.
-2. Settles consumed tokens since the last cycle (metered debit, clamped).
+2. Settles consumed tokens since the last cycle (metered debit, debt-capable).
 3. Evaluates the warning/terminate ladder.
 4. Emits gpu_session.credit_warning SSE events on upward transitions.
 5. Terminates sessions whose balance falls to the floor.
 
 Key invariants:
-- Never raises InsufficientBalanceError (settle_session_usage is clamped).
+- Never raises InsufficientBalanceError (settle_session_usage is a recording path, not a refusing one).
 - Emits each level at most once per upward transition (state stored on DB row).
 - De-escalates (clears warning) when balance rises well above warning threshold
   (e.g. user tops up), with a hysteresis band to prevent flapping.
