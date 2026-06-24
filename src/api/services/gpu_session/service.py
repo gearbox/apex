@@ -1290,8 +1290,9 @@ class GpuSessionService:
         Uses ``get_settled_tokens_for_session`` rather than just the base reservation
         amount so that metered debits during the session lifetime are not double-charged.
 
-        Overage debits are clamped via ``settle_session_usage`` so that the no-debt
-        invariant holds at finalization: balance can reach zero but never go negative.
+        Overage debits are recorded via ``settle_session_usage`` at full cost; balance
+        may go negative (debt recorded, not prevented). Prevention of new work lives
+        in ``check_and_reserve``.
 
         Stamps ``billing_finalized_at`` on success so the reconciler knows to skip
         this session.
@@ -1322,9 +1323,9 @@ class GpuSessionService:
             total_settled = await repo.get_settled_tokens_for_session(session_row.id)
 
             if billable_tokens > total_settled:
-                # Remaining overage after metered debits — settle clamped (no-debt invariant).
+                # Remaining overage after metered debits — record full cost; may drive balance negative.
                 overage = billable_tokens - total_settled
-                settled, _, _ = await self._billing_service.settle_session_usage(
+                settled, _ = await self._billing_service.settle_session_usage(
                     account_id,
                     overage,
                     session_id=session_row.id,

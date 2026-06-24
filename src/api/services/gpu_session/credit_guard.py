@@ -2,13 +2,13 @@
 
 Runs on the HealthSnapshotWorker cadence. Each cycle:
 1. Loads active/stale sessions.
-2. Settles consumed tokens since the last cycle (metered debit, clamped).
+2. Settles consumed tokens since the last cycle (metered debit, debt-capable).
 3. Evaluates the warning/terminate ladder.
 4. Emits gpu_session.credit_warning SSE events on upward transitions.
 5. Terminates sessions whose balance falls to the floor.
 
 Key invariants:
-- Never raises InsufficientBalanceError (settle_session_usage is clamped).
+- Never raises InsufficientBalanceError (settle_session_usage is a recording path, not a refusing one).
 - Emits each level at most once per upward transition (state stored on DB row).
 - De-escalates (clears warning) when balance rises well above warning threshold
   (e.g. user tops up), with a hysteresis band to prevent flapping.
@@ -208,7 +208,7 @@ class SessionCreditGuard:
         rate = self._settings.gpu_session_tokens_per_minute
 
         # --- Metered settlement (nets base reservation; idempotent) ---
-        _settled, new_balance, _ = await self._settle_metered(session, consumed_tokens)
+        _settled, new_balance = await self._settle_metered(session, consumed_tokens)
 
         # --- Classify warning level ---
         new_level = self._classify_level(new_balance)
@@ -263,9 +263,7 @@ class SessionCreditGuard:
             if minutes_remaining > warning_minutes + hysteresis_minutes:
                 await self._clear_warning(session)
 
-    async def _settle_metered(
-        self, session: GpuSession, consumed_tokens: int
-    ) -> tuple[int, int, bool]:
+    async def _settle_metered(self, session: GpuSession, consumed_tokens: int) -> tuple[int, int]:
         """Settle metered usage for the session, netting the base reservation.
 
         Computes owed = max(0, consumed_tokens - total_settled) within the same

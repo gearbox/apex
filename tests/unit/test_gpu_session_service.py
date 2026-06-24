@@ -58,8 +58,8 @@ def _make_billing_mock() -> MagicMock:
     m.check_and_reserve = AsyncMock(return_value=None)
     m.refund = AsyncMock(return_value=None)
     m.partial_refund = AsyncMock(return_value=None)
-    # (settled_tokens, new_balance, fully_settled) — overridden per-test as needed
-    m.settle_session_usage = AsyncMock(return_value=(0, 0, True))
+    # (settled_tokens, new_balance) — overridden per-test as needed
+    m.settle_session_usage = AsyncMock(return_value=(0, 0))
     return m
 
 
