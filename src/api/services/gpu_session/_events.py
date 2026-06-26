@@ -55,7 +55,6 @@ async def publish_status_event(
                     # session.model_type is stored as the enum `.value` already;
                     # use it directly for consistency across all call sites.
                     model_type=session.model_type,
-                    bundle_name=session.bundle_name,
                     tunnel_hostname=session.tunnel_hostname,
                     error_message=error_message,
                     reason=reason,

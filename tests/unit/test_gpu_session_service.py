@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import msgspec
 import pytest
 from sqlalchemy.exc import IntegrityError
 
@@ -881,7 +882,8 @@ class TestStartSession:
         assert payload.status == GpuSessionStatus.pending.value
         assert payload.previous_status == "none"
         assert payload.model_type == expected_session.model_type
-        assert payload.bundle_name == expected_session.bundle_name
+        assert not hasattr(payload, "bundle_name")
+        assert "bundle_name" not in {f.name for f in msgspec.structs.fields(type(payload))}
         assert payload.error_message is None
 
     async def test_start_session_event_publish_failure_does_not_break(self) -> None:
@@ -1183,7 +1185,6 @@ class TestStopSession:
         assert isinstance(result, StopConfirmation)
         assert result.session_id == session.id
         assert result.model_type == session.model_type
-        assert result.bundle_name == session.bundle_name
         # No state changes
         mocks["vastai_client"].destroy_instance.assert_not_called()
         mocks["cf_client"].delete_session_tunnel.assert_not_called()

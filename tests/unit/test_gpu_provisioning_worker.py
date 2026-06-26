@@ -1114,7 +1114,7 @@ class TestMarkFailed:
         assert payload.previous_status == GpuSessionStatus.pending.value
         assert payload.error_message == "boot timeout"
         assert payload.model_type == session.model_type
-        assert payload.bundle_name == session.bundle_name
+        assert not hasattr(payload, "bundle_name")
 
     async def test_mark_failed_truncates_error_message_in_status_event(self) -> None:
         """Long reasons must be truncated to 500 chars in the payload."""
@@ -1867,8 +1867,8 @@ class TestProbeComfyui:
             result = await worker._probe_comfyui(session)
 
         assert result is True
-        assert not any(
-            log.get("event") == "gpu_session.provision.probe_checkpoint_path_mismatch"
+        assert all(
+            log.get("event") != "gpu_session.provision.probe_checkpoint_path_mismatch"
             for log in logs
         ), "exact match must not fire probe_checkpoint_path_mismatch"
 

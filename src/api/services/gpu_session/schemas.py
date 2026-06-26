@@ -20,7 +20,6 @@ class StopConfirmation(msgspec.Struct, kw_only=True):
 
     session_id: UUID
     model_type: str
-    bundle_name: str
     vastai_gpu_name: str | None
     vastai_cost_per_hour_micros: int | None
     active_duration_seconds: int

@@ -239,7 +239,6 @@ class GpuSessionController(Controller):
                 content=StopConfirmationResponse(
                     session_id=result.session_id,
                     model_type=result.model_type,
-                    bundle_name=result.bundle_name,
                     vastai_gpu_name=result.vastai_gpu_name,
                     vastai_cost_per_hour_micros=result.vastai_cost_per_hour_micros,
                     active_duration_seconds=result.active_duration_seconds,
