@@ -2447,7 +2447,6 @@ class TestGpuSessionRouteHandlers:
         stop_conf.active_duration_seconds = 300
         stop_conf.session_id = uuid4()
         stop_conf.model_type = "aisha-image"
-        stop_conf.bundle_name = "wan_2.2"
         stop_conf.vastai_gpu_name = "RTX 4090"
         stop_conf.vastai_cost_per_hour_micros = 100000
         stop_conf.paused_duration_seconds = 0
@@ -2596,6 +2595,14 @@ class TestGpuSessionRouteHandlers:
                     billing_service=billing_service,
                     product_id="vex",
                 )
+
+    def test_stop_confirmation_response_excludes_bundle_name(self) -> None:
+        import msgspec
+
+        from src.api.schemas.gpu_session import StopConfirmationResponse
+
+        fields = {f.name for f in msgspec.structs.fields(StopConfirmationResponse)}
+        assert "bundle_name" not in fields
 
 
 # ---------------------------------------------------------------------------

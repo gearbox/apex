@@ -37,8 +37,6 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
     product_id: str
     status: str
     model_type: str
-    bundle_name: str
-    bundle_version: str | None
     tunnel_hostname: str | None
     vastai_gpu_name: str | None
     vastai_cost_per_hour_micros: int | None
@@ -64,8 +62,6 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
             product_id=m.product_id,
             status=str(m.status),
             model_type=m.model_type,
-            bundle_name=m.bundle_name,
-            bundle_version=m.bundle_version,
             tunnel_hostname=m.tunnel_hostname,
             vastai_gpu_name=m.vastai_gpu_name,
             vastai_cost_per_hour_micros=m.vastai_cost_per_hour_micros,
@@ -84,7 +80,6 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
 class StopConfirmationResponse(msgspec.Struct, kw_only=True):
     session_id: UUID
     model_type: str
-    bundle_name: str
     vastai_gpu_name: str | None
     vastai_cost_per_hour_micros: int | None
     active_duration_seconds: int

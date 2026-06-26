@@ -937,7 +937,6 @@ class GpuSessionService:
         return StopConfirmation(
             session_id=session_id,
             model_type=session_row.model_type,
-            bundle_name=session_row.bundle_name,
             vastai_gpu_name=session_row.vastai_gpu_name,
             vastai_cost_per_hour_micros=session_row.vastai_cost_per_hour_micros,
             active_duration_seconds=active_duration_seconds,

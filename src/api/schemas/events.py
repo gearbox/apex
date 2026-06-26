@@ -60,7 +60,6 @@ class GpuSessionStatusPayload(msgspec.Struct, kw_only=True):
     status: str
     previous_status: str
     model_type: str
-    bundle_name: str
     tunnel_hostname: str | None = None
     error_message: str | None = None
     reason: str | None = None

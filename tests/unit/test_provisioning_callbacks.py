@@ -437,6 +437,13 @@ class TestSessionResponseSchema:
         assert response.provisioning_phase is None
         assert response.provisioning_progress is None
 
+    def test_from_model_excludes_internal_bundle_fields(self) -> None:
+        import msgspec
+
+        fields = {f.name for f in msgspec.structs.fields(GpuSessionResponse)}
+        assert "bundle_name" not in fields
+        assert "bundle_version" not in fields
+
 
 # ---------------------------------------------------------------------------
 # HTTP controller tests — auth parsing, session_id mismatch, happy path
