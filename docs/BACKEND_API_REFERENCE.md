@@ -1,6 +1,6 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-06-20 — vex age gate switched from `checkbox` to `date_of_birth` (§3, §16); DOB point-of-use capture flow documented in §3 PATCH /v1/users/me. Prior: provider provisioning mode + per-user session state (§5, §17)._
+> _Last updated: 2026-06-26 — removed `bundle_name` and `bundle_version` from the frontend-facing API surface (§7, §15): both fields are dropped from `GpuSessionResponse`, `StopConfirmationResponse`, and the `gpu_session.status_changed` SSE payload. The DB columns and all internal reads are unchanged. Prior: vex age gate switched from `checkbox` to `date_of_birth` (§3, §16)._
 >
 > _Prior (2026-06-17): synced the doc with `master` after a long gap — Aisha generation parameter system (§4), quality-tier capabilities (§5), per-output `thumbnail_url` (§6), GPU-session provisioning fields + internal callback (§7), corrected billing public-endpoint behaviour (§11), corrected model-capability matrix and new enums (§17), corrected `POST /v1/auth/register` contract (§2)._
 
@@ -578,8 +578,6 @@ GpuSessionResponse: {
   product_id: string,                          // "vex" | "synthara"
   status: GpuSessionStatus,                    // see Enums
   model_type: ModelType,                       // e.g. "aisha-image"
-  bundle_name: string,                         // ComfyUI bundle identifier
-  bundle_version: string | null,
   tunnel_hostname: string | null,              // Cloudflare tunnel — set once active
   vastai_gpu_name: string | null,              // e.g. "RTX 4090"
   vastai_cost_per_hour_micros: int | null,     // cost in millionths of USD per hour
@@ -602,7 +600,6 @@ ListSessionsResponse: { sessions: GpuSessionResponse[] }
 StopConfirmationResponse: {
   session_id: UUID,
   model_type: ModelType,
-  bundle_name: string,
   vastai_gpu_name: string | null,
   vastai_cost_per_hour_micros: int | null,
   active_duration_seconds: int,
@@ -1676,7 +1673,6 @@ interface GpuSessionStatusPayload {
   status: GpuSessionStatus;      // new status
   previous_status: string;       // previous status
   model_type: string;            // e.g. "aisha-image"
-  bundle_name: string;
   tunnel_hostname: string | null;
   error_message: string | null;  // populated when status == "failed"
   reason: string | null;         // machine-readable stop reason, e.g. "insufficient_credits"
