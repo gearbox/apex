@@ -71,6 +71,7 @@ VEX_CONFIG = ProductConfig(
         api_global="2000/minute",
     ),
     features=frozenset(),
+    cookie_domain="vex.pics",
 )
 
 SYNTHARA_CONFIG = ProductConfig(
@@ -123,6 +124,7 @@ SYNTHARA_CONFIG = ProductConfig(
         api_global="5000/minute",
     ),
     features=frozenset({"organizations"}),
+    cookie_domain="synthara.app",
 )
 
 

@@ -1260,12 +1260,22 @@ class TestAuthRouteHandlers:
         data.email = "user@example.com"
         data.password = "pw"
         data.display_name = "Test"
+        jwt_service = MagicMock()
+        jwt_service.create_content_token.return_value = ("content_tok", None)
+        product_config = MagicMock()
+        product_config.cookie_domain = "vex.pics"
+        settings = MagicMock()
+        settings.content_cookie_ttl_hours = 24
+        settings.content_cookie_secure = True
 
         response = await AuthController.register.fn(  # type: ignore[attr-defined]
             MagicMock(),
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
             product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 201
 
@@ -1279,12 +1289,18 @@ class TestAuthRouteHandlers:
         data.email = "x@x.com"
         data.password = "pw"
         data.display_name = "T"
+        jwt_service = MagicMock()
+        product_config = MagicMock()
+        settings = MagicMock()
 
         response = await AuthController.register.fn(  # type: ignore[attr-defined]
             MagicMock(),
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
             product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 400
 
@@ -1426,13 +1442,23 @@ class TestAuthRouteHandlers:
         request.headers.get.return_value = ""
         request.client = MagicMock()
         request.client.host = "127.0.0.1"
+        jwt_service = MagicMock()
+        jwt_service.create_content_token.return_value = ("content_tok", None)
+        product_config = MagicMock()
+        product_config.cookie_domain = "vex.pics"
+        settings = MagicMock()
+        settings.content_cookie_ttl_hours = 24
+        settings.content_cookie_secure = True
 
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
             MagicMock(),
             request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
             product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 200
 
@@ -1446,13 +1472,19 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = ""
         request.client = None
+        jwt_service = MagicMock()
+        product_config = MagicMock()
+        settings = MagicMock()
 
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
             MagicMock(),
             request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
             product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 401
 
@@ -1466,13 +1498,19 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = ""
         request.client = None
+        jwt_service = MagicMock()
+        product_config = MagicMock()
+        settings = MagicMock()
 
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
             MagicMock(),
             request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
             product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 401
 
@@ -1491,12 +1529,23 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = ""
         request.client = None
+        jwt_service = MagicMock()
+        jwt_service.decode_access_token.return_value = None  # skip cookie on MagicMock token
+        product_config = MagicMock()
+        product_config.cookie_domain = "vex.pics"
+        settings = MagicMock()
+        settings.content_cookie_ttl_hours = 24
+        settings.content_cookie_secure = True
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
             request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
+            product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 200
 
@@ -1510,12 +1559,19 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = ""
         request.client = None
+        jwt_service = MagicMock()
+        product_config = MagicMock()
+        settings = MagicMock()
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
             request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
+            product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 401
 
@@ -1529,12 +1585,19 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = ""
         request.client = None
+        jwt_service = MagicMock()
+        product_config = MagicMock()
+        settings = MagicMock()
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
             request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
+            product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 401
 
@@ -1548,12 +1611,19 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = ""
         request.client = None
+        jwt_service = MagicMock()
+        product_config = MagicMock()
+        settings = MagicMock()
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
             request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
+            product_id="vex",
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 401
 
@@ -1564,11 +1634,17 @@ class TestAuthRouteHandlers:
         auth_service.logout = AsyncMock()
         data = MagicMock()
         data.refresh_token = "ref"
+        product_config = MagicMock()
+        product_config.cookie_domain = "vex.pics"
+        settings = MagicMock()
+        settings.content_cookie_secure = True
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
             data=data,
             auth_service=auth_service,
+            product_config=product_config,
+            settings=settings,
         )
         assert response.status_code == 200
 

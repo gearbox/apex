@@ -11,6 +11,8 @@ from litestar.connection import ASGIConnection
 from litestar.exceptions import NotAuthorizedException
 from litestar.handlers import BaseRouteHandler
 
+from src.core.config import get_settings
+
 if TYPE_CHECKING:
     from src.api.security.jwt import JWTService
     from src.db.models import User
@@ -109,6 +111,65 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
             raise NotAuthorizedException(detail="Token was issued for a different product")
 
     # Store user_id in connection state for dependency injection
+    connection.state["user_id"] = user_id
+    connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
+
+
+async def content_auth_guard(
+    connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler
+) -> None:
+    """Guard that accepts either a Bearer access token or a content cookie.
+
+    Used exclusively on the content GET proxy routes so that browser media
+    elements (img, video) can authenticate via the first-party SameSite=Lax
+    cookie without needing an Authorization header.
+
+    Args:
+        connection: ASGI connection.
+        _: Route handler (unused).
+
+    Raises:
+        NotAuthorizedException: If neither credential is valid.
+    """
+    settings = get_settings()
+    jwt_service: JWTService | None = connection.app.state.get("jwt_service")
+    if jwt_service is None:
+        raise RuntimeError("JWT service not configured")
+
+    user_id: UUID | None = None
+    token_product_id: str | None = None
+
+    # 1. Try Bearer access token (for SSR / API clients)
+    raw_bearer = extract_token_from_header(connection.headers.get("authorization"))
+    if raw_bearer:
+        payload = jwt_service.decode_access_token(raw_bearer)
+        if payload is not None:
+            with contextlib.suppress(ValueError):
+                user_id = UUID(payload.sub)
+                token_product_id = payload.product_id
+    # 2. Fall back to content cookie
+    if user_id is None and (raw_cookie := connection.cookies.get(settings.content_cookie_name)):
+        payload = jwt_service.decode_content_token(raw_cookie)
+        if payload is not None:
+            with contextlib.suppress(ValueError):
+                user_id = UUID(payload.sub)
+                token_product_id = payload.product_id
+    if user_id is None:
+        raise NotAuthorizedException(detail="Missing or invalid credentials")
+
+    # 3. Product check — token must belong to the resolved request product
+    request_product_id: str | None = None
+    with contextlib.suppress(Exception):
+        request_product_id = connection.state.get("product_id")
+
+    if (
+        request_product_id is not None
+        and token_product_id is not None
+        and token_product_id != request_product_id
+    ):
+        raise NotAuthorizedException(detail="Token was issued for a different product")
+
+    # 4. Mirror auth_guard state — downstream DI reads from here
     connection.state["user_id"] = user_id
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
 

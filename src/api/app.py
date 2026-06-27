@@ -1,5 +1,6 @@
 """Litestar application factory and configuration."""
 
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -58,6 +59,7 @@ from src.api.services.billing_errors import (
 from src.api.services.idempotency import IdempotencyConflictError
 from src.core.config import get_settings
 from src.core.logging import configure_logging
+from src.core.product_registry import PRODUCT_REGISTRY
 
 logger = structlog.get_logger(__name__)
 
@@ -291,17 +293,27 @@ def create_app() -> Litestar:
     settings = get_settings()
     configure_logging(settings)
 
-    # CORS configuration for development
+    # CORS — derive allowed origins from the product registry so we never
+    # hard-code brand strings here. Wildcard is invalid with credentials.
+    _domains = sorted({d for pc in PRODUCT_REGISTRY.values() for d in pc.domains})
+    _escaped = "|".join(re.escape(d) for d in _domains)
+    if settings.debug:
+        _origin_regex = rf"^(https://([a-z0-9-]+\.)?({_escaped})|http://localhost(:\d+)?)$"
+    else:
+        _origin_regex = rf"^https://([a-z0-9-]+\.)?({_escaped})$"
+
     cors_config = CORSConfig(
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=[],  # must be empty — origin matching is done by allow_origin_regex
+        allow_origin_regex=_origin_regex,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Product-Id"],
     )
 
     # OpenAPI documentation configuration
     openapi_config = OpenAPIConfig(
         title="Apex Generation API",
-        version="0.2.0",
+        version="0.3.0",
         description=(
             "Apex REST API for AI content generation.\n\n"
             "## Providers\n\n"

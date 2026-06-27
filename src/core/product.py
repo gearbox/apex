@@ -132,6 +132,10 @@ class ProductConfig:
     # Feature flags — extensible set of feature slugs
     features: frozenset[str] = field(default_factory=frozenset)
 
+    # Cookie domain — registrable domain for the content cookie (e.g. "vex.pics").
+    # None for localhost/dev pseudo-products that don't set Domain on the cookie.
+    cookie_domain: str | None = None
+
     def is_model_allowed(self, model: ModelType) -> bool:
         """Check if a model is accessible on this product."""
         if model in self.blocked_models:
