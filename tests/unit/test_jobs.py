@@ -735,3 +735,132 @@ class TestSchemas:
         assert decoded.status == JobStatus.QUEUED
         assert decoded.model == "grok-imagine-image"
         assert decoded.tokens_charged == 100
+
+
+# ---------------------------------------------------------------------------
+# Tests: list_jobs — cursor and has_more paths
+# ---------------------------------------------------------------------------
+
+
+class TestListJobsPaginationCoverage:
+    async def test_cursor_decoded_when_provided(self) -> None:
+        """Covers line 130: decode_cursor called when cursor is not None."""
+        from src.api.schemas.pagination import encode_cursor
+
+        user_id = uuid4()
+        now = datetime.now(UTC)
+        cursor = encode_cursor(now, user_id)
+
+        session = _session_for_list(jobs=[])
+        result = await _service().list_jobs(user_id, session=session, cursor=cursor)
+
+        assert isinstance(result, CursorPage)
+        assert result.has_more is False
+
+    async def test_has_more_and_next_cursor_when_extra_jobs_returned(self) -> None:
+        """Covers lines 148, 156-157: jobs sliced and next_cursor encoded."""
+        user_id = uuid4()
+        jobs = [_make_job(user_id=user_id) for _ in range(3)]
+        session = _session_for_list(jobs=jobs)
+
+        result = await _service().list_jobs(user_id, session=session, limit=2)
+
+        assert result.has_more is True
+        assert len(result.items) == 2
+        assert result.next_cursor is not None
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_response — eager-load and NoInspectionAvailable paths
+# ---------------------------------------------------------------------------
+
+
+class TestBuildResponseEagerLoadCoverage:
+    async def test_no_inspection_available_falls_back_to_query_path(self) -> None:
+        """Covers lines 187-188: except NoInspectionAvailable sets _outputs_loaded=False."""
+        from unittest.mock import patch
+
+        from sqlalchemy.exc import NoInspectionAvailable
+
+        user_id = uuid4()
+        job = _make_job(user_id=user_id)
+        session = _session_for_get(job, full_outputs=[], derivative_outputs=[])
+
+        with patch(
+            "src.api.services.unified_jobs.inspect",
+            side_effect=NoInspectionAvailable(),
+        ):
+            result = await _service().get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert result.outputs == []
+
+    async def test_eager_loaded_outputs_used_directly(self) -> None:
+        """Covers lines 192-199: eagerly-loaded outputs separated in Python."""
+        from unittest.mock import patch
+
+        user_id = uuid4()
+        job = _make_job(user_id=user_id)
+
+        out_id = uuid4()
+        full_out = _make_output(output_id=out_id, is_thumbnail=False, output_index=0)
+        thumb_out = _make_output(
+            is_thumbnail=True,
+            parent_output_id=out_id,
+            output_index=0,
+            thumbnail_max_edge=512,
+            width=400,
+            height=400,
+        )
+        job.outputs = [full_out, thumb_out]
+
+        inspect_result = MagicMock()
+        inspect_result.dict = {"outputs": [full_out, thumb_out]}
+
+        get_result = MagicMock()
+        get_result.scalar_one_or_none.return_value = job
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=get_result)
+
+        with patch("src.api.services.unified_jobs.inspect", return_value=inspect_result):
+            result = await _service().get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert len(result.outputs) == 1  # Only the full output
+        assert result.outputs[0].id == out_id
+
+    async def test_eager_loaded_thumbnail_appears_as_variant(self) -> None:
+        """Covers lines 195-197: is_thumbnail loop builds derivatives_map."""
+        from unittest.mock import patch
+
+        user_id = uuid4()
+        job = _make_job(user_id=user_id)
+
+        out_id = uuid4()
+        thumb_id = uuid4()
+        full_out = _make_output(output_id=out_id, is_thumbnail=False, output_index=0)
+        thumb_out = _make_output(
+            output_id=thumb_id,
+            is_thumbnail=True,
+            parent_output_id=out_id,
+            output_index=0,
+            thumbnail_max_edge=512,
+            width=400,
+            height=400,
+        )
+        job.outputs = [full_out, thumb_out]
+
+        inspect_result = MagicMock()
+        inspect_result.dict = {"outputs": [full_out, thumb_out]}
+
+        get_result = MagicMock()
+        get_result.scalar_one_or_none.return_value = job
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=get_result)
+
+        with patch("src.api.services.unified_jobs.inspect", return_value=inspect_result):
+            result = await _service().get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert len(result.outputs[0].media.variants) == 1
+        assert result.outputs[0].media.variants[0].label == "md"

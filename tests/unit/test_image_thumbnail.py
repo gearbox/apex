@@ -201,3 +201,21 @@ class TestMakeImageThumbnails:
             img = Image.open(io.BytesIO(r.result.data)).convert("RGB")
             pixels = list(img.getdata())  # type: ignore[arg-type]
             assert any(p != (0, 0, 0) for p in pixels)
+
+    async def test_per_spec_failure_is_skipped(self) -> None:
+        """A spec that fails during thumbnail generation is logged and skipped."""
+        from unittest.mock import patch
+
+        from src.core.thumbnails import ThumbnailSpec
+
+        data = _make_png(200, 200)
+        failing_spec = ThumbnailSpec("sm", 150)
+
+        with patch.object(
+            __import__("PIL.Image", fromlist=["Image"]).Image,
+            "thumbnail",
+            side_effect=Exception("encode error"),
+        ):
+            results = await make_image_thumbnails(data, [failing_spec])
+
+        assert results == []
