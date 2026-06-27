@@ -7,6 +7,7 @@ from uuid import UUID
 
 import msgspec
 
+from src.api.schemas.media import MediaObject
 from src.core.enums import (
     GalleryBadge,
     GallerySourceType,
@@ -21,29 +22,13 @@ class GalleryGridItem(msgspec.Struct, kw_only=True):
     job_id: UUID
     """Generation group identifier."""
 
-    cover_url: str
-    """Content proxy path for the grid cover.
-
-    Resolution logic:
-    - Image-input types (i2i, i2v, flf2v, v2v):
-      → source output image OR uploaded input image.
-    - Text-only types (t2i): → last generated output.
-    - Text-only video (t2v): → video thumbnail (poster frame).
-
-    Format: "/v1/content/outputs/{id}" or "/v1/content/uploads/{id}"
-    """
-
-    video_url: str | None = None
-    """Content proxy path for the full video (autoplay).
-    Present only for video generation types.
-    Frontend uses cover_url (thumbnail) for fast grid load,
-    then replaces with autoplaying video_url."""
+    cover: MediaObject
+    """Media envelope for the grid cover — always the job's own primary output.
+    For image jobs: the primary output image with sm/md WEBP variants.
+    For video jobs: original is the MP4; variants are poster-frame rasters."""
 
     badge: GalleryBadge
     """'image' if input-driven (i2i, i2v, flf2v, v2v), 'prompt' if text-only."""
-
-    media_type: OutputMediaType
-    """Output media type: 'image' or 'video'. Derived from generation_type.is_video."""
 
     output_count: int
     """Number of non-thumbnail outputs in this group."""
@@ -66,22 +51,13 @@ class GalleryOutputItem(msgspec.Struct, kw_only=True):
 
     id: UUID
 
-    url: str
-    """Content proxy path: '/v1/content/outputs/{id}'."""
-
-    thumbnail_url: str | None = None
-    """Content proxy path for video poster frame (if applicable)."""
-
-    content_type: str
-    """MIME type: 'image/jpeg', 'video/mp4', etc."""
-
-    media_type: OutputMediaType
-    """'image' or 'video' — derived from content_type."""
-
-    format: str
-    size_bytes: int
     output_index: int
+
     created_at: datetime
+
+    media: MediaObject
+    """Full media envelope: original asset + preview variants (sm/md WEBP).
+    For video: original is the MP4 source; variants are poster-frame rasters."""
 
 
 class GalleryLineage(msgspec.Struct, kw_only=True):
@@ -111,8 +87,8 @@ class GalleryGroupDetail(msgspec.Struct, kw_only=True):
     badge: GalleryBadge
     """'image' if input-driven, 'prompt' if text-only."""
 
-    input_image_url: str | None = None
-    """Content proxy path for the input image/output.
+    input_media: MediaObject | None = None
+    """Media envelope for the source input (upload or remixed output).
     Present when badge == 'image'."""
 
     prompt: str

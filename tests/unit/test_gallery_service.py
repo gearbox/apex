@@ -27,6 +27,8 @@ def _make_job(
     source_output_id: object = None,
     input_image_id: object = None,
     source_job: object = None,
+    source_output: object = None,
+    input_image: object = None,
     prompt: str = "a cat",
     aspect_ratio: str | None = "16:9",
     model: str | None = "grok-imagine-image",
@@ -40,6 +42,8 @@ def _make_job(
     job.source_output_id = source_output_id
     job.input_image_id = input_image_id
     job.source_job = source_job
+    job.source_output = source_output
+    job.input_image = input_image
     job.prompt = prompt
     job.negative_prompt = None
     job.aspect_ratio = aspect_ratio
@@ -50,6 +54,24 @@ def _make_job(
     job.completed_at = None
     job.outputs = []
     return job
+
+
+def _make_output_row(
+    *,
+    content_type: str = "image/png",
+    width: int | None = 512,
+    height: int | None = 512,
+    size_bytes: int = 1024,
+    thumbnail_max_edge: int | None = None,
+) -> MagicMock:
+    row = MagicMock()
+    row.id = uuid4()
+    row.content_type = content_type
+    row.width = width
+    row.height = height
+    row.size_bytes = size_bytes
+    row.thumbnail_max_edge = thumbnail_max_edge
+    return row
 
 
 class TestResolveBadge:
@@ -104,20 +126,6 @@ class TestResolveMediaType:
         assert svc._resolve_media_type(GenerationType.FLF2V) == OutputMediaType.VIDEO
 
 
-class TestOutputMediaType:
-    def test_image_jpeg(self) -> None:
-        svc = _make_service()
-        assert svc._output_media_type("image/jpeg") == OutputMediaType.IMAGE
-
-    def test_video_mp4(self) -> None:
-        svc = _make_service()
-        assert svc._output_media_type("video/mp4") == OutputMediaType.VIDEO
-
-    def test_image_png(self) -> None:
-        svc = _make_service()
-        assert svc._output_media_type("image/png") == OutputMediaType.IMAGE
-
-
 class TestPromptSnippet:
     def test_short_prompt_unchanged(self) -> None:
         svc = _make_service()
@@ -134,63 +142,6 @@ class TestPromptSnippet:
         svc = _make_service()
         prompt = "a" * 100
         assert svc._prompt_snippet(prompt) == prompt
-
-
-class TestResolveCover:
-    def test_t2i_uses_cover_output(self) -> None:
-        svc = _make_service()
-        job = _make_job(generation_type="t2i")
-        cover_id = uuid4()
-        cover_data = CoverData(cover_output_id=cover_id, output_count=1)
-        cover_url, video_url = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/outputs/{cover_id}"
-        assert video_url is None
-
-    def test_t2v_uses_thumbnail_for_cover(self) -> None:
-        svc = _make_service()
-        job = _make_job(generation_type="t2v")
-        thumb_id = uuid4()
-        video_id = uuid4()
-        cover_data = CoverData(
-            thumbnail_output_id=thumb_id,
-            video_output_id=video_id,
-            output_count=1,
-        )
-        cover_url, video_url = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/outputs/{thumb_id}"
-        assert video_url == f"/v1/content/outputs/{video_id}"
-
-    def test_i2i_uses_source_output_id(self) -> None:
-        svc = _make_service()
-        source_output_id = uuid4()
-        job = _make_job(generation_type="i2i", source_output_id=source_output_id)
-        cover_data = CoverData(output_count=1)
-        cover_url, video_url = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/outputs/{source_output_id}"
-
-    def test_i2i_falls_back_to_input_image_id(self) -> None:
-        svc = _make_service()
-        image_id = uuid4()
-        job = _make_job(generation_type="i2i", input_image_id=image_id)
-        cover_data = CoverData(output_count=1)
-        cover_url, _ = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/uploads/{image_id}"
-
-    def test_i2i_falls_back_to_cover_output(self) -> None:
-        svc = _make_service()
-        cover_id = uuid4()
-        job = _make_job(generation_type="i2i")
-        cover_data = CoverData(cover_output_id=cover_id, output_count=1)
-        cover_url, _ = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/outputs/{cover_id}"
-
-    def test_video_types_set_video_url(self) -> None:
-        svc = _make_service()
-        video_id = uuid4()
-        job = _make_job(generation_type="i2v", source_output_id=uuid4())
-        cover_data = CoverData(video_output_id=video_id, output_count=1)
-        _, video_url = svc._resolve_cover(job, cover_data)
-        assert video_url == f"/v1/content/outputs/{video_id}"
 
 
 class TestBuildLineage:
@@ -221,77 +172,51 @@ class TestBuildLineage:
         assert lineage.source_upload_id == image_id
 
 
-class TestAspectRatioPassthrough:
-    def test_aspect_ratio_in_grid_item(self) -> None:
-        svc = _make_service()
-        job = _make_job(generation_type="t2i", aspect_ratio="4:3")
-        cover_id = uuid4()
-        cover_data = CoverData(cover_output_id=cover_id, output_count=1)
-        cover_url, _ = svc._resolve_cover(job, cover_data)
-        # Verify aspect_ratio is accessible on the job (passthrough check)
-        assert job.aspect_ratio == "4:3"
-
-
-class TestResolveCoverV2V:
-    def test_v2v_uses_source_output(self) -> None:
-        svc = _make_service()
-        source_id = uuid4()
-        job = _make_job(generation_type="v2v", source_output_id=source_id)
-        cover_data = CoverData(output_count=1)
-        cover_url, _ = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/outputs/{source_id}"
-
-    def test_v2v_falls_back_to_thumbnail(self) -> None:
-        svc = _make_service()
-        thumb_id = uuid4()
-        job = _make_job(generation_type="v2v")
-        cover_data = CoverData(thumbnail_output_id=thumb_id, output_count=1)
-        cover_url, _ = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/outputs/{thumb_id}"
-
-    def test_t2i_fallback_when_no_cover_output(self) -> None:
-        svc = _make_service()
-        job = _make_job(generation_type="t2i")
-        cover_data = CoverData(output_count=0)
-        cover_url, video_url = svc._resolve_cover(job, cover_data)
-        assert cover_url == "/v1/content/outputs/unknown"
-        assert video_url is None
-
-    def test_i2i_thumbnail_fallback(self) -> None:
-        svc = _make_service()
-        thumb_id = uuid4()
-        job = _make_job(generation_type="i2i")
-        cover_data = CoverData(thumbnail_output_id=thumb_id, output_count=1)
-        cover_url, _ = svc._resolve_cover(job, cover_data)
-        assert cover_url == f"/v1/content/outputs/{thumb_id}"
-
-
 class TestBuildOutputItem:
-    def test_image_output_no_thumbnail(self) -> None:
+    def test_image_output_no_derivatives(self) -> None:
         svc = _make_service()
-        output = MagicMock()
-        output.id = uuid4()
-        output.content_type = "image/jpeg"
+        output = _make_output_row(content_type="image/png")
+        output.is_thumbnail = False
         output.output_index = 0
-        output.width = 512
-        output.height = 512
-        item = svc._build_output_item(output)
-        assert item.thumbnail_url is None
-        assert item.media_type == OutputMediaType.IMAGE
+        output.created_at = datetime.now(UTC)
 
-    def test_video_output_with_thumbnail(self) -> None:
+        item = svc._build_output_item(output, [])
+
+        assert item.media.media_type == OutputMediaType.IMAGE
+        assert item.media.original.url == f"/v1/content/outputs/{output.id}"
+        assert item.media.variants == []
+
+    def test_video_output_with_webp_derivative(self) -> None:
         svc = _make_service()
-        output = MagicMock()
-        output.id = uuid4()
-        output.content_type = "video/mp4"
+        output = _make_output_row(content_type="video/mp4")
+        output.is_thumbnail = False
         output.output_index = 0
-        output.width = 512
-        output.height = 512
-        thumbnail = MagicMock()
-        thumbnail.id = uuid4()
-        item = svc._build_output_item(output, thumbnail)
-        assert item.thumbnail_url == f"/v1/content/outputs/{thumbnail.id}"
-        assert item.media_type == OutputMediaType.VIDEO
+        output.created_at = datetime.now(UTC)
+
+        derivative = _make_output_row(
+            content_type="image/webp",
+            thumbnail_max_edge=512,
+            width=400,
+            height=225,
+        )
+
+        item = svc._build_output_item(output, [derivative])
+
+        assert item.media.media_type == OutputMediaType.VIDEO
+        assert len(item.media.variants) == 1
+        assert item.media.variants[0].label == "md"
+        assert item.media.variants[0].url == f"/v1/content/outputs/{derivative.id}"
+
+    def test_output_index_preserved(self) -> None:
+        svc = _make_service()
+        output = _make_output_row(content_type="image/png")
+        output.is_thumbnail = False
+        output.output_index = 3
+        output.created_at = datetime.now(UTC)
+
+        item = svc._build_output_item(output, [])
+
+        assert item.output_index == 3
 
 
 class TestListGallery:
@@ -314,10 +239,13 @@ class TestListGallery:
         svc = GalleryService(session=mock_session)
         mock_repo = AsyncMock()
         job = _make_job(generation_type="t2i")
-        cover_id = uuid4()
+
+        primary_output = _make_output_row(content_type="image/png")
+        cover_data = CoverData(primary_output=primary_output, output_count=1)
+
         # Return limit+1 jobs to trigger has_more=True
         mock_repo.list_gallery_jobs.return_value = [job, job]
-        mock_repo.batch_cover_data.return_value = {job.id: CoverData(cover_output_id=cover_id)}
+        mock_repo.batch_cover_data.return_value = {job.id: cover_data}
 
         with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
             page = await svc.list_gallery(uuid4(), "vex", session=mock_session, limit=1)
@@ -347,6 +275,33 @@ class TestListGallery:
         # Verify cursor was decoded and passed through
         assert call_kwargs.kwargs.get("cursor_ts") is not None or call_kwargs.args
 
+    async def test_grid_item_cover_is_media_object(self) -> None:
+        """Gallery grid cover is a MediaObject with original URL and optional variants."""
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+        job = _make_job(generation_type="t2i")
+
+        primary_output = _make_output_row(content_type="image/png")
+        thumb = _make_output_row(content_type="image/webp", thumbnail_max_edge=512)
+        cover_data = CoverData(
+            primary_output=primary_output,
+            primary_derivatives=[thumb],
+            output_count=1,
+        )
+
+        mock_repo.list_gallery_jobs.return_value = [job]
+        mock_repo.batch_cover_data.return_value = {job.id: cover_data}
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            page = await svc.list_gallery(uuid4(), "vex", session=mock_session, limit=20)
+
+        assert len(page.items) == 1
+        cover = page.items[0].cover
+        assert cover.original.url == f"/v1/content/outputs/{primary_output.id}"
+        assert len(cover.variants) == 1
+        assert cover.variants[0].label == "md"
+
 
 class TestGetGalleryDetail:
     async def test_returns_none_for_missing_job(self) -> None:
@@ -360,12 +315,11 @@ class TestGetGalleryDetail:
 
         assert result is None
 
-    async def test_returns_detail_for_found_job_with_source_output(self) -> None:
+    async def test_returns_detail_with_no_input(self) -> None:
         mock_session = AsyncMock()
         svc = GalleryService(session=mock_session)
         mock_repo = AsyncMock()
-        source_output_id = uuid4()
-        job = _make_job(generation_type="t2i", source_output_id=source_output_id)
+        job = _make_job(generation_type="t2i", source_output=None, input_image=None)
         job.outputs = []
         mock_repo.get_gallery_job.return_value = job
 
@@ -373,14 +327,46 @@ class TestGetGalleryDetail:
             result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
-        assert result.input_image_url == f"/v1/content/outputs/{source_output_id}"
+        assert result.input_media is None
+
+    async def test_returns_detail_for_found_job_with_source_output(self) -> None:
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+
+        source_output = _make_output_row(content_type="image/png")
+        source_output.derivatives = []
+
+        job = _make_job(
+            generation_type="i2i",
+            source_output_id=source_output.id,
+            source_output=source_output,
+            input_image=None,
+        )
+        job.outputs = []
+        mock_repo.get_gallery_job.return_value = job
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
+
+        assert result is not None
+        assert result.input_media is not None
+        assert result.input_media.original.url == f"/v1/content/outputs/{source_output.id}"
 
     async def test_returns_detail_for_found_job_with_input_image(self) -> None:
         mock_session = AsyncMock()
         svc = GalleryService(session=mock_session)
         mock_repo = AsyncMock()
-        image_id = uuid4()
-        job = _make_job(generation_type="t2i", input_image_id=image_id)
+
+        input_image = _make_output_row(content_type="image/png")
+        input_image.derivatives = []
+
+        job = _make_job(
+            generation_type="i2v",
+            input_image_id=input_image.id,
+            source_output=None,
+            input_image=input_image,
+        )
         job.outputs = []
         mock_repo.get_gallery_job.return_value = job
 
@@ -388,18 +374,5 @@ class TestGetGalleryDetail:
             result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
-        assert result.input_image_url == f"/v1/content/uploads/{image_id}"
-
-    async def test_returns_detail_with_no_input(self) -> None:
-        mock_session = AsyncMock()
-        svc = GalleryService(session=mock_session)
-        mock_repo = AsyncMock()
-        job = _make_job(generation_type="t2i")
-        job.outputs = []
-        mock_repo.get_gallery_job.return_value = job
-
-        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
-            result = await svc.get_gallery_detail(uuid4(), uuid4(), "vex", session=mock_session)
-
-        assert result is not None
-        assert result.input_image_url is None
+        assert result.input_media is not None
+        assert result.input_media.original.url == f"/v1/content/uploads/{input_image.id}"

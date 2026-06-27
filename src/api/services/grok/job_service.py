@@ -24,7 +24,7 @@ from src.api.services.grok import (
     GrokVideoJobStarted,
     GrokVideoResult,
 )
-from src.api.services.image_thumbnail import read_dimensions
+from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
@@ -708,43 +708,56 @@ class GrokJobService:
 
         logger.debug("grok.video_output_stored", output_id=str(output_id), job_id=str(job_id))
 
-        thumbnail_bytes = await extract_video_thumbnail(video_data)
-        if thumbnail_bytes:
-            thumb_id = new_id()
-            thumb_key = self._storage.build_storage_key(
-                user_id=user_id,
-                file_id=thumb_id,
-                storage_type=StorageType.OUTPUT,
-                format=MediaFormat.JPEG,
-                job_id=job_id,
-            )
-            async with self._storage._get_client() as client:
-                await client.put_object(
-                    Bucket=self._storage._settings.bucket_name,
-                    Key=thumb_key,
-                    Body=thumbnail_bytes,
-                    ContentType=MediaFormat.JPEG.content_type,
+        # Extract first frame and generate sm + md WEBP poster variants
+        frame_bytes = await extract_video_thumbnail(video_data)
+        if frame_bytes:
+            thumbnails = await make_image_thumbnails(frame_bytes)
+            for generated in thumbnails:
+                thumb_id = new_id()
+                thumb_key = self._storage.build_storage_key(
+                    user_id=user_id,
+                    file_id=thumb_id,
+                    storage_type=StorageType.OUTPUT,
+                    format=MediaFormat.WEBP,
+                    job_id=job_id,
                 )
-
-            thumb_dims = await read_dimensions(thumbnail_bytes)
-            await output_repo.create(
-                id=thumb_id,
-                user_id=user_id,
-                job_id=job_id,
-                storage_key=thumb_key,
-                content_type=MediaFormat.JPEG.content_type,
-                size_bytes=len(thumbnail_bytes),
-                format=MediaFormat.JPEG.value,
-                output_index=0,
-                expires_at=expires_at,
-                input_image_id=None,
-                is_thumbnail=True,
-                parent_output_id=output_id,
-                width=thumb_dims.width if thumb_dims else None,
-                height=thumb_dims.height if thumb_dims else None,
-                product_id=product_id,
-            )
-            logger.debug("grok.thumbnail_stored", thumb_id=str(thumb_id), job_id=str(job_id))
+                try:
+                    async with self._storage._get_client() as client:
+                        await client.put_object(
+                            Bucket=self._storage._settings.bucket_name,
+                            Key=thumb_key,
+                            Body=generated.result.data,
+                            ContentType=MediaFormat.WEBP.content_type,
+                        )
+                    await output_repo.create(
+                        id=thumb_id,
+                        user_id=user_id,
+                        job_id=job_id,
+                        storage_key=thumb_key,
+                        content_type=MediaFormat.WEBP.content_type,
+                        size_bytes=len(generated.result.data),
+                        format=MediaFormat.WEBP.value,
+                        output_index=0,
+                        expires_at=expires_at,
+                        input_image_id=None,
+                        is_thumbnail=True,
+                        parent_output_id=output_id,
+                        thumbnail_max_edge=generated.spec.max_edge,
+                        width=generated.result.width,
+                        height=generated.result.height,
+                        product_id=product_id,
+                    )
+                    logger.debug(
+                        "grok.thumbnail_stored",
+                        thumb_id=str(thumb_id),
+                        max_edge=generated.spec.max_edge,
+                    )
+                except Exception:
+                    logger.warning(
+                        "grok.thumbnail_skipped",
+                        job_id=str(job_id),
+                        max_edge=generated.spec.max_edge,
+                    )
         else:
             logger.warning("grok.thumbnail_skipped", job_id=str(job_id))
 

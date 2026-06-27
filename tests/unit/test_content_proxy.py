@@ -184,7 +184,7 @@ class TestDeleteContent:
         mock_image_repo = AsyncMock()
 
         service = _make_service()
-        service._storage.delete = AsyncMock(return_value=True)
+        service._storage.delete = AsyncMock(return_value=True)  # type: ignore[method-assign]
         session = AsyncMock()
 
         with (
@@ -227,7 +227,7 @@ class TestDeleteContent:
         mock_image_repo.delete.return_value = True
 
         service = _make_service()
-        service._storage.delete = AsyncMock(return_value=True)
+        service._storage.delete = AsyncMock(return_value=True)  # type: ignore[method-assign]
         session = AsyncMock()
 
         with (
@@ -343,6 +343,102 @@ class TestDeleteContent:
                 session=session,
             )
 
+    async def test_delete_output_purges_derivative_r2_objects(self) -> None:
+        """Deleting an output with thumbnails removes all derivative R2 objects."""
+        content_id = uuid4()
+        user_id = uuid4()
+        product_id = "vex"
+
+        mock_output = MagicMock()
+        mock_output.id = content_id
+        mock_output.storage_key = "users/x/outputs/job/file.png"
+        mock_output.product_id = product_id
+
+        derivative_sm = MagicMock()
+        derivative_sm.storage_key = "users/x/outputs/job/thumb_sm.webp"
+
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = mock_output
+        mock_output_repo.list_derivatives.return_value = [derivative_sm]
+        mock_output_repo.delete.return_value = True
+        mock_image_repo = AsyncMock()
+
+        service = _make_service()
+        service._storage.delete = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        session = AsyncMock()
+
+        with (
+            patch(
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
+            ),
+        ):
+            result = await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id=product_id,
+                session=session,
+            )
+
+        assert result is True
+        assert service._storage.delete.await_count == 2
+        service._storage.delete.assert_any_await("users/x/outputs/job/thumb_sm.webp")
+        service._storage.delete.assert_any_await("users/x/outputs/job/file.png")
+
+    async def test_delete_upload_purges_derivative_r2_objects(self) -> None:
+        """Deleting an upload with thumbnails removes all derivative R2 objects."""
+        content_id = uuid4()
+        user_id = uuid4()
+        product_id = "vex"
+
+        mock_upload = MagicMock()
+        mock_upload.id = content_id
+        mock_upload.storage_key = "users/x/uploads/file.png"
+        mock_upload.product_id = product_id
+
+        derivative_sm = MagicMock()
+        derivative_sm.storage_key = "users/x/uploads/thumb_sm_file.webp"
+        derivative_md = MagicMock()
+        derivative_md.storage_key = "users/x/uploads/thumb_md_file.webp"
+
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = None
+        mock_image_repo = AsyncMock()
+        mock_image_repo.get.return_value = mock_upload
+        mock_image_repo.list_derivatives.return_value = [derivative_sm, derivative_md]
+        mock_image_repo.delete.return_value = True
+
+        service = _make_service()
+        service._storage.delete = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        session = AsyncMock()
+
+        with (
+            patch(
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
+            ),
+        ):
+            result = await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id=product_id,
+                session=session,
+            )
+
+        assert result is True
+        assert service._storage.delete.await_count == 3
+        service._storage.delete.assert_any_await("users/x/uploads/thumb_sm_file.webp")
+        service._storage.delete.assert_any_await("users/x/uploads/thumb_md_file.webp")
+        service._storage.delete.assert_any_await("users/x/uploads/file.png")
+
     async def test_delete_output_fallthrough_to_upload(self) -> None:
         """When ID matches an upload but not an output, upload is deleted."""
         content_id = uuid4()
@@ -365,7 +461,7 @@ class TestDeleteContent:
         mock_image_repo.delete.return_value = True
 
         service = _make_service()
-        service._storage.delete = AsyncMock(return_value=True)
+        service._storage.delete = AsyncMock(return_value=True)  # type: ignore[method-assign]
         session = AsyncMock()
 
         with (

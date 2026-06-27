@@ -29,7 +29,7 @@ from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
     validate_tunnel_hostname,
 )
-from src.api.services.image_thumbnail import make_image_thumbnail, read_dimensions
+from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions
 from src.api.services.job_state_transition import (
     GenerationOutputData,
     JobStateTransitionService,
@@ -483,49 +483,48 @@ class AishaJobPoller:
             height=dims.height if dims else None,
         )
 
-        # Generate WEBP thumbnail — non-fatal if it fails
-        thumb_result = await make_image_thumbnail(data)
-        if thumb_result is None:
-            logger.warning(
-                "thumbnail.image.skipped",
-                job_id=str(job.id),
-                filename=filename,
-            )
-            return [full]
+        # Generate sm + md WEBP thumbnails — non-fatal per-size
+        thumbnails = await make_image_thumbnails(data)
+        results: list[GenerationOutputData] = [full]
 
-        thumb_id = new_id()
-        thumb_filename = f"{thumb_id}_thumb.webp"
-        try:
-            thumb_upload = await self._r2.upload(
-                user_id=job.user_id,
-                data=thumb_result.data,
-                filename=thumb_filename,
-                content_type=thumb_result.content_type,
-                storage_type=StorageType.OUTPUT,
-                job_id=job.id,
-            )
-        except Exception:
-            logger.warning(
-                "thumbnail.image.skipped",
-                job_id=str(job.id),
-                filename=filename,
-            )
-            return [full]
+        for generated in thumbnails:
+            thumb_id = new_id()
+            thumb_filename = f"{thumb_id}_thumb.webp"
+            try:
+                thumb_upload = await self._r2.upload(
+                    user_id=job.user_id,
+                    data=generated.result.data,
+                    filename=thumb_filename,
+                    content_type=generated.result.content_type,
+                    storage_type=StorageType.OUTPUT,
+                    job_id=job.id,
+                )
+            except Exception:
+                logger.warning(
+                    "thumbnail.image.upload_skipped",
+                    job_id=str(job.id),
+                    max_edge=generated.spec.max_edge,
+                )
+                continue
 
-        thumb = GenerationOutputData(
-            id=thumb_upload.id,
-            storage_key=thumb_upload.storage_key,
-            content_type=thumb_result.content_type,
-            size_bytes=len(thumb_result.data),
-            format=thumb_result.format,
-            output_index=output_index,
-            expires_at=expires_at,
-            is_thumbnail=True,
-            parent_output_id=full.id,
-            width=thumb_result.width,
-            height=thumb_result.height,
-        )
-        return [full, thumb]
+            results.append(
+                GenerationOutputData(
+                    id=thumb_upload.id,
+                    storage_key=thumb_upload.storage_key,
+                    content_type=generated.result.content_type,
+                    size_bytes=len(generated.result.data),
+                    format=generated.result.format,
+                    output_index=output_index,
+                    expires_at=expires_at,
+                    is_thumbnail=True,
+                    parent_output_id=full.id,
+                    thumbnail_max_edge=generated.spec.max_edge,
+                    width=generated.result.width,
+                    height=generated.result.height,
+                )
+            )
+
+        return results
 
     @staticmethod
     def _infer_image_format_and_content_type(filename: str) -> tuple[str, str]:

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.storage import UserImage
@@ -36,6 +37,11 @@ class UserImageRepository(BaseRepository[UserImage]):
         format: str,
         expires_at: datetime,
         product_id: str,
+        is_thumbnail: bool = False,
+        parent_image_id: UUID | None = None,
+        thumbnail_max_edge: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> UserImage:
         """Create a new user upload record.
 
@@ -49,6 +55,11 @@ class UserImageRepository(BaseRepository[UserImage]):
             format: Image format (png, jpeg, webp).
             expires_at: When the upload should be cleaned up.
             product_id: Product this upload belongs to.
+            is_thumbnail: Whether this is a derived thumbnail row.
+            parent_image_id: Parent upload this thumbnail derives from.
+            thumbnail_max_edge: Size bucket (150=sm, 512=md). None on full rows.
+            width: Pixel width.
+            height: Pixel height.
 
         Returns:
             Created UserImage instance.
@@ -63,6 +74,11 @@ class UserImageRepository(BaseRepository[UserImage]):
             format=format,
             expires_at=expires_at,
             product_id=product_id,
+            is_thumbnail=is_thumbnail,
+            parent_image_id=parent_image_id,
+            thumbnail_max_edge=thumbnail_max_edge,
+            width=width,
+            height=height,
         )
         self._session.add(upload)
         await self._session.flush()
@@ -75,6 +91,8 @@ class UserImageRepository(BaseRepository[UserImage]):
         user_id: UUID | None = None,
     ) -> UserImage | None:
         """Get a user image by ID, optionally scoped to a user.
+
+        Returns thumbnail rows too (content proxy needs to resolve by id).
 
         Args:
             image_id: Image ID to look up.
@@ -108,7 +126,7 @@ class UserImageRepository(BaseRepository[UserImage]):
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
     ) -> Sequence[UserImage]:
-        """List images for a user with cursor-based pagination.
+        """List full (non-thumbnail) images for a user with cursor-based pagination.
 
         Uses limit+1 fetch pattern. Caller checks ``len(result) > limit``
         to determine ``has_more``.
@@ -120,11 +138,67 @@ class UserImageRepository(BaseRepository[UserImage]):
             cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            List of UserImage instances ordered by ``created_at DESC, id DESC``.
+            List of non-thumbnail UserImage instances ordered by
+            ``created_at DESC, id DESC``.
         """
-        return await self._list_by_user_cursor(
-            user_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
+        query = select(UserImage).where(
+            UserImage.user_id == user_id,
+            UserImage.is_thumbnail.is_(False),
         )
+
+        if cursor_ts is not None and cursor_id is not None:
+            query = query.where(
+                tuple_(UserImage.created_at, UserImage.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
+
+        result = await self._session.execute(
+            query.order_by(
+                UserImage.created_at.desc(),
+                UserImage.id.desc(),
+            ).limit(limit + 1)
+        )
+        return result.scalars().all()
+
+    async def list_derivatives(self, parent_image_id: UUID) -> Sequence[UserImage]:
+        """List derivative uploads (thumbnails) for a given parent upload.
+
+        Args:
+            parent_image_id: Parent upload ID.
+
+        Returns:
+            List of derivative UserImage instances.
+        """
+        result = await self._session.execute(
+            select(UserImage).where(UserImage.parent_image_id == parent_image_id)
+        )
+        return result.scalars().all()
+
+    async def batch_derivatives(
+        self,
+        parent_ids: Sequence[UUID],
+    ) -> dict[UUID, list[UserImage]]:
+        """Fetch all derivatives for a batch of parent upload IDs.
+
+        Args:
+            parent_ids: Parent upload IDs to look up.
+
+        Returns:
+            Mapping from parent_image_id to list of derivative UserImage rows.
+        """
+        if not parent_ids:
+            return {}
+
+        result = await self._session.execute(
+            select(UserImage).where(UserImage.parent_image_id.in_(parent_ids))
+        )
+        rows = result.scalars().all()
+
+        grouped: dict[UUID, list[UserImage]] = defaultdict(list)
+        for row in rows:
+            if row.parent_image_id is not None:
+                grouped[row.parent_image_id].append(row)
+        return dict(grouped)
 
     async def delete(
         self,
@@ -153,7 +227,9 @@ class UserImageRepository(BaseRepository[UserImage]):
         before: datetime | None = None,
         limit: int = 1000,
     ) -> Sequence[UserImage]:
-        """Get images past their expiration date.
+        """Get full (non-thumbnail) images past their expiration date.
+
+        Thumbnails are excluded — they cascade-delete with their parent.
 
         Args:
             before: Consider expired if expires_at < before (default: now).
@@ -167,16 +243,19 @@ class UserImageRepository(BaseRepository[UserImage]):
 
         result = await self._session.execute(
             select(UserImage)
-            .where(UserImage.expires_at < before)
+            .where(
+                UserImage.expires_at < before,
+                UserImage.is_thumbnail.is_(False),
+            )
             .order_by(UserImage.expires_at)
             .limit(limit)
         )
         return result.scalars().all()
 
     async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
-        """Count uploads and sum their size for a user.
+        """Count full uploads and sum their size for a user.
 
-        Used by storage stats aggregation.
+        Excludes thumbnail rows — only full uploads are counted.
 
         Args:
             user_id: User to aggregate for.
@@ -188,7 +267,10 @@ class UserImageRepository(BaseRepository[UserImage]):
             select(
                 func.count(UserImage.id),
                 func.coalesce(func.sum(UserImage.size_bytes), 0),
-            ).where(UserImage.user_id == user_id)
+            ).where(
+                UserImage.user_id == user_id,
+                UserImage.is_thumbnail.is_(False),
+            )
         )
         count, total_bytes = result.one()
         return int(count), int(total_bytes)

@@ -74,6 +74,23 @@ class UserImage(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     format: Mapped[str] = mapped_column(String(10), nullable=False)  # png, jpeg, webp
 
+    # Thumbnail support (mirrors GenerationOutput self-referential pattern)
+    is_thumbnail: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    parent_image_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("user_images.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    thumbnail_max_edge: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -96,8 +113,18 @@ class UserImage(Base):
         back_populates="input_image",
         foreign_keys="GenerationOutput.input_image_id",
     )
+    derivatives: Mapped[list[UserImage]] = relationship(
+        "UserImage",
+        backref=backref("parent", remote_side="UserImage.id"),
+        cascade="all, delete-orphan",
+        single_parent=True,
+        foreign_keys="UserImage.parent_image_id",
+    )
 
-    __table_args__ = (Index("ix_user_images_user_created", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_user_images_user_created", "user_id", "created_at"),
+        Index("ix_user_images_parent_image_id", "parent_image_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<UserImage {self.id} user={self.user_id} key={self.storage_key}>"
@@ -346,6 +373,10 @@ class GenerationOutput(Base):
         default=False,
         server_default=text("false"),
     )
+
+    # Size discriminator for thumbnail rows. NULL on full rows.
+    # Values match ThumbnailSpec.max_edge (e.g. 150=sm, 512=md).
+    thumbnail_max_edge: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Output index (for batch generation)
     output_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

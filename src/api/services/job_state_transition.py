@@ -57,6 +57,7 @@ class GenerationOutputData:
     expires_at: datetime
     is_thumbnail: bool = False
     parent_output_id: UUID | None = None
+    thumbnail_max_edge: int | None = None
     width: int | None = None
     height: int | None = None
 
@@ -187,6 +188,7 @@ class JobStateTransitionService:
                 product_id=product_id,
                 is_thumbnail=out.is_thumbnail,
                 parent_output_id=out.parent_output_id,
+                thumbnail_max_edge=out.thumbnail_max_edge,
                 width=out.width,
                 height=out.height,
             )

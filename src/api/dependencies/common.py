@@ -558,7 +558,6 @@ async def init_services(settings: Settings) -> JWTService:
 
     # Initialize unified job service
     _services.unified_job_service = UnifiedJobService(
-        storage=_services.r2_storage,
         grok_job_service=_services.grok_job_service,
     )
     logger.info("unified_job_service.initialized")

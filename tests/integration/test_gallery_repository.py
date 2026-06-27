@@ -328,7 +328,7 @@ class TestBatchCoverData:
         result = await gallery_repo.batch_cover_data([job.id])
         cover = result[job.id]
         assert cover.output_count == 2
-        assert cover.thumbnail_output_id is not None
+        assert cover.primary_output is not None
 
     async def test_detects_video_output(
         self,
@@ -343,7 +343,8 @@ class TestBatchCoverData:
 
         result = await gallery_repo.batch_cover_data([job.id])
         cover = result[job.id]
-        assert cover.video_output_id == vid.id
+        assert cover.primary_output is not None
+        assert cover.primary_output.id == vid.id
 
     async def test_missing_job_gets_empty_cover(
         self,
@@ -353,7 +354,7 @@ class TestBatchCoverData:
         result = await gallery_repo.batch_cover_data([fake_id])
         cover = result[fake_id]
         assert cover.output_count == 0
-        assert cover.cover_output_id is None
+        assert cover.primary_output is None
 
 
 # ---------------------------------------------------------------------------

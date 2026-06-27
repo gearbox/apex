@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import io
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import structlog
 from PIL import Image
+
+from src.core.thumbnails import THUMBNAIL_SPECS, ThumbnailSpec
 
 logger = structlog.get_logger(__name__)
 
@@ -27,6 +30,12 @@ class ThumbnailResult:
     format: str = "webp"
 
 
+@dataclass(frozen=True, slots=True)
+class GeneratedThumbnail:
+    spec: ThumbnailSpec
+    result: ThumbnailResult
+
+
 async def read_dimensions(image_bytes: bytes) -> ImageDimensions | None:
     """Read pixel dimensions from image bytes. Returns None on failure."""
     return await asyncio.to_thread(_read_dimensions_sync, image_bytes)
@@ -41,6 +50,20 @@ async def make_image_thumbnail(
     except Exception:
         logger.warning("thumbnail.image.failed")
         return None
+
+
+async def make_image_thumbnails(
+    image_bytes: bytes,
+    specs: Sequence[ThumbnailSpec] = THUMBNAIL_SPECS,
+    *,
+    quality: int = 80,
+) -> list[GeneratedThumbnail]:
+    """Decode source once and produce all requested size variants (WEBP).
+
+    Per-spec failures are skipped and logged — never raised. Returns an empty
+    list if the source image cannot be decoded at all.
+    """
+    return await asyncio.to_thread(_make_all_sync, image_bytes, list(specs), quality)
 
 
 def _read_dimensions_sync(image_bytes: bytes) -> ImageDimensions | None:
@@ -64,3 +87,41 @@ def _make_sync(image_bytes: bytes, max_edge: int, quality: int) -> ThumbnailResu
         buf = io.BytesIO()
         img.save(buf, format="WEBP", quality=quality, method=4)
         return ThumbnailResult(data=buf.getvalue(), width=img.width, height=img.height)
+
+
+def _make_all_sync(
+    image_bytes: bytes,
+    specs: list[ThumbnailSpec],
+    quality: int,
+) -> list[GeneratedThumbnail]:
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            # Convert to a safe mode while the source is still open (palette intact).
+            # frombytes() on a "P" image strips the palette, so convert("RGB") on the
+            # reconstructed image maps through an empty palette → solid black output.
+            if source.mode in ("RGB", "RGBA"):
+                base = source.copy()
+            else:
+                base = source.convert("RGBA" if "A" in source.mode else "RGB")
+    except Exception:
+        logger.warning("thumbnail.image.decode_failed")
+        return []
+
+    results: list[GeneratedThumbnail] = []
+    for spec in specs:
+        try:
+            img = base.copy()
+            img.thumbnail((spec.max_edge, spec.max_edge))
+            buf = io.BytesIO()
+            img.save(buf, format="WEBP", quality=quality, method=4)
+            results.append(
+                GeneratedThumbnail(
+                    spec=spec,
+                    result=ThumbnailResult(data=buf.getvalue(), width=img.width, height=img.height),
+                )
+            )
+        except Exception:
+            logger.warning("thumbnail.image.failed", max_edge=spec.max_edge)
+
+    return results

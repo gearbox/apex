@@ -11,6 +11,7 @@ from uuid import UUID
 
 import msgspec
 
+from src.api.schemas.media import MediaObject
 from src.core.enums import GenerationType, JobStatus
 
 
@@ -55,27 +56,12 @@ class JobOutputItem(msgspec.Struct, kw_only=True):
     id: UUID
     """Output record UUID."""
 
-    url: str
-    """Presigned URL for downloading the full-resolution output.
-    Valid for ~1 hour; caller should not cache."""
-
-    content_type: str
-    """MIME type, e.g. ``image/jpeg`` or ``video/mp4``."""
-
-    format: str
-    """File format string, e.g. ``jpeg``, ``webp``, ``mp4``."""
-
-    size_bytes: int
-    """File size in bytes."""
-
     output_index: int
     """Position within the batch (0-based)."""
 
-    thumbnail_url: str | None = None
-    """Presigned URL for a WEBP thumbnail of this output (image) or poster frame (video)."""
-
-    is_thumbnail: bool = False
-    """True for the extracted first-frame/poster image of a video."""
+    media: MediaObject
+    """Full media envelope: original asset + preview variants (sm/md WEBP).
+    For video: original is the MP4 source; variants are poster-frame rasters."""
 
 
 class UnifiedJobResponse(msgspec.Struct, kw_only=True):
@@ -120,11 +106,7 @@ class UnifiedJobResponse(msgspec.Struct, kw_only=True):
 
     # Results
     outputs: list[JobOutputItem] = msgspec.field(default_factory=list)
-    """Ordered list of outputs. Thumbnail (if any) is first (``is_thumbnail=True``)."""
-
-    thumbnail_url: str | None = None
-    """Convenience shortcut — presigned URL of the thumbnail output.
-    Equivalent to ``outputs[0].url`` when ``outputs[0].is_thumbnail is True``."""
+    """Ordered list of outputs. Empty while the job is processing."""
 
     error: str | None = None
     """Error message for failed jobs."""

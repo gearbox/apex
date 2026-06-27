@@ -2,17 +2,19 @@ from datetime import datetime
 
 import msgspec
 
+from src.api.schemas.media import MediaObject
+
 
 class UploadResponse(msgspec.Struct, kw_only=True):
     """Response for successful image upload."""
 
     id: str
-    storage_key: str
     filename: str
-    content_type: str
-    size_bytes: int
     created_at: datetime
     expires_at: datetime
+
+    media: MediaObject
+    """Media envelope for the uploaded image: original asset + sm/md WEBP variants."""
 
 
 class ImageAccessResponse(msgspec.Struct, kw_only=True):
@@ -31,10 +33,11 @@ class ImageListItem(msgspec.Struct, kw_only=True):
 
     id: str
     filename: str
-    content_type: str
-    size_bytes: int
     created_at: datetime
     expires_at: datetime
+
+    media: MediaObject
+    """Media envelope: original asset + sm/md WEBP preview variants."""
 
 
 class OutputListItem(msgspec.Struct, kw_only=True):
@@ -42,11 +45,12 @@ class OutputListItem(msgspec.Struct, kw_only=True):
 
     id: str
     job_id: str
-    content_type: str
-    size_bytes: int
     output_index: int
     created_at: datetime
     expires_at: datetime
+
+    media: MediaObject
+    """Media envelope: original asset + sm/md WEBP preview variants."""
 
 
 class StorageStatsResponse(msgspec.Struct, kw_only=True):

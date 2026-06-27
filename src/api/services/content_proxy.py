@@ -147,6 +147,12 @@ class ContentProxyService:
         # Try upload
         upload = await image_repo.get(content_id, user_id=user_id)
         if upload is not None and upload.product_id == product_id:
+            # Delete derivative (thumbnail) R2 objects before removing the parent row.
+            # The DB cascade (ON DELETE CASCADE on parent_image_id) removes derivative
+            # rows, but we must explicitly clean up their R2 objects.
+            upload_derivatives = await image_repo.list_derivatives(content_id)
+            for upload_derivative in upload_derivatives:
+                await self._storage.delete(upload_derivative.storage_key)
             await self._storage.delete(upload.storage_key)
             await image_repo.delete(content_id, user_id=user_id)
             logger.info(
