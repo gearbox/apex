@@ -8,11 +8,14 @@ import pytest
 from PIL import Image
 
 from src.api.services.image_thumbnail import (
+    GeneratedThumbnail,
     ImageDimensions,
     ThumbnailResult,
     make_image_thumbnail,
+    make_image_thumbnails,
     read_dimensions,
 )
+from src.core.thumbnails import THUMBNAIL_SPECS
 
 pytestmark = pytest.mark.unit
 
@@ -129,3 +132,72 @@ class TestMakeImageThumbnail:
         assert result.format == "webp"
         img = Image.open(io.BytesIO(result.data))
         assert img.format == "WEBP"
+
+
+def _make_palette_png(width: int, height: int, fill_rgb: tuple[int, int, int]) -> bytes:
+    src = Image.new("RGB", (width, height), fill_rgb)
+    palette_img = src.quantize(colors=16)
+    buf = io.BytesIO()
+    palette_img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class TestMakeImageThumbnails:
+    async def test_returns_one_thumbnail_per_spec(self) -> None:
+        data = _make_png(800, 600)
+        results = await make_image_thumbnails(data, THUMBNAIL_SPECS)
+        assert len(results) == len(THUMBNAIL_SPECS)
+        assert all(isinstance(r, GeneratedThumbnail) for r in results)
+
+    async def test_each_result_is_webp(self) -> None:
+        data = _make_png(800, 600)
+        results = await make_image_thumbnails(data, THUMBNAIL_SPECS)
+        for r in results:
+            assert r.result.format == "webp"
+            assert r.result.content_type == "image/webp"
+
+    async def test_longest_edge_matches_spec(self) -> None:
+        data = _make_png(1024, 768)
+        results = await make_image_thumbnails(data, THUMBNAIL_SPECS)
+        for r in results:
+            longest = max(r.result.width, r.result.height)
+            assert longest <= r.spec.max_edge
+
+    async def test_portrait_dims_truthful(self) -> None:
+        """Portrait input preserves width < height in generated thumbnails."""
+        data = _make_png(400, 800)
+        results = await make_image_thumbnails(data, THUMBNAIL_SPECS)
+        assert len(results) > 0
+        for r in results:
+            assert r.result.width < r.result.height
+
+    async def test_returns_empty_list_for_invalid_input(self) -> None:
+        results = await make_image_thumbnails(b"not an image")
+        assert results == []
+
+    async def test_palette_png_color_preserved(self) -> None:
+        """Palette images must not render as solid black (F1 regression guard)."""
+        # Pure red palette PNG — frombytes() strips palette, giving black before fix
+        data = _make_palette_png(300, 200, fill_rgb=(200, 10, 10))
+        results = await make_image_thumbnails(data, THUMBNAIL_SPECS)
+        assert len(results) > 0
+        for r in results:
+            img = Image.open(io.BytesIO(r.result.data)).convert("RGB")
+            # At least one pixel must have dominant red — proves palette was applied
+            pixels = list(img.getdata())  # type: ignore[arg-type]
+            assert any(p[0] > 150 and p[1] < 80 and p[2] < 80 for p in pixels), (
+                f"All pixels appear black/wrong for spec {r.spec.label}: sample={pixels[:4]}"
+            )
+
+    async def test_cmyk_color_preserved(self) -> None:
+        """CMYK images must not lose color across all size variants."""
+        src = Image.new("CMYK", (300, 200), (0, 200, 200, 0))
+        buf = io.BytesIO()
+        src.save(buf, format="JPEG")
+        data = buf.getvalue()
+        results = await make_image_thumbnails(data, THUMBNAIL_SPECS)
+        assert len(results) > 0
+        for r in results:
+            img = Image.open(io.BytesIO(r.result.data)).convert("RGB")
+            pixels = list(img.getdata())  # type: ignore[arg-type]
+            assert any(p != (0, 0, 0) for p in pixels)

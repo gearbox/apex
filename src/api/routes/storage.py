@@ -26,7 +26,6 @@ from litestar.status_codes import (
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.schemas.storage import (
     ImageAccessResponse,
@@ -43,8 +42,6 @@ from src.api.services.user_content import (
     UserContentService,
     UserContentValidationError,
 )
-from src.core.enums import OutputMediaType
-from src.core.thumbnails import label_for_max_edge
 
 logger = structlog.get_logger(__name__)
 
@@ -55,6 +52,7 @@ logger = structlog.get_logger(__name__)
 ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
 IMAGE_NOT_FOUND = "Image not found"
+OUTPUT_NOT_FOUND = "Output not found"
 
 
 @dataclass
@@ -145,39 +143,13 @@ class StorageController(Controller):
                 filename=data.data.filename or "data.png",
                 content_type=content_type,
             )
-
-            derivatives = await user_content.list_upload_derivatives(result.id)
-            variants: list[ImageVariant] = []
-            for d in derivatives:
-                label = label_for_max_edge(d.thumbnail_max_edge)
-                if label is not None:
-                    variants.append(
-                        ImageVariant(
-                            label=label,
-                            width=d.width,
-                            height=d.height,
-                            url=f"/v1/content/uploads/{d.id}",
-                        )
-                    )
-            variants.sort(key=lambda v: v.width or 0)
-            media = MediaObject(
-                media_type=OutputMediaType.IMAGE,
-                original=MediaOriginal(
-                    url=f"/v1/content/uploads/{result.id}",
-                    width=None,
-                    height=None,
-                    content_type=result.content_type,
-                    size_bytes=result.size_bytes,
-                ),
-                variants=variants,
-            )
             return Response(
                 content=UploadResponse(
                     id=str(result.id),
                     filename=result.filename,
                     created_at=result.created_at,
                     expires_at=result.expires_at,
-                    media=media,
+                    media=result.media,
                 ),
                 status_code=HTTP_201_CREATED,
             )
@@ -391,7 +363,7 @@ class StorageController(Controller):
         except UserContentNotFoundError:
             return Response(
                 content=ErrorEnvelope(
-                    error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
+                    error="not_found", message=OUTPUT_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
                 ),
                 status_code=HTTP_404_NOT_FOUND,
             )
@@ -413,7 +385,7 @@ class StorageController(Controller):
                 return Response(
                     content=ErrorEnvelope(
                         error="not_found",
-                        message=IMAGE_NOT_FOUND,
+                        message=OUTPUT_NOT_FOUND,
                         status_code=HTTP_404_NOT_FOUND,
                     ),
                     status_code=HTTP_404_NOT_FOUND,
@@ -430,7 +402,7 @@ class StorageController(Controller):
         except UserContentNotFoundError:
             return Response(
                 content=ErrorEnvelope(
-                    error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
+                    error="not_found", message=OUTPUT_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
                 ),
                 status_code=HTTP_404_NOT_FOUND,
             )

@@ -18,7 +18,8 @@ from uuid import UUID
 import structlog
 
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
-from src.api.services.image_thumbnail import make_image_thumbnails
+from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions
+from src.api.services.media import build_upload_media
 from src.api.services.storage import (
     MediaFormat,
     R2StorageService,
@@ -123,6 +124,9 @@ class UserContentService:
             now = datetime.now(UTC)
             expires_at = now + timedelta(days=self._retention_days)
 
+            # Read original dimensions before creating the DB record (F4)
+            dims = await read_dimensions(data)
+
             # Create database record
             db_image = await self._image_repo.create(
                 id=result.id,
@@ -134,6 +138,8 @@ class UserContentService:
                 format=image_format.value,
                 expires_at=expires_at,
                 product_id=self._product_id,
+                width=dims.width if dims is not None else None,
+                height=dims.height if dims is not None else None,
             )
 
             logger.info(
@@ -144,6 +150,7 @@ class UserContentService:
                 size_bytes=len(data),
             )
 
+            created_derivatives: list[UserImage] = []
             # Generate sm + md WEBP thumbnails — non-fatal
             try:
                 thumbnails = await make_image_thumbnails(data)
@@ -156,7 +163,7 @@ class UserContentService:
                         content_type=generated.result.content_type,
                         storage_type=StorageType.UPLOAD,
                     )
-                    await self._image_repo.create(
+                    thumb_db = await self._image_repo.create(
                         id=thumb_result.id,
                         user_id=user_id,
                         storage_key=thumb_result.storage_key,
@@ -172,11 +179,14 @@ class UserContentService:
                         width=generated.result.width,
                         height=generated.result.height,
                     )
+                    created_derivatives.append(thumb_db)
             except Exception:
                 logger.warning(
                     "user_content.thumbnail_generation_failed",
                     image_id=str(db_image.id),
                 )
+
+            media = build_upload_media(db_image, created_derivatives)
 
             return UploadedImage(
                 id=db_image.id,
@@ -186,6 +196,7 @@ class UserContentService:
                 size_bytes=db_image.size_bytes,
                 created_at=db_image.created_at,
                 expires_at=db_image.expires_at,
+                media=media,
             )
 
         except StorageValidationError as e:
@@ -360,10 +371,12 @@ class UserContentService:
         if image is None:
             return False
 
-        # Delete from R2 first
-        await self._storage.delete(image.storage_key)
+        # Delete derivative (thumbnail) R2 objects first; DB cascade removes rows.
+        derivatives = await self._image_repo.list_derivatives(image_id)
+        for derivative in derivatives:
+            await self._storage.delete(derivative.storage_key)
 
-        # Then delete DB record
+        await self._storage.delete(image.storage_key)
         await self._image_repo.delete(image_id, user_id=user_id)
 
         logger.info("user_content.deleted", image_id=str(image_id))

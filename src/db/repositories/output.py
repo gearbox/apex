@@ -228,7 +228,10 @@ class OutputRepository(BaseRepository[GenerationOutput]):
 
         result = await self._session.execute(
             select(GenerationOutput)
-            .where(GenerationOutput.expires_at < before)
+            .where(
+                GenerationOutput.expires_at < before,
+                GenerationOutput.is_thumbnail.is_(False),
+            )
             .order_by(GenerationOutput.expires_at)
             .limit(limit)
         )

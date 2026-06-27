@@ -97,9 +97,13 @@ def _make_all_sync(
     try:
         with Image.open(io.BytesIO(image_bytes)) as source:
             source.load()
-            base_mode = source.mode
-            base_pixels = source.tobytes()
-            base_size = source.size
+            # Convert to a safe mode while the source is still open (palette intact).
+            # frombytes() on a "P" image strips the palette, so convert("RGB") on the
+            # reconstructed image maps through an empty palette → solid black output.
+            if source.mode in ("RGB", "RGBA"):
+                base = source.copy()
+            else:
+                base = source.convert("RGBA" if "A" in source.mode else "RGB")
     except Exception:
         logger.warning("thumbnail.image.decode_failed")
         return []
@@ -107,16 +111,16 @@ def _make_all_sync(
     results: list[GeneratedThumbnail] = []
     for spec in specs:
         try:
-            # Reconstruct a fresh copy from the decoded pixels each time so
-            # Pillow's in-place .thumbnail() doesn't corrupt subsequent sizes.
-            img = Image.frombytes(base_mode, base_size, base_pixels)
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGBA" if "A" in img.mode else "RGB")
+            img = base.copy()
             img.thumbnail((spec.max_edge, spec.max_edge))
             buf = io.BytesIO()
             img.save(buf, format="WEBP", quality=quality, method=4)
-            thumb = ThumbnailResult(data=buf.getvalue(), width=img.width, height=img.height)
-            results.append(GeneratedThumbnail(spec=spec, result=thumb))
+            results.append(
+                GeneratedThumbnail(
+                    spec=spec,
+                    result=ThumbnailResult(data=buf.getvalue(), width=img.width, height=img.height),
+                )
+            )
         except Exception:
             logger.warning("thumbnail.image.failed", max_edge=spec.max_edge)
 
