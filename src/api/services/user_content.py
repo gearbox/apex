@@ -18,6 +18,7 @@ from uuid import UUID
 import structlog
 
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
+from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.storage import (
     MediaFormat,
     R2StorageService,
@@ -142,6 +143,40 @@ class UserContentService:
                 filename=filename,
                 size_bytes=len(data),
             )
+
+            # Generate sm + md WEBP thumbnails — non-fatal
+            try:
+                thumbnails = await make_image_thumbnails(data)
+                for generated in thumbnails:
+                    thumb_filename = f"thumb_{generated.spec.label}_{filename}"
+                    thumb_result = await self._storage.upload(
+                        user_id=user_id,
+                        data=generated.result.data,
+                        filename=thumb_filename,
+                        content_type=generated.result.content_type,
+                        storage_type=StorageType.UPLOAD,
+                    )
+                    await self._image_repo.create(
+                        id=thumb_result.id,
+                        user_id=user_id,
+                        storage_key=thumb_result.storage_key,
+                        original_filename=thumb_filename,
+                        content_type=generated.result.content_type,
+                        size_bytes=len(generated.result.data),
+                        format=generated.result.format,
+                        expires_at=expires_at,
+                        product_id=self._product_id,
+                        is_thumbnail=True,
+                        parent_image_id=db_image.id,
+                        thumbnail_max_edge=generated.spec.max_edge,
+                        width=generated.result.width,
+                        height=generated.result.height,
+                    )
+            except Exception:
+                logger.warning(
+                    "user_content.thumbnail_generation_failed",
+                    image_id=str(db_image.id),
+                )
 
             return UploadedImage(
                 id=db_image.id,
@@ -273,6 +308,41 @@ class UserContentService:
             cursor_id=cursor_id,
         )
         return list(images)
+
+    async def list_upload_derivatives(self, image_id: UUID) -> list[UserImage]:
+        """Return derivative (thumbnail) rows for a single upload.
+
+        Args:
+            image_id: Parent upload ID.
+
+        Returns:
+            List of derivative UserImage rows.
+        """
+        return list(await self._image_repo.list_derivatives(image_id))
+
+    async def batch_upload_derivatives(self, image_ids: list[UUID]) -> dict[UUID, list[UserImage]]:
+        """Return derivative rows for a batch of uploads.
+
+        Args:
+            image_ids: Parent upload IDs.
+
+        Returns:
+            Mapping from parent_image_id to list of derivative rows.
+        """
+        return await self._image_repo.batch_derivatives(image_ids)
+
+    async def batch_output_derivatives(
+        self, output_ids: list[UUID]
+    ) -> dict[UUID, list[GenerationOutput]]:
+        """Return derivative rows for a batch of outputs.
+
+        Args:
+            output_ids: Parent output IDs.
+
+        Returns:
+            Mapping from parent_output_id to list of derivative rows.
+        """
+        return await self._output_repo.batch_derivatives(output_ids)
 
     async def delete_upload(self, image_id: UUID, *, user_id: UUID) -> bool:
         """Delete an uploaded image.

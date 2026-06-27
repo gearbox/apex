@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from src.api.schemas.gallery import (
     GalleryOutputItem,
 )
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
+from src.api.services.media import build_output_media, build_upload_media
 from src.core.enums import GalleryBadge, GallerySourceType, GenerationType, OutputMediaType
 from src.db.repositories.gallery import CoverData, GalleryRepository
 
@@ -89,15 +91,17 @@ class GalleryService:
         items: list[GalleryGridItem] = []
         for job in page_rows:
             cover_data = cover_map.get(job.id, CoverData())
-            cover_url, video_url = self._resolve_cover(job, cover_data)
+            if cover_data.primary_output is None:
+                logger.warning("gallery.job_has_no_outputs", job_id=str(job.id))
+                continue
+
             gt = GenerationType(job.generation_type)
+            cover = build_output_media(cover_data.primary_output, cover_data.primary_derivatives)
             items.append(
                 GalleryGridItem(
                     job_id=job.id,
-                    cover_url=cover_url,
-                    video_url=video_url,
+                    cover=cover,
                     badge=self._resolve_badge(gt),
-                    media_type=self._resolve_media_type(gt),
                     output_count=cover_data.output_count,
                     generation_type=gt,
                     model=job.model,
@@ -144,28 +148,32 @@ class GalleryService:
             return None
 
         gt = GenerationType(job.generation_type)
-        non_thumbnail_outputs = [o for o in job.outputs if not o.is_thumbnail]
-        # Map parent_output_id → thumbnail so each output can have its own thumbnail.
-        thumbnail_map = {
-            o.parent_output_id: o for o in job.outputs if o.is_thumbnail and o.parent_output_id
-        }
+
+        # Separate full outputs from thumbnails and build derivatives map
+        full_outputs = [o for o in job.outputs if not o.is_thumbnail]
+        derivatives_map: dict[UUID, list[GenerationOutput]] = defaultdict(list)
+        for o in job.outputs:
+            if o.is_thumbnail and o.parent_output_id is not None:
+                derivatives_map[o.parent_output_id].append(o)
 
         output_items = [
-            self._build_output_item(o, thumbnail_map.get(o.id))
-            for o in sorted(non_thumbnail_outputs, key=lambda o: o.output_index)
+            self._build_output_item(o, list(derivatives_map.get(o.id, [])))
+            for o in sorted(full_outputs, key=lambda o: o.output_index)
         ]
 
-        # Resolve input image URL for detail view header
-        input_url: str | None = None
-        if job.source_output_id is not None:
-            input_url = self._output_url(job.source_output_id)
-        elif job.input_image_id is not None:
-            input_url = self._upload_url(job.input_image_id)
+        # Resolve input_media for detail view header
+        input_media = None
+        if job.source_output is not None:
+            # Derivatives were eagerly loaded on source_output
+            input_media = build_output_media(job.source_output, list(job.source_output.derivatives))
+        elif job.input_image is not None:
+            # Derivatives were eagerly loaded on input_image
+            input_media = build_upload_media(job.input_image, list(job.input_image.derivatives))
 
         return GalleryGroupDetail(
             job_id=job.id,
             badge=self._resolve_badge(gt),
-            input_image_url=input_url,
+            input_media=input_media,
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
             outputs=output_items,
@@ -196,76 +204,6 @@ class GalleryService:
         """Resolve output media type from generation type."""
         return OutputMediaType.VIDEO if gt.is_video else OutputMediaType.IMAGE
 
-    @staticmethod
-    def _output_media_type(content_type: str) -> OutputMediaType:
-        """Classify media type from MIME content_type."""
-        return OutputMediaType.VIDEO if content_type.startswith("video/") else OutputMediaType.IMAGE
-
-    @staticmethod
-    def _output_url(output_id: UUID) -> str:
-        return f"/v1/content/outputs/{output_id}"
-
-    @staticmethod
-    def _upload_url(image_id: UUID) -> str:
-        return f"/v1/content/uploads/{image_id}"
-
-    def _resolve_cover(
-        self,
-        job: GenerationJob,
-        cover_data: CoverData,
-    ) -> tuple[str, str | None]:
-        """Resolve cover_url and video_url for a grid item.
-
-        Returns:
-            (cover_url, video_url)
-        """
-        gt = GenerationType(job.generation_type)
-        video_url: str | None = None
-
-        # For ALL video types, set video_url if we have a video output
-        if gt.is_video and cover_data.video_output_id is not None:
-            video_url = self._output_url(cover_data.video_output_id)
-
-        if gt.requires_image_input:
-            # i2i, i2v, flf2v: prefer source output, then upload, then thumbnail/cover
-            if job.source_output_id is not None:
-                return self._output_url(job.source_output_id), video_url
-            if job.input_image_id is not None:
-                return self._upload_url(job.input_image_id), video_url
-            # For image i2i without a source input, prefer thumbnail over full output
-            if cover_data.thumbnail_output_id is not None:
-                return self._output_url(cover_data.thumbnail_output_id), video_url
-            if cover_data.cover_output_id is not None:
-                return self._output_url(cover_data.cover_output_id), video_url
-
-        elif gt.requires_video_input:
-            # v2v: prefer source output, then thumbnail
-            if job.source_output_id is not None:
-                return self._output_url(job.source_output_id), video_url
-            if cover_data.thumbnail_output_id is not None:
-                return self._output_url(cover_data.thumbnail_output_id), video_url
-
-        elif gt == GenerationType.T2V:
-            # t2v: cover = thumbnail, video = video output
-            cover = (
-                self._output_url(cover_data.thumbnail_output_id)
-                if cover_data.thumbnail_output_id is not None
-                else self._output_url(cover_data.video_output_id)
-                if cover_data.video_output_id is not None
-                else "/v1/content/outputs/unknown"
-            )
-            return cover, video_url
-
-        else:
-            # t2i: prefer thumbnail (lighter egress), fall back to full output
-            if cover_data.thumbnail_output_id is not None:
-                return self._output_url(cover_data.thumbnail_output_id), None
-            if cover_data.cover_output_id is not None:
-                return self._output_url(cover_data.cover_output_id), None
-
-        # Final fallback
-        return "/v1/content/outputs/unknown", video_url
-
     def _build_lineage(self, job: GenerationJob) -> GalleryLineage | None:
         """Build lineage info from a job's source fields."""
         if job.source_job_id is not None:
@@ -289,23 +227,17 @@ class GalleryService:
         if len(prompt) <= max_len:
             return prompt
         truncated = prompt[:max_len].rsplit(" ", 1)[0]
-        return truncated + "\u2026"
+        return f"{truncated}…"
 
+    @staticmethod
     def _build_output_item(
-        self,
         output: GenerationOutput,
-        _thumbnail: GenerationOutput | None = None,
+        derivatives: list[GenerationOutput],
     ) -> GalleryOutputItem:
-        """Build a GalleryOutputItem from a GenerationOutput."""
-        thumbnail_url = None if _thumbnail is None else self._output_url(_thumbnail.id)
+        """Build a GalleryOutputItem from a GenerationOutput and its derivatives."""
         return GalleryOutputItem(
             id=output.id,
-            url=self._output_url(output.id),
-            thumbnail_url=thumbnail_url,
-            content_type=output.content_type,
-            media_type=self._output_media_type(output.content_type),
-            format=output.format,
-            size_bytes=output.size_bytes,
             output_index=output.output_index,
             created_at=output.created_at,
+            media=build_output_media(output, derivatives),
         )

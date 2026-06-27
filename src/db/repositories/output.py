@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.storage import GenerationOutput
@@ -40,6 +41,7 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         input_image_id: UUID | None = None,
         is_thumbnail: bool = False,
         parent_output_id: UUID | None = None,
+        thumbnail_max_edge: int | None = None,
         width: int | None = None,
         height: int | None = None,
     ) -> GenerationOutput:
@@ -59,6 +61,7 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             input_image_id: Associated input image (for i2i).
             is_thumbnail: Whether this output is a derived preview.
             parent_output_id: Full output this thumbnail derives from.
+            thumbnail_max_edge: Size bucket (150=sm, 512=md). None on full rows.
             width: Pixel width (stored for full and thumbnail rows).
             height: Pixel height (stored for full and thumbnail rows).
 
@@ -78,6 +81,7 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             input_image_id=input_image_id,
             is_thumbnail=is_thumbnail,
             parent_output_id=parent_output_id,
+            thumbnail_max_edge=thumbnail_max_edge,
             width=width,
             height=height,
             product_id=product_id,
@@ -104,17 +108,20 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         return await self._get_with_optional_owner(output_id, user_id=user_id)
 
     async def list_by_job(self, job_id: UUID) -> Sequence[GenerationOutput]:
-        """List outputs for a job, ordered by output_index.
+        """List full (non-thumbnail) outputs for a job, ordered by output_index.
 
         Args:
             job_id: Job to list outputs for.
 
         Returns:
-            List of GenerationOutput instances ordered by index.
+            List of non-thumbnail GenerationOutput instances ordered by index.
         """
         result = await self._session.execute(
             select(GenerationOutput)
-            .where(GenerationOutput.job_id == job_id)
+            .where(
+                GenerationOutput.job_id == job_id,
+                GenerationOutput.is_thumbnail.is_(False),
+            )
             .order_by(GenerationOutput.output_index)
         )
         return result.scalars().all()
@@ -127,7 +134,7 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
     ) -> Sequence[GenerationOutput]:
-        """List outputs for a user with cursor-based pagination.
+        """List full (non-thumbnail) outputs for a user with cursor-based pagination.
 
         Uses limit+1 fetch pattern. Caller checks ``len(result) > limit``
         to determine ``has_more``.
@@ -139,11 +146,27 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             cursor_id: ``id`` of the last item on the previous page.
 
         Returns:
-            List of GenerationOutput instances ordered by ``created_at DESC, id DESC``.
+            List of non-thumbnail GenerationOutput instances ordered by
+            ``created_at DESC, id DESC``.
         """
-        return await self._list_by_user_cursor(
-            user_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
+        query = select(GenerationOutput).where(
+            GenerationOutput.user_id == user_id,
+            GenerationOutput.is_thumbnail.is_(False),
         )
+
+        if cursor_ts is not None and cursor_id is not None:
+            query = query.where(
+                tuple_(GenerationOutput.created_at, GenerationOutput.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
+
+        result = await self._session.execute(
+            query.order_by(
+                GenerationOutput.created_at.desc(),
+                GenerationOutput.id.desc(),
+            ).limit(limit + 1)
+        )
+        return result.scalars().all()
 
     async def list_derivatives(self, parent_output_id: UUID) -> Sequence[GenerationOutput]:
         """List derivative outputs (thumbnails) for a given parent output.
@@ -158,6 +181,33 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             select(GenerationOutput).where(GenerationOutput.parent_output_id == parent_output_id)
         )
         return result.scalars().all()
+
+    async def batch_derivatives(
+        self,
+        parent_ids: Sequence[UUID],
+    ) -> dict[UUID, list[GenerationOutput]]:
+        """Fetch all derivatives for a batch of parent output IDs.
+
+        Args:
+            parent_ids: Parent output IDs to look up.
+
+        Returns:
+            Mapping from parent_output_id to list of derivative GenerationOutput rows.
+            Parent IDs with no derivatives are absent from the result.
+        """
+        if not parent_ids:
+            return {}
+
+        result = await self._session.execute(
+            select(GenerationOutput).where(GenerationOutput.parent_output_id.in_(parent_ids))
+        )
+        rows = result.scalars().all()
+
+        grouped: dict[UUID, list[GenerationOutput]] = defaultdict(list)
+        for row in rows:
+            if row.parent_output_id is not None:
+                grouped[row.parent_output_id].append(row)
+        return dict(grouped)
 
     async def get_expired(
         self,
@@ -228,9 +278,9 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         return result.rowcount or 0  # type: ignore[attr-defined]
 
     async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
-        """Count outputs and sum their size for a user.
+        """Count full outputs and sum their size for a user.
 
-        Used by storage stats aggregation.
+        Excludes thumbnail rows — only full outputs are counted.
 
         Args:
             user_id: User to aggregate for.
@@ -242,7 +292,10 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             select(
                 func.count(GenerationOutput.id),
                 func.coalesce(func.sum(GenerationOutput.size_bytes), 0),
-            ).where(GenerationOutput.user_id == user_id)
+            ).where(
+                GenerationOutput.user_id == user_id,
+                GenerationOutput.is_thumbnail.is_(False),
+            )
         )
         count, total_bytes = result.one()
         return int(count), int(total_bytes)

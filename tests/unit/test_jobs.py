@@ -3,9 +3,8 @@
 Covers:
   - UnifiedJobService.get_job (including Grok poll-on-read)
   - UnifiedJobService.list_jobs (pagination, limit capping)
-  - _build_response output/thumbnail logic (presigned URL failures, thumbnail flag)
-  - Schema round-trip serialization (UnifiedJobResponse, CursorPage,
-    JobOutputItem)
+  - _build_response output/derivative logic (proxy URLs, MediaObject variants)
+  - Schema round-trip serialization (UnifiedJobResponse, CursorPage, JobOutputItem)
 """
 
 from __future__ import annotations
@@ -21,9 +20,10 @@ from src.api.schemas.jobs import (
     JobOutputItem,
     UnifiedJobResponse,
 )
+from src.api.schemas.media import MediaObject, MediaOriginal
 from src.api.schemas.pagination import CursorPage
 from src.api.services.unified_jobs import UnifiedJobService
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, OutputMediaType
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -58,6 +58,7 @@ def _make_job(
     job.prompt = prompt
     job.name = name
     job.negative_prompt = negative_prompt
+    job.aspect_ratio = None
     job.token_cost = token_cost
     job.error_message = error_message
     job.is_deleted = is_deleted
@@ -72,96 +73,107 @@ def _make_output(
     output_id: UUID | None = None,
     job_id: UUID | None = None,
     content_type: str = "image/jpeg",
-    format: str = "jpeg",
     size_bytes: int = 2048,
     output_index: int = 0,
     is_thumbnail: bool = False,
-    storage_key: str | None = None,
     parent_output_id: UUID | None = None,
+    thumbnail_max_edge: int | None = None,
+    width: int | None = 512,
+    height: int | None = 512,
 ) -> MagicMock:
     out = MagicMock()
     out.id = output_id or uuid4()
     out.job_id = job_id or uuid4()
     out.content_type = content_type
-    out.format = format
     out.size_bytes = size_bytes
     out.output_index = output_index
     out.is_thumbnail = is_thumbnail
-    out.storage_key = storage_key or f"users/uid/outputs/{uuid4()}/file.{format}"
     out.parent_output_id = parent_output_id
+    out.thumbnail_max_edge = thumbnail_max_edge
+    out.width = width
+    out.height = height
     return out
 
 
-def _make_storage(presigned_url: str = "https://r2.example.com/file") -> AsyncMock:
-    url_result = MagicMock()
-    url_result.presigned_url = presigned_url
-    storage = AsyncMock()
-    storage.get_presigned_url = AsyncMock(return_value=url_result)
-    return storage
-
-
-def _url_mock(url: str) -> MagicMock:
-    """Build a presigned-URL result mock pointing to *url*."""
-    r = MagicMock()
-    r.presigned_url = url
-    return r
+def _make_media() -> MediaObject:
+    return MediaObject(
+        media_type=OutputMediaType.IMAGE,
+        original=MediaOriginal(
+            url="/v1/content/outputs/some-id",
+            width=512,
+            height=512,
+            content_type="image/png",
+            size_bytes=1024,
+        ),
+    )
 
 
 def _session_for_get(
     job: MagicMock | None,
-    outputs: list | None = None,
+    full_outputs: list | None = None,
+    derivative_outputs: list | None = None,
 ) -> AsyncMock:
     """Build a mock AsyncSession for ``get_job`` calls.
 
-    Provides side-effects for up to two ``execute`` calls:
-    1. ``_get_by_id_with_optional_owner`` — returns *job* via scalar_one_or_none.
-    2. ``list_job_outputs`` — returns *outputs* via scalars().all()
-       (only called when *job* is not None).
+    Side-effect order:
+    1. ``job_repo.get`` → scalar_one_or_none
+    2. ``output_repo.list_by_job`` → scalars().all()  (only when job is found)
+    3. ``output_repo.batch_derivatives`` → scalars().all()  (only when job is found)
     """
     get_result = MagicMock()
     get_result.scalar_one_or_none.return_value = job
 
     out_result = MagicMock()
-    out_result.scalars.return_value.all.return_value = outputs or []
+    out_result.scalars.return_value.all.return_value = full_outputs or []
+
+    deriv_result = MagicMock()
+    deriv_result.scalars.return_value.all.return_value = derivative_outputs or []
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[get_result, out_result])
+    side_effects = [get_result]
+    if job is not None:
+        side_effects += [out_result, deriv_result]
+    session.execute = AsyncMock(side_effect=side_effects)
     return session
 
 
 def _session_for_list(
     jobs: list,
-    outputs_per_job: list[list] | None = None,
+    full_outputs_per_job: list[list] | None = None,
+    derivatives_per_job: list[list] | None = None,
 ) -> AsyncMock:
     """Build a mock AsyncSession for ``list_jobs`` calls.
 
     Side-effect order:
-    1. data (jobs) query
-    2+. one list_job_outputs call per job
+    1. ``job_repo.list_by_user`` → scalars().all()
+    For each job:
+      2i. ``output_repo.list_by_job`` → scalars().all()
+      2i+1. ``output_repo.batch_derivatives`` → scalars().all()
     """
     jobs_result = MagicMock()
     jobs_result.scalars.return_value.all.return_value = jobs
 
     side_effects: list = [jobs_result]
-
-    for outputs in outputs_per_job or [[] for _ in jobs]:
+    for i in range(len(jobs)):
         out_result = MagicMock()
-        out_result.scalars.return_value.all.return_value = outputs
+        out_result.scalars.return_value.all.return_value = (
+            full_outputs_per_job[i] if full_outputs_per_job else []
+        )
         side_effects.append(out_result)
+
+        deriv_result = MagicMock()
+        deriv_result.scalars.return_value.all.return_value = (
+            derivatives_per_job[i] if derivatives_per_job else []
+        )
+        side_effects.append(deriv_result)
 
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=side_effects)
     return session
 
 
-def _service(
-    storage: AsyncMock | None = None,
-    grok_job_service: AsyncMock | None = None,
-) -> UnifiedJobService:
-    return UnifiedJobService(
-        storage=storage or _make_storage(),
-        grok_job_service=grok_job_service,
-    )
+def _service(grok_job_service: AsyncMock | None = None) -> UnifiedJobService:
+    return UnifiedJobService(grok_job_service=grok_job_service)
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +240,7 @@ class TestGetJob:
         )
         session = _session_for_get(job)
 
-        # Should not raise even though the job is a video job
-        result = await UnifiedJobService(storage=_make_storage(), grok_job_service=None).get_job(
+        result = await UnifiedJobService(grok_job_service=None).get_job(
             job.id, user_id, session=session
         )
 
@@ -251,6 +262,7 @@ class TestGetJob:
             generation_type=GenerationType.T2V.value,
             status=JobStatus.COMPLETED.value,
         )
+        # get_job fetches the original job; then 2 more execute calls for _build_response
         session = _session_for_get(job)
 
         grok = AsyncMock()
@@ -284,7 +296,7 @@ class TestGetJob:
         job = _make_job(
             user_id=user_id,
             provider="grok",
-            generation_type=GenerationType.T2I.value,  # image, not video
+            generation_type=GenerationType.T2I.value,
             status=JobStatus.RUNNING.value,
         )
         session = _session_for_get(job)
@@ -302,7 +314,7 @@ class TestGetJob:
             user_id=user_id,
             provider="grok",
             generation_type=GenerationType.T2V.value,
-            status=JobStatus.COMPLETED.value,  # not queued/running
+            status=JobStatus.COMPLETED.value,
         )
         session = _session_for_get(job)
 
@@ -343,11 +355,10 @@ class TestGetJob:
         grok = AsyncMock()
         grok.poll_video_job = AsyncMock(side_effect=RuntimeError("xAI unreachable"))
 
-        # Should not propagate the exception
         result = await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
 
         assert result is not None
-        assert result.status == JobStatus.QUEUED  # original status unchanged
+        assert result.status == JobStatus.QUEUED
 
     async def test_grok_poll_returning_none_falls_back_to_original_job(self) -> None:
         user_id = uuid4()
@@ -375,11 +386,7 @@ class TestGetJob:
 
 class TestBuildResponse:
     async def test_soft_deleted_job_error_field_not_leaked(self) -> None:
-        """A soft-deleted job should not expose '__hidden__' as its error.
-
-        This is a regression guard — the old sentinel pattern leaked
-        '__hidden__' through the error field.
-        """
+        """A soft-deleted job should not expose '__hidden__' as its error."""
         user_id = uuid4()
         job = _make_job(user_id=user_id, is_deleted=True, error_message=None)
         session = _session_for_get(job)
@@ -460,242 +467,127 @@ class TestListJobs:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _build_response — output and thumbnail logic
+# Tests: _build_response — output and media object logic
 # ---------------------------------------------------------------------------
 
 
 class TestBuildResponseOutputs:
-    async def test_no_outputs_returns_empty_list_and_no_thumbnail(self) -> None:
+    async def test_no_outputs_returns_empty_list(self) -> None:
         user_id = uuid4()
         job = _make_job(user_id=user_id)
-        session = _session_for_get(job, outputs=[])
+        session = _session_for_get(job, full_outputs=[], derivative_outputs=[])
 
         result = await _service().get_job(job.id, user_id, session=session)
 
         assert result is not None
         assert result.outputs == []
-        assert result.thumbnail_url is None
 
-    async def test_single_image_output_sets_thumbnail_url(self) -> None:
+    async def test_single_output_has_proxy_url(self) -> None:
         user_id = uuid4()
         job = _make_job(user_id=user_id)
-        out = _make_output(job_id=job.id, content_type="image/jpeg", format="jpeg")
-        session = _session_for_get(job, outputs=[out])
+        out_id = uuid4()
+        out = _make_output(output_id=out_id, content_type="image/png")
+        session = _session_for_get(job, full_outputs=[out], derivative_outputs=[])
 
-        storage = _make_storage("https://r2.example.com/img.jpg")
-        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
+        result = await _service().get_job(job.id, user_id, session=session)
 
         assert result is not None
         assert len(result.outputs) == 1
-        assert result.thumbnail_url == "https://r2.example.com/img.jpg"
+        item = result.outputs[0]
+        assert isinstance(item, JobOutputItem)
+        assert item.id == out_id
+        assert item.media.original.url == f"/v1/content/outputs/{out_id}"
 
-    async def test_image_output_item_fields_mapped(self) -> None:
+    async def test_output_item_fields_mapped(self) -> None:
         user_id = uuid4()
         job = _make_job(user_id=user_id)
         out_id = uuid4()
         out = _make_output(
             output_id=out_id,
-            job_id=job.id,
             content_type="image/png",
-            format="png",
             size_bytes=4096,
-            output_index=1,
+            output_index=2,
+            width=1024,
+            height=768,
         )
-        session = _session_for_get(job, outputs=[out])
+        session = _session_for_get(job, full_outputs=[out])
 
         result = await _service().get_job(job.id, user_id, session=session)
 
         assert result is not None
         item = result.outputs[0]
-        assert isinstance(item, JobOutputItem)
-        assert item.id == out_id
-        assert item.content_type == "image/png"
-        assert item.format == "png"
-        assert item.size_bytes == 4096
-        assert item.output_index == 1
-        assert item.is_thumbnail is False
+        assert item.output_index == 2
+        assert item.media.original.content_type == "image/png"
+        assert item.media.original.size_bytes == 4096
+        assert item.media.original.width == 1024
+        assert item.media.original.height == 768
 
-    async def test_thumbnail_linked_via_parent_output_id_used_as_thumbnail_url(self) -> None:
-        """Thumbnail row with parent_output_id surfaces as thumbnail_url on the primary output."""
+    async def test_derivative_appears_as_variant(self) -> None:
+        """Thumbnail row returned by batch_derivatives surfaces as media.variants entry."""
         user_id = uuid4()
         job = _make_job(user_id=user_id)
-        video_id = uuid4()
-        thumb_key = "users/uid/outputs/job/thumb.jpg"
-        video_key = "users/uid/outputs/job/video.mp4"
+        out_id = uuid4()
+        thumb_id = uuid4()
 
-        video = _make_output(
-            output_id=video_id,
-            job_id=job.id,
-            content_type="video/mp4",
-            format="mp4",
-            output_index=0,
-            storage_key=video_key,
-        )
-        # Thumbnail linked to video via parent_output_id
+        out = _make_output(output_id=out_id, content_type="image/png")
         thumb = _make_output(
-            job_id=job.id,
-            content_type="image/jpeg",
-            format="jpeg",
+            output_id=thumb_id,
+            content_type="image/webp",
             is_thumbnail=True,
-            output_index=0,
-            storage_key=thumb_key,
-            parent_output_id=video_id,
+            parent_output_id=out_id,
+            thumbnail_max_edge=512,
+            width=400,
+            height=400,
         )
-        session = _session_for_get(job, outputs=[thumb, video])
-
-        url_map = {
-            thumb_key: "https://r2.example.com/thumb.jpg",
-            video_key: "https://r2.example.com/video.mp4",
-        }
-        storage = AsyncMock()
-        storage.get_presigned_url = AsyncMock(side_effect=lambda key, **_: _url_mock(url_map[key]))
-
-        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
-
-        assert result is not None
-        # Top-level thumbnail_url comes from the video's linked thumbnail
-        assert result.thumbnail_url == "https://r2.example.com/thumb.jpg"
-        # Thumbnail rows are excluded from outputs; only the primary video output appears
-        assert len(result.outputs) == 1
-        assert result.outputs[0].thumbnail_url == "https://r2.example.com/thumb.jpg"
-
-    async def test_video_output_without_thumbnail_flag_has_no_thumbnail_url(self) -> None:
-        user_id = uuid4()
-        job = _make_job(user_id=user_id)
-        video = _make_output(
-            job_id=job.id,
-            content_type="video/mp4",
-            format="mp4",
-            is_thumbnail=False,
-        )
-        session = _session_for_get(job, outputs=[video])
+        session = _session_for_get(job, full_outputs=[out], derivative_outputs=[thumb])
 
         result = await _service().get_job(job.id, user_id, session=session)
 
         assert result is not None
-        # video/mp4 content type does not trigger the "image" fallback
-        assert result.thumbnail_url is None
+        item = result.outputs[0]
+        assert len(item.media.variants) == 1
+        assert item.media.variants[0].url == f"/v1/content/outputs/{thumb_id}"
+        assert item.media.variants[0].label == "md"
+        assert item.media.variants[0].width == 400
 
-    async def test_failed_presigned_url_skips_output(self) -> None:
+    async def test_multiple_outputs_all_returned(self) -> None:
+        # list_by_job in the DB already orders by output_index; the mock returns
+        # them in whatever order we pass, which is already sorted here.
         user_id = uuid4()
         job = _make_job(user_id=user_id)
-        out = _make_output(job_id=job.id)
-        session = _session_for_get(job, outputs=[out])
+        out0 = _make_output(output_index=0, content_type="image/png")
+        out1 = _make_output(output_index=1, content_type="image/png")
+        out2 = _make_output(output_index=2, content_type="image/png")
+        session = _session_for_get(job, full_outputs=[out0, out1, out2])
 
-        storage = AsyncMock()
-        storage.get_presigned_url = AsyncMock(side_effect=Exception("R2 error"))
-
-        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
-
-        assert result is not None
-        assert result.outputs == []
-        assert result.thumbnail_url is None
-
-    async def test_partial_presigned_failure_keeps_successful_outputs(self) -> None:
-        user_id = uuid4()
-        job = _make_job(user_id=user_id)
-        good_key = "users/uid/outputs/good.jpg"
-        bad_key = "users/uid/outputs/bad.jpg"
-
-        good_out = _make_output(job_id=job.id, content_type="image/jpeg", storage_key=good_key)
-        bad_out = _make_output(job_id=job.id, content_type="image/jpeg", storage_key=bad_key)
-        session = _session_for_get(job, outputs=[good_out, bad_out])
-
-        def _side_effect(storage_key: str, **_: object) -> MagicMock:
-            if storage_key == bad_key:
-                raise Exception("R2 failure")
-            return _url_mock("https://r2.example.com/good.jpg")
-
-        storage = AsyncMock()
-        storage.get_presigned_url = AsyncMock(side_effect=_side_effect)
-
-        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
-
-        assert result is not None
-        assert len(result.outputs) == 1
-        assert result.outputs[0].url == "https://r2.example.com/good.jpg"
-
-    async def test_no_storage_configured_skips_all_outputs(self) -> None:
-        user_id = uuid4()
-        job = _make_job(user_id=user_id)
-        out = _make_output(job_id=job.id)
-        session = _session_for_get(job, outputs=[out])
-
-        result = await UnifiedJobService(storage=None, grok_job_service=None).get_job(
-            job.id, user_id, session=session
-        )
-
-        assert result is not None
-        assert result.outputs == []
-        assert result.thumbnail_url is None
-
-    async def test_legacy_thumbnail_used_when_no_parent_link(self) -> None:
-        """Legacy jobs: is_thumbnail=True with parent_output_id=None populates top-level thumbnail_url."""
-        user_id = uuid4()
-        job = _make_job(user_id=user_id)
-        primary_key = "users/uid/outputs/job/primary.mp4"
-        legacy_thumb_key = "users/uid/outputs/job/thumb.jpg"
-
-        primary = _make_output(
-            job_id=job.id,
-            content_type="video/mp4",
-            format="mp4",
-            output_index=0,
-            storage_key=primary_key,
-        )
-        # Legacy thumbnail: is_thumbnail=True but parent_output_id=None
-        legacy_thumb = _make_output(
-            job_id=job.id,
-            content_type="image/jpeg",
-            format="jpeg",
-            is_thumbnail=True,
-            output_index=0,
-            storage_key=legacy_thumb_key,
-            parent_output_id=None,
-        )
-        session = _session_for_get(job, outputs=[primary, legacy_thumb])
-
-        url_map = {
-            primary_key: "https://r2.example.com/primary.mp4",
-            legacy_thumb_key: "https://r2.example.com/legacy_thumb.jpg",
-        }
-        storage = AsyncMock()
-        storage.get_presigned_url = AsyncMock(side_effect=lambda key, **_: _url_mock(url_map[key]))
-
-        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
-
-        assert result is not None
-        assert result.thumbnail_url == "https://r2.example.com/legacy_thumb.jpg"
-        assert len(result.outputs) == 1
-        assert result.outputs[0].content_type == "video/mp4"
-
-    async def test_multiple_image_outputs_first_becomes_thumbnail(self) -> None:
-        user_id = uuid4()
-        job = _make_job(user_id=user_id)
-        outputs = [
-            _make_output(
-                job_id=job.id,
-                content_type="image/png",
-                output_index=i,
-                storage_key=f"users/uid/outputs/img_{i}.png",
-            )
-            for i in range(3)
-        ]
-        session = _session_for_get(job, outputs=outputs)
-
-        first_url = "https://r2.example.com/img_0.png"
-        storage = AsyncMock()
-        storage.get_presigned_url = AsyncMock(
-            side_effect=lambda key, **_: _url_mock(
-                first_url if "img_0" in key else "https://r2.example.com/other.png"
-            )
-        )
-
-        result = await _service(storage=storage).get_job(job.id, user_id, session=session)
+        result = await _service().get_job(job.id, user_id, session=session)
 
         assert result is not None
         assert len(result.outputs) == 3
-        assert result.thumbnail_url == first_url
+        indices = [item.output_index for item in result.outputs]
+        assert sorted(indices) == [0, 1, 2]
+
+    async def test_no_variants_when_no_derivatives(self) -> None:
+        user_id = uuid4()
+        job = _make_job(user_id=user_id)
+        out = _make_output(content_type="image/png")
+        session = _session_for_get(job, full_outputs=[out], derivative_outputs=[])
+
+        result = await _service().get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert result.outputs[0].media.variants == []
+
+    async def test_video_output_media_type_is_video(self) -> None:
+        user_id = uuid4()
+        job = _make_job(user_id=user_id)
+        out = _make_output(content_type="video/mp4")
+        session = _session_for_get(job, full_outputs=[out])
+
+        result = await _service().get_job(job.id, user_id, session=session)
+
+        assert result is not None
+        assert result.outputs[0].media.media_type == OutputMediaType.VIDEO
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +616,6 @@ class TestSchemas:
         assert decoded.status == JobStatus.COMPLETED
         assert decoded.generation_type == GenerationType.T2I
         assert decoded.outputs == []
-        assert decoded.thumbnail_url is None
         assert decoded.model is None
         assert decoded.error is None
 
@@ -743,7 +634,6 @@ class TestSchemas:
             created_at=now,
             started_at=now,
             completed_at=now,
-            thumbnail_url="https://r2.example.com/thumb.jpg",
             error="Connection reset by peer",
         )
 
@@ -755,7 +645,6 @@ class TestSchemas:
         assert decoded.model == "aisha"
         assert decoded.negative_prompt == "blurry"
         assert decoded.token_cost == 120
-        assert decoded.thumbnail_url == "https://r2.example.com/thumb.jpg"
         assert decoded.error == "Connection reset by peer"
 
     def test_cursor_page_round_trip(self) -> None:
@@ -774,46 +663,60 @@ class TestSchemas:
     def test_job_output_item_defaults(self) -> None:
         item = JobOutputItem(
             id=uuid4(),
-            url="https://r2.example.com/img.jpg",
-            content_type="image/jpeg",
-            format="jpeg",
-            size_bytes=1024,
             output_index=0,
+            media=_make_media(),
         )
 
-        assert item.is_thumbnail is False
+        assert item.output_index == 0
+        assert isinstance(item.media, MediaObject)
 
     def test_job_output_item_round_trip(self) -> None:
         item_id = uuid4()
         item = JobOutputItem(
             id=item_id,
-            url="https://r2.example.com/video.mp4",
-            content_type="video/mp4",
-            format="mp4",
-            size_bytes=1_048_576,
             output_index=0,
-            is_thumbnail=True,
+            media=_make_media(),
         )
 
         encoded = msgspec.json.encode(item)
         decoded = msgspec.json.decode(encoded, type=JobOutputItem)
 
         assert decoded.id == item_id
-        assert decoded.content_type == "video/mp4"
-        assert decoded.size_bytes == 1_048_576
-        assert decoded.is_thumbnail is True
+        assert decoded.output_index == 0
+        assert decoded.media.original.content_type == "image/png"
 
-    def test_job_output_item_negative_index_for_thumbnail(self) -> None:
+    def test_job_output_item_with_variants_round_trip(self) -> None:
+        from src.api.schemas.media import ImageVariant
+
         item = JobOutputItem(
             id=uuid4(),
-            url="https://r2.example.com/thumb.jpg",
-            content_type="image/jpeg",
-            format="jpeg",
-            size_bytes=512,
-            output_index=-1,
-            is_thumbnail=True,
+            output_index=1,
+            media=MediaObject(
+                media_type=OutputMediaType.IMAGE,
+                original=MediaOriginal(
+                    url="/v1/content/outputs/abc",
+                    width=1024,
+                    height=1024,
+                    content_type="image/png",
+                    size_bytes=50000,
+                ),
+                variants=[
+                    ImageVariant(
+                        label="sm", width=100, height=100, url="/v1/content/outputs/sm-id"
+                    ),
+                    ImageVariant(
+                        label="md", width=400, height=400, url="/v1/content/outputs/md-id"
+                    ),
+                ],
+            ),
         )
-        assert item.output_index == -1
+
+        encoded = msgspec.json.encode(item)
+        decoded = msgspec.json.decode(encoded, type=JobOutputItem)
+
+        assert len(decoded.media.variants) == 2
+        assert decoded.media.variants[0].label == "sm"
+        assert decoded.media.variants[1].label == "md"
 
     def test_job_created_response_round_trip(self) -> None:
         now = datetime.now(UTC)

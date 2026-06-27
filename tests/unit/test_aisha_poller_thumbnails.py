@@ -8,13 +8,26 @@ from uuid import uuid4
 
 import pytest
 
-from src.api.services.image_thumbnail import ThumbnailResult
+from src.api.services.image_thumbnail import GeneratedThumbnail, ThumbnailResult
+from src.core.thumbnails import ThumbnailSpec
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 
 pytestmark = pytest.mark.unit
 
 _FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # not a real PNG, but enough for mocking
 _FAKE_WEBP = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 20
+
+_SM_SPEC = ThumbnailSpec("sm", 150)
+_MD_SPEC = ThumbnailSpec("md", 512)
+
+
+def _make_generated_thumbnail(
+    spec: ThumbnailSpec, width: int = 64, height: int = 64
+) -> GeneratedThumbnail:
+    return GeneratedThumbnail(
+        spec=spec,
+        result=ThumbnailResult(data=_FAKE_WEBP, width=width, height=height),
+    )
 
 
 def _make_config(**kwargs: object) -> AishaPollerConfig:
@@ -132,19 +145,22 @@ class TestCollectImageInfosFiltering:
 
 
 # ---------------------------------------------------------------------------
-# _download_and_upload — thumbnail generation
+# _download_and_upload — multi-size thumbnail generation
 # ---------------------------------------------------------------------------
 
 
 class TestDownloadAndUploadThumbnails:
-    async def test_returns_full_and_thumb_on_success(self) -> None:
+    async def test_returns_full_and_both_thumbs_on_success(self) -> None:
+        """make_image_thumbnails returns sm+md, so we get full + 2 thumbnails."""
         full_id = uuid4()
-        thumb_id = uuid4()
+        sm_id = uuid4()
+        md_id = uuid4()
         r2 = AsyncMock()
         r2.upload = AsyncMock(
             side_effect=[
                 _make_r2_upload_result(full_id),
-                _make_r2_upload_result(thumb_id),
+                _make_r2_upload_result(sm_id),
+                _make_r2_upload_result(md_id),
             ]
         )
 
@@ -156,7 +172,10 @@ class TestDownloadAndUploadThumbnails:
         expires_at = datetime.now(UTC) + timedelta(days=7)
         img_info = {"filename": "out.png", "subfolder": "", "type": "output"}
 
-        thumb_result = ThumbnailResult(data=_FAKE_WEBP, width=128, height=128)
+        thumbnails = [
+            _make_generated_thumbnail(_SM_SPEC, width=100, height=100),
+            _make_generated_thumbnail(_MD_SPEC, width=400, height=400),
+        ]
         dims_mock = MagicMock()
         dims_mock.width = 512
         dims_mock.height = 512
@@ -167,8 +186,8 @@ class TestDownloadAndUploadThumbnails:
                 new=AsyncMock(return_value=dims_mock),
             ),
             patch(
-                "src.workers.aisha_job_poller.make_image_thumbnail",
-                new=AsyncMock(return_value=thumb_result),
+                "src.workers.aisha_job_poller.make_image_thumbnails",
+                new=AsyncMock(return_value=thumbnails),
             ),
         ):
             results = await poller._download_and_upload(
@@ -179,20 +198,30 @@ class TestDownloadAndUploadThumbnails:
                 expires_at=expires_at,
             )
 
-        assert len(results) == 2
-        full, thumb = results
+        assert len(results) == 3
+        full = results[0]
+        sm_thumb = results[1]
+        md_thumb = results[2]
+
         assert full.is_thumbnail is False
         assert full.width == 512
         assert full.height == 512
         assert full.parent_output_id is None
-        assert thumb.is_thumbnail is True
-        assert thumb.parent_output_id == full.id
-        assert thumb.format == "webp"
-        assert thumb.width == 128
-        assert thumb.height == 128
-        assert r2.upload.call_count == 2
+        assert full.thumbnail_max_edge is None
 
-    async def test_returns_only_full_when_thumbnail_fails(self) -> None:
+        assert sm_thumb.is_thumbnail is True
+        assert sm_thumb.parent_output_id == full.id
+        assert sm_thumb.thumbnail_max_edge == 150
+        assert sm_thumb.width == 100
+        assert sm_thumb.height == 100
+
+        assert md_thumb.is_thumbnail is True
+        assert md_thumb.parent_output_id == full.id
+        assert md_thumb.thumbnail_max_edge == 512
+        assert r2.upload.call_count == 3
+
+    async def test_returns_only_full_when_thumbnails_empty(self) -> None:
+        """make_image_thumbnails returns [] (decode failure) → only full output."""
         full_id = uuid4()
         r2 = AsyncMock()
         r2.upload = AsyncMock(return_value=_make_r2_upload_result(full_id))
@@ -211,8 +240,8 @@ class TestDownloadAndUploadThumbnails:
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "src.workers.aisha_job_poller.make_image_thumbnail",
-                new=AsyncMock(return_value=None),
+                "src.workers.aisha_job_poller.make_image_thumbnails",
+                new=AsyncMock(return_value=[]),
             ),
         ):
             results = await poller._download_and_upload(
@@ -226,13 +255,16 @@ class TestDownloadAndUploadThumbnails:
         assert len(results) == 1
         assert results[0].is_thumbnail is False
 
-    async def test_returns_only_full_when_thumb_r2_upload_fails(self) -> None:
+    async def test_skips_thumb_when_r2_upload_fails(self) -> None:
+        """If a thumb's R2 upload raises, that size is skipped; others succeed."""
         full_id = uuid4()
+        md_id = uuid4()
         r2 = AsyncMock()
         r2.upload = AsyncMock(
             side_effect=[
                 _make_r2_upload_result(full_id),
-                Exception("R2 upload failed"),
+                Exception("R2 upload failed for sm"),
+                _make_r2_upload_result(md_id),
             ]
         )
 
@@ -244,7 +276,10 @@ class TestDownloadAndUploadThumbnails:
         expires_at = datetime.now(UTC) + timedelta(days=7)
         img_info = {"filename": "out.png", "subfolder": "", "type": "output"}
 
-        thumb_result = ThumbnailResult(data=_FAKE_WEBP, width=128, height=128)
+        thumbnails = [
+            _make_generated_thumbnail(_SM_SPEC),
+            _make_generated_thumbnail(_MD_SPEC),
+        ]
 
         with (
             patch(
@@ -252,8 +287,8 @@ class TestDownloadAndUploadThumbnails:
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "src.workers.aisha_job_poller.make_image_thumbnail",
-                new=AsyncMock(return_value=thumb_result),
+                "src.workers.aisha_job_poller.make_image_thumbnails",
+                new=AsyncMock(return_value=thumbnails),
             ),
         ):
             results = await poller._download_and_upload(
@@ -264,8 +299,10 @@ class TestDownloadAndUploadThumbnails:
                 expires_at=expires_at,
             )
 
-        assert len(results) == 1
+        # sm skipped (upload error), md succeeded → full + md
+        assert len(results) == 2
         assert results[0].is_thumbnail is False
+        assert results[1].thumbnail_max_edge == 512
 
     async def test_returns_empty_when_r2_not_configured(self) -> None:
         poller = _make_poller(r2=None)
@@ -298,7 +335,7 @@ class TestDownloadAndUploadThumbnails:
         client = AsyncMock()
         client.get_image = AsyncMock(return_value=_FAKE_PNG)
 
-        thumb_result = ThumbnailResult(data=_FAKE_WEBP, width=64, height=64)
+        thumbnails = [_make_generated_thumbnail(_MD_SPEC, width=64, height=64)]
 
         with (
             patch(
@@ -306,8 +343,8 @@ class TestDownloadAndUploadThumbnails:
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "src.workers.aisha_job_poller.make_image_thumbnail",
-                new=AsyncMock(return_value=thumb_result),
+                "src.workers.aisha_job_poller.make_image_thumbnails",
+                new=AsyncMock(return_value=thumbnails),
             ),
         ):
             results = await poller._download_and_upload(

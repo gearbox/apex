@@ -1,7 +1,7 @@
 """Unified job service — cross-provider job history and detail.
 
-Builds ``UnifiedJobResponse`` objects from ``GenerationJob`` DB records
-by fetching outputs and generating presigned R2 URLs.
+Builds ``UnifiedJobResponse`` objects from ``GenerationJob`` DB records.
+Output URLs are stable content-proxy paths — no presigned URL generation.
 
 GET /v1/jobs/{id} is DB-only: no ComfyUI calls in the request path.
 Aisha job status is updated by AishaJobPoller (background worker).
@@ -9,16 +9,18 @@ Aisha job status is updated by AishaJobPoller (background worker).
 
 from __future__ import annotations
 
+from collections import defaultdict
 from uuid import UUID
 
 import structlog
 from sqlalchemy import inspect
+from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.services.grok.job_service import GrokJobService
-from src.api.services.storage import R2StorageService
+from src.api.services.media import build_output_media
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.repositories.job import JobRepository
@@ -26,15 +28,11 @@ from src.db.repositories.output import OutputRepository
 
 logger = structlog.get_logger(__name__)
 
-# Presigned URL TTL in seconds (1 hour)
-_URL_TTL = 3600
-
 
 class UnifiedJobService:
     """Read-side service for the cross-provider jobs API.
 
     Args:
-        storage: R2 storage service for presigned URL generation.
         grok_job_service: Grok execution service used to poll async video jobs.
             Pass ``None`` when Grok is not configured.
     """
@@ -42,10 +40,8 @@ class UnifiedJobService:
     def __init__(
         self,
         *,
-        storage: R2StorageService | None,
         grok_job_service: GrokJobService | None,
     ) -> None:
-        self._storage = storage
         self._grok = grok_job_service
 
     # -------------------------------------------------------------------------
@@ -111,7 +107,7 @@ class UnifiedJobService:
         """List jobs for a user with optional filters and cursor pagination.
 
         Delegates filtering and cursor pagination to ``JobRepository.list_by_user``,
-        then assembles ``UnifiedJobResponse`` DTOs with presigned output URLs.
+        then assembles ``UnifiedJobResponse`` DTOs with stable proxy-path output URLs.
 
         Args:
             user_id: Owner.
@@ -171,29 +167,6 @@ class UnifiedJobService:
     # Internal helpers
     # -------------------------------------------------------------------------
 
-    async def _get_job_outputs(
-        self,
-        job: GenerationJob,
-        session: AsyncSession,
-    ) -> list[GenerationOutput]:
-        """Resolve outputs for a job, preferring the eagerly-loaded relationship.
-
-        When the ``outputs`` relationship was populated by ``selectinload``
-        (list path), returns them sorted by ``output_index`` with no extra query.
-        Otherwise falls back to a repository query (single-job path).
-
-        Args:
-            job: GenerationJob instance.
-            session: DB session for the fallback query.
-
-        Returns:
-            Outputs sorted by ``output_index``.
-        """
-        if "outputs" in inspect(job).dict:
-            return sorted(job.outputs, key=lambda o: o.output_index)
-        output_repo = OutputRepository(session)
-        return list(await output_repo.list_by_job(job.id))
-
     async def _build_response(
         self,
         job: GenerationJob,
@@ -202,68 +175,44 @@ class UnifiedJobService:
     ) -> UnifiedJobResponse:
         """Build a full ``UnifiedJobResponse`` for a DB job record.
 
-        Uses eagerly-loaded ``job.outputs`` when available, falls back
-        to a repo query when outputs aren't preloaded.
+        Uses eagerly-loaded ``job.outputs`` when available (list path); falls
+        back to two repository queries (single-job path): one for full outputs
+        and one batch for their derivatives.
         """
-        db_outputs = await self._get_job_outputs(job, session)
+        output_repo = OutputRepository(session)
+        derivatives_map: dict[UUID, list[GenerationOutput]] = defaultdict(list)
 
-        # One pass: parent_id -> presigned thumbnail URL, plus a legacy fallback
-        # (older rows have is_thumbnail=True but parent_output_id=None, e.g. pre-migration video posters).
-        thumb_url_by_parent: dict[UUID, str] = {}
-        legacy_thumb_url: str | None = None
-        if self._storage is not None:
-            for out in db_outputs:
-                if not out.is_thumbnail:
-                    continue
-                try:
-                    r = await self._storage.get_presigned_url(out.storage_key, expires_in=_URL_TTL)
-                except Exception:
-                    logger.warning("unified_jobs.presigned_url_failed", output_id=str(out.id))
-                    continue
-                if out.parent_output_id is not None:
-                    thumb_url_by_parent[out.parent_output_id] = r.presigned_url
-                elif legacy_thumb_url is None:
-                    legacy_thumb_url = r.presigned_url
+        try:
+            _outputs_loaded = "outputs" in inspect(job).dict
+        except NoInspectionAvailable:
+            _outputs_loaded = False
 
-        output_items: list[JobOutputItem] = []
-        thumbnail_url: str | None = None
-
-        for out in db_outputs:
-            if out.is_thumbnail:
-                continue
-            try:
-                if self._storage is None:
-                    logger.warning("unified_jobs.presigned_url_skipped", output_id=str(out.id))
-                    continue
-                url_result = await self._storage.get_presigned_url(
-                    out.storage_key, expires_in=_URL_TTL
-                )
-                presigned = url_result.presigned_url
-            except Exception:
-                logger.warning("unified_jobs.presigned_url_failed", output_id=str(out.id))
-                continue
-
-            out_thumb_url = thumb_url_by_parent.get(out.id)
-            output_items.append(
-                JobOutputItem(
-                    id=out.id,
-                    url=presigned,
-                    content_type=out.content_type,
-                    format=out.format,
-                    size_bytes=out.size_bytes,
-                    output_index=out.output_index,
-                    thumbnail_url=out_thumb_url,
-                    is_thumbnail=False,
-                )
+        if _outputs_loaded:
+            # Eagerly loaded — separate full vs. thumbnails in Python
+            all_outputs = list(job.outputs)
+            full_outputs = sorted(
+                [o for o in all_outputs if not o.is_thumbnail],
+                key=lambda o: o.output_index,
             )
-            if thumbnail_url is None and out_thumb_url is not None:
-                thumbnail_url = out_thumb_url
+            for o in all_outputs:
+                if o.is_thumbnail and o.parent_output_id is not None:
+                    derivatives_map[o.parent_output_id].append(o)
+        else:
+            # Single-job path — list_by_job returns full outputs only
+            full_outputs = list(await output_repo.list_by_job(job.id))
+            full_ids = [o.id for o in full_outputs]
+            raw_map = await output_repo.batch_derivatives(full_ids)
+            for k, v in raw_map.items():
+                derivatives_map[k] = v
 
-        # Cover thumbnail fallbacks for legacy jobs.
-        if thumbnail_url is None:
-            thumbnail_url = legacy_thumb_url
-        if thumbnail_url is None and output_items and "image" in output_items[0].content_type:
-            thumbnail_url = output_items[0].url
+        output_items: list[JobOutputItem] = [
+            JobOutputItem(
+                id=out.id,
+                output_index=out.output_index,
+                media=build_output_media(out, list(derivatives_map.get(out.id, []))),
+            )
+            for out in full_outputs
+        ]
 
         return UnifiedJobResponse(
             id=job.id,
@@ -280,6 +229,5 @@ class UnifiedJobService:
             started_at=job.started_at,
             completed_at=job.completed_at,
             outputs=output_items,
-            thumbnail_url=thumbnail_url,
             error=job.error_message,
         )

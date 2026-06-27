@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.enums import GenerationType, JobStatus, OutputMediaType
-from src.db.models.storage import GenerationJob, GenerationOutput
+from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 
 logger = structlog.get_logger(__name__)
 
@@ -22,13 +22,16 @@ _VIDEO_TYPES: list[str] = [gt.value for gt in GenerationType if gt.is_video]
 _IMAGE_TYPES: list[str] = [gt.value for gt in GenerationType if not gt.is_video]
 
 
-@dataclass(frozen=True)
+@dataclass
 class CoverData:
-    """Cover resolution data for a single gallery job."""
+    """Cover resolution data for a single gallery job.
 
-    cover_output_id: UUID | None = None
-    video_output_id: UUID | None = None
-    thumbnail_output_id: UUID | None = None
+    primary_output is the first non-thumbnail output (by output_index).
+    primary_derivatives are its thumbnail children (sm/md WEBP).
+    """
+
+    primary_output: GenerationOutput | None = None
+    primary_derivatives: list[GenerationOutput] = field(default_factory=list)
     output_count: int = 0
 
 
@@ -107,13 +110,16 @@ class GalleryRepository:
     ) -> GenerationJob | None:
         """Get a single completed job with eager-loaded relationships.
 
+        Loads all outputs (full + thumbnails), source_job, source_output
+        (with its derivatives), and input_image (with its derivatives).
+
         Args:
             job_id: Job to fetch.
             user_id: Owner check.
             product_id: Product scope check.
 
         Returns:
-            GenerationJob with outputs, source_job, input_image loaded; None if not found.
+            GenerationJob with relationships loaded; None if not found.
         """
         result = await self._session.execute(
             select(GenerationJob)
@@ -127,7 +133,10 @@ class GalleryRepository:
             .options(
                 selectinload(GenerationJob.outputs),
                 selectinload(GenerationJob.source_job),
-                selectinload(GenerationJob.input_image),
+                selectinload(GenerationJob.source_output).selectinload(
+                    GenerationOutput.derivatives
+                ),
+                selectinload(GenerationJob.input_image).selectinload(UserImage.derivatives),
             )
         )
         return result.scalar_one_or_none()
@@ -137,6 +146,10 @@ class GalleryRepository:
         job_ids: list[UUID],
     ) -> dict[UUID, CoverData]:
         """Fetch all outputs for a batch of jobs and build cover data.
+
+        The cover is always the job's own primary output (first by output_index,
+        non-thumbnail). Derivatives (sm/md WEBP thumbnails) for the primary output
+        are also collected.
 
         Args:
             job_ids: List of job IDs (bounded by page size, max 25).
@@ -154,7 +167,6 @@ class GalleryRepository:
         )
         outputs = result.scalars().all()
 
-        # Group outputs by job_id
         by_job: dict[UUID, list[GenerationOutput]] = defaultdict(list)
         for output in outputs:
             by_job[output.job_id].append(output)
@@ -162,42 +174,23 @@ class GalleryRepository:
         cover_map: dict[UUID, CoverData] = {}
         for job_id in job_ids:
             job_outputs = by_job.get(job_id, [])
-            # thumbnails_by_parent: parent_output_id → thumbnail.id (new-style link)
-            thumbnails_by_parent: dict[UUID, UUID] = {}
-            fallback_thumbnail_id: UUID | None = None  # for legacy rows without parent_output_id
-            video_output_id: UUID | None = None
-            cover_output_id: UUID | None = None
-            real_count = 0
+            full_outputs = [o for o in job_outputs if not o.is_thumbnail]
+            thumbnails_by_parent: dict[UUID, list[GenerationOutput]] = defaultdict(list)
+            for o in job_outputs:
+                if o.is_thumbnail and o.parent_output_id is not None:
+                    thumbnails_by_parent[o.parent_output_id].append(o)
 
-            for out in job_outputs:
-                if out.is_thumbnail:
-                    fallback_thumbnail_id = out.id
-                    if out.parent_output_id is not None:
-                        thumbnails_by_parent[out.parent_output_id] = out.id
-                else:
-                    real_count += 1
-                    if out.content_type.startswith("video/"):
-                        # Take the first video output found
-                        if video_output_id is None:
-                            video_output_id = out.id
-                    else:
-                        # Last real image output (highest index) becomes cover
-                        cover_output_id = out.id
-
-            # Find the thumbnail that corresponds to the chosen cover/video output.
-            # Fall back to any thumbnail for legacy jobs that lack parent_output_id.
-            thumbnail_output_id: UUID | None = None
-            primary_id = cover_output_id if cover_output_id is not None else video_output_id
-            if primary_id is not None:
-                thumbnail_output_id = thumbnails_by_parent.get(primary_id, fallback_thumbnail_id)
-            else:
-                thumbnail_output_id = fallback_thumbnail_id
+            primary_output = full_outputs[0] if full_outputs else None
+            primary_derivatives: list[GenerationOutput] = (
+                thumbnails_by_parent.get(primary_output.id, [])
+                if primary_output is not None
+                else []
+            )
 
             cover_map[job_id] = CoverData(
-                cover_output_id=cover_output_id,
-                video_output_id=video_output_id,
-                thumbnail_output_id=thumbnail_output_id,
-                output_count=real_count,
+                primary_output=primary_output,
+                primary_derivatives=primary_derivatives,
+                output_count=len(full_outputs),
             )
 
         return cover_map

@@ -26,6 +26,7 @@ from litestar.status_codes import (
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
+from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.schemas.storage import (
     ImageAccessResponse,
@@ -35,12 +36,15 @@ from src.api.schemas.storage import (
     UploadResponse,
 )
 from src.api.security import auth_guard
+from src.api.services.media import build_output_media, build_upload_media
 from src.api.services.user_content import (
     UserContentError,
     UserContentNotFoundError,
     UserContentService,
     UserContentValidationError,
 )
+from src.core.enums import OutputMediaType
+from src.core.thumbnails import label_for_max_edge
 
 logger = structlog.get_logger(__name__)
 
@@ -50,7 +54,7 @@ logger = structlog.get_logger(__name__)
 
 ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
-
+IMAGE_NOT_FOUND = "Image not found"
 
 @dataclass
 class UploadForm:
@@ -141,15 +145,38 @@ class StorageController(Controller):
                 content_type=content_type,
             )
 
+            derivatives = await user_content.list_upload_derivatives(result.id)
+            variants: list[ImageVariant] = []
+            for d in derivatives:
+                label = label_for_max_edge(d.thumbnail_max_edge)
+                if label is not None:
+                    variants.append(
+                        ImageVariant(
+                            label=label,
+                            width=d.width,
+                            height=d.height,
+                            url=f"/v1/content/uploads/{d.id}",
+                        )
+                    )
+            variants.sort(key=lambda v: v.width or 0)
+            media = MediaObject(
+                media_type=OutputMediaType.IMAGE,
+                original=MediaOriginal(
+                    url=f"/v1/content/uploads/{result.id}",
+                    width=None,
+                    height=None,
+                    content_type=result.content_type,
+                    size_bytes=result.size_bytes,
+                ),
+                variants=variants,
+            )
             return Response(
                 content=UploadResponse(
                     id=str(result.id),
-                    storage_key=result.storage_key,
                     filename=result.filename,
-                    content_type=result.content_type,
-                    size_bytes=result.size_bytes,
                     created_at=result.created_at,
                     expires_at=result.expires_at,
+                    media=media,
                 ),
                 status_code=HTTP_201_CREATED,
             )
@@ -217,7 +244,7 @@ class StorageController(Controller):
         except UserContentNotFoundError:
             return Response(
                 content=ErrorEnvelope(
-                    error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND
+                    error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
                 ),
                 status_code=HTTP_404_NOT_FOUND,
             )
@@ -240,7 +267,7 @@ class StorageController(Controller):
             if image is None:
                 return Response(
                     content=ErrorEnvelope(
-                        error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND
+                        error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
                     ),
                     status_code=HTTP_404_NOT_FOUND,
                 )
@@ -294,14 +321,14 @@ class StorageController(Controller):
         if has_more:
             images = images[:limit]
 
+        derivatives_map = await user_content.batch_upload_derivatives([img.id for img in images])
         items = [
             ImageListItem(
                 id=str(img.id),
                 filename=img.original_filename,
-                content_type=img.content_type,
-                size_bytes=img.size_bytes,
                 created_at=img.created_at,
                 expires_at=img.expires_at,
+                media=build_upload_media(img, derivatives_map.get(img.id, [])),
             )
             for img in images
         ]
@@ -363,7 +390,7 @@ class StorageController(Controller):
         except UserContentNotFoundError:
             return Response(
                 content=ErrorEnvelope(
-                    error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND
+                    error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
                 ),
                 status_code=HTTP_404_NOT_FOUND,
             )
@@ -385,7 +412,7 @@ class StorageController(Controller):
                 return Response(
                     content=ErrorEnvelope(
                         error="not_found",
-                        message="Output not found",
+                        message=IMAGE_NOT_FOUND,
                         status_code=HTTP_404_NOT_FOUND,
                     ),
                     status_code=HTTP_404_NOT_FOUND,
@@ -402,7 +429,7 @@ class StorageController(Controller):
         except UserContentNotFoundError:
             return Response(
                 content=ErrorEnvelope(
-                    error="not_found", message="Output not found", status_code=HTTP_404_NOT_FOUND
+                    error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
                 ),
                 status_code=HTTP_404_NOT_FOUND,
             )
@@ -440,15 +467,15 @@ class StorageController(Controller):
         if has_more:
             outputs = outputs[:limit]
 
+        derivatives_map = await user_content.batch_output_derivatives([out.id for out in outputs])
         items = [
             OutputListItem(
                 id=str(out.id),
                 job_id=str(out.job_id),
-                content_type=out.content_type,
-                size_bytes=out.size_bytes,
                 output_index=out.output_index,
                 created_at=out.created_at,
                 expires_at=out.expires_at,
+                media=build_output_media(out, derivatives_map.get(out.id, [])),
             )
             for out in outputs
         ]
@@ -489,15 +516,15 @@ class StorageController(Controller):
                 status_code=HTTP_404_NOT_FOUND,
             )
 
+        derivatives_map = await user_content.batch_output_derivatives([out.id for out in outputs])
         items = [
             OutputListItem(
                 id=str(out.id),
                 job_id=str(out.job_id),
-                content_type=out.content_type,
-                size_bytes=out.size_bytes,
                 output_index=out.output_index,
                 created_at=out.created_at,
                 expires_at=out.expires_at,
+                media=build_output_media(out, derivatives_map.get(out.id, [])),
             )
             for out in outputs
         ]

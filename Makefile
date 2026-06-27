@@ -114,7 +114,7 @@ test-all:
 lint:
 	docker compose exec api ruff check src/
 	docker compose exec api ruff format --check src/
-	uv run mypy src/ --ignore-missing-imports
+	uv run mypy src/ --ignore-missing-imports --strict
 
 format:
 	docker compose exec api ruff format src/

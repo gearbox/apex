@@ -8,26 +8,14 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.gallery import GalleryService
-from src.db.repositories.gallery import CoverData, GalleryRepository
+from src.api.services.media import build_output_media
+from src.db.repositories.gallery import GalleryRepository
 
 pytestmark = pytest.mark.unit
 
 
 def _make_service() -> GalleryService:
-    from unittest.mock import AsyncMock
-
     return GalleryService(session=AsyncMock())
-
-
-def _make_job(*, generation_type: str = "t2i") -> MagicMock:
-    job = MagicMock()
-    job.id = uuid4()
-    job.generation_type = generation_type
-    job.source_output_id = None
-    job.input_image_id = None
-    job.prompt = "a cat"
-    job.outputs = []
-    return job
 
 
 def _make_output(
@@ -37,6 +25,10 @@ def _make_output(
     content_type: str = "image/png",
     output_index: int = 0,
     job_id: object = None,
+    thumbnail_max_edge: int | None = None,
+    width: int | None = 512,
+    height: int | None = 512,
+    size_bytes: int = 1024,
 ) -> MagicMock:
     out = MagicMock()
     out.id = uuid4()
@@ -45,17 +37,22 @@ def _make_output(
     out.content_type = content_type
     out.output_index = output_index
     out.job_id = job_id or uuid4()
+    out.thumbnail_max_edge = thumbnail_max_edge
+    out.width = width
+    out.height = height
+    out.size_bytes = size_bytes
+    out.created_at = __import__("datetime").datetime.now(__import__("datetime").UTC)
     return out
 
 
 # ---------------------------------------------------------------------------
-# GalleryRepository.batch_cover_data — thumbnail index by parent_output_id
+# GalleryRepository.batch_cover_data — new CoverData shape
 # ---------------------------------------------------------------------------
 
 
 class TestBatchCoverDataThumbnailLink:
-    async def test_thumbnail_linked_to_cover_via_parent_output_id(self) -> None:
-        """thumbnail_output_id resolves to the thumbnail of the cover output."""
+    async def test_primary_output_is_first_non_thumbnail(self) -> None:
+        """primary_output resolves to the first full (non-thumbnail) output."""
         job_id = uuid4()
         cover_id = uuid4()
         thumb_id = uuid4()
@@ -83,19 +80,20 @@ class TestBatchCoverDataThumbnailLink:
         cover_map = await repo.batch_cover_data([job_id])
 
         data = cover_map[job_id]
-        assert data.cover_output_id == cover_id
-        assert data.thumbnail_output_id == thumb_id
+        assert data.primary_output is cover
+        assert len(data.primary_derivatives) == 1
+        assert data.primary_derivatives[0] is thumb
         assert data.output_count == 1
 
-    async def test_legacy_thumbnail_fallback_when_no_parent_output_id(self) -> None:
-        """Legacy thumbnail rows (parent_output_id=None) use fallback slot."""
+    async def test_thumbnail_without_parent_output_id_not_in_derivatives(self) -> None:
+        """Legacy thumbnails (parent_output_id=None) do not appear in primary_derivatives."""
         job_id = uuid4()
         cover_id = uuid4()
         thumb_id = uuid4()
 
         cover = _make_output(content_type="image/png", output_index=0, job_id=job_id)
         cover.id = cover_id
-        # Legacy thumbnail without parent_output_id
+        # Legacy thumbnail without a parent link
         thumb = _make_output(is_thumbnail=True, parent_output_id=None, job_id=job_id)
         thumb.id = thumb_id
 
@@ -111,9 +109,10 @@ class TestBatchCoverDataThumbnailLink:
         cover_map = await repo.batch_cover_data([job_id])
 
         data = cover_map[job_id]
-        assert data.thumbnail_output_id == thumb_id  # fallback used
+        assert data.primary_output is cover
+        assert data.primary_derivatives == []  # legacy thumb not linked to cover
 
-    async def test_no_thumbnail_returns_none(self) -> None:
+    async def test_no_thumbnail_returns_empty_derivatives(self) -> None:
         job_id = uuid4()
         cover_id = uuid4()
         cover = _make_output(content_type="image/png", output_index=0, job_id=job_id)
@@ -131,80 +130,90 @@ class TestBatchCoverDataThumbnailLink:
         cover_map = await repo.batch_cover_data([job_id])
 
         data = cover_map[job_id]
-        assert data.thumbnail_output_id is None
-        assert data.cover_output_id == cover_id
+        assert data.primary_output is cover
+        assert data.primary_derivatives == []
+        assert data.output_count == 1
 
 
 # ---------------------------------------------------------------------------
-# GalleryService._resolve_cover — t2i prefers thumbnail
+# build_output_media — cover MediaObject variant linking
 # ---------------------------------------------------------------------------
 
 
-class TestResolveCoverImagePrefersThumbnail:
-    def test_t2i_prefers_thumbnail_url_over_full_cover(self) -> None:
-        svc = _make_service()
-        cover_id = uuid4()
-        thumb_id = uuid4()
-
-        job = _make_job(generation_type="t2i")
-        cover_data = CoverData(
-            cover_output_id=cover_id,
-            thumbnail_output_id=thumb_id,
+class TestBuildMediaVariantsFromCoverData:
+    def test_derivatives_appear_as_variants(self) -> None:
+        cover = _make_output(thumbnail_max_edge=None)
+        thumb = _make_output(
+            is_thumbnail=True,
+            parent_output_id=cover.id,
+            content_type="image/webp",
+            thumbnail_max_edge=512,
+            width=400,
+            height=400,
         )
-        url, video_url = svc._resolve_cover(job, cover_data)
-        assert f"/v1/content/outputs/{thumb_id}" == url
-        assert video_url is None
 
-    def test_t2i_falls_back_to_full_cover_when_no_thumbnail(self) -> None:
-        svc = _make_service()
-        cover_id = uuid4()
+        media = build_output_media(cover, [thumb])
+        assert len(media.variants) == 1
+        assert media.variants[0].label == "md"
+        assert media.variants[0].url == f"/v1/content/outputs/{thumb.id}"
+        assert media.variants[0].width == 400
 
-        job = _make_job(generation_type="t2i")
-        cover_data = CoverData(cover_output_id=cover_id, thumbnail_output_id=None)
-        url, video_url = svc._resolve_cover(job, cover_data)
-        assert f"/v1/content/outputs/{cover_id}" == url
+    def test_no_derivatives_returns_empty_variants(self) -> None:
+        cover = _make_output(thumbnail_max_edge=None)
 
-    def test_t2i_fallback_unknown_when_no_cover_and_no_thumbnail(self) -> None:
-        svc = _make_service()
-        job = _make_job(generation_type="t2i")
-        cover_data = CoverData()
-        url, video_url = svc._resolve_cover(job, cover_data)
-        assert "unknown" in url
+        media = build_output_media(cover, [])
+        assert media.variants == []
+        assert media.original.url == f"/v1/content/outputs/{cover.id}"
+
+    def test_multiple_sizes_sorted_by_width(self) -> None:
+        cover = _make_output(thumbnail_max_edge=None)
+        sm_thumb = _make_output(
+            is_thumbnail=True,
+            content_type="image/webp",
+            thumbnail_max_edge=150,
+            width=100,
+        )
+        md_thumb = _make_output(
+            is_thumbnail=True,
+            content_type="image/webp",
+            thumbnail_max_edge=512,
+            width=400,
+        )
+
+        media = build_output_media(cover, [md_thumb, sm_thumb])  # intentionally reversed
+        assert len(media.variants) == 2
+        assert media.variants[0].label == "sm"  # sorted by width asc
+        assert media.variants[1].label == "md"
 
 
 # ---------------------------------------------------------------------------
-# GalleryService.get_gallery_detail — thumbnail_map by parent_output_id
+# GalleryService._build_output_item — new list[derivative] signature
 # ---------------------------------------------------------------------------
 
 
 class TestGalleryDetailThumbnailMap:
-    def test_build_output_item_attaches_thumbnail(self) -> None:
+    def test_build_output_item_attaches_variants(self) -> None:
         svc = _make_service()
-        full_id = uuid4()
-        thumb_id = uuid4()
-
-        full_out = _make_output(content_type="image/png", output_index=0)
-        full_out.id = full_id
-        full_out.size_bytes = 1024
-        full_out.format = "png"
-        full_out.created_at = __import__("datetime").datetime.now(__import__("datetime").UTC)
-
+        full_out = _make_output(content_type="image/png", output_index=0, thumbnail_max_edge=None)
         thumb_out = _make_output(
             is_thumbnail=True,
-            parent_output_id=full_id,
+            parent_output_id=full_out.id,
             content_type="image/webp",
+            thumbnail_max_edge=512,
+            width=400,
         )
-        thumb_out.id = thumb_id
 
-        item = svc._build_output_item(full_out, thumb_out)
-        assert item.thumbnail_url == f"/v1/content/outputs/{thumb_id}"
+        item = svc._build_output_item(full_out, [thumb_out])
+        assert item.output_index == 0
+        assert len(item.media.variants) == 1
+        assert item.media.variants[0].url == f"/v1/content/outputs/{thumb_out.id}"
+        assert item.media.original.url == f"/v1/content/outputs/{full_out.id}"
 
-    def test_build_output_item_no_thumbnail_when_none_passed(self) -> None:
+    def test_build_output_item_empty_derivatives_gives_no_variants(self) -> None:
         svc = _make_service()
-        full_out = _make_output(content_type="image/png", output_index=0)
-        full_out.size_bytes = 1024
-        full_out.format = "png"
-        full_out.created_at = __import__("datetime").datetime.now(__import__("datetime").UTC)
+        full_out = _make_output(content_type="image/png", output_index=2, thumbnail_max_edge=None)
 
-        item = svc._build_output_item(full_out, None)
-        assert item.thumbnail_url is None
+        item = svc._build_output_item(full_out, [])
+        assert item.output_index == 2
+        assert item.media.variants == []
+        assert item.media.original.url == f"/v1/content/outputs/{full_out.id}"
