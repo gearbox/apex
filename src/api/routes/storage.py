@@ -56,6 +56,7 @@ ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
 IMAGE_NOT_FOUND = "Image not found"
 
+
 @dataclass
 class UploadForm:
     data: UploadFile
