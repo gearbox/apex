@@ -1,11 +1,8 @@
 """Authentication API routes."""
 
-
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Sequence
-from datetime import timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -35,7 +32,7 @@ from src.api.schemas.auth import (
 )
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.security import auth_guard
-from src.api.security.content_cookie import build_content_cookie, clear_content_cookie
+from src.api.security.content_cookie import attach_content_cookie, clear_content_cookie
 from src.api.security.jwt import JWTService
 from src.api.services.auth import (
     AuthService,
@@ -107,12 +104,7 @@ class AuthController(Controller):
                 display_name=data.display_name,
             )
 
-            content_token, _ = jwt_service.create_content_token(
-                user.id,
-                product_id=product_id,
-                ttl=timedelta(hours=settings.content_cookie_ttl_hours),
-            )
-            return Response(
+            response: Response[TokenResponse | ErrorEnvelope] = Response(
                 content=TokenResponse(
                     access_token=tokens.access_token,
                     refresh_token=tokens.refresh_token,
@@ -120,15 +112,16 @@ class AuthController(Controller):
                     expires_at=tokens.expires_at,
                 ),
                 status_code=HTTP_201_CREATED,
-                cookies=[
-                    build_content_cookie(
-                        content_token,
-                        domain=product_config.cookie_domain,
-                        secure=settings.content_cookie_secure,
-                        max_age=settings.content_cookie_ttl_hours * 3600,
-                    )
-                ],
             )
+            attach_content_cookie(
+                response,
+                user_id=user.id,
+                product_id=product_id,
+                jwt_service=jwt_service,
+                settings=settings,
+                product_config=product_config,
+            )
+            return response
 
         except EmailAlreadyExistsError as e:
             return Response(
@@ -257,12 +250,7 @@ class AuthController(Controller):
                 ip_address=ip_address,
             )
 
-            content_token, _ = jwt_service.create_content_token(
-                user.id,
-                product_id=product_id,
-                ttl=timedelta(hours=settings.content_cookie_ttl_hours),
-            )
-            return Response(
+            response: Response[TokenResponse | ErrorEnvelope] = Response(
                 content=TokenResponse(
                     access_token=tokens.access_token,
                     refresh_token=tokens.refresh_token,
@@ -270,15 +258,16 @@ class AuthController(Controller):
                     expires_at=tokens.expires_at,
                 ),
                 status_code=HTTP_200_OK,
-                cookies=[
-                    build_content_cookie(
-                        content_token,
-                        domain=product_config.cookie_domain,
-                        secure=settings.content_cookie_secure,
-                        max_age=settings.content_cookie_ttl_hours * 3600,
-                    )
-                ],
             )
+            attach_content_cookie(
+                response,
+                user_id=user.id,
+                product_id=product_id,
+                jwt_service=jwt_service,
+                settings=settings,
+                product_config=product_config,
+            )
+            return response
 
         except InvalidCredentialsError:
             return Response(
@@ -324,15 +313,12 @@ class AuthController(Controller):
                 else None
             )
 
-            tokens = await auth_service.refresh_tokens(
+            tokens, user_id = await auth_service.refresh_tokens(
                 data.refresh_token,
                 user_agent=user_agent,
                 ip_address=ip_address,
             )
 
-            # Decode the freshly-minted access token to extract user_id and
-            # product_id for the content cookie (avoids changing AuthService API).
-            access_payload = jwt_service.decode_access_token(tokens.access_token)
             response: Response[TokenResponse | ErrorEnvelope] = Response(
                 content=TokenResponse(
                     access_token=tokens.access_token,
@@ -342,23 +328,14 @@ class AuthController(Controller):
                 ),
                 status_code=HTTP_200_OK,
             )
-            if access_payload is not None:
-                with contextlib.suppress(ValueError, AttributeError):
-                    content_uid = UUID(access_payload.sub)
-                    content_pid = access_payload.product_id or product_id
-                    content_token, _ = jwt_service.create_content_token(
-                        content_uid,
-                        product_id=content_pid,
-                        ttl=timedelta(hours=settings.content_cookie_ttl_hours),
-                    )
-                    response.cookies.append(
-                        build_content_cookie(
-                            content_token,
-                            domain=product_config.cookie_domain,
-                            secure=settings.content_cookie_secure,
-                            max_age=settings.content_cookie_ttl_hours * 3600,
-                        )
-                    )
+            attach_content_cookie(
+                response,
+                user_id=user_id,
+                product_id=product_id,
+                jwt_service=jwt_service,
+                settings=settings,
+                product_config=product_config,
+            )
             return response
 
         except InvalidRefreshTokenError:

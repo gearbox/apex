@@ -307,7 +307,13 @@ def create_app() -> Litestar:
         allow_origin_regex=_origin_regex,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Product-Id"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Product-Id",
+            "Idempotency-Key",
+            "X-Request-Id",
+        ],
     )
 
     # OpenAPI documentation configuration

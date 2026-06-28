@@ -1523,7 +1523,7 @@ class TestAuthRouteHandlers:
         tokens.expires_in = 3600
         tokens.expires_at = None
         auth_service = AsyncMock()
-        auth_service.refresh_tokens = AsyncMock(return_value=tokens)
+        auth_service.refresh_tokens = AsyncMock(return_value=(tokens, "user-uuid-123"))
         data = MagicMock()
         data.refresh_token = "old_ref"
         request = MagicMock()
@@ -1531,6 +1531,7 @@ class TestAuthRouteHandlers:
         request.client = None
         jwt_service = MagicMock()
         jwt_service.decode_access_token.return_value = None  # skip cookie on MagicMock token
+        jwt_service.create_content_token.return_value = ("content_token", None)
         product_config = MagicMock()
         product_config.cookie_domain = "vex.pics"
         settings = MagicMock()

@@ -9,14 +9,14 @@ Validates that:
 - DELETE /v1/content/* with only the cookie returns 401
 - DELETE /v1/content/* with a valid Bearer token succeeds
 
-These tests build a minimal Litestar app that inlines just enough wiring
-(guards, DI, middleware state) to exercise the real guard logic without
-requiring a database or full app startup.
+Auth-route tests use the real AuthController handlers via .fn() with mocked
+AuthService (no DB required). Guard tests build a minimal Litestar app.
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -242,3 +242,216 @@ class TestCookieAttributes:
         )
         assert cookie.secure is False
         assert cookie.domain is None
+
+
+# ---------------------------------------------------------------------------
+# Real AuthController handler tests (no DB — AuthService is mocked)
+# ---------------------------------------------------------------------------
+
+
+def _make_product_config(domain: str = COOKIE_DOMAIN) -> Any:
+    from unittest.mock import MagicMock
+
+    cfg = MagicMock()
+    cfg.cookie_domain = domain
+    return cfg
+
+
+def _make_token_pair() -> Any:
+    from unittest.mock import MagicMock
+
+    pair = MagicMock()
+    pair.access_token = "access.token.here"
+    pair.refresh_token = "refresh.token.here"
+    pair.expires_in = 3600
+    pair.expires_at = None
+    return pair
+
+
+class TestAuthControllerCookies:
+    """AuthController register / login / refresh set; logout clears the content cookie."""
+
+    async def test_register_sets_content_cookie(
+        self, jwt_service: JWTService, settings: Settings
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.api.routes.auth import AuthController
+        from src.api.schemas.auth import RegisterRequest
+
+        user = MagicMock()
+        user.id = uuid4()
+        pair = _make_token_pair()
+
+        mock_auth = AsyncMock()
+        mock_auth.register = AsyncMock(return_value=(user, pair))
+
+        response = await AuthController.register.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            data=RegisterRequest(email="a@b.com", password="pass1234"),
+            auth_service=mock_auth,
+            jwt_service=jwt_service,
+            product_id=PRODUCT_ID,
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        assert len(response.cookies) == 1
+        cookie = response.cookies[0]
+        assert cookie.key == COOKIE_NAME
+        assert cookie.httponly is True
+        assert cookie.samesite == "lax"
+        assert cookie.path == "/v1/content"
+        assert cookie.domain == COOKIE_DOMAIN
+        assert cookie.max_age == settings.content_cookie_ttl_hours * 3600
+        assert cookie.secure == settings.content_cookie_secure
+
+    async def test_login_sets_content_cookie(
+        self, jwt_service: JWTService, settings: Settings
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from litestar import Request
+
+        from src.api.routes.auth import AuthController
+        from src.api.schemas.auth import LoginRequest
+
+        user = MagicMock()
+        user.id = uuid4()
+        pair = _make_token_pair()
+
+        mock_auth = AsyncMock()
+        mock_auth.login = AsyncMock(return_value=(user, pair))
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.headers.get.return_value = None
+        mock_request.client = None
+
+        response = await AuthController.login.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            request=mock_request,
+            data=LoginRequest(email="a@b.com", password="pass1234"),
+            auth_service=mock_auth,
+            jwt_service=jwt_service,
+            product_id=PRODUCT_ID,
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        assert len(response.cookies) == 1
+        cookie = response.cookies[0]
+        assert cookie.key == COOKIE_NAME
+        assert cookie.httponly is True
+        assert cookie.samesite == "lax"
+        assert cookie.path == "/v1/content"
+        assert cookie.domain == COOKIE_DOMAIN
+
+    async def test_refresh_sets_content_cookie_without_decoding(
+        self, jwt_service: JWTService, settings: Settings
+    ) -> None:
+        """refresh sets the cookie via user_id from AuthService — no access-token decode."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from litestar import Request
+
+        from src.api.routes.auth import AuthController
+        from src.api.schemas.auth import RefreshTokenRequest
+        from src.api.security.jwt import JWTConfig
+        from src.api.security.jwt import JWTService as _JS
+
+        user_id = uuid4()
+        pair = _make_token_pair()
+        # AuthService.refresh_tokens now returns (TokenPair, UUID)
+        mock_auth = AsyncMock()
+        mock_auth.refresh_tokens = AsyncMock(return_value=(pair, user_id))
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.headers.get.return_value = None
+        mock_request.client = None
+
+        response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            request=mock_request,
+            data=RefreshTokenRequest(refresh_token="some.refresh.token"),
+            auth_service=mock_auth,
+            jwt_service=jwt_service,
+            product_id=PRODUCT_ID,
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        assert len(response.cookies) == 1
+        cookie = response.cookies[0]
+        assert cookie.key == COOKIE_NAME
+        assert cookie.httponly is True
+        assert cookie.path == "/v1/content"
+        assert cookie.domain == COOKIE_DOMAIN
+
+        # Verify the cookie is for the correct user by decoding it
+        svc = _JS(JWTConfig(secret_key=TEST_SECRET))
+        payload = svc.decode_content_token(cookie.value)
+        assert payload is not None
+        from uuid import UUID as _UUID
+
+        assert _UUID(payload.sub) == user_id
+
+    async def test_logout_clears_content_cookie(
+        self,
+        jwt_service: JWTService,  # noqa: ARG002
+        settings: Settings,  # noqa: ARG002
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.api.routes.auth import AuthController
+        from src.api.schemas.auth import RefreshTokenRequest
+
+        mock_auth = AsyncMock()
+        mock_auth.logout = AsyncMock(return_value=True)
+
+        response = await AuthController.logout.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            data=RefreshTokenRequest(refresh_token="tok"),
+            auth_service=mock_auth,
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        assert len(response.cookies) == 1
+        cookie = response.cookies[0]
+        assert cookie.key == COOKIE_NAME
+        assert cookie.max_age == 0
+        assert cookie.value == ""
+        assert cookie.path == "/v1/content"
+        assert cookie.domain == COOKIE_DOMAIN
+
+    async def test_register_secure_false_in_debug(self, jwt_service: JWTService) -> None:
+        """When debug=True, content_cookie_secure=False so Secure attribute is absent."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.api.routes.auth import AuthController
+        from src.api.schemas.auth import RegisterRequest
+
+        debug_settings = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            debug=True,
+        )
+
+        user = MagicMock()
+        user.id = uuid4()
+        pair = _make_token_pair()
+        mock_auth = AsyncMock()
+        mock_auth.register = AsyncMock(return_value=(user, pair))
+
+        response = await AuthController.register.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            data=RegisterRequest(email="a@b.com", password="pass1234"),
+            auth_service=mock_auth,
+            jwt_service=jwt_service,
+            product_id=PRODUCT_ID,
+            product_config=_make_product_config(),
+            settings=debug_settings,
+        )
+
+        cookie = response.cookies[0]
+        assert cookie.secure is False

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -14,7 +15,7 @@ from litestar.handlers import BaseRouteHandler
 from src.core.config import get_settings
 
 if TYPE_CHECKING:
-    from src.api.security.jwt import JWTService
+    from src.api.security.jwt import JWTService, TokenPayload
     from src.db.models import User
 
 logger = structlog.get_logger(__name__)
@@ -67,6 +68,45 @@ def extract_token_from_header(authorization: str | None) -> str | None:
     return None if len(parts) != 2 or parts[0].lower() != "bearer" else parts[1]
 
 
+def _identity_from_token(
+    raw: str | None,
+    decode: Callable[[str], TokenPayload | None],
+) -> tuple[UUID, str | None] | None:
+    """Decode a raw token string into (user_id, product_id).
+
+    Returns None if the token is absent, invalid, or has an unparseable subject.
+    """
+    if not raw:
+        return None
+    payload = decode(raw)
+    if payload is None:
+        return None
+    try:
+        return UUID(payload.sub), payload.product_id
+    except ValueError:
+        return None
+
+
+def _enforce_product(
+    connection: ASGIConnection[Any, Any, Any, Any],
+    token_product_id: str | None,
+) -> None:
+    """Raise 401 if the token's product_id is absent or mismatches the request product.
+
+    A None token_product_id is always rejected on product-scoped requests — all
+    validly issued tokens carry a product_id, so None means malformed/legacy token.
+    """
+    request_product_id: str | None = None
+    with contextlib.suppress(Exception):
+        request_product_id = connection.state.get("product_id")
+    if request_product_id is None:
+        return
+    if token_product_id is None:
+        raise NotAuthorizedException(detail="Token is not scoped to the requested product")
+    if token_product_id != request_product_id:
+        raise NotAuthorizedException(detail="Token was issued for a different product")
+
+
 async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
     """Guard that requires valid JWT authentication.
 
@@ -86,31 +126,17 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
     if not token:
         raise NotAuthorizedException(detail="Missing authorization header")
 
-    # Get JWT service from app state
     jwt_service: JWTService | None = connection.app.state.get("jwt_service")
     if jwt_service is None:
         raise RuntimeError("JWT service not configured")
 
-    token_payload = jwt_service.decode_access_token(token)
-    if token_payload is None:
+    identity = _identity_from_token(token, jwt_service.decode_access_token)
+    if identity is None:
         raise NotAuthorizedException(detail="Invalid or expired token")
 
-    try:
-        user_id = UUID(token_payload.sub)
-    except ValueError as exc:
-        raise NotAuthorizedException(detail="Invalid token subject") from exc
+    user_id, token_product_id = identity
+    _enforce_product(connection, token_product_id)
 
-    # Validate product_id claim matches request product context
-    request_product_id: str | None = None
-    with contextlib.suppress(Exception):
-        request_product_id = connection.state.get("product_id")
-
-    if request_product_id is not None:
-        token_product_id = token_payload.product_id
-        if token_product_id != request_product_id:
-            raise NotAuthorizedException(detail="Token was issued for a different product")
-
-    # Store user_id in connection state for dependency injection
     connection.state["user_id"] = user_id
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
 
@@ -136,38 +162,22 @@ async def content_auth_guard(
     if jwt_service is None:
         raise RuntimeError("JWT service not configured")
 
-    user_id: UUID | None = None
-    token_product_id: str | None = None
-
     # 1. Try Bearer access token (for SSR / API clients)
     raw_bearer = extract_token_from_header(connection.headers.get("authorization"))
-    if raw_bearer:
-        payload = jwt_service.decode_access_token(raw_bearer)
-        if payload is not None:
-            with contextlib.suppress(ValueError):
-                user_id = UUID(payload.sub)
-                token_product_id = payload.product_id
+    identity = _identity_from_token(raw_bearer, jwt_service.decode_access_token)
+
     # 2. Fall back to content cookie
-    if user_id is None and (raw_cookie := connection.cookies.get(settings.content_cookie_name)):
-        payload = jwt_service.decode_content_token(raw_cookie)
-        if payload is not None:
-            with contextlib.suppress(ValueError):
-                user_id = UUID(payload.sub)
-                token_product_id = payload.product_id
-    if user_id is None:
+    if identity is None:
+        raw_cookie = connection.cookies.get(settings.content_cookie_name)
+        identity = _identity_from_token(raw_cookie, jwt_service.decode_content_token)
+
+    if identity is None:
         raise NotAuthorizedException(detail="Missing or invalid credentials")
 
-    # 3. Product check — token must belong to the resolved request product
-    request_product_id: str | None = None
-    with contextlib.suppress(Exception):
-        request_product_id = connection.state.get("product_id")
+    user_id, token_product_id = identity
 
-    if (
-        request_product_id is not None
-        and token_product_id is not None
-        and token_product_id != request_product_id
-    ):
-        raise NotAuthorizedException(detail="Token was issued for a different product")
+    # 3. Product check — token must belong to the resolved request product
+    _enforce_product(connection, token_product_id)
 
     # 4. Mirror auth_guard state — downstream DI reads from here
     connection.state["user_id"] = user_id

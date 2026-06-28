@@ -179,6 +179,36 @@ class TestContentAuthGuardProductCheck:
         with pytest.raises(NotAuthorizedException):
             asyncio.run(content_auth_guard(mock_connection, MagicMock()))
 
+    def test_unscoped_token_rejected_on_product_request(self, jwt_service: JWTService) -> None:
+        """Content cookie whose product_id is None is rejected when request has a product scope."""
+        from unittest.mock import MagicMock, patch
+
+        class DictState(dict):  # type: ignore[type-arg]
+            pass
+
+        uid = uuid4()
+        token, _ = jwt_service.create_content_token(uid, product_id="vex", ttl=timedelta(hours=1))
+
+        state = DictState({"product_id": "vex"})
+        mock_connection = MagicMock()
+        mock_connection.headers.get.return_value = None
+        mock_connection.cookies.get.return_value = token
+        mock_connection.state = state
+        mock_connection.app.state.get.return_value = jwt_service
+
+        # Patch decode_content_token to return a payload with product_id=None
+        fake_payload = MagicMock()
+        fake_payload.sub = str(uid)
+        fake_payload.product_id = None
+
+        import asyncio
+
+        with (
+            patch.object(jwt_service, "decode_content_token", return_value=fake_payload),
+            pytest.raises(NotAuthorizedException, match="not scoped to the requested product"),
+        ):
+            asyncio.run(content_auth_guard(mock_connection, MagicMock()))
+
     def test_matching_product_cookie_accepted(self, jwt_service: JWTService) -> None:
         """A content cookie matching the request product_id is accepted."""
         uid = uuid4()

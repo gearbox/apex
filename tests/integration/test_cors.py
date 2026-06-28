@@ -34,7 +34,13 @@ def _build_cors_config(debug: bool = False) -> CORSConfig:
         allow_origin_regex=origin_regex,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Product-Id"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Product-Id",
+            "Idempotency-Key",
+            "X-Request-Id",
+        ],
     )
 
 
@@ -118,6 +124,47 @@ class TestCORSRejectedOrigins:
             )
         acao = resp.headers.get("Access-Control-Allow-Origin", "")
         assert acao not in (origin, "*")
+
+
+class TestCORSIdempotencyKey:
+    """Regression: generation + billing preflights must include Idempotency-Key."""
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["https://vex.pics", "https://synthara.app"],
+    )
+    def test_preflight_allows_idempotency_key(self, origin: str) -> None:
+        app = _make_app()
+        with TestClient(app=app) as client:
+            resp = client.options(
+                "/test",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "Authorization, Content-Type, Idempotency-Key",
+                },
+            )
+        assert resp.status_code in (200, 204)
+        allowed = resp.headers.get("Access-Control-Allow-Headers", "")
+        allowed_lower = allowed.lower()
+        assert "idempotency-key" in allowed_lower, (
+            f"Expected Idempotency-Key in Access-Control-Allow-Headers, got: {allowed!r}"
+        )
+
+    def test_preflight_allows_x_request_id(self) -> None:
+        app = _make_app()
+        with TestClient(app=app) as client:
+            resp = client.options(
+                "/test",
+                headers={
+                    "Origin": "https://vex.pics",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "X-Request-Id",
+                },
+            )
+        assert resp.status_code in (200, 204)
+        allowed = resp.headers.get("Access-Control-Allow-Headers", "")
+        assert "x-request-id" in allowed.lower()
 
 
 class TestCORSDevMode:

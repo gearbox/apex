@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
+
 from litestar.datastructures import Cookie
 
 from src.core.config import get_settings
+
+if TYPE_CHECKING:
+    from src.api.security.jwt import JWTService
+    from src.core.config import Settings
+    from src.core.product import ProductConfig
 
 
 def build_content_cookie(
@@ -58,4 +67,38 @@ def clear_content_cookie(*, domain: str | None, secure: bool) -> Cookie:
         path="/v1/content",
         domain=domain,
         max_age=0,
+    )
+
+
+def attach_content_cookie(
+    response: Any,
+    *,
+    user_id: UUID,
+    product_id: str,
+    jwt_service: JWTService,
+    settings: Settings,
+    product_config: ProductConfig,
+) -> None:
+    """Mint a content token and append the Set-Cookie to the response.
+
+    Args:
+        response: Litestar Response to append the cookie to.
+        user_id: Authenticated user's UUID.
+        product_id: Product slug for the token scope.
+        jwt_service: JWT service used to sign the token.
+        settings: Application settings (TTL, secure flag, cookie name).
+        product_config: Product config supplying the cookie domain.
+    """
+    content_token, _ = jwt_service.create_content_token(
+        user_id,
+        product_id=product_id,
+        ttl=timedelta(hours=settings.content_cookie_ttl_hours),
+    )
+    response.cookies.append(
+        build_content_cookie(
+            content_token,
+            domain=product_config.cookie_domain,
+            secure=settings.content_cookie_secure,
+            max_age=settings.content_cookie_ttl_hours * 3600,
+        )
     )
