@@ -243,6 +243,33 @@ class TestCookieAttributes:
         assert cookie.secure is False
         assert cookie.domain is None
 
+    def test_default_cookie_ttl_is_1_hour(self) -> None:
+        s = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+        )
+        assert s.content_cookie_ttl_hours == 1
+
+    def test_cookie_ttl_above_max_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            Settings(
+                jwt_secret_key=TEST_SECRET,
+                database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+                content_cookie_ttl_hours=25,
+            )
+
+    def test_cookie_ttl_below_min_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            Settings(
+                jwt_secret_key=TEST_SECRET,
+                database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+                content_cookie_ttl_hours=0,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Real AuthController handler tests (no DB — AuthService is mocked)

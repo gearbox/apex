@@ -1265,7 +1265,7 @@ class TestAuthRouteHandlers:
         product_config = MagicMock()
         product_config.cookie_domain = "vex.pics"
         settings = MagicMock()
-        settings.content_cookie_ttl_hours = 24
+        settings.content_cookie_ttl_hours = 1
         settings.content_cookie_secure = True
 
         response = await AuthController.register.fn(  # type: ignore[attr-defined]
@@ -1447,7 +1447,7 @@ class TestAuthRouteHandlers:
         product_config = MagicMock()
         product_config.cookie_domain = "vex.pics"
         settings = MagicMock()
-        settings.content_cookie_ttl_hours = 24
+        settings.content_cookie_ttl_hours = 1
         settings.content_cookie_secure = True
 
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
@@ -1535,7 +1535,7 @@ class TestAuthRouteHandlers:
         product_config = MagicMock()
         product_config.cookie_domain = "vex.pics"
         settings = MagicMock()
-        settings.content_cookie_ttl_hours = 24
+        settings.content_cookie_ttl_hours = 1
         settings.content_cookie_secure = True
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
