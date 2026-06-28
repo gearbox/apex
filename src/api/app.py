@@ -319,7 +319,7 @@ def create_app() -> Litestar:
     # OpenAPI documentation configuration
     openapi_config = OpenAPIConfig(
         title="Apex Generation API",
-        version="0.3.0",
+        version="0.3.1",
         description=(
             "Apex REST API for AI content generation.\n\n"
             "## Providers\n\n"
