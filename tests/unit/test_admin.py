@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from litestar.exceptions import NotFoundException, PermissionDeniedException, ValidationException
 
 from src.api.routes.admin import validate_and_patch_user
 from src.api.schemas.admin import AdminPatchUserRequest
+from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.services.billing import BillingService
 from src.core.enums import UserRole
 from src.db.repositories.billing import BillingRepository
@@ -20,7 +22,7 @@ from src.db.repositories.billing import BillingRepository
 
 
 def _make_account(
-    account_id=None,
+    account_id: UUID | None = None,
     account_type: str = "enterprise",
     org_name: str | None = "Acme Corp",
 ) -> MagicMock:
@@ -200,7 +202,7 @@ class TestGetAccountWithOrganization:
 
 
 def _make_user(
-    user_id=None,
+    user_id: UUID | None = None,
     email: str = "user@example.com",
     role: str = "user",
     subscription_tier: str = "free",
@@ -221,58 +223,132 @@ def _make_user(
     return user
 
 
+def _make_cursor_user(user_id: UUID | None = None, ts: datetime | None = None) -> MagicMock:
+    """Create a user mock with real created_at and id for cursor encoding."""
+    user = _make_user(user_id=user_id)
+    user.created_at = ts or datetime.now(UTC)
+    user.id = user_id or uuid4()
+    return user
+
+
 class TestListUsers:
-    async def test_returns_paginated_user_list(self) -> None:
-        """list_users returns items list and total from the repository."""
-        users = [_make_user(), _make_user()]
-        total = 5
+    async def test_returns_cursor_page_with_has_more_when_limit_plus_one_rows(self) -> None:
+        """list_users handler returns CursorPage with has_more=True when repo returns limit+1 rows."""
+        from src.api.routes.admin import AdminController
+
+        limit = 3
+        users = [_make_cursor_user() for _ in range(limit + 1)]
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
 
         with patch("src.api.routes.admin.UserRepository") as MockRepo:
-            repo = MockRepo.return_value
-            repo.list_users = AsyncMock(return_value=(users, total))
-
-            result_users, result_total = await repo.list_users(
-                is_active=None, role=None, email_contains=None, limit=50, offset=0
+            MockRepo.return_value.list_users = AsyncMock(return_value=users)
+            result = await AdminController.list_users.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                product_id="vex",
+                is_active=None,
+                role=None,
+                email=None,
+                limit=limit,
+                cursor=None,
             )
 
-        assert len(result_users) == 2
-        assert result_total == 5
+        assert isinstance(result, CursorPage)
+        assert len(result.items) == limit
+        assert result.has_more is True
+        assert result.next_cursor is not None
+
+    async def test_returns_cursor_page_without_cursor_when_at_last_page(self) -> None:
+        """list_users handler returns has_more=False, next_cursor=None when repo returns ≤ limit rows."""
+        from src.api.routes.admin import AdminController
+
+        limit = 3
+        users = [_make_cursor_user() for _ in range(limit)]
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
+
+        with patch("src.api.routes.admin.UserRepository") as MockRepo:
+            MockRepo.return_value.list_users = AsyncMock(return_value=users)
+            result = await AdminController.list_users.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                product_id="vex",
+                is_active=None,
+                role=None,
+                email=None,
+                limit=limit,
+                cursor=None,
+            )
+
+        assert result.has_more is False
+        assert result.next_cursor is None
+        assert len(result.items) == limit
+
+    async def test_cursor_decoded_and_forwarded_to_repository(self) -> None:
+        """Encoded cursor is decoded into cursor_ts/cursor_id and forwarded to repo."""
+        from src.api.routes.admin import AdminController
+
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+        cursor_uid = uuid4()
+        cursor = encode_cursor(ts, cursor_uid)
+
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
+
+        with patch("src.api.routes.admin.UserRepository") as MockRepo:
+            mock_list = AsyncMock(return_value=[])
+            MockRepo.return_value.list_users = mock_list
+
+            await AdminController.list_users.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                product_id="vex",
+                is_active=None,
+                role=None,
+                email=None,
+                limit=50,
+                cursor=cursor,
+            )
+
+        mock_list.assert_awaited_once()
+        call_kwargs = mock_list.call_args.kwargs
+        assert call_kwargs["cursor_ts"] == ts
+        assert call_kwargs["cursor_id"] == cursor_uid
+        assert "offset" not in call_kwargs
 
     async def test_filters_forwarded_to_repository(self) -> None:
         """Handler forwards all filter params to list_users with correct argument names."""
-        users = [_make_user()]
+        from src.api.routes.admin import AdminController
+
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
 
         with patch("src.api.routes.admin.UserRepository") as MockRepo:
-            repo = MockRepo.return_value
-            repo.list_users = AsyncMock(return_value=(users, 1))
+            mock_list = AsyncMock(return_value=[])
+            MockRepo.return_value.list_users = mock_list
 
-            await repo.list_users(
+            await AdminController.list_users.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                product_id="vex",
                 is_active=True,
                 role="user",
-                email_contains="alice",
+                email="alice",
                 limit=10,
-                offset=20,
+                cursor=None,
             )
 
-            repo.list_users.assert_awaited_once_with(
-                is_active=True,
-                role="user",
-                email_contains="alice",
-                limit=10,
-                offset=20,
-            )
-
-    async def test_system_users_excluded(self) -> None:
-        """SYSTEM role exclusion is enforced in the repository, not the route.
-
-        The handler passes no special filter to exclude system users; the
-        repository's list_users method unconditionally excludes them.
-        See UserRepository.list_users for the WHERE clause.
-        """
-        # No separate route-level assertion needed — documented here for clarity.
-
-    # Auth guard is tested at the integration level; admin role enforcement is
-    # handled by get_current_admin_user DI dependency, not in this unit test suite.
+        call_kwargs = mock_list.call_args.kwargs
+        assert call_kwargs["is_active"] is True
+        assert call_kwargs["role"] == "user"
+        assert call_kwargs["email_contains"] == "alice"
+        assert call_kwargs["limit"] == 10
+        assert "offset" not in call_kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +451,7 @@ class TestPatchUser:
 
 
 def _make_org(
-    org_id=None,
+    org_id: UUID | None = None,
     name: str = "Test Org",
     is_active: bool = True,
 ) -> MagicMock:
@@ -389,33 +465,243 @@ def _make_org(
     return org
 
 
+def _make_cursor_org(org_id: UUID | None = None, ts: datetime | None = None) -> MagicMock:
+    """Create an org mock with real created_at and id for cursor encoding."""
+    org = _make_org(org_id=org_id)
+    org.created_at = ts or datetime.now(UTC)
+    org.id = org_id or uuid4()
+    return org
+
+
 class TestListOrganizations:
-    async def test_returns_paginated_org_list(self) -> None:
-        """list_organizations returns items with member_count and token_balance."""
-        org1 = _make_org()
-        org2 = _make_org()
-        rows = [(org1, 3, 1000), (org2, 0, 0)]
-        total = 2
+    async def test_returns_cursor_page_with_has_more_when_limit_plus_one_rows(self) -> None:
+        """list_organizations returns CursorPage with has_more=True when repo returns limit+1 rows."""
+        from src.api.routes.admin import AdminController
+
+        limit = 2
+        orgs = [_make_cursor_org() for _ in range(limit + 1)]
+        rows = [(o, i, i * 100) for i, o in enumerate(orgs)]
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
 
         with patch("src.api.routes.admin.BillingRepository") as MockRepo:
-            repo = MockRepo.return_value
-            repo.list_organizations = AsyncMock(return_value=(rows, total))
-
-            result_rows, result_total = await repo.list_organizations(
-                is_active=None, limit=50, offset=0
+            MockRepo.return_value.list_organizations = AsyncMock(return_value=rows)
+            result = await AdminController.list_organizations.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                is_active=None,
+                limit=limit,
+                cursor=None,
             )
 
-        assert len(result_rows) == 2
-        assert result_total == 2
-        assert result_rows[0][1] == 3  # member_count
-        assert result_rows[0][2] == 1000  # token_balance
+        assert isinstance(result, CursorPage)
+        assert len(result.items) == limit
+        assert result.has_more is True
+        assert result.next_cursor is not None
+
+    async def test_returns_cursor_page_without_cursor_at_last_page(self) -> None:
+        """list_organizations returns has_more=False, next_cursor=None at last page."""
+        from src.api.routes.admin import AdminController
+
+        limit = 2
+        orgs = [_make_cursor_org() for _ in range(limit)]
+        rows = [(o, 0, 0) for o in orgs]
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
+
+        with patch("src.api.routes.admin.BillingRepository") as MockRepo:
+            MockRepo.return_value.list_organizations = AsyncMock(return_value=rows)
+            result = await AdminController.list_organizations.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                is_active=None,
+                limit=limit,
+                cursor=None,
+            )
+
+        assert result.has_more is False
+        assert result.next_cursor is None
+
+    async def test_cursor_decoded_and_forwarded_to_repository(self) -> None:
+        """Encoded cursor is decoded into cursor_ts/cursor_id and forwarded to repo."""
+        from src.api.routes.admin import AdminController
+
+        ts = datetime(2026, 5, 15, 10, 0, 0, tzinfo=UTC)
+        cursor_uid = uuid4()
+        cursor = encode_cursor(ts, cursor_uid)
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
+
+        with patch("src.api.routes.admin.BillingRepository") as MockRepo:
+            mock_list = AsyncMock(return_value=[])
+            MockRepo.return_value.list_organizations = mock_list
+
+            await AdminController.list_organizations.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                is_active=None,
+                limit=50,
+                cursor=cursor,
+            )
+
+        call_kwargs = mock_list.call_args.kwargs
+        assert call_kwargs["cursor_ts"] == ts
+        assert call_kwargs["cursor_id"] == cursor_uid
+        assert "offset" not in call_kwargs
 
     async def test_is_active_filter_forwarded(self) -> None:
         """Handler forwards is_active=False to list_organizations."""
+        from src.api.routes.admin import AdminController
+
+        admin_user = MagicMock()
+        admin_user.id = uuid4()
+
         with patch("src.api.routes.admin.BillingRepository") as MockRepo:
-            repo = MockRepo.return_value
-            repo.list_organizations = AsyncMock(return_value=([], 0))
+            mock_list = AsyncMock(return_value=[])
+            MockRepo.return_value.list_organizations = mock_list
 
-            await repo.list_organizations(is_active=False, limit=50, offset=0)
+            await AdminController.list_organizations.fn(
+                MagicMock(),
+                admin_user=admin_user,
+                session=AsyncMock(),
+                is_active=False,
+                limit=50,
+                cursor=None,
+            )
 
-            repo.list_organizations.assert_awaited_once_with(is_active=False, limit=50, offset=0)
+        call_kwargs = mock_list.call_args.kwargs
+        assert call_kwargs["is_active"] is False
+        assert "offset" not in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/admin/manage/audit — handler unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_audit_entry(ts: datetime | None = None) -> MagicMock:
+    """Create an audit entry mock with real created_at and id for cursor encoding."""
+    entry = MagicMock()
+    entry.id = uuid4()
+    entry.actor_id = uuid4()
+    entry.target_user_id = uuid4()
+    entry.action = "role.grant"
+    entry.detail = "Role changed from 'user' to 'admin'"
+    entry.source = "api"
+    entry.created_at = ts or datetime.now(UTC)
+    return entry
+
+
+class TestAuditLogRouteHandler:
+    async def test_returns_cursor_page_with_has_more_when_limit_plus_one_rows(self) -> None:
+        """Handler trims to limit, sets has_more=True, next_cursor encodes last kept entry."""
+        from src.api.routes.admin_management import AdminManagementController
+
+        limit = 3
+        entries = [_make_audit_entry() for _ in range(limit + 1)]
+        superadmin = MagicMock()
+        superadmin.id = uuid4()
+        admin_mgmt = AsyncMock()
+        admin_mgmt.get_audit_log = AsyncMock(return_value=entries)
+
+        result = await AdminManagementController.get_audit_log.fn(
+            MagicMock(),
+            superadmin=superadmin,
+            session=AsyncMock(),
+            product_id="vex",
+            admin_mgmt=admin_mgmt,
+            target_user_id=None,
+            limit=limit,
+            cursor=None,
+        )
+
+        assert isinstance(result, CursorPage)
+        assert len(result.items) == limit
+        assert result.has_more is True
+        assert result.next_cursor is not None
+        # next_cursor must decode to the last kept entry's (created_at, id)
+        decoded_ts, decoded_id = decode_cursor(result.next_cursor)
+        last_kept = entries[limit - 1]
+        assert decoded_id == last_kept.id
+        assert decoded_ts == last_kept.created_at
+
+    async def test_returns_no_cursor_when_at_last_page(self) -> None:
+        """Handler returns has_more=False, next_cursor=None when repo returns ≤ limit rows."""
+        from src.api.routes.admin_management import AdminManagementController
+
+        limit = 3
+        entries = [_make_audit_entry() for _ in range(limit)]
+        superadmin = MagicMock()
+        superadmin.id = uuid4()
+        admin_mgmt = AsyncMock()
+        admin_mgmt.get_audit_log = AsyncMock(return_value=entries)
+
+        result = await AdminManagementController.get_audit_log.fn(
+            MagicMock(),
+            superadmin=superadmin,
+            session=AsyncMock(),
+            product_id="vex",
+            admin_mgmt=admin_mgmt,
+            target_user_id=None,
+            limit=limit,
+            cursor=None,
+        )
+
+        assert result.has_more is False
+        assert result.next_cursor is None
+        assert len(result.items) == limit
+
+    async def test_cursor_decoded_and_forwarded_to_service(self) -> None:
+        """Encoded cursor is decoded and forwarded as cursor_ts/cursor_id to the service."""
+        from src.api.routes.admin_management import AdminManagementController
+
+        ts = datetime(2026, 6, 10, 8, 0, 0, tzinfo=UTC)
+        cursor_uid = uuid4()
+        cursor = encode_cursor(ts, cursor_uid)
+        superadmin = MagicMock()
+        superadmin.id = uuid4()
+        admin_mgmt = AsyncMock()
+        admin_mgmt.get_audit_log = AsyncMock(return_value=[])
+
+        await AdminManagementController.get_audit_log.fn(
+            MagicMock(),
+            superadmin=superadmin,
+            session=AsyncMock(),
+            product_id="vex",
+            admin_mgmt=admin_mgmt,
+            target_user_id=None,
+            limit=50,
+            cursor=cursor,
+        )
+
+        admin_mgmt.get_audit_log.assert_awaited_once()
+        call_kwargs = admin_mgmt.get_audit_log.call_args.kwargs
+        assert call_kwargs["cursor_ts"] == ts
+        assert call_kwargs["cursor_id"] == cursor_uid
+
+    async def test_target_user_id_forwarded_to_service(self) -> None:
+        """target_user_id filter is forwarded to the service."""
+        from src.api.routes.admin_management import AdminManagementController
+
+        target_uid = uuid4()
+        superadmin = MagicMock()
+        superadmin.id = uuid4()
+        admin_mgmt = AsyncMock()
+        admin_mgmt.get_audit_log = AsyncMock(return_value=[])
+
+        await AdminManagementController.get_audit_log.fn(
+            MagicMock(),
+            superadmin=superadmin,
+            session=AsyncMock(),
+            product_id="vex",
+            admin_mgmt=admin_mgmt,
+            target_user_id=target_uid,
+            limit=50,
+            cursor=None,
+        )
+
+        call_kwargs = admin_mgmt.get_audit_log.call_args.kwargs
+        assert call_kwargs["target_user_id"] == target_uid

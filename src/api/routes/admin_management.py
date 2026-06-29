@@ -21,6 +21,7 @@ from src.api.schemas.admin import (
     GrantPermissionRequest,
     GrantRoleRequest,
 )
+from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.security import auth_guard
 from src.api.services.admin_management import (
     AdminManagementError,
@@ -188,20 +189,33 @@ class AdminManagementController(Controller):
         admin_mgmt: AdminManagementService,
         target_user_id: UUID | None = None,
         limit: int = 50,
-    ) -> list[AuditLogEntry]:
-        """Retrieve admin audit log entries."""
+        cursor: str | None = None,
+    ) -> CursorPage[AuditLogEntry]:
+        """Retrieve admin audit log entries (cursor-paginated, newest first)."""
         logger.info(
             "admin_mgmt.viewing_audit_log",
             superadmin_id=str(superadmin.id),
             product_id=product_id,
         )
+        cursor_ts = None
+        cursor_id = None
+        if cursor is not None:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+
         entries = await admin_mgmt.get_audit_log(
             product_id,
             target_user_id=target_user_id,
             limit=limit,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
             session=session,
         )
-        return [
+
+        has_more = len(entries) > limit
+        if has_more:
+            entries = list(entries)[:limit]
+
+        items = [
             AuditLogEntry(
                 id=e.id,
                 actor_id=e.actor_id,
@@ -213,3 +227,15 @@ class AdminManagementController(Controller):
             )
             for e in entries
         ]
+
+        next_cursor: str | None = None
+        if has_more and entries:
+            last = entries[-1]
+            next_cursor = encode_cursor(last.created_at, last.id)
+
+        return CursorPage(
+            items=items,
+            limit=limit,
+            has_more=has_more,
+            next_cursor=next_cursor,
+        )

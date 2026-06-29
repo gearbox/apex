@@ -1,6 +1,6 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-06-27 — Unified Image Variants (§6, §8, §10): `MediaObject` replaces all per-output presigned URL fields across the Jobs, Storage, and Gallery APIs. Jobs API no longer presigns URLs — all content URLs are stable content-proxy paths. Gallery cover logic now always uses the job's own primary output (no longer sources input images). Upload thumbnails (sm=150px, md=512px WEBP) generated automatically on upload._
+> _Last updated: 2026-06-29 — Cursor pagination on audit log (§14): `GET /v1/admin/manage/audit` now returns `CursorPage<AuditLogEntry>` instead of a bare array. Pass `cursor=next_cursor` for subsequent pages. Frontend must regenerate types and switch to cursor-scroll. Prior (2026-06-27): Unified Image Variants (§6, §8, §10): `MediaObject` replaces all per-output presigned URL fields across the Jobs, Storage, and Gallery APIs. Jobs API no longer presigns URLs — all content URLs are stable content-proxy paths. Gallery cover logic now always uses the job's own primary output (no longer sources input images). Upload thumbnails (sm=150px, md=512px WEBP) generated automatically on upload._
 >
 > _Prior (2026-06-26): removed `bundle_name` and `bundle_version` from the frontend-facing API surface (§7, §15). Prior (2026-06-17): synced the doc with `master` — Aisha generation parameter system (§4), quality-tier capabilities (§5), per-output `thumbnail_url` (§6), GPU-session provisioning fields + internal callback (§7), corrected billing public-endpoint behaviour (§11), corrected model-capability matrix and new enums (§17), corrected `POST /v1/auth/register` contract (§2)._
 
@@ -1596,9 +1596,14 @@ Note:     Idempotent — revoking a permission the user doesn't hold is a no-op 
 #### `GET /v1/admin/manage/audit`
 
 ```
-Query:    target_user_id? (UUID), limit? (default 50)
-Response: AuditLogEntry[]
+Query:    target_user_id? (UUID), limit? (default 50), cursor? (opaque token)
+Response: CursorPage<AuditLogEntry>
 Note:     Entries are returned newest-first. Optionally filter to a specific target user.
+          Uses cursor (keyset) pagination — pass cursor=next_cursor from the previous
+          response to fetch the next page. Breaking change from the previous bare
+          AuditLogEntry[] response: the body is now wrapped in the standard CursorPage
+          envelope (items / limit / has_more / next_cursor). Regenerate OpenAPI types
+          and update the admin audit-log table in apex-frontend (gen:api → cursor scroll).
 ```
 
 ---

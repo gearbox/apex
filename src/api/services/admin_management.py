@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 import structlog
@@ -415,13 +417,16 @@ class AdminManagementService:
         *,
         target_user_id: UUID | None = None,
         limit: int = 50,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
         session: AsyncSession,
-    ) -> list[AdminAuditLog]:
-        """Retrieve audit log entries."""
+    ) -> Sequence[AdminAuditLog]:
+        """Retrieve audit log entries (limit+1, untrimmed) for cursor paging."""
         admin_repo = AdminRepository(session)
-        entries = await admin_repo.get_audit_log(
+        return await admin_repo.get_audit_log(
             product_id,
             target_user_id=target_user_id,
             limit=limit,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
         )
-        return list(entries)
