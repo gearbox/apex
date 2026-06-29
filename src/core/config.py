@@ -560,6 +560,28 @@ class Settings(BaseSettings):
         description="JWT issuer claim",
     )
 
+    # Content cookie
+    content_cookie_ttl_hours: int = Field(
+        default=1,
+        ge=1,
+        le=24,
+        description=(
+            "TTL in hours for the content authentication cookie (apex_content). "
+            "Kept short so a stateless token's post-revocation window is small; "
+            "the cookie is refreshed on every login/token refresh, so this never "
+            "expires mid-session."
+        ),
+    )
+    content_cookie_name: str = Field(
+        default="apex_content",
+        description="Name of the content authentication cookie.",
+    )
+
+    @property
+    def content_cookie_secure(self) -> bool:
+        """Secure flag for the content cookie — disabled in debug/dev mode."""
+        return not self.debug
+
     # Logging settings
     log_level: str = Field(
         default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)"

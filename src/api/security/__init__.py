@@ -4,9 +4,11 @@ This module provides implementations only. For DI providers,
 use src.api.dependencies.
 """
 
+from .content_cookie import build_content_cookie, clear_content_cookie
 from .guards import (
     AuthenticatedUser,
     auth_guard,
+    content_auth_guard,
     extract_token_from_header,
     optional_auth_guard,
 )
@@ -24,8 +26,12 @@ __all__ = [
     # Guards
     "AuthenticatedUser",
     "auth_guard",
+    "content_auth_guard",
     "extract_token_from_header",
     "optional_auth_guard",
+    # Content cookie helpers
+    "build_content_cookie",
+    "clear_content_cookie",
     # JWT
     "InvalidTokenError",
     "JWTConfig",

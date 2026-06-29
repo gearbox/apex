@@ -239,7 +239,7 @@ class AuthService:
         *,
         user_agent: str | None = None,
         ip_address: str | None = None,
-    ) -> TokenPair:
+    ) -> tuple[TokenPair, UUID]:
         """Refresh access token using refresh token.
 
         Implements token rotation: the old refresh token is revoked
@@ -301,7 +301,7 @@ class AuthService:
 
         logger.debug("auth.token_refreshed", user_id=str(stored_token.user_id))
 
-        return tokens
+        return tokens, stored_token.user_id
 
     async def logout(self, refresh_token: str) -> bool:
         """Logout by revoking the refresh token.

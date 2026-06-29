@@ -920,6 +920,8 @@ dependencies = {
     # Product context (resolved by ProductMiddleware)
     "product_config": Provide(get_product_config, sync_to_thread=False),
     "product_id": Provide(get_product_id, sync_to_thread=False),
+    # JWT service (needed by auth routes to mint content tokens)
+    "jwt_service": Provide(get_jwt_service, sync_to_thread=False),
     # Content proxy
     "content_proxy": Provide(get_content_proxy, sync_to_thread=False),
     # Gallery

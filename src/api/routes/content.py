@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.security import auth_guard
+from src.api.security import auth_guard, content_auth_guard
 from src.api.services.content_proxy import ContentNotFoundError, ContentProxyService
 from src.api.services.storage.exceptions import StorageError
 from src.api.services.storage.r2 import R2StorageService
@@ -37,10 +37,9 @@ class ContentProxyController(Controller):
 
     path = "/v1/content"
     tags: Sequence[str] | None = ["Content"]
-    guards = [auth_guard]
     dependencies = {"current_user_id": Provide(get_current_user_id)}
 
-    @get("/outputs/{output_id:uuid}")
+    @get("/outputs/{output_id:uuid}", guards=[content_auth_guard])
     async def proxy_output(
         self,
         current_user_id: UUID,
@@ -70,7 +69,7 @@ class ContentProxyController(Controller):
 
         return await self._stream_from_r2(r2_storage, storage_key, etag, content_proxy.ttl)
 
-    @get("/uploads/{image_id:uuid}")
+    @get("/uploads/{image_id:uuid}", guards=[content_auth_guard])
     async def proxy_upload(
         self,
         current_user_id: UUID,
@@ -100,7 +99,7 @@ class ContentProxyController(Controller):
 
         return await self._stream_from_r2(r2_storage, storage_key, etag, content_proxy.ttl)
 
-    @delete("/{content_id:uuid}", status_code=HTTP_204_NO_CONTENT)
+    @delete("/{content_id:uuid}", status_code=HTTP_204_NO_CONTENT, guards=[auth_guard])
     async def delete_content(
         self,
         current_user_id: UUID,

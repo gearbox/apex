@@ -583,7 +583,34 @@ class TestAuthGuardUncoveredBranches:
         conn = self._make_connection(jwt_service=jwt_service, authorization="Bearer tok")
         with (
             patch.object(jwt_service, "decode_access_token", return_value=fake_payload),
-            pytest.raises(NotAuthorizedException, match="Invalid token subject"),
+            pytest.raises(NotAuthorizedException, match="Invalid or expired token"),
+        ):
+            await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+    @pytest.mark.asyncio
+    async def test_auth_guard_rejects_unscoped_token_on_product_request(
+        self, jwt_service: JWTService, test_user_id: UUID
+    ) -> None:
+        """Token with product_id=None is rejected when the request has a product scope."""
+        from unittest.mock import MagicMock, patch
+
+        from litestar.exceptions import NotAuthorizedException
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        fake_payload = MagicMock()
+        fake_payload.sub = str(test_user_id)
+        fake_payload.product_id = None
+
+        conn = self._make_connection(
+            jwt_service=jwt_service,
+            authorization="Bearer tok",
+            state_product_id="vex",
+        )
+        with (
+            patch.object(jwt_service, "decode_access_token", return_value=fake_payload),
+            pytest.raises(NotAuthorizedException, match="not scoped to the requested product"),
         ):
             await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 

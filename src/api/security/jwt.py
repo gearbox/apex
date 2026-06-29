@@ -147,6 +147,86 @@ class JWTService:
         except jwt.InvalidTokenError:
             return None
 
+    def create_content_token(
+        self,
+        user_id: UUID,
+        *,
+        product_id: str,
+        ttl: timedelta,
+    ) -> tuple[str, datetime]:
+        """Create a content-only authentication token.
+
+        Args:
+            user_id: User ID to encode in token.
+            product_id: Product scope — token is rejected on other products.
+            ttl: Token lifetime.
+
+        Returns:
+            Tuple of (token string, expiration datetime).
+        """
+        now = datetime.now(UTC)
+        expires_at = now + ttl
+
+        payload: dict[str, Any] = {
+            "sub": str(user_id),
+            "exp": int(expires_at.timestamp()),
+            "iat": int(now.timestamp()),
+            "jti": generate_token(16),
+            "type": "content",
+            "product_id": product_id,
+        }
+
+        if self._config.issuer:
+            payload["iss"] = self._config.issuer
+        if self._config.audience:
+            payload["aud"] = self._config.audience
+
+        token = jwt.encode(
+            payload,
+            self._config.secret_key,
+            algorithm=self._config.algorithm,
+        )
+
+        return token, expires_at
+
+    def decode_content_token(self, token: str) -> TokenPayload | None:
+        """Decode and validate a content token.
+
+        Args:
+            token: JWT token string.
+
+        Returns:
+            TokenPayload if valid and type=="content", None on any failure.
+        """
+        try:
+            options = {"require": ["sub", "exp", "iat", "jti"]}
+
+            payload = jwt.decode(
+                token,
+                self._config.secret_key,
+                algorithms=[self._config.algorithm],
+                options=options,  # type: ignore[arg-type]
+                issuer=self._config.issuer,
+                audience=self._config.audience,
+            )
+
+            if payload.get("type") != "content":
+                return None
+
+            return TokenPayload(
+                sub=payload["sub"],
+                exp=payload["exp"],
+                iat=payload["iat"],
+                jti=payload["jti"],
+                type="content",
+                product_id=payload.get("product_id"),
+            )
+
+        except jwt.ExpiredSignatureError:
+            return None
+        except jwt.InvalidTokenError:
+            return None
+
     def get_user_id_from_token(self, token: str) -> UUID | None:
         """Extract user ID from a valid token.
 

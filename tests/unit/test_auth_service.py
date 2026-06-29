@@ -330,10 +330,11 @@ class TestAuthServiceRefresh:
         # Mock: new token creation
         mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
 
-        tokens = await auth_service.refresh_tokens(refresh_token)
+        tokens, returned_user_id = await auth_service.refresh_tokens(refresh_token)
 
         assert tokens.access_token is not None
         assert tokens.refresh_token is not None
+        assert returned_user_id == user_id
         mock_repository.revoke_refresh_token.assert_called_once_with(mock_token.id)
 
     @pytest.mark.asyncio
