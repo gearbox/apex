@@ -32,7 +32,11 @@ from src.api.schemas.auth import (
 )
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.security import auth_guard
-from src.api.security.content_cookie import attach_content_cookie, clear_content_cookie
+from src.api.security.content_cookie import (
+    attach_content_cookie,
+    clear_content_cookie,
+    effective_cookie_domain,
+)
 from src.api.security.jwt import JWTService
 from src.api.services.auth import (
     AuthService,
@@ -387,7 +391,7 @@ class AuthController(Controller):
             status_code=HTTP_200_OK,
             cookies=[
                 clear_content_cookie(
-                    domain=product_config.cookie_domain,
+                    domain=effective_cookie_domain(settings, product_config),
                     secure=settings.content_cookie_secure,
                 )
             ],

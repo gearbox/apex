@@ -9,10 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import structlog
+
 from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
 from src.core.enums import OutputMediaType
 from src.core.thumbnails import label_for_max_edge
 from src.db.models.storage import GenerationOutput, UserImage
+
+logger = structlog.get_logger(__name__)
 
 OUTPUT_PREFIX = "/v1/content/outputs"
 UPLOAD_PREFIX = "/v1/content/uploads"
@@ -43,16 +47,18 @@ def _build_media(
         label = label_for_max_edge(d.thumbnail_max_edge)
         if label is None:
             continue
-        variants.append(
-            ImageVariant(
+        w, h = d.width, d.height
+        if w is None or h is None:
+            logger.warning(
+                "media.variant.missing_dims",
+                content_id=str(d.id),
                 label=label,
-                width=d.width,
-                height=d.height,
-                url=f"{url_prefix}/{d.id}",
+                thumbnail_max_edge=d.thumbnail_max_edge,
             )
-        )
+            continue
+        variants.append(ImageVariant(label=label, width=w, height=h, url=f"{url_prefix}/{d.id}"))
 
-    variants.sort(key=lambda v: v.width or v.height or 0)
+    variants.sort(key=lambda v: v.width)
 
     return MediaObject(
         media_type=media_type,

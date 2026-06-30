@@ -16,6 +16,17 @@ if TYPE_CHECKING:
     from src.core.product import ProductConfig
 
 
+def effective_cookie_domain(settings: Settings, product_config: ProductConfig) -> str | None:
+    """Return the cookie Domain to use, or None for a host-only cookie.
+
+    Host-only in dev (when Secure is also dropped) so the content cookie is
+    actually stored over http://localhost; the product's registrable domain
+    in production. Keyed off the same flag as the Secure attribute so the two
+    never diverge.
+    """
+    return product_config.cookie_domain if settings.content_cookie_secure else None
+
+
 def build_content_cookie(
     token: str,
     *,
@@ -97,7 +108,7 @@ def attach_content_cookie(
     response.cookies.append(
         build_content_cookie(
             content_token,
-            domain=product_config.cookie_domain,
+            domain=effective_cookie_domain(settings, product_config),
             secure=settings.content_cookie_secure,
             max_age=settings.content_cookie_ttl_hours * 3600,
         )

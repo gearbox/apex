@@ -148,3 +148,39 @@ class TestBuildOutputMedia:
         media = build_output_media(full, [md, sm])
         assert media.variants[0].width == 150
         assert media.variants[1].width == 512
+
+
+class TestVariantMissingDims:
+    def test_missing_width_skips_variant_and_logs(self) -> None:
+        import structlog.testing
+
+        full = _make_output_row()
+        missing_width = _make_output_row(thumbnail_max_edge=150, width=None)
+        with structlog.testing.capture_logs() as cap:
+            media = build_output_media(full, [missing_width])
+
+        assert media.variants == []
+        assert len(cap) == 1
+        assert cap[0]["event"] == "media.variant.missing_dims"
+        assert cap[0]["log_level"] == "warning"
+
+    def test_missing_height_skips_variant_and_logs(self) -> None:
+        import structlog.testing
+
+        full = _make_output_row()
+        missing_height = _make_output_row(thumbnail_max_edge=150, width=150, height=None)
+        with structlog.testing.capture_logs() as cap:
+            media = build_output_media(full, [missing_height])
+
+        assert media.variants == []
+        assert len(cap) == 1
+        assert cap[0]["event"] == "media.variant.missing_dims"
+
+    def test_valid_variant_dims_are_int(self) -> None:
+        full = _make_output_row()
+        sm = _make_output_row(thumbnail_max_edge=150, width=150, height=100)
+        media = build_output_media(full, [sm])
+
+        assert len(media.variants) == 1
+        assert isinstance(media.variants[0].width, int)
+        assert isinstance(media.variants[0].height, int)

@@ -41,6 +41,7 @@ def _make_media(
             content_type=content_type,
             size_bytes=12345,
         ),
+        variants=[],
     )
 
 
