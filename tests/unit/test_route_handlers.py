@@ -7,11 +7,21 @@ without spinning up Litestar's HTTP layer.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import msgspec
 import pytest
-from litestar.status_codes import HTTP_200_OK, HTTP_404_NOT_FOUND
+from litestar.exceptions import (
+    NotAuthorizedException,
+    NotFoundException,
+    PermissionDeniedException,
+    ValidationException,
+)
+from litestar.response import Response, ServerSentEvent, Stream
+from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
 pytestmark = pytest.mark.unit
 
@@ -128,8 +138,6 @@ class TestJobRouteHandlers:
         assert response.status_code == HTTP_404_NOT_FOUND
 
     async def test_delete_job_succeeds(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.jobs import UnifiedJobController
 
         mock_job = MagicMock()
@@ -151,10 +159,6 @@ class TestJobRouteHandlers:
         session.commit.assert_awaited_once()
 
     async def test_delete_job_raises_404_when_not_found(self) -> None:
-        from unittest.mock import patch
-
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.jobs import UnifiedJobController
 
         session = AsyncMock()
@@ -197,8 +201,6 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_200_OK
 
     async def test_get_profile_raises_404_on_not_found(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.user import UserController
         from src.api.services.user import UserNotFoundError
 
@@ -238,8 +240,6 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_200_OK
 
     async def test_update_profile_raises_404_on_not_found(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.user import UserController
         from src.api.services.user import UserNotFoundError
 
@@ -256,8 +256,6 @@ class TestUserRouteHandlers:
             )
 
     async def test_update_profile_returns_400_on_email_exists(self) -> None:
-        from litestar.status_codes import HTTP_400_BAD_REQUEST
-
         from src.api.routes.user import UserController
         from src.api.services.user import EmailAlreadyExistsError
 
@@ -274,8 +272,6 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_400_BAD_REQUEST
 
     async def test_update_profile_returns_400_on_age_verification_error(self) -> None:
-        from litestar.status_codes import HTTP_400_BAD_REQUEST
-
         from src.api.routes.user import UserController
         from src.api.services.age_verification import AgeVerificationError
 
@@ -312,8 +308,6 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_200_OK
 
     async def test_change_password_returns_400_on_invalid_password(self) -> None:
-        from litestar.status_codes import HTTP_400_BAD_REQUEST
-
         from src.api.routes.user import UserController
         from src.api.services.user import InvalidPasswordError
 
@@ -333,8 +327,6 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_400_BAD_REQUEST
 
     async def test_change_password_raises_404_on_user_not_found(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.user import UserController
         from src.api.services.user import UserNotFoundError
 
@@ -354,8 +346,6 @@ class TestUserRouteHandlers:
             )
 
     async def test_delete_account_success(self) -> None:
-        from datetime import UTC, datetime
-
         from src.api.routes.user import UserController
 
         user_service = AsyncMock()
@@ -369,8 +359,6 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_200_OK
 
     async def test_delete_account_raises_404_on_user_not_found(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.user import UserController
         from src.api.services.user import UserNotFoundError
 
@@ -399,8 +387,6 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_200_OK
 
     async def test_get_stats_raises_404_on_user_not_found(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.user import UserController
         from src.api.services.user import UserNotFoundError
 
@@ -429,9 +415,6 @@ class TestUserRouteHandlers:
         assert "3" in response.content.message
 
     async def test_get_current_user_id_raises_when_missing(self) -> None:
-        import pytest
-        from litestar.exceptions import NotAuthorizedException
-
         from src.api.routes.user import get_current_user_id
 
         request = MagicMock()
@@ -541,8 +524,6 @@ class TestContentRouteHandlers:
         content_proxy.delete_content.assert_awaited_once()
 
     async def test_delete_content_raises_404_on_not_found(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.content import ContentProxyController
         from src.api.services.content_proxy import ContentNotFoundError
 
@@ -616,8 +597,6 @@ class TestAdminManagementRouteHandlers:
         assert "granted" in result["message"]
 
     async def test_grant_role_raises_permission_denied_on_self_modification(self) -> None:
-        from litestar.exceptions import PermissionDeniedException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import SelfModificationError
 
@@ -640,8 +619,6 @@ class TestAdminManagementRouteHandlers:
             )
 
     async def test_grant_role_raises_validation_on_invalid_transition(self) -> None:
-        from litestar.exceptions import ValidationException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import InvalidRoleTransitionError
 
@@ -664,8 +641,6 @@ class TestAdminManagementRouteHandlers:
             )
 
     async def test_grant_role_raises_not_found_on_mgmt_error(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import AdminManagementError
 
@@ -705,8 +680,6 @@ class TestAdminManagementRouteHandlers:
         assert "revoked" in result["message"]
 
     async def test_revoke_role_raises_validation_on_last_superadmin(self) -> None:
-        from litestar.exceptions import ValidationException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import LastSuperadminError
 
@@ -725,8 +698,6 @@ class TestAdminManagementRouteHandlers:
             )
 
     async def test_revoke_role_raises_validation_on_invalid_transition(self) -> None:
-        from litestar.exceptions import ValidationException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import InvalidRoleTransitionError
 
@@ -745,8 +716,6 @@ class TestAdminManagementRouteHandlers:
             )
 
     async def test_revoke_role_raises_permission_denied_on_self_modification(self) -> None:
-        from litestar.exceptions import PermissionDeniedException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import SelfModificationError
 
@@ -765,8 +734,6 @@ class TestAdminManagementRouteHandlers:
             )
 
     async def test_revoke_role_raises_not_found_on_mgmt_error(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import AdminManagementError
 
@@ -806,8 +773,6 @@ class TestAdminManagementRouteHandlers:
         assert "granted" in result["message"]
 
     async def test_grant_permission_raises_validation_on_invalid_transition(self) -> None:
-        from litestar.exceptions import ValidationException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import InvalidRoleTransitionError
 
@@ -830,8 +795,6 @@ class TestAdminManagementRouteHandlers:
             )
 
     async def test_grant_permission_raises_not_found_on_mgmt_error(self) -> None:
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.admin_management import AdminManagementController
         from src.api.services.admin_management import AdminManagementError
 
@@ -876,6 +839,7 @@ class TestAdminManagementRouteHandlers:
 
     async def test_get_audit_log_returns_list(self) -> None:
         from src.api.routes.admin_management import AdminManagementController
+        from src.api.schemas.pagination import CursorPage
 
         mgmt = self._make_mgmt_service()
         response = await AdminManagementController.get_audit_log.fn(  # type: ignore[attr-defined]
@@ -885,7 +849,11 @@ class TestAdminManagementRouteHandlers:
             product_id="vex",
             admin_mgmt=mgmt,
         )
-        assert response == []
+
+        assert isinstance(response, CursorPage)
+        assert response.items == []
+        assert response.has_more is False
+        assert response.next_cursor is None
 
 
 # ---------------------------------------------------------------------------
@@ -979,8 +947,6 @@ class TestHealthRouteHandlers:
         assert result.status == "healthy"
 
     async def test_stream_returns_sse(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.health import AdminHealthController
 
         health_service = AsyncMock()
@@ -998,9 +964,6 @@ class TestHealthRouteHandlers:
         assert response is not None
 
     async def test_history_returns_snapshot_list(self) -> None:
-        from datetime import UTC, datetime
-        from unittest.mock import patch
-
         from src.api.routes.health import AdminHealthController
 
         session = AsyncMock()
@@ -1037,8 +1000,6 @@ class TestHealthRouteHandlers:
 
 class TestProvidersRouteHandlers:
     async def test_list_providers_no_auth_no_grok(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.providers import ProvidersController
         from src.core.enums import Provider
 
@@ -1068,8 +1029,6 @@ class TestProvidersRouteHandlers:
         assert grok_provider.available is False
 
     async def test_list_providers_with_authenticated_user(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.providers import ProvidersController
         from src.core.enums import Provider
 
@@ -1115,8 +1074,6 @@ class TestProvidersRouteHandlers:
         assert grok_provider.available is True
 
     def test_configured_providers_controls_availability(self) -> None:
-        from unittest.mock import MagicMock
-
         from src.api.services.generation.service import GenerationService
         from src.core.enums import Provider
 
@@ -1130,8 +1087,6 @@ class TestProvidersRouteHandlers:
         assert Provider.AISHA not in svc.configured_providers
 
     async def test_list_providers_with_valid_model_record(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.providers import ProvidersController
 
         session = AsyncMock()
@@ -1167,8 +1122,6 @@ class TestProvidersRouteHandlers:
         assert aisha_provider.models[0].model_key == "aisha-image"
 
     async def test_list_providers_skips_unknown_model_key(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.providers import ProvidersController
 
         session = AsyncMock()
@@ -1200,8 +1153,6 @@ class TestProvidersRouteHandlers:
             assert provider.models == []
 
     async def test_list_providers_user_not_found_returns_no_context(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.providers import ProvidersController
 
         session = AsyncMock()
@@ -1340,8 +1291,6 @@ class TestAuthRouteHandlers:
         assert response.status_code == 400
 
     async def test_resend_verification_user_not_found(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.auth import AuthController
 
         session = AsyncMock()
@@ -1359,9 +1308,6 @@ class TestAuthRouteHandlers:
         assert response.status_code == 400
 
     async def test_resend_verification_already_verified(self) -> None:
-        from datetime import UTC, datetime
-        from unittest.mock import patch
-
         from src.api.routes.auth import AuthController
 
         session = AsyncMock()
@@ -1381,8 +1327,6 @@ class TestAuthRouteHandlers:
         assert response.status_code == 200
 
     async def test_resend_verification_sends_email(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.auth import AuthController
 
         session = AsyncMock()
@@ -1403,8 +1347,6 @@ class TestAuthRouteHandlers:
         assert response.status_code == 200
 
     async def test_resend_verification_user_not_found_error(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.auth import AuthController
         from src.api.services.email_verification import UserNotFoundError
 
@@ -1788,8 +1730,6 @@ class TestUnifiedGenerationRouteHandlers:
         assert response.status_code == 201
 
     async def test_generate_success(self) -> None:
-        from datetime import UTC, datetime
-
         from src.api.routes.unified_generation import UnifiedGenerationController
         from src.api.schemas.jobs import JobCreatedResponse
         from src.core.enums import GenerationType, JobStatus
@@ -1978,8 +1918,6 @@ class TestUnifiedGenerationRouteHandlers:
         assert response.status_code == 400
 
     async def test_generate_bare_exception_reraises(self) -> None:
-        import pytest
-
         from src.api.routes.unified_generation import UnifiedGenerationController
 
         generation_service = AsyncMock()
@@ -2243,8 +2181,6 @@ class TestOrganizationRouteHandlers:
 
 class TestGpuSessionRouteHandlers:
     async def test_start_session_success(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session = MagicMock()
@@ -2362,8 +2298,6 @@ class TestGpuSessionRouteHandlers:
         assert response.status_code == 503
 
     async def test_list_sessions(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session_service = AsyncMock()
@@ -2382,9 +2316,6 @@ class TestGpuSessionRouteHandlers:
         assert len(result.sessions) == 1
 
     async def test_get_session_not_found(self) -> None:
-        import pytest
-        from litestar.exceptions import NotFoundException
-
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session_service = AsyncMock()
@@ -2401,8 +2332,6 @@ class TestGpuSessionRouteHandlers:
             )
 
     async def test_get_session_found(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session_service = AsyncMock()
@@ -2423,8 +2352,6 @@ class TestGpuSessionRouteHandlers:
         assert result is not None
 
     async def test_pause_success(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session_service = AsyncMock()
@@ -2480,8 +2407,6 @@ class TestGpuSessionRouteHandlers:
         assert response.status_code == 404
 
     async def test_resume_success(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session_service = AsyncMock()
@@ -2548,8 +2473,6 @@ class TestGpuSessionRouteHandlers:
         assert response.status_code == 200
 
     async def test_stop_executes(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session_service = AsyncMock()
@@ -2640,11 +2563,6 @@ class TestGpuSessionRouteHandlers:
         assert response.status_code == 404
 
     async def test_start_bundle_override_non_admin_forbidden(self) -> None:
-        from unittest.mock import patch
-
-        import pytest
-        from litestar.exceptions import PermissionDeniedException
-
         from src.api.routes.gpu_session import GpuSessionController
 
         user_mock = MagicMock()
@@ -2674,8 +2592,6 @@ class TestGpuSessionRouteHandlers:
                 )
 
     def test_stop_confirmation_response_excludes_bundle_name(self) -> None:
-        import msgspec
-
         from src.api.schemas.gpu_session import StopConfirmationResponse
 
         fields = {f.name for f in msgspec.structs.fields(StopConfirmationResponse)}
@@ -2689,8 +2605,6 @@ class TestGpuSessionRouteHandlers:
 
 class TestSSERouteHandlers:
     async def test_create_sse_ticket_no_redis(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.sse import SSEController
 
         settings = MagicMock()
@@ -2705,8 +2619,6 @@ class TestSSERouteHandlers:
         assert response.status_code == 503
 
     async def test_create_sse_ticket_with_redis(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.sse import SSEController
 
         settings = MagicMock()
@@ -2723,8 +2635,6 @@ class TestSSERouteHandlers:
         assert result.ticket == "ticket-xyz"
 
     async def test_stream_no_redis(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.sse import SSEController
 
         settings = MagicMock()
@@ -2740,8 +2650,6 @@ class TestSSERouteHandlers:
         assert response.status_code == 503
 
     async def test_stream_invalid_ticket(self) -> None:
-        from unittest.mock import patch
-
         from src.api.routes.sse import SSEController
 
         settings = MagicMock()
@@ -2759,10 +2667,6 @@ class TestSSERouteHandlers:
         assert response.status_code == 401
 
     async def test_stream_valid_ticket_returns_sse(self) -> None:
-        from unittest.mock import patch
-
-        from litestar.response import ServerSentEvent
-
         from src.api.routes.sse import SSEController
 
         settings = MagicMock()
@@ -2782,10 +2686,6 @@ class TestSSERouteHandlers:
 
 class TestContentStreamFromR2:
     async def test_stream_from_r2_success(self) -> None:
-        from contextlib import asynccontextmanager
-
-        from litestar.response import Stream
-
         from src.api.routes.content import ContentProxyController
 
         client_mock = AsyncMock()
@@ -2808,10 +2708,6 @@ class TestContentStreamFromR2:
         assert isinstance(result, Stream)
 
     async def test_stream_from_r2_storage_error_returns_502(self) -> None:
-        from contextlib import asynccontextmanager
-
-        from litestar.response import Response
-
         from src.api.routes.content import ContentProxyController
         from src.api.services.storage.exceptions import StorageError
 

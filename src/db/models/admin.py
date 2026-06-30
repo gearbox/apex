@@ -90,5 +90,5 @@ class AdminAuditLog(Base):
 
     __table_args__ = (
         Index("ix_audit_target_product", "target_user_id", "product_id"),
-        Index("ix_audit_created", "created_at"),
+        Index("ix_audit_product_created_id", "product_id", "created_at", "id"),
     )

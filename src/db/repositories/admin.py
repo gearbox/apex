@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 import structlog
-from sqlalchemy import CursorResult, delete, select
+from sqlalchemy import CursorResult, delete, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 from src.db.models.admin import AdminAuditLog, AdminPermissionGrant
 
@@ -126,11 +129,29 @@ class AdminRepository:
         *,
         target_user_id: UUID | None = None,
         limit: int = 50,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
     ) -> Sequence[AdminAuditLog]:
-        """Retrieve audit log entries, newest first."""
+        """Retrieve audit log entries, newest first, with keyset pagination.
+
+        Uses the limit+1 fetch pattern — caller checks ``len(result) > limit``
+        to determine ``has_more``. Ordered by ``(created_at DESC, id DESC)``.
+        """
         stmt = select(AdminAuditLog).where(AdminAuditLog.product_id == product_id)
         if target_user_id is not None:
             stmt = stmt.where(AdminAuditLog.target_user_id == target_user_id)
-        stmt = stmt.order_by(AdminAuditLog.created_at.desc()).limit(limit)
+        if (cursor_ts is None) != (cursor_id is None):
+            raise ValueError(
+                "cursor_ts and cursor_id must be provided together (got one without the other)"
+            )
+        if cursor_ts is not None and cursor_id is not None:
+            stmt = stmt.where(
+                tuple_(AdminAuditLog.created_at, AdminAuditLog.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
+        stmt = stmt.order_by(
+            AdminAuditLog.created_at.desc(),
+            AdminAuditLog.id.desc(),
+        ).limit(limit + 1)
         result = await self._session.execute(stmt)
         return result.scalars().all()
