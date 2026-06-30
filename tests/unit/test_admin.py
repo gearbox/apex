@@ -578,6 +578,39 @@ class TestListOrganizations:
 
 
 # ---------------------------------------------------------------------------
+# AdminRepository.get_audit_log — partial cursor guard
+# ---------------------------------------------------------------------------
+
+
+class TestAdminRepositoryAuditLogCursorGuard:
+    async def test_raises_when_cursor_ts_given_without_cursor_id(self) -> None:
+        """Providing cursor_ts without cursor_id must raise ValueError immediately."""
+        from datetime import UTC, datetime
+
+        from src.db.repositories.admin import AdminRepository
+
+        repo = AdminRepository(MagicMock())
+        with pytest.raises(ValueError, match="cursor_ts and cursor_id must be provided together"):
+            await repo.get_audit_log(
+                "vex",
+                cursor_ts=datetime(2026, 1, 1, tzinfo=UTC),
+                cursor_id=None,
+            )
+
+    async def test_raises_when_cursor_id_given_without_cursor_ts(self) -> None:
+        """Providing cursor_id without cursor_ts must raise ValueError immediately."""
+        from src.db.repositories.admin import AdminRepository
+
+        repo = AdminRepository(MagicMock())
+        with pytest.raises(ValueError, match="cursor_ts and cursor_id must be provided together"):
+            await repo.get_audit_log(
+                "vex",
+                cursor_ts=None,
+                cursor_id=uuid4(),
+            )
+
+
+# ---------------------------------------------------------------------------
 # GET /v1/admin/manage/audit — handler unit tests
 # ---------------------------------------------------------------------------
 

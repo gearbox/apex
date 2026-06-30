@@ -853,6 +853,7 @@ class TestAdminManagementRouteHandlers:
         assert isinstance(response, CursorPage)
         assert response.items == []
         assert response.has_more is False
+        assert response.next_cursor is None
 
 
 # ---------------------------------------------------------------------------

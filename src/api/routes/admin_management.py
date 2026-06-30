@@ -213,7 +213,7 @@ class AdminManagementController(Controller):
 
         has_more = len(entries) > limit
         if has_more:
-            entries = list(entries)[:limit]
+            entries = entries[:limit]
 
         items = [
             AuditLogEntry(

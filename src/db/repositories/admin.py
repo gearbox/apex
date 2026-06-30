@@ -140,6 +140,10 @@ class AdminRepository:
         stmt = select(AdminAuditLog).where(AdminAuditLog.product_id == product_id)
         if target_user_id is not None:
             stmt = stmt.where(AdminAuditLog.target_user_id == target_user_id)
+        if (cursor_ts is None) != (cursor_id is None):
+            raise ValueError(
+                "cursor_ts and cursor_id must be provided together (got one without the other)"
+            )
         if cursor_ts is not None and cursor_id is not None:
             stmt = stmt.where(
                 tuple_(AdminAuditLog.created_at, AdminAuditLog.id)
