@@ -105,6 +105,7 @@ def _make_media() -> MediaObject:
             content_type="image/png",
             size_bytes=1024,
         ),
+        variants=[],
     )
 
 

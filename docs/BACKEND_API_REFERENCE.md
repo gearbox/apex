@@ -1,6 +1,6 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-06-29 — Cursor pagination on audit log (§14): `GET /v1/admin/manage/audit` now returns `CursorPage<AuditLogEntry>` instead of a bare array. Pass `cursor=next_cursor` for subsequent pages. Frontend must regenerate types and switch to cursor-scroll. Prior (2026-06-27): Unified Image Variants (§6, §8, §10): `MediaObject` replaces all per-output presigned URL fields across the Jobs, Storage, and Gallery APIs. Jobs API no longer presigns URLs — all content URLs are stable content-proxy paths. Gallery cover logic now always uses the job's own primary output (no longer sources input images). Upload thumbnails (sm=150px, md=512px WEBP) generated automatically on upload._
+> _Last updated: 2026-06-30 — MediaObject contract tightening (§5b): `ImageVariant.width`/`height` are now required non-null integers (serializer skips and logs any legacy dimensionless variant row rather than emitting null). `MediaObject.variants` is now required (was optional with a default) — OpenAPI marks it in `required`. Content cookie `Domain` is now omitted (host-only) in dev mode so the `apex_content` cookie is stored correctly over `http://localhost`; production posture unchanged (`Domain=<product>`, `Secure`). Frontend must re-run `gen:api` to pick up the updated types, then drop `?? []` on `variants` and `.filter(v => v.width)` guards. Prior (2026-06-29): Cursor pagination on audit log (§14): `GET /v1/admin/manage/audit` now returns `CursorPage<AuditLogEntry>` instead of a bare array. Pass `cursor=next_cursor` for subsequent pages. Frontend must regenerate types and switch to cursor-scroll. Prior (2026-06-27): Unified Image Variants (§6, §8, §10): `MediaObject` replaces all per-output presigned URL fields across the Jobs, Storage, and Gallery APIs. Jobs API no longer presigns URLs — all content URLs are stable content-proxy paths. Gallery cover logic now always uses the job's own primary output (no longer sources input images). Upload thumbnails (sm=150px, md=512px WEBP) generated automatically on upload._
 >
 > _Prior (2026-06-26): removed `bundle_name` and `bundle_version` from the frontend-facing API surface (§7, §15). Prior (2026-06-17): synced the doc with `master` — Aisha generation parameter system (§4), quality-tier capabilities (§5), per-output `thumbnail_url` (§6), GPU-session provisioning fields + internal callback (§7), corrected billing public-endpoint behaviour (§11), corrected model-capability matrix and new enums (§17), corrected `POST /v1/auth/register` contract (§2)._
 
@@ -477,7 +477,7 @@ All image- and video-bearing responses use a unified `MediaObject` envelope. URL
 interface MediaObject {
   media_type: "image" | "video";
   original: MediaOriginal;
-  variants: ImageVariant[];  // preview rasters, ascending by width; may be empty
+  variants: ImageVariant[];  // preview rasters, ascending by width; always present, may be empty
 }
 
 interface MediaOriginal {
@@ -489,10 +489,10 @@ interface MediaOriginal {
 }
 
 interface ImageVariant {
-  label: string;        // "sm" (150px longest edge) or "md" (512px longest edge)
-  width: number | null; // actual pixel width of this variant
-  height: number | null;
-  url: string;          // "/v1/content/outputs/{id}" or "/v1/content/uploads/{id}"
+  label: string;   // "sm" (150px longest edge) or "md" (512px longest edge)
+  width: number;   // actual pixel width of this variant (always non-null)
+  height: number;  // actual pixel height of this variant (always non-null)
+  url: string;     // "/v1/content/outputs/{id}" or "/v1/content/uploads/{id}"
 }
 ```
 

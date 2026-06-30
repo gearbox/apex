@@ -482,3 +482,88 @@ class TestAuthControllerCookies:
 
         cookie = response.cookies[0]
         assert cookie.secure is False
+
+
+# ---------------------------------------------------------------------------
+# effective_cookie_domain unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestEffectiveCookieDomain:
+    def test_returns_none_in_dev(self) -> None:
+        from src.api.security.content_cookie import effective_cookie_domain
+        from src.core.product_registry import resolve_product_by_slug
+
+        debug_settings = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            debug=True,
+        )
+        vex_config = resolve_product_by_slug("vex")
+        assert vex_config is not None
+        assert effective_cookie_domain(debug_settings, vex_config) is None
+
+    def test_returns_product_domain_in_prod(self) -> None:
+        from src.api.security.content_cookie import effective_cookie_domain
+        from src.core.product_registry import resolve_product_by_slug
+
+        prod_settings = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            debug=False,
+        )
+        vex_config = resolve_product_by_slug("vex")
+        assert vex_config is not None
+        assert effective_cookie_domain(prod_settings, vex_config) == "vex.pics"
+
+
+# ---------------------------------------------------------------------------
+# attach_content_cookie domain behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestAttachContentCookieDomain:
+    async def test_host_only_in_dev(self, jwt_service: JWTService) -> None:
+        from litestar import Response
+
+        from src.api.security.content_cookie import attach_content_cookie
+
+        debug_settings = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            debug=True,
+        )
+        product_config = _make_product_config(domain=COOKIE_DOMAIN)
+        response: Response[dict[str, str]] = Response(content={"ok": "true"})
+        attach_content_cookie(
+            response,
+            user_id=uuid4(),
+            product_id=PRODUCT_ID,
+            jwt_service=jwt_service,
+            settings=debug_settings,
+            product_config=product_config,
+        )
+        assert len(response.cookies) == 1
+        cookie = response.cookies[0]
+        assert cookie.domain is None
+        assert cookie.secure is False
+
+    async def test_domain_set_in_prod(self, jwt_service: JWTService, settings: Settings) -> None:
+        from litestar import Response
+
+        from src.api.security.content_cookie import attach_content_cookie
+
+        product_config = _make_product_config(domain=COOKIE_DOMAIN)
+        response: Response[dict[str, str]] = Response(content={"ok": "true"})
+        attach_content_cookie(
+            response,
+            user_id=uuid4(),
+            product_id=PRODUCT_ID,
+            jwt_service=jwt_service,
+            settings=settings,
+            product_config=product_config,
+        )
+        assert len(response.cookies) == 1
+        cookie = response.cookies[0]
+        assert cookie.domain == COOKIE_DOMAIN
+        assert cookie.secure is True

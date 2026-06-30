@@ -13,10 +13,10 @@ class ImageVariant(msgspec.Struct, kw_only=True):
     label: str
     """Bucket label: 'sm' (150px longest edge) or 'md' (512px longest edge)."""
 
-    width: int | None = None
+    width: int
     """Actual pixel width of this variant."""
 
-    height: int | None = None
+    height: int
     """Actual pixel height of this variant."""
 
     url: str
@@ -50,5 +50,5 @@ class MediaObject(msgspec.Struct, kw_only=True):
 
     original: MediaOriginal
 
-    variants: list[ImageVariant] = msgspec.field(default_factory=list)
-    """Preview rasters, ascending by width. May be empty when no thumbnails exist."""
+    variants: list[ImageVariant]
+    """Preview rasters, ascending by width. Always present; may be empty."""
