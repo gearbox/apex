@@ -484,6 +484,99 @@ class TestDeleteContent:
         assert result is True
         mock_image_repo.delete.assert_awaited_once()
 
+    async def test_delete_commits_before_touching_r2(self) -> None:
+        """DB delete + commit must happen before any R2 delete call — the DB
+        is the source of truth; R2 cleanup is best-effort afterward."""
+        content_id = uuid4()
+        user_id = uuid4()
+        product_id = "vex"
+
+        mock_output = MagicMock()
+        mock_output.id = content_id
+        mock_output.storage_key = "users/x/outputs/job/file.png"
+        mock_output.product_id = product_id
+
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = mock_output
+        mock_output_repo.delete.return_value = True
+        mock_image_repo = AsyncMock()
+
+        call_order: list[str] = []
+        mock_output_repo.delete.side_effect = lambda *a, **k: call_order.append("db_delete")  # noqa: ARG005
+
+        service = _make_service()
+        service._storage.delete = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda *a, **k: call_order.append("r2_delete")  # noqa: ARG005
+        )
+        session = AsyncMock()
+        session.commit = AsyncMock(side_effect=lambda: call_order.append("commit"))
+
+        with (
+            patch(
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
+            ),
+        ):
+            await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id=product_id,
+                session=session,
+            )
+
+        assert call_order.index("db_delete") < call_order.index("commit")
+        assert call_order.index("commit") < call_order.index("r2_delete")
+
+    async def test_delete_r2_failure_does_not_raise_and_db_row_stays_deleted(self) -> None:
+        """If R2 delete raises after the DB row is already committed gone,
+        the error is logged and swallowed — not raised to the caller — since
+        the DB is already the source of truth and the request must not fail."""
+        content_id = uuid4()
+        user_id = uuid4()
+        product_id = "vex"
+
+        mock_output = MagicMock()
+        mock_output.id = content_id
+        mock_output.storage_key = "users/x/outputs/job/file.png"
+        mock_output.product_id = product_id
+
+        mock_output_repo = AsyncMock()
+        mock_output_repo.get.return_value = mock_output
+        mock_output_repo.delete.return_value = True
+        mock_image_repo = AsyncMock()
+
+        service = _make_service()
+        service._storage.delete = AsyncMock(  # type: ignore[method-assign]
+            side_effect=Exception("R2 unreachable")
+        )
+        session = AsyncMock()
+
+        with (
+            patch(
+                "src.api.services.content_proxy.OutputRepository",
+                return_value=mock_output_repo,
+            ),
+            patch(
+                "src.api.services.content_proxy.UserImageRepository",
+                return_value=mock_image_repo,
+            ),
+        ):
+            # Must not raise despite the R2 failure.
+            result = await service.delete_content(
+                content_id,
+                user_id=user_id,
+                product_id=product_id,
+                session=session,
+            )
+
+        assert result is True
+        mock_output_repo.delete.assert_awaited_once_with(content_id, user_id=user_id)
+        session.commit.assert_awaited_once()
+
 
 class TestSettingsContentUrlTtl:
     def test_default_ttl(self) -> None:

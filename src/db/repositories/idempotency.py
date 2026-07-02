@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,6 +95,44 @@ class IdempotencyRepository:
         record.response_body = response_body
         record.completed_at = datetime.now(UTC)
         await self._session.flush()
+
+    async def reclaim_stale(
+        self,
+        record_id: UUID,
+        *,
+        request_hash: str,
+        expires_at: datetime,
+        stale_before: datetime,
+    ) -> bool:
+        """Atomically take over a stale 'processing' record.
+
+        Guarded UPDATE: only matches rows still 'processing' with
+        ``created_at`` older than ``stale_before``. Resets ``created_at`` to
+        now as part of the same statement — this is what makes a second,
+        near-simultaneous reclaim attempt lose: it re-evaluates the WHERE
+        clause against the just-refreshed ``created_at`` (no longer stale)
+        once it gets past this UPDATE's row lock, so at most one caller ever
+        sees rowcount > 0. Also refreshes request_hash (matches the caller's
+        already-verified request) and expires_at (fresh TTL window instead of
+        inheriting whatever was left on the original attempt).
+
+        Returns:
+            True if this call won the reclaim, False if the row was no
+            longer stale/processing by the time the lock was granted.
+        """
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            update(IdempotencyKey)
+            .where(
+                IdempotencyKey.id == record_id,
+                IdempotencyKey.status == "processing",
+                IdempotencyKey.created_at < stale_before,
+            )
+            .values(created_at=now, request_hash=request_hash, expires_at=expires_at)
+        )
+        await self._session.flush()
+        rowcount: int = result.rowcount  # type: ignore[attr-defined]
+        return rowcount > 0
 
     async def mark_failed(self, record_id: UUID) -> None:
         """Mark an idempotency record as failed (allows retry with same key)."""

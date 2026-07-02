@@ -141,7 +141,7 @@ class AuthService:
 
         # Create user
         user_id = new_id()
-        password_hash = self._password.hash(password)
+        password_hash = await self._password.ahash(password)
 
         user = await self._repo.create_user(
             id=user_id,
@@ -210,15 +210,15 @@ class AuthService:
 
         if user is None:
             # Prevent timing attacks — covers both not-found and inactive accounts
-            self._password.hash("dummy_password")
+            await self._password.ahash("dummy_password")
             raise InvalidCredentialsError("Invalid email or password")
 
-        if not self._password.verify(user.password_hash, password):
+        if not await self._password.averify(user.password_hash, password):
             raise InvalidCredentialsError("Invalid email or password")
 
         # Check if password needs rehash (parameter upgrade)
         if self._password.needs_rehash(user.password_hash):
-            new_hash = self._password.hash(password)
+            new_hash = await self._password.ahash(password)
             await self._repo.update_user(user.id, password_hash=new_hash)
             logger.info("user.password_rehashed", user_id=str(user.id))
 

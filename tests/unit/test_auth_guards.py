@@ -640,10 +640,13 @@ class TestOptionalAuthGuard:
         self,
         jwt_service: JWTService | None = None,
         authorization: str | None = None,
+        product_id: str | None = None,
     ) -> Any:
         from unittest.mock import MagicMock
 
         state: dict[str, Any] = {}
+        if product_id is not None:
+            state["product_id"] = product_id
         conn = MagicMock()
         conn.headers.get.return_value = authorization
         conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
@@ -655,78 +658,119 @@ class TestOptionalAuthGuard:
 
     @pytest.mark.asyncio
     async def test_sets_none_when_no_token(self) -> None:
-        from unittest.mock import MagicMock
-
         from litestar.handlers import BaseRouteHandler
 
         from src.api.security.guards import optional_auth_guard
 
-        state: dict[str, Any] = {}
-        conn = MagicMock()
-        conn.headers.get.return_value = None
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
+        conn = self._make_connection()
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 
-        assert state["user_id"] is None
-        assert state["auth_user"] is None
+        assert conn.state.get("user_id") is None
+        assert conn.state.get("auth_user") is None
 
     @pytest.mark.asyncio
     async def test_sets_none_when_jwt_service_missing(self) -> None:
-        from unittest.mock import MagicMock
-
         from litestar.handlers import BaseRouteHandler
 
         from src.api.security.guards import optional_auth_guard
 
-        state: dict[str, Any] = {}
-        conn = MagicMock()
-        conn.headers.get.return_value = "Bearer sometoken"
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
-        conn.app.state.get.return_value = None
+        conn = self._make_connection(jwt_service=None, authorization="Bearer sometoken")
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 
-        assert state["user_id"] is None
-        assert state["auth_user"] is None
+        assert conn.state.get("user_id") is None
+        assert conn.state.get("auth_user") is None
 
     @pytest.mark.asyncio
     async def test_sets_user_id_when_valid_token(self, jwt_service: JWTService) -> None:
-        from unittest.mock import MagicMock
-
         from litestar.handlers import BaseRouteHandler
 
         from src.api.security.guards import optional_auth_guard
 
         uid = uuid4()
         token, _ = jwt_service.create_access_token(uid)
-        state: dict[str, Any] = {}
-        conn = MagicMock()
-        conn.headers.get.return_value = f"Bearer {token}"
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
-        conn.app.state.get.return_value = jwt_service
+        conn = self._make_connection(jwt_service=jwt_service, authorization=f"Bearer {token}")
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 
-        assert state["user_id"] == uid
-        assert isinstance(state["auth_user"], AuthenticatedUser)
-        assert state["auth_user"].user_id == uid
+        assert conn.state.get("user_id") == uid
+        assert isinstance(conn.state.get("auth_user"), AuthenticatedUser)
+        assert conn.state.get("auth_user").user_id == uid
 
     @pytest.mark.asyncio
     async def test_sets_none_when_invalid_token(self, jwt_service: JWTService) -> None:
-        from unittest.mock import MagicMock
-
         from litestar.handlers import BaseRouteHandler
 
         from src.api.security.guards import optional_auth_guard
 
-        state: dict[str, Any] = {}
-        conn = MagicMock()
-        conn.headers.get.return_value = "Bearer bad.token.here"
-        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
-        conn.app.state.get.return_value = jwt_service
+        conn = self._make_connection(jwt_service=jwt_service, authorization="Bearer bad.token.here")
 
         await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 
-        assert state["user_id"] is None
-        assert state["auth_user"] is None
+        assert conn.state.get("user_id") is None
+        assert conn.state.get("auth_user") is None
+
+    @pytest.mark.asyncio
+    async def test_sets_user_id_when_token_product_matches_request(
+        self, jwt_service: JWTService
+    ) -> None:
+        """A token scoped to the same product as the request authenticates normally."""
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid, product_id="vex")
+        conn = self._make_connection(
+            jwt_service=jwt_service, authorization=f"Bearer {token}", product_id="vex"
+        )
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert conn.state.get("user_id") == uid
+        assert conn.state.get("auth_user").user_id == uid
+
+    @pytest.mark.asyncio
+    async def test_degrades_to_anonymous_when_token_product_mismatches_request(
+        self, jwt_service: JWTService
+    ) -> None:
+        """A token scoped to a *different* product than the request degrades to
+        anonymous (no user_id set) rather than raising 401 — unlike auth_guard,
+        an optional guard must not turn a page that doesn't require
+        authentication into one that 401s for a stale other-product token."""
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid, product_id="synthara")
+        conn = self._make_connection(
+            jwt_service=jwt_service, authorization=f"Bearer {token}", product_id="vex"
+        )
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert conn.state.get("user_id") is None
+        assert conn.state.get("auth_user") is None
+
+    @pytest.mark.asyncio
+    async def test_degrades_to_anonymous_when_token_has_no_product_claim(
+        self, jwt_service: JWTService
+    ) -> None:
+        """A token with no product_id claim at all (malformed/legacy) also
+        degrades to anonymous on a product-scoped request."""
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid)  # no product_id
+        conn = self._make_connection(
+            jwt_service=jwt_service, authorization=f"Bearer {token}", product_id="vex"
+        )
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert conn.state.get("user_id") is None
+        assert conn.state.get("auth_user") is None

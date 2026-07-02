@@ -6,8 +6,10 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.db.models.idempotency import IdempotencyKey
 from src.db.repositories.idempotency import IdempotencyRepository
 
 
@@ -156,6 +158,112 @@ async def test_get_existing_returns_none_for_expired(
 
     result = await idempotency_repo.get_existing(user.id, "vex", "expired-key")
     assert result is None
+
+
+async def test_reclaim_stale_succeeds_when_old_enough(
+    idempotency_repo: IdempotencyRepository, make_user, db_session: AsyncSession
+) -> None:
+    """A 'processing' record older than stale_before is atomically reclaimed,
+    with created_at refreshed to now (so a second reclaim pass can't also
+    succeed against the same stale window)."""
+    user = await make_user(email=f"idem-{uuid4().hex[:6]}@example.com")
+    record = await idempotency_repo.try_acquire(
+        id=uuid4(),
+        user_id=user.id,
+        product_id="vex",
+        idempotency_key="stale-key",
+        operation="generation",
+        request_hash="abc",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+    )
+    assert record is not None
+
+    # Backdate created_at to simulate a stranded 'processing' record (the
+    # owning request crashed before calling complete()/fail()).
+    old_created_at = datetime.now(UTC) - timedelta(seconds=200)
+    await db_session.execute(
+        update(IdempotencyKey)
+        .where(IdempotencyKey.id == record.id)
+        .values(created_at=old_created_at)
+    )
+    await db_session.flush()
+
+    new_expires_at = datetime.now(UTC) + timedelta(hours=24)
+    reclaimed = await idempotency_repo.reclaim_stale(
+        record.id,
+        request_hash="abc",
+        expires_at=new_expires_at,
+        stale_before=datetime.now(UTC) - timedelta(seconds=120),
+    )
+    assert reclaimed is True
+
+    existing = await idempotency_repo.get_existing(user.id, "vex", "stale-key")
+    assert existing is not None
+    assert existing.status == "processing"  # reclaimed, not completed/failed
+    assert existing.created_at > old_created_at  # refreshed to "now"
+
+
+async def test_reclaim_stale_fails_when_too_young(
+    idempotency_repo: IdempotencyRepository, make_user
+) -> None:
+    """A 'processing' record younger than stale_before is not reclaimable —
+    it's a genuinely concurrent in-flight request, not a dead owner."""
+    user = await make_user(email=f"idem-{uuid4().hex[:6]}@example.com")
+    record = await idempotency_repo.try_acquire(
+        id=uuid4(),
+        user_id=user.id,
+        product_id="vex",
+        idempotency_key="fresh-key",
+        operation="generation",
+        request_hash="abc",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+    )
+    assert record is not None
+
+    reclaimed = await idempotency_repo.reclaim_stale(
+        record.id,
+        request_hash="abc",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+        stale_before=datetime.now(UTC) - timedelta(seconds=120),
+    )
+    assert reclaimed is False
+
+
+async def test_reclaim_stale_fails_when_already_completed(
+    idempotency_repo: IdempotencyRepository, make_user, db_session: AsyncSession
+) -> None:
+    """A record that finished (status != 'processing') by the time reclaim
+    runs must not be touched — the WHERE guard excludes it."""
+    user = await make_user(email=f"idem-{uuid4().hex[:6]}@example.com")
+    record = await idempotency_repo.try_acquire(
+        id=uuid4(),
+        user_id=user.id,
+        product_id="vex",
+        idempotency_key="done-key",
+        operation="generation",
+        request_hash="abc",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+    )
+    assert record is not None
+    await idempotency_repo.mark_completed(
+        record.id, resource_id=uuid4(), response_status_code=201, response_body={}
+    )
+
+    old_created_at = datetime.now(UTC) - timedelta(seconds=200)
+    await db_session.execute(
+        update(IdempotencyKey)
+        .where(IdempotencyKey.id == record.id)
+        .values(created_at=old_created_at)
+    )
+    await db_session.flush()
+
+    reclaimed = await idempotency_repo.reclaim_stale(
+        record.id,
+        request_hash="abc",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+        stale_before=datetime.now(UTC) - timedelta(seconds=120),
+    )
+    assert reclaimed is False
 
 
 async def test_cleanup_expired(idempotency_repo: IdempotencyRepository, make_user) -> None:

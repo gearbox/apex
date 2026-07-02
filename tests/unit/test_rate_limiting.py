@@ -2,7 +2,7 @@ from collections.abc import Generator
 from unittest.mock import patch
 
 import pytest
-from limits.storage import MemoryStorage
+from limits.aio.storage import MemoryStorage
 from litestar.status_codes import HTTP_429_TOO_MANY_REQUESTS
 from litestar.testing import AsyncTestClient
 
@@ -19,6 +19,11 @@ _PRODUCT_HEADERS = {"X-Product-Id": "vex"}
 # Shared test settings — redis_url=None forces MemoryStorage so the rate limit
 # counters are process-local and isolated across tests even when REDIS_URL is
 # present in the environment (e.g. `make test-all` Docker environment).
+#
+# trusted_ip_header="x-forwarded-for" simulates the real production topology
+# (a trusted reverse proxy in front) so tests can distinguish "different
+# clients" via X-Forwarded-For. Tests that don't set that header simply fall
+# back to the AsyncTestClient's fixed connection address, unaffected.
 _TEST_SETTINGS = Settings(
     redis_url=None,
     rate_limit_register="5/hour",
@@ -26,10 +31,46 @@ _TEST_SETTINGS = Settings(
     rate_limit_forgot_password="3/hour",
     rate_limit_resend_verification="3/hour",
     rate_limit_sse_ticket="10/minute",
+    trusted_ip_header="x-forwarded-for",
     # Disable the 1-second-tick DB poller so test cycles don't accumulate
     # open connections that may race against shutdown_services().
     aisha_poller_enabled=False,
 )
+
+# Same as _TEST_SETTINGS but with the real production *default* IP-trust mode
+# ("none") — used to prove a spoofed X-Forwarded-For no longer buys a fresh
+# rate-limit bucket (the C4 fix).
+_TEST_SETTINGS_NO_TRUSTED_HEADER = Settings(
+    redis_url=None,
+    rate_limit_register="5/hour",
+    rate_limit_login="10/minute",
+    rate_limit_forgot_password="3/hour",
+    rate_limit_resend_verification="3/hour",
+    rate_limit_sse_ticket="10/minute",
+    trusted_ip_header="none",
+    aisha_poller_enabled=False,
+)
+
+
+def _override_limiter(settings: Settings) -> Generator[None]:
+    """Shared body for the limiter-override fixtures below.
+
+    Patches get_settings() everywhere it's read fresh per-request: the app
+    lifespan, the DI container, and the rate-limit middleware's per-request
+    trust-mode lookup (RateLimitMiddleware itself is constructed once at
+    `create_app()` import time, so only settings read *inside* `__call__`
+    can be influenced by these patches).
+    """
+    with (
+        patch("src.api.app.get_settings", return_value=settings),
+        patch("src.api.dependencies.common.get_settings", return_value=settings),
+        patch("src.api.middleware.rate_limit.get_settings", return_value=settings),
+    ):
+        init_rate_limiter(settings)
+        storage = get_rate_limiter_storage()
+        if isinstance(storage, MemoryStorage):
+            storage.storage.clear()
+        yield
 
 
 @pytest.fixture
@@ -40,15 +81,13 @@ def override_limiter_defaults() -> Generator[None]:
     container so the lifespan never creates a RedisStorage that would
     persist counters across tests.
     """
-    with (
-        patch("src.api.app.get_settings", return_value=_TEST_SETTINGS),
-        patch("src.api.dependencies.common.get_settings", return_value=_TEST_SETTINGS),
-    ):
-        init_rate_limiter(_TEST_SETTINGS)
-        storage = get_rate_limiter_storage()
-        if isinstance(storage, MemoryStorage):
-            storage.storage.clear()
-        yield
+    yield from _override_limiter(_TEST_SETTINGS)
+
+
+@pytest.fixture
+def override_limiter_no_trusted_header() -> Generator[None]:
+    """Same as override_limiter_defaults but with trusted_ip_header='none'."""
+    yield from _override_limiter(_TEST_SETTINGS_NO_TRUSTED_HEADER)
 
 
 @pytest.mark.asyncio
@@ -184,3 +223,26 @@ async def test_different_ips_have_separate_counters(override_limiter_defaults: N
         headers_ip2 = {"X-Forwarded-For": "192.168.1.2", **_PRODUCT_HEADERS}
         response_ip2 = await client.post("/v1/auth/register", json={}, headers=headers_ip2)
         assert response_ip2.status_code != HTTP_429_TOO_MANY_REQUESTS
+
+
+@pytest.mark.asyncio
+async def test_spoofed_xff_does_not_bypass_limit_without_trusted_header(
+    override_limiter_no_trusted_header: None,  # noqa: ARG001
+) -> None:
+    """With trusted_ip_header='none' (the default), X-Forwarded-For is a
+    client-controlled header and must be ignored — every request should share
+    the same connection-address-based counter regardless of a spoofed XFF."""
+    async with AsyncTestClient(app=application) as client:
+        # Exhaust the limit while sending a different spoofed XFF on every request.
+        for i in range(5):
+            headers = {"X-Forwarded-For": f"10.0.0.{i}", **_PRODUCT_HEADERS}
+            await client.post("/v1/auth/register", json={}, headers=headers)
+
+        # A request with yet another "fresh" spoofed IP must still be blocked —
+        # proving XFF no longer buys a new bucket.
+        response = await client.post(
+            "/v1/auth/register",
+            json={},
+            headers={"X-Forwarded-For": "203.0.113.99", **_PRODUCT_HEADERS},
+        )
+        assert response.status_code == HTTP_429_TOO_MANY_REQUESTS

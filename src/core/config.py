@@ -606,6 +606,18 @@ class Settings(BaseSettings):
         le=168,
         description="TTL in hours for idempotency key records before cleanup",
     )
+    idempotency_processing_stale_seconds: int = Field(
+        default=120,
+        ge=10,
+        description=(
+            "Seconds a 'processing' idempotency record may sit unresolved before "
+            "a retry with the same key is allowed to reclaim it — the owning "
+            "request is presumed dead (process crash, poisoned session, etc.). "
+            "Must exceed the worst-case legitimate submit time (ComfyUI queue + "
+            "tunnel handshake, Stripe/NowPayments round trip). Below this "
+            "threshold, a same-key retry gets 409 (a genuinely concurrent request)."
+        ),
+    )
 
     # Health check
     health_check_timeout_seconds: float = Field(
@@ -641,6 +653,29 @@ class Settings(BaseSettings):
             "When None, falls back to in-memory storage for rate limiting (single-process only) "
             "and SSE/pub-sub will not function. Recommended: set to redis://redis:6379/0 in "
             "production Docker environments."
+        ),
+    )
+    trusted_ip_header: Literal["cf-connecting-ip", "x-forwarded-for", "none"] = Field(
+        default="none",
+        description=(
+            "Header trusted for client-IP-based rate limiting. 'none' (default, dev) "
+            "uses only the ASGI connection address — never a client-controlled header. "
+            "'cf-connecting-ip' for Cloudflare-fronted deployments (CF strips/overwrites "
+            "this header at the edge, so it's unforgeable provided the origin only "
+            "accepts CF traffic). 'x-forwarded-for' for a generic reverse proxy — "
+            "combine with trusted_proxy_hops and never trust the leftmost entry, which "
+            "is client-controlled."
+        ),
+    )
+    trusted_proxy_hops: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Only used when trusted_ip_header='x-forwarded-for'. Number of trusted "
+            "reverse-proxy hops — selects the X-Forwarded-For entry at position "
+            "(count - 1 - trusted_proxy_hops), i.e. rightmost-minus-hops. 0 means "
+            "trust the rightmost (last-appended) entry, which is the proxy closest "
+            "to this service."
         ),
     )
     rate_limit_sse_ticket: str = Field(
@@ -815,6 +850,17 @@ class Settings(BaseSettings):
     nowpayments_ipn_secret_vex: str | None = Field(
         default=None,
         description="NowPayments IPN HMAC secret for vex.pics",
+    )
+
+    # Stripe Checkout redirect paths — appended to a product's ProductConfig.frontend_origin.
+    # Kept as settings (not hardcoded) so ops can repoint them without a backend deploy.
+    stripe_checkout_success_path: str = Field(
+        default="/billing?success=true",
+        description="Path+query appended to frontend_origin for the Stripe success redirect.",
+    )
+    stripe_checkout_cancel_path: str = Field(
+        default="/billing?cancelled=true",
+        description="Path+query appended to frontend_origin for the Stripe cancel redirect.",
     )
 
     # -------------------------------------------------------------------------
@@ -1003,6 +1049,63 @@ class Settings(BaseSettings):
         per_product = bool(self.nowpayments_api_key_vex and self.nowpayments_ipn_secret_vex)
         legacy = bool(self.nowpayments_api_key and self.nowpayments_ipn_secret)
         return per_product or legacy
+
+    def stripe_secret_key_for(self, product_id: str) -> str:
+        """Resolve the Stripe secret key for a product, falling back to the legacy key.
+
+        Explicit per-product dict (not getattr reflection) so an unrecognized
+        product_id can never probe an unrelated attribute name.
+
+        Raises:
+            RuntimeError: Neither a per-product nor a legacy key is configured.
+        """
+        per_product = {
+            "vex": self.stripe_secret_key_vex,
+            "synthara": self.stripe_secret_key_synthara,
+        }.get(product_id)
+        key = per_product or self.stripe_secret_key
+        if not key:
+            raise RuntimeError(f"No Stripe secret key configured for product '{product_id}'")
+        return key
+
+    def stripe_webhook_secret_for(self, product_id: str) -> str:
+        """Resolve the Stripe webhook signing secret for a product.
+
+        Raises:
+            RuntimeError: Neither a per-product nor a legacy secret is configured.
+        """
+        per_product = {
+            "vex": self.stripe_webhook_secret_vex,
+            "synthara": self.stripe_webhook_secret_synthara,
+        }.get(product_id)
+        secret = per_product or self.stripe_webhook_secret
+        if not secret:
+            raise RuntimeError(f"No Stripe webhook secret configured for product '{product_id}'")
+        return secret
+
+    def nowpayments_api_key_for(self, product_id: str) -> str:
+        """Resolve the NowPayments API key for a product (vex.pics only today).
+
+        Raises:
+            RuntimeError: Neither a per-product nor a legacy key is configured.
+        """
+        per_product = {"vex": self.nowpayments_api_key_vex}.get(product_id)
+        key = per_product or self.nowpayments_api_key
+        if not key:
+            raise RuntimeError(f"No NowPayments API key configured for product '{product_id}'")
+        return key
+
+    def nowpayments_ipn_secret_for(self, product_id: str) -> str:
+        """Resolve the NowPayments IPN HMAC secret for a product.
+
+        Raises:
+            RuntimeError: Neither a per-product nor a legacy secret is configured.
+        """
+        per_product = {"vex": self.nowpayments_ipn_secret_vex}.get(product_id)
+        secret = per_product or self.nowpayments_ipn_secret
+        if not secret:
+            raise RuntimeError(f"No NowPayments IPN secret configured for product '{product_id}'")
+        return secret
 
     @property
     def email_configured(self) -> bool:

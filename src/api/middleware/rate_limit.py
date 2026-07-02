@@ -1,7 +1,9 @@
 """Rate limiting middleware.
 
 Uses the `limits` library for sliding-window counters backed by Redis
-(or in-memory when Redis is not configured).
+(or in-memory when Redis is not configured). Uses the async storage/strategy
+variants (`limits.aio`) — under Redis, `hit()`/`get_window_stats()` are
+network round-trips and must not block the event loop.
 """
 
 from __future__ import annotations
@@ -11,8 +13,8 @@ from typing import Any
 
 import structlog
 from limits import parse
-from limits.storage import MemoryStorage, RedisStorage, Storage
-from limits.strategies import MovingWindowRateLimiter
+from limits.aio.storage import MemoryStorage, RedisStorage, Storage
+from limits.aio.strategies import MovingWindowRateLimiter
 from litestar import Request, Response
 from litestar.enums import ScopeType
 from litestar.middleware import MiddlewareProtocol
@@ -20,7 +22,7 @@ from litestar.status_codes import HTTP_429_TOO_MANY_REQUESTS
 from litestar.types import ASGIApp, Receive, Scope, Send
 
 from src.api.schemas.errors import ErrorEnvelope
-from src.core.config import Settings
+from src.core.config import Settings, get_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -37,7 +39,13 @@ def create_storage(redis_url: str | None) -> Storage:
     Returns:
         Storage instance (Redis or Memory).
     """
-    return RedisStorage(redis_url) if redis_url else MemoryStorage()
+    if not redis_url:
+        return MemoryStorage()
+    # limits.aio's default async Redis implementation is coredis, which isn't
+    # in this project's dependency tree. redispy (the plain `redis` package,
+    # already a dependency and used elsewhere via redis.asyncio — see
+    # src/core/redis.py) has async support and works as a drop-in.
+    return RedisStorage(redis_url, implementation="redispy")
 
 
 def init_rate_limiter(settings: Settings) -> None:
@@ -49,6 +57,19 @@ def init_rate_limiter(settings: Settings) -> None:
     global _limiter_storage
     _limiter_storage = create_storage(settings.redis_url)
     logger.info("rate_limiter.initialized", backend="redis" if settings.redis_url else "memory")
+
+    if settings.trusted_ip_header == "none" and not settings.debug:
+        logger.warning(
+            "rate_limiter.trusted_ip_header_unset",
+            hint=(
+                "trusted_ip_header is 'none' outside debug mode — rate limiting keys "
+                "on the raw ASGI connection address, which in production is almost "
+                "always a single load-balancer/proxy IP shared by every client. Set "
+                "TRUSTED_IP_HEADER=cf-connecting-ip (behind Cloudflare) or "
+                "x-forwarded-for (behind a generic reverse proxy, plus "
+                "TRUSTED_PROXY_HOPS) so per-client limits are actually per-client."
+            ),
+        )
 
 
 def get_rate_limiter_storage() -> Storage:
@@ -65,21 +86,34 @@ def get_rate_limiter_storage() -> Storage:
     return _limiter_storage
 
 
-def get_real_ip(request: Request[Any, Any, Any]) -> str:
-    """Extract real client IP address.
+def get_real_ip(request: Request[Any, Any, Any], settings: Settings) -> str:
+    """Extract the real client IP address from the configured trusted source.
 
-    Respects X-Forwarded-For if present (assuming litestar runs behind a proxy),
-    otherwise falls back to the connection client host.
+    Trusts only the header configured via ``settings.trusted_ip_header`` —
+    never the leftmost X-Forwarded-For entry, which is fully client-controlled
+    and lets any caller mint a fresh rate-limit bucket per request. With no
+    trusted header configured ("none", the default), falls back to the raw
+    ASGI connection address only.
 
     Args:
         request: The incoming request.
+        settings: Application settings (trusted_ip_header / trusted_proxy_hops).
 
     Returns:
         The client IP address string.
     """
-    if forwarded_for := request.headers.get("X-Forwarded-For"):
-        # First IP in the list is the original client
-        return forwarded_for.split(",")[0].strip()
+    if settings.trusted_ip_header == "cf-connecting-ip":
+        if ip := request.headers.get("CF-Connecting-IP"):
+            return ip.strip()
+    elif (
+        settings.trusted_ip_header == "x-forwarded-for"
+        and (forwarded_for := request.headers.get("X-Forwarded-For"))
+        and (parts := [p.strip() for p in forwarded_for.split(",") if p.strip()])
+    ):
+        # Rightmost-minus-hops: the entry appended by the trusted proxy
+        # closest to us, never the client-supplied leftmost entry.
+        idx = max(0, len(parts) - 1 - settings.trusted_proxy_hops)
+        return parts[idx]
 
     return request.client.host if request.client else "127.0.0.1"
 
@@ -141,14 +175,17 @@ class RateLimitMiddleware(MiddlewareProtocol):
 
         storage = get_rate_limiter_storage()
         limiter = MovingWindowRateLimiter(storage)
-        ip = get_real_ip(request)
+        # Resolved fresh per request (not captured at middleware construction,
+        # which happens once at app-creation time) so trust-mode config is
+        # never stale relative to the currently active Settings.
+        ip = get_real_ip(request, get_settings())
 
         # We form a unique key using the route and the IP
         key = f"rate_limit:{route_key}:{ip}"
 
         # hit() atomically increments and returns False when limit is exceeded
-        allowed = limiter.hit(limit_item, key)
-        stats = limiter.get_window_stats(limit_item, key)
+        allowed = await limiter.hit(limit_item, key)
+        stats = await limiter.get_window_stats(limit_item, key)
 
         limit = limit_item.amount
         remaining = max(0, stats.remaining)

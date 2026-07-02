@@ -194,6 +194,7 @@ class TestResetPassword:
 
             pwd_instance = MagicMock()
             pwd_instance.hash.return_value = "hashed_pw"
+            pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
             pwd_cls.return_value = pwd_instance
 
             result = await svc.reset_password("token", "new_password", session=session)
@@ -233,6 +234,7 @@ class TestResetPassword:
 
             pwd_instance = MagicMock()
             pwd_instance.hash.return_value = "hashed_pw"
+            pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
             pwd_cls.return_value = pwd_instance
 
             with pytest.raises(UserNotFoundError):

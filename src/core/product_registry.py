@@ -33,6 +33,7 @@ VEX_CONFIG = ProductConfig(
             "vex.pics",
         }
     ),
+    frontend_origin="https://vex.pics",
     age_gate=AgeGatePolicy.DATE_OF_BIRTH,
     allowed_auth_methods=frozenset(
         {
@@ -83,6 +84,7 @@ SYNTHARA_CONFIG = ProductConfig(
             "synthara.app",
         }
     ),
+    frontend_origin="https://synthara.app",
     age_gate=AgeGatePolicy.NONE,
     allowed_auth_methods=frozenset(
         {

@@ -52,6 +52,8 @@ def _make_service(
     pwd = MagicMock()
     pwd.verify.return_value = password_verify
     pwd.hash.return_value = "new_hash"
+    pwd.averify = AsyncMock(return_value=password_verify)
+    pwd.ahash = AsyncMock(return_value="new_hash")
 
     if user is not None:
         repo.get_user = AsyncMock(return_value=user)
@@ -326,8 +328,8 @@ class TestChangePassword:
 
         await svc.change_password(user.id, current_password="old", new_password="new")
 
-        pwd.verify.assert_called_once_with("hashed_pw", "old")
-        pwd.hash.assert_called_once_with("new")
+        pwd.averify.assert_called_once_with("hashed_pw", "old")
+        pwd.ahash.assert_called_once_with("new")
         repo.revoke_all_user_tokens.assert_awaited_once_with(user.id)
 
     async def test_raises_when_user_not_found(self) -> None:

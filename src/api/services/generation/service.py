@@ -21,6 +21,7 @@ from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
+    from src.db.models.storage import GenerationJob
 
 logger = structlog.get_logger(__name__)
 
@@ -94,7 +95,7 @@ class GenerationService:
         *,
         user_id: UUID,
         session: AsyncSession,
-        product_config: ProductConfig | None = None,
+        product_config: ProductConfig,
     ) -> JobCreatedResponse:
         """Execute the full generation pipeline."""
         # 1. Model-generation_type compatibility (declarative, enum-driven)
@@ -104,7 +105,7 @@ class GenerationService:
             )
 
         # 1.5. Product model access check
-        if product_config is not None and not product_config.is_model_allowed(request.model):
+        if not product_config.is_model_allowed(request.model):
             raise ModelNotAllowedError(
                 f"Model '{request.model.value}' is not available on {product_config.display_name}"
             )
@@ -134,7 +135,7 @@ class GenerationService:
             raise ModelDisabledError(f"Model '{request.model.value}' is currently disabled")
 
         # 4.5 Global per-model rate limit check
-        self._rate_limiter.check(request.model)
+        await self._rate_limiter.check(request.model)
 
         # 5. Resolve provider
         provider_key = request.model.provider
@@ -171,7 +172,7 @@ class GenerationService:
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)
 
         # 8. Submit to provider (with billing saga)
-        product_id = product_config.slug if product_config is not None else "vex"
+        product_id = product_config.slug
 
         # Resolve lineage: if source_output_id is provided, look up the source job
         source_job_id: UUID | None = None
@@ -186,7 +187,7 @@ class GenerationService:
                 raise ValueError("Source output not found")
             source_job_id = source_output.job_id
 
-        job = None
+        job: GenerationJob | None = None
         try:
             job = await provider.submit(
                 request,
@@ -216,24 +217,20 @@ class GenerationService:
                     ),
                 )
 
+        except GenerationError:
+            # Domain errors carry user-safe messages by contract (see
+            # ProviderResponseError's docstring) — refund if a debit was
+            # already written, then re-raise unchanged so the route surfaces
+            # the deliberate message.
+            await self._resolve_submit_failure(job, session=session, product_id=product_id)
+            raise
         except Exception as exc:
-            # 9. Refund on failure
-            if job is not None:
-                try:
-                    await self._billing.refund(
-                        job.id,
-                        description=f"Generation failed: {str(exc)[:200]}",
-                        session=session,
-                        product_id=product_id,
-                    )
-                    await session.commit()
-                except Exception as refund_err:
-                    logger.exception(
-                        "generation.refund_failed",
-                        job_id=str(job.id) if job else "unknown",
-                        error=str(refund_err),
-                    )
-            raise GenerationError(str(exc)) from exc
+            logger.exception("generation.submit_failed", model=request.model.value)
+            await self._resolve_submit_failure(job, session=session, product_id=product_id)
+            # Any other exception (asyncpg errors, httpx errors carrying tunnel
+            # hostnames, raw provider payload fragments, ...) MUST NOT reach
+            # the client — only this fixed message may.
+            raise GenerationError("Generation failed due to an internal error.") from exc
 
         # 10. Build response
         balance = await self._billing.get_balance(account.id, session=session)
@@ -247,6 +244,42 @@ class GenerationService:
             tokens_charged=token_cost,
             balance_remaining=balance,
         )
+
+    async def _resolve_submit_failure(
+        self,
+        job: GenerationJob | None,
+        *,
+        session: AsyncSession,
+        product_id: str,
+    ) -> None:
+        """Resolve the DB transaction after a failed ``provider.submit()`` call.
+
+        ``job is None`` ⇒ no external side effect is durable yet — the job
+        row and its debit, if either was written, are still uncommitted in
+        this same transaction. Roll back rather than committing an orphaned
+        charge for a job that never ran.
+
+        ``job is not None`` ⇒ the job row (and its debit) were already
+        written by the provider. Refund and commit so the ledger nets to
+        zero and the failed job stays visible in the user's history. A
+        refund failure is treated the same as "nothing durable" — roll back
+        rather than leave an uncovered debit.
+        """
+        if job is None:
+            await session.rollback()
+            return
+        try:
+            await self._billing.refund(
+                job.id,
+                description="Generation failed — tokens refunded",
+                session=session,
+                product_id=product_id,
+            )
+        except Exception:
+            logger.exception("generation.refund_failed", job_id=str(job.id))
+            await session.rollback()
+            return
+        await session.commit()
 
     @staticmethod
     def _validate_inputs(request: UnifiedGenerationRequest) -> None:
