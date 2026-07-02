@@ -10,7 +10,7 @@ import time
 
 import structlog
 from limits import parse
-from limits.strategies import MovingWindowRateLimiter
+from limits.aio.strategies import MovingWindowRateLimiter
 
 from src.api.middleware.rate_limit import get_rate_limiter_storage
 from src.core.enums import ModelType
@@ -37,7 +37,7 @@ class ModelRateLimiter:
     Uses the same storage backend (Memory or Redis) as the HTTP middleware.
     """
 
-    def check(self, model: ModelType) -> None:
+    async def check(self, model: ModelType) -> None:
         """Check rate limit and record the request atomically.
 
         Args:
@@ -59,8 +59,8 @@ class ModelRateLimiter:
 
         key = f"model_rate_limit:{model.value}"
 
-        if not limiter.hit(limit_item, key):
-            stats = limiter.get_window_stats(limit_item, key)
+        if not await limiter.hit(limit_item, key):
+            stats = await limiter.get_window_stats(limit_item, key)
             retry_after = max(0, int(stats.reset_time) - int(time.time()))
             logger.warning(
                 "model_rate_limit.exceeded",

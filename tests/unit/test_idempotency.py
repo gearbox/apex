@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -78,16 +79,79 @@ class TestCheck:
         assert result.body == {"job_id": "xxx"}
 
     async def test_processing_key_raises_conflict(self) -> None:
-        service = IdempotencyService(ttl_hours=24)
+        """A young 'processing' record (genuinely concurrent request) → 409."""
+        service = IdempotencyService(ttl_hours=24, processing_stale_after_seconds=120)
         existing = MagicMock(
             status="processing",
             request_hash="abc123",
+            created_at=datetime.now(UTC),
         )
 
         with patch("src.api.services.idempotency.IdempotencyRepository") as MockRepo:
             repo = MockRepo.return_value
             repo.try_acquire = AsyncMock(return_value=None)
             repo.get_existing = AsyncMock(return_value=existing)
+
+            with pytest.raises(IdempotencyConflictError):
+                await service.check(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    idempotency_key="key-123",
+                    operation="generation",
+                    request_hash="abc123",
+                    session=AsyncMock(),
+                )
+
+            repo.reclaim_stale.assert_not_called()
+
+    async def test_stale_processing_key_is_reclaimed(self) -> None:
+        """A 'processing' record older than the stale threshold → reclaimed,
+        letting the retry proceed instead of getting stuck behind a dead
+        owner until the 24h TTL expires."""
+        service = IdempotencyService(ttl_hours=24, processing_stale_after_seconds=120)
+        record_id = uuid4()
+        existing = MagicMock(
+            id=record_id,
+            status="processing",
+            request_hash="abc123",
+            created_at=datetime.now(UTC) - timedelta(seconds=121),
+        )
+
+        with patch("src.api.services.idempotency.IdempotencyRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.try_acquire = AsyncMock(return_value=None)
+            repo.get_existing = AsyncMock(return_value=existing)
+            repo.reclaim_stale = AsyncMock(return_value=True)
+
+            result = await service.check(
+                user_id=uuid4(),
+                product_id="vex",
+                idempotency_key="key-123",
+                operation="generation",
+                request_hash="abc123",
+                session=AsyncMock(),
+            )
+
+        assert result == record_id
+        repo.reclaim_stale.assert_called_once()
+
+    async def test_stale_processing_key_reclaim_race_lost_raises_conflict(self) -> None:
+        """Two retries racing to reclaim the same stale record: the loser
+        (reclaim_stale returns False — a concurrent retry already won) still
+        gets a 409, not a duplicated in-flight attempt."""
+        service = IdempotencyService(ttl_hours=24, processing_stale_after_seconds=120)
+        existing = MagicMock(
+            id=uuid4(),
+            status="processing",
+            request_hash="abc123",
+            created_at=datetime.now(UTC) - timedelta(seconds=121),
+        )
+
+        with patch("src.api.services.idempotency.IdempotencyRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.try_acquire = AsyncMock(return_value=None)
+            repo.get_existing = AsyncMock(return_value=existing)
+            repo.reclaim_stale = AsyncMock(return_value=False)
 
             with pytest.raises(IdempotencyConflictError):
                 await service.check(

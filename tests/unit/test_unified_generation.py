@@ -28,6 +28,7 @@ from src.core.enums import (
     Scheduler,
     VideoResolution,
 )
+from src.core.product_registry import VEX_CONFIG
 
 # ---------------------------------------------------------------------------
 # Schema validation tests
@@ -336,6 +337,7 @@ class TestGenerationServiceGenerate:
                 request,
                 user_id=uuid4(),
                 session=AsyncMock(),
+                product_config=VEX_CONFIG,
             )
 
     async def test_rejects_incompatible_model_generation_type(self) -> None:
@@ -352,6 +354,7 @@ class TestGenerationServiceGenerate:
                 request,
                 user_id=uuid4(),
                 session=AsyncMock(),
+                product_config=VEX_CONFIG,
             )
 
     async def test_rejects_n_exceeding_model_cap(self) -> None:
@@ -368,11 +371,16 @@ class TestGenerationServiceGenerate:
                 request,
                 user_id=uuid4(),
                 session=AsyncMock(),
+                product_config=VEX_CONFIG,
             )
 
-    async def test_refunds_on_provider_error(self) -> None:
+    async def test_generic_provider_error_rolls_back_without_leaking_message(self) -> None:
+        """A bare Exception from provider.submit() must not leak into the
+        response — only the fixed generic message may. Since submit() raised
+        before returning a job, nothing durable was written: the session
+        must roll back (there is no job to refund, and nothing to commit)."""
         mock_provider = _make_mock_provider()
-        mock_provider.submit = AsyncMock(side_effect=Exception("GPU exploded"))
+        mock_provider.submit = AsyncMock(side_effect=Exception("tunnel host 10.0.0.5 unreachable"))
 
         billing = AsyncMock()
         billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
@@ -382,8 +390,10 @@ class TestGenerationServiceGenerate:
         pricing = AsyncMock()
         pricing.get_price = AsyncMock(return_value=50)
 
+        session = AsyncMock()
+
         service = GenerationService(
-            providers={Provider.GROK: mock_provider},  # type: ignore[arg-type]
+            providers={Provider.GROK: mock_provider},
             billing_service=billing,
             pricing_service=pricing,
             rate_limiter=MagicMock(spec=ModelRateLimiter),
@@ -399,13 +409,138 @@ class TestGenerationServiceGenerate:
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=_make_enabled_model_mock()),
             ),
-            pytest.raises(GenerationError, match="GPU exploded"),
+            pytest.raises(GenerationError) as exc_info,
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        # Fixed, generic message only — the real exception text must not leak.
+        assert str(exc_info.value) == "Generation failed due to an internal error."
+        assert "tunnel host" not in str(exc_info.value)
+
+        # submit() never returned a job, so there is nothing to refund —
+        # discard the (empty) transaction instead of committing a charge.
+        billing.refund.assert_not_awaited()
+        session.rollback.assert_awaited()
+
+    async def test_asyncpg_style_db_error_does_not_leak_into_response(self) -> None:
+        """A raw DB-driver-style exception (e.g. asyncpg.PostgresError, or
+        SQLAlchemy wrapping one) must never reach the client — only the fixed
+        generic GenerationError message may."""
+
+        class FakeUniqueViolationError(Exception):
+            """Stands in for asyncpg.exceptions.UniqueViolationError."""
+
+        mock_provider = _make_mock_provider()
+        mock_provider.submit = AsyncMock(
+            side_effect=FakeUniqueViolationError(
+                'duplicate key value violates unique constraint "ix_generation_jobs_external_request_id" '
+                "DETAIL:  Key (external_request_id)=(prompt-abc123) already exists."
+            )
+        )
+
+        billing = AsyncMock()
+        billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        billing.assert_sufficient_balance = AsyncMock()
+        billing.refund = AsyncMock()
+
+        pricing = AsyncMock()
+        pricing.get_price = AsyncMock(return_value=50)
+
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=billing,
+            pricing_service=pricing,
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+        )
+
+        request = UnifiedGenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            pytest.raises(GenerationError) as exc_info,
         ):
             await service.generate(
                 request,
                 user_id=uuid4(),
                 session=AsyncMock(),
+                product_config=VEX_CONFIG,
             )
+
+        message = str(exc_info.value)
+        assert message == "Generation failed due to an internal error."
+        assert "constraint" not in message
+        assert "external_request_id" not in message
+        assert "DETAIL" not in message
+
+    async def test_commit_failure_after_submit_refunds_and_rolls_back(self) -> None:
+        """If provider.submit() succeeds (job + debit written) but the
+        subsequent session.commit() fails, the orchestrator must refund the
+        job and commit that compensating transaction — never leave a debit
+        on the ledger with no refund."""
+        job = MagicMock()
+        job.id = uuid4()
+        job.status = JobStatus.QUEUED.value
+        job.name = "Test"
+        job.created_at = datetime.now(UTC)
+
+        mock_provider = MagicMock()
+        mock_provider.validate = MagicMock()
+        mock_provider.submit = AsyncMock(return_value=job)
+
+        billing = AsyncMock()
+        billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        billing.assert_sufficient_balance = AsyncMock()
+        billing.refund = AsyncMock()
+
+        pricing = AsyncMock()
+        pricing.get_price = AsyncMock(return_value=50)
+
+        session = AsyncMock()
+        # First commit() (right after submit succeeds) fails; the recovery
+        # commit inside the failure-handling path should still succeed.
+        session.commit = AsyncMock(side_effect=[Exception("db connection lost"), None])
+
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=billing,
+            pricing_service=pricing,
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+        )
+
+        request = UnifiedGenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            pytest.raises(GenerationError) as exc_info,
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        assert str(exc_info.value) == "Generation failed due to an internal error."
+        billing.refund.assert_awaited_once()
+        assert billing.refund.await_args.args[0] == job.id
+        assert session.commit.await_count == 2
 
 
 class TestGenerationServiceRateLimit:
@@ -453,4 +588,6 @@ class TestGenerationServiceRateLimit:
             ),
             pytest.raises(RateLimitExceededError),
         ):
-            await service.generate(request, user_id=uuid4(), session=mock_session)
+            await service.generate(
+                request, user_id=uuid4(), session=mock_session, product_config=VEX_CONFIG
+            )

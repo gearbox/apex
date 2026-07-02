@@ -359,6 +359,29 @@ class BillingRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_payment_by_external_id_for_update(self, external_id: str) -> Payment | None:
+        """Get payment by external_id with a row lock (webhook idempotency).
+
+        Used by Stripe webhook handling: the status re-check happens under
+        this lock so two concurrent deliveries for the same event serialize
+        instead of both passing the "not yet completed" check.
+        """
+        result = await self._session.execute(
+            select(Payment).where(Payment.external_id == external_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def get_payment_for_update(self, payment_id: UUID) -> Payment | None:
+        """Get payment by id with a row lock (webhook idempotency).
+
+        Used by NowPayments IPN handling, which resolves the payment via our
+        internal id (embedded in order_id) rather than external_id.
+        """
+        result = await self._session.execute(
+            select(Payment).where(Payment.id == payment_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def create_payment(
         self,
         *,

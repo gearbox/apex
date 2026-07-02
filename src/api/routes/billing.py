@@ -36,6 +36,7 @@ from src.api.services.idempotency import IdempotencyReplayResult, IdempotencySer
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
 from src.core.config import TOKEN_PACKAGES
+from src.core.product import ProductConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -232,6 +233,7 @@ class BillingController(Controller):
         billing_service: BillingService,
         payment_service: PaymentService,
         product_id: str,
+        product_config: ProductConfig,
         idempotency_service: IdempotencyService,
         idempotency_key_header: Annotated[
             str,
@@ -269,7 +271,7 @@ class BillingController(Controller):
                 data.package_id,
                 current_user_id,
                 session=session,
-                product_id=product_id,
+                product_config=product_config,
             )
             response = StripeCheckoutResponse(
                 checkout_url=result.checkout_url,
@@ -372,11 +374,19 @@ class BillingWebhookController(Controller):
         request: Request[Any, Any, Any],
         session: AsyncSession,
         payment_service: PaymentService,
+        product_id: str,
     ) -> Response[dict[str, Any]]:
-        """Handle Stripe webhook."""
+        """Handle Stripe webhook.
+
+        ``product_id`` is resolved by ProductMiddleware from the request Host —
+        Stripe must be configured to post to the product's own domain so the
+        correct per-product webhook secret is used for verification.
+        """
         payload = await request.body()
         signature = request.headers.get("stripe-signature", "")
-        await payment_service.handle_stripe_webhook(payload, signature, session=session)
+        await payment_service.handle_stripe_webhook(
+            payload, signature, session=session, product_id=product_id
+        )
         await session.commit()
         return Response(content={"received": True}, status_code=HTTP_200_OK)
 
@@ -386,10 +396,18 @@ class BillingWebhookController(Controller):
         request: Request[Any, Any, Any],
         session: AsyncSession,
         payment_service: PaymentService,
+        product_id: str,
     ) -> Response[dict[str, Any]]:
-        """Handle NowPayments IPN webhook."""
-        payload = await request.json()
+        """Handle NowPayments IPN webhook.
+
+        Reads the raw body (not the parsed JSON) — HMAC verification must run
+        over the exact bytes NowPayments signed, which a parse/re-serialize
+        round trip through ``request.json()`` is not guaranteed to preserve.
+        """
+        raw = await request.body()
         hmac_sig = request.headers.get("x-nowpayments-sig", "")
-        await payment_service.handle_nowpayments_webhook(payload, hmac_sig, session=session)
+        await payment_service.handle_nowpayments_webhook(
+            raw, hmac_sig, session=session, product_id=product_id
+        )
         await session.commit()
         return Response(content={"received": True}, status_code=HTTP_200_OK)

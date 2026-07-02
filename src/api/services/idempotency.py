@@ -48,8 +48,9 @@ class IdempotencyService:
             raise
     """
 
-    def __init__(self, ttl_hours: int = 24) -> None:
+    def __init__(self, ttl_hours: int = 24, processing_stale_after_seconds: int = 120) -> None:
         self._ttl_hours = ttl_hours
+        self._processing_stale_after_seconds = processing_stale_after_seconds
 
     @staticmethod
     def hash_request(body: bytes) -> str:
@@ -126,13 +127,39 @@ class IdempotencyService:
             )
             raise IdempotencyConflictError("Idempotency key reused with different request body")
 
-        # Still processing — concurrent request in flight
+        # Still processing — either a concurrent in-flight request, or the
+        # owning request died (crash / poisoned session) and left the key
+        # stranded. Distinguish by age: only a record older than the stale
+        # threshold is eligible for reclaim.
         if existing.status == "processing":
-            logger.info(
-                "idempotency.in_flight",
-                key=idempotency_key,
-                operation=operation,
+            age = datetime.now(UTC) - existing.created_at
+            if age.total_seconds() < self._processing_stale_after_seconds:
+                logger.info(
+                    "idempotency.in_flight",
+                    key=idempotency_key,
+                    operation=operation,
+                )
+                raise IdempotencyConflictError("Concurrent request with the same idempotency key")
+
+            stale_before = datetime.now(UTC) - timedelta(
+                seconds=self._processing_stale_after_seconds
             )
+            reclaimed = await repo.reclaim_stale(
+                existing.id,
+                request_hash=request_hash,
+                expires_at=expires_at,
+                stale_before=stale_before,
+            )
+            if reclaimed:
+                logger.warning(
+                    "idempotency.stale_reclaimed",
+                    key=idempotency_key,
+                    operation=operation,
+                    age_s=int(age.total_seconds()),
+                )
+                return existing.id
+            # Lost the reclaim race to a concurrent retry — that retry now
+            # owns the record.
             raise IdempotencyConflictError("Concurrent request with the same idempotency key")
 
         # Failed — allow retry (delete old record and re-acquire)

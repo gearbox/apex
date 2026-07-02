@@ -42,6 +42,21 @@ from src.core.product import ProductConfig
 logger = structlog.get_logger(__name__)
 
 
+async def _mark_failed(
+    idempotency_service: IdempotencyService, record_id: UUID, session: AsyncSession
+) -> None:
+    """Roll back any pending work, then record the idempotency key as failed.
+
+    A service-layer error can leave the session poisoned (a later statement
+    would raise PendingRollbackError) — rolling back first keeps fail()'s own
+    write, and the commit below, from raising in turn and stranding the key
+    in 'processing' until its TTL expires.
+    """
+    await session.rollback()
+    await idempotency_service.fail(record_id, session=session)
+    await session.commit()
+
+
 class UnifiedGenerationController(Controller):
     """Single endpoint for all generation types and providers."""
 
@@ -115,7 +130,7 @@ class UnifiedGenerationController(Controller):
             return Response(content=result, status_code=HTTP_201_CREATED)
 
         except NoActiveSessionError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.info("generation.no_active_gpu_session", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -127,7 +142,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except RateLimitExceededError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.warning(
                 "generation.rate_limited",
                 model=data.model.value,
@@ -145,7 +160,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ProviderUnavailableError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.warning("generation.provider_unavailable", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -157,7 +172,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except AgeVerificationRequiredError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.info("generation.age_verification_required", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -169,7 +184,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ModelNotAllowedError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.info("generation.model_not_allowed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -181,7 +196,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ModelDisabledError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.info("generation.model_disabled", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -193,7 +208,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except ValueError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.info("generation.validation_failed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -205,7 +220,7 @@ class UnifiedGenerationController(Controller):
             )
 
         except GenerationError as exc:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             logger.error("generation.failed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
@@ -217,5 +232,5 @@ class UnifiedGenerationController(Controller):
             )
 
         except Exception:
-            await idempotency_service.fail(record_id, session=session)
+            await _mark_failed(idempotency_service, record_id, session)
             raise

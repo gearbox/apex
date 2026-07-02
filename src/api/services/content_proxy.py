@@ -106,14 +106,21 @@ class ContentProxyService:
     ) -> bool:
         """Delete a content item (output or upload) by ID.
 
-        Tries generation_outputs first, then user_images.
-        Deletes R2 object first, then DB row.
+        Tries generation_outputs first, then user_images. Deletes the DB
+        row(s) and commits *first* — the database is the source of truth for
+        "does this content exist" — then best-effort deletes the R2 objects.
+        The reverse order (R2 first) risks the DB still pointing at a
+        destroyed object if the row delete or commit then fails; deleting
+        DB-first means the worst case is an orphaned (harmless, GC-able) R2
+        object, never a dangling reference in the gallery.
 
         Args:
             content_id: UUID of the content to delete.
             user_id: Requesting user (must be owner).
             product_id: Product slug for scoping.
-            session: Database session.
+            session: Database session. This method commits it directly (the
+                delete must be durable before R2 objects are touched) —
+                callers must not expect further work in the same transaction.
 
         Returns:
             True if content was found and deleted.
@@ -127,14 +134,15 @@ class ContentProxyService:
         # Try output first (more common deletion target)
         output = await output_repo.get(content_id, user_id=user_id)
         if output is not None and output.product_id == product_id:
-            # Delete derivative (thumbnail) R2 objects before removing the parent row.
-            # The DB cascade (ON DELETE CASCADE on parent_output_id) removes derivative
-            # rows, but we must explicitly clean up their R2 objects.
+            # The DB cascade (ON DELETE CASCADE on parent_output_id) removes
+            # derivative (thumbnail) rows, but their R2 objects still need
+            # explicit cleanup — collect the keys before the row is gone.
             derivatives = await output_repo.list_derivatives(content_id)
-            for derivative in derivatives:
-                await self._storage.delete(derivative.storage_key)
-            await self._storage.delete(output.storage_key)
+            keys = [d.storage_key for d in derivatives]
+            keys.append(output.storage_key)
             await output_repo.delete(content_id, user_id=user_id)
+            await session.commit()
+            await self._delete_storage_keys(keys, content_id=content_id)
             logger.info(
                 "content.deleted",
                 content_id=str(content_id),
@@ -147,14 +155,12 @@ class ContentProxyService:
         # Try upload
         upload = await image_repo.get(content_id, user_id=user_id)
         if upload is not None and upload.product_id == product_id:
-            # Delete derivative (thumbnail) R2 objects before removing the parent row.
-            # The DB cascade (ON DELETE CASCADE on parent_image_id) removes derivative
-            # rows, but we must explicitly clean up their R2 objects.
             upload_derivatives = await image_repo.list_derivatives(content_id)
-            for upload_derivative in upload_derivatives:
-                await self._storage.delete(upload_derivative.storage_key)
-            await self._storage.delete(upload.storage_key)
+            keys = [d.storage_key for d in upload_derivatives]
+            keys.append(upload.storage_key)
             await image_repo.delete(content_id, user_id=user_id)
+            await session.commit()
+            await self._delete_storage_keys(keys, content_id=content_id)
             logger.info(
                 "content.deleted",
                 content_id=str(content_id),
@@ -165,6 +171,24 @@ class ContentProxyService:
             return True
 
         raise ContentNotFoundError(f"Content not found: {content_id}")
+
+    async def _delete_storage_keys(self, keys: list[str], *, content_id: UUID) -> None:
+        """Best-effort R2 cleanup after the DB row is already committed gone.
+
+        Each key is attempted independently — one failure logs loudly and
+        moves on rather than blocking cleanup of the rest or raising back to
+        the caller (the DB delete already succeeded and committed; a
+        storage-side failure here must not surface as a failed request).
+        """
+        for key in keys:
+            try:
+                await self._storage.delete(key)
+            except Exception:
+                logger.error(
+                    "content.r2_delete_failed",
+                    storage_key=key,
+                    content_id=str(content_id),
+                )
 
     @property
     def ttl(self) -> int:

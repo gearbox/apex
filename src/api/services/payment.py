@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from src.api.services.billing import BillingService
     from src.core.config import Settings
+    from src.core.product import ProductConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -66,7 +67,7 @@ class PaymentService:
         user_id: UUID,
         *,
         session: AsyncSession,
-        product_id: str,
+        product_config: ProductConfig,
     ) -> StripeCheckoutResult:
         """Create a Stripe Checkout Session.
 
@@ -79,34 +80,42 @@ class PaymentService:
         if package is None:
             raise ValueError(f"Invalid package_id: {package_id}")
 
+        product_id = product_config.slug
+
         repo = BillingRepository(session)
         account = await repo.get_account(account_id)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found")
 
-        stripe.api_key = self._settings.stripe_secret_key
+        client = stripe.StripeClient(api_key=self._settings.stripe_secret_key_for(product_id))
+        success_url = (
+            f"{product_config.frontend_origin}{self._settings.stripe_checkout_success_path}"
+        )
+        cancel_url = f"{product_config.frontend_origin}{self._settings.stripe_checkout_cancel_path}"
 
-        checkout_session = stripe.checkout.Session.create(
-            mode="payment",
-            line_items=[
-                {
-                    "price_data": {
-                        "currency": "usd",
-                        "product_data": {
-                            "name": f"{package.name} Token Package",
-                            "description": f"{package.total_tokens} tokens",
+        checkout_session = await client.v1.checkout.sessions.create_async(
+            params={
+                "mode": "payment",
+                "line_items": [
+                    {
+                        "price_data": {
+                            "currency": "usd",
+                            "product_data": {
+                                "name": f"{package.name} Token Package",
+                                "description": f"{package.total_tokens} tokens",
+                            },
+                            "unit_amount": int(package.price_usd * 100),
                         },
-                        "unit_amount": int(package.price_usd * 100),
-                    },
-                    "quantity": 1,
-                }
-            ],
-            metadata={
-                "account_id": str(account_id),
-                "package_id": package_id,
-            },
-            success_url="https://app.example.com/billing?success=true",
-            cancel_url="https://app.example.com/billing?cancelled=true",
+                        "quantity": 1,
+                    }
+                ],
+                "metadata": {
+                    "account_id": str(account_id),
+                    "package_id": package_id,
+                },
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+            }
         )
 
         payment_id = new_id()
@@ -136,21 +145,23 @@ class PaymentService:
         stripe_signature: str,
         *,
         session: AsyncSession,
+        product_id: str,
     ) -> None:
         """Handle Stripe webhook event.
 
-        1. Verify signature.
+        1. Verify signature using the requesting product's webhook secret.
         2. Handle 'checkout.session.completed' only.
-        3. Idempotent: skip if already 'completed'.
+        3. Lock the payment row and re-check status under the lock (idempotent
+           against concurrent/retried deliveries of the same event).
         4. Credit tokens.
         """
-        stripe.api_key = self._settings.stripe_secret_key
+        webhook_secret = self._settings.stripe_webhook_secret_for(product_id)
 
         try:
             event = stripe.Webhook.construct_event(  # type: ignore[no-untyped-call]
                 payload,
                 stripe_signature,
-                self._settings.stripe_webhook_secret,
+                webhook_secret,
             )
         except (stripe.SignatureVerificationError, ValueError) as e:
             raise PaymentVerificationError(f"Stripe signature invalid: {e}") from e
@@ -162,12 +173,15 @@ class PaymentService:
         external_id: str = checkout_session["id"]
 
         repo = BillingRepository(session)
-        payment = await repo.get_payment_by_external_id(external_id)
+        # Row lock: a concurrent/retried delivery for the same event blocks
+        # here until the first delivery commits, then observes COMPLETED and
+        # returns — preventing a double credit.
+        payment = await repo.get_payment_by_external_id_for_update(external_id)
         if payment is None:
             logger.warning("payment.webhook_payment_not_found", external_id=external_id)
             return
 
-        # Idempotent check
+        # Idempotent check — re-checked under the row lock above.
         if payment.status == PaymentStatus.COMPLETED.value:
             return
 
@@ -232,7 +246,7 @@ class PaymentService:
             resp = await client.post(
                 "https://api.nowpayments.io/v1/invoice",
                 headers={
-                    "x-api-key": self._settings.nowpayments_api_key,
+                    "x-api-key": self._settings.nowpayments_api_key_for(product_id),
                     "Content-Type": "application/json",
                 },
                 json={
@@ -270,49 +284,79 @@ class PaymentService:
 
     async def handle_nowpayments_webhook(
         self,
-        payload: dict[str, Any],
+        raw_payload: bytes,
         hmac_signature: str,
         *,
         session: AsyncSession,
+        product_id: str,
     ) -> None:
         """Handle NowPayments IPN webhook.
 
-        1. Verify HMAC-SHA512.
-        2. Only act on payment_status == 'finished'.
-        3. Idempotent: skip if already 'completed'.
+        1. Verify HMAC-SHA512 over the raw body, using NowPayments' own
+           canonicalization (sort_keys, numeric lexemes preserved as strings
+           so e.g. 10.00 doesn't become 10.0 and break byte-equality).
+        2. Resolve our internal payment via the ``payment_id`` we embedded in
+           ``order_id`` at invoice-creation time — NOT the IPN's top-level
+           ``payment_id``, which is NowPayments' own payment id and never
+           matches what we stored as ``external_id`` (the invoice id).
+        3. Lock the payment row and re-check status under the lock (idempotent
+           against concurrent/retried IPNs for the same payment).
         4. Credit tokens on 'finished'.
         """
-        # Verify HMAC
-        ipn_secret = self._settings.nowpayments_ipn_secret
-        sorted_keys = sorted(payload.keys())
-        sorted_payload = {k: payload[k] for k in sorted_keys}
-        payload_bytes = json.dumps(sorted_payload, separators=(",", ":")).encode()
+        ipn_secret = self._settings.nowpayments_ipn_secret_for(product_id)
+
+        try:
+            parsed = json.loads(raw_payload, parse_float=str, parse_int=str)
+        except json.JSONDecodeError as e:
+            raise PaymentVerificationError("NowPayments IPN payload is not valid JSON") from e
+
+        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
         expected = hmac.new(
             ipn_secret.encode(),
-            payload_bytes,
+            canonical,
             hashlib.sha512,
         ).hexdigest()
 
         if not hmac.compare_digest(expected, hmac_signature):
             raise PaymentVerificationError("NowPayments HMAC signature invalid")
 
+        payload: dict[str, Any] = parsed
         payment_status = payload.get("payment_status", "")
-        payment_id_str = str(payload.get("payment_id", ""))
+
+        try:
+            order = json.loads(str(payload.get("order_id", "")))
+            internal_payment_id = UUID(str(order["payment_id"]))
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            raise PaymentVerificationError("NowPayments IPN order_id is malformed") from e
 
         repo = BillingRepository(session)
-        payment = await repo.get_payment_by_external_id(payment_id_str)
+        # Row lock: a concurrent/retried IPN for the same payment blocks here
+        # until the first delivery commits, then observes COMPLETED and
+        # returns — preventing a double credit.
+        payment = await repo.get_payment_for_update(internal_payment_id)
         if payment is None:
-            logger.warning("payment.webhook_payment_not_found", external_id=payment_id_str)
+            logger.warning(
+                "payment.webhook_payment_not_found",
+                internal_payment_id=str(internal_payment_id),
+            )
             return
 
-        # Idempotent check
+        # Idempotent check — re-checked under the row lock above.
         if payment.status == PaymentStatus.COMPLETED.value:
             return
+
+        # NowPayments' own payment id (distinct from our external_id, which
+        # stores the invoice id) — kept for reconciliation, not used as a lookup key.
+        np_payment_id = str(payload.get("payment_id", ""))
 
         if payment_status == "finished":
             payment.status = PaymentStatus.COMPLETED.value
             payment.completed_at = datetime.now(UTC)
-            payment.provider_metadata = {**payment.provider_metadata, "ipn_payload": payload}
+            payment.provider_metadata = {
+                **payment.provider_metadata,
+                "ipn_payment_id": np_payment_id,
+                "ipn_payload": payload,
+            }
             await session.flush()
 
             await self._billing.credit(
@@ -336,4 +380,8 @@ class PaymentService:
             }
             new_status = status_map.get(payment_status, payment.status)
             payment.status = new_status
+            payment.provider_metadata = {
+                **payment.provider_metadata,
+                "ipn_payment_id": np_payment_id,
+            }
             await session.flush()

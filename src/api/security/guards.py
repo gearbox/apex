@@ -189,8 +189,16 @@ async def optional_auth_guard(
 ) -> None:
     """Guard that optionally extracts JWT authentication.
 
-    Does not raise if no token provided, but validates if present.
-    Sets user_id in connection state if authenticated.
+    Does not raise if no token is provided. Routes through the same
+    ``_identity_from_token`` / ``_enforce_product`` path as ``auth_guard``, so
+    a token's product claim is checked here too — but unlike ``auth_guard``,
+    a product mismatch degrades to anonymous instead of raising 401. An
+    optional guard should degrade, not reject: a stale other-product token
+    sitting in a shared browser (e.g. a prior vex.pics login while visiting a
+    synthara.app page) must not break access to a page that doesn't require
+    authentication in the first place.
+
+    Sets user_id/auth_user in connection state if authenticated.
 
     Args:
         connection: ASGI connection.
@@ -199,18 +207,21 @@ async def optional_auth_guard(
     authorization = connection.headers.get("authorization")
     token = extract_token_from_header(authorization)
 
-    if not token:
-        connection.state["user_id"] = None
-        connection.state["auth_user"] = None
-        return
-
     jwt_service: JWTService | None = connection.app.state.get("jwt_service")
-    if jwt_service is None:
-        connection.state["user_id"] = None
-        connection.state["auth_user"] = None
-        return
+    identity: tuple[UUID, str | None] | None = None
+    if jwt_service is not None:
+        identity = _identity_from_token(token, jwt_service.decode_access_token)
 
-    if user_id := jwt_service.get_user_id_from_token(token):
+    if identity is not None:
+        token_product_id = identity[1]
+        try:
+            _enforce_product(connection, token_product_id)
+        except NotAuthorizedException:
+            logger.debug("optional_auth.product_mismatch_treated_as_anonymous")
+            identity = None
+
+    if identity is not None:
+        user_id = identity[0]
         connection.state["user_id"] = user_id
         connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
     else:

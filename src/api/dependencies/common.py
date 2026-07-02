@@ -322,7 +322,10 @@ def get_billing_service() -> BillingService:
 def get_idempotency_service() -> IdempotencyService:
     """Provide IdempotencyService instance."""
     settings = get_settings()
-    return IdempotencyService(ttl_hours=settings.idempotency_key_ttl_hours)
+    return IdempotencyService(
+        ttl_hours=settings.idempotency_key_ttl_hours,
+        processing_stale_after_seconds=settings.idempotency_processing_stale_seconds,
+    )
 
 
 def get_pricing_service() -> PricingService:

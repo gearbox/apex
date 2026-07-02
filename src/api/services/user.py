@@ -195,11 +195,11 @@ class UserService:
             raise UserNotFoundError(f"User {user_id} not found")
 
         # Verify current password
-        if not self._password.verify(user.password_hash, current_password):
+        if not await self._password.averify(user.password_hash, current_password):
             raise InvalidPasswordError("Current password is incorrect")
 
         # Hash and update new password
-        new_hash = self._password.hash(new_password)
+        new_hash = await self._password.ahash(new_password)
         await self._repo.update_user(user_id, password_hash=new_hash)
 
         # Revoke all refresh tokens (force re-login on all devices)

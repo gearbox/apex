@@ -231,7 +231,7 @@ class EmailVerificationService:
             raise InvalidTokenError("Invalid or expired password reset token")
 
         password_service = PasswordService()
-        new_hash = password_service.hash(new_password)
+        new_hash = await password_service.ahash(new_password)
 
         user_repo = UserRepository(session)
         user = await user_repo.update_user(user_id, password_hash=new_hash)

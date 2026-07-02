@@ -100,6 +100,10 @@ class ProductConfig:
     slug: str
     display_name: str
     domains: frozenset[str]
+    # Canonical frontend origin (scheme + host, no trailing slash), e.g.
+    # "https://vex.pics". Used to build redirect URLs (e.g. Stripe Checkout
+    # success/cancel) without hardcoding brand strings in service code.
+    frontend_origin: str
 
     # Auth
     age_gate: AgeGatePolicy

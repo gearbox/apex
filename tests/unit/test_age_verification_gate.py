@@ -20,6 +20,7 @@ from src.api.services.generation.service import (
     GenerationService,
 )
 from src.core.enums import GenerationType, JobStatus, ModelType, Provider
+from src.core.product_registry import VEX_CONFIG
 
 pytestmark = pytest.mark.unit
 
@@ -118,7 +119,9 @@ class TestGenerationAgeGate:
             ),
             pytest.raises(AgeVerificationRequiredError),
         ):
-            await service.generate(request, user_id=uuid4(), session=AsyncMock())
+            await service.generate(
+                request, user_id=uuid4(), session=AsyncMock(), product_config=VEX_CONFIG
+            )
 
     @pytest.mark.parametrize(
         ("model", "gen_type"),
@@ -144,7 +147,9 @@ class TestGenerationAgeGate:
                 new=AsyncMock(return_value=_make_user_mock(age_verified_at=verified_at)),
             ),
         ):
-            result = await service.generate(request, user_id=uuid4(), session=AsyncMock())
+            result = await service.generate(
+                request, user_id=uuid4(), session=AsyncMock(), product_config=VEX_CONFIG
+            )
 
         assert result.model == model.value
 
@@ -163,6 +168,8 @@ class TestGenerationAgeGate:
             new=AsyncMock(return_value=_make_enabled_model_mock()),
         ):
             # Must complete without raising AgeVerificationRequiredError
-            result = await service.generate(request, user_id=uuid4(), session=session_mock)
+            result = await service.generate(
+                request, user_id=uuid4(), session=session_mock, product_config=VEX_CONFIG
+            )
 
         assert result.model == ModelType.GROK_IMAGINE_IMAGE.value
