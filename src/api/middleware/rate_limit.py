@@ -105,15 +105,15 @@ def get_real_ip(request: Request[Any, Any, Any], settings: Settings) -> str:
     if settings.trusted_ip_header == "cf-connecting-ip":
         if ip := request.headers.get("CF-Connecting-IP"):
             return ip.strip()
-    elif settings.trusted_ip_header == "x-forwarded-for" and (
-        forwarded_for := request.headers.get("X-Forwarded-For")
+    elif (
+        settings.trusted_ip_header == "x-forwarded-for"
+        and (forwarded_for := request.headers.get("X-Forwarded-For"))
+        and (parts := [p.strip() for p in forwarded_for.split(",") if p.strip()])
     ):
-        parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
-        if parts:
-            # Rightmost-minus-hops: the entry appended by the trusted proxy
-            # closest to us, never the client-supplied leftmost entry.
-            idx = max(0, len(parts) - 1 - settings.trusted_proxy_hops)
-            return parts[idx]
+        # Rightmost-minus-hops: the entry appended by the trusted proxy
+        # closest to us, never the client-supplied leftmost entry.
+        idx = max(0, len(parts) - 1 - settings.trusted_proxy_hops)
+        return parts[idx]
 
     return request.client.host if request.client else "127.0.0.1"
 
