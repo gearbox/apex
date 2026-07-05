@@ -133,6 +133,24 @@ class TestMakeImageThumbnail:
         img = Image.open(io.BytesIO(result.data))
         assert img.format == "WEBP"
 
+    async def test_thumbnail_palette_transparency_preserved(self) -> None:
+        """P+tRNS input must not lose transparency in the WEBP thumbnail (F1 bug)."""
+        rgba = Image.new("RGBA", (20, 20), (255, 0, 0, 0))
+        rgba.putpixel((0, 0), (0, 255, 0, 255))
+        pal = rgba.convert("P", palette=Image.Palette.ADAPTIVE)
+        buf = io.BytesIO()
+        pal.save(buf, format="PNG")
+        data = buf.getvalue()
+
+        result = await make_image_thumbnail(data, max_edge=512)
+
+        assert result is not None
+        img = Image.open(io.BytesIO(result.data))
+        assert img.mode == "RGBA"
+        pixel = img.getpixel((img.width - 1, img.height - 1))
+        assert isinstance(pixel, tuple)
+        assert pixel[3] == 0
+
 
 def _make_palette_png(width: int, height: int, fill_rgb: tuple[int, int, int]) -> bytes:
     src = Image.new("RGB", (width, height), fill_rgb)

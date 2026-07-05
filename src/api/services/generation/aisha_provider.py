@@ -18,7 +18,11 @@ from src.api.services.generation.tunnel_validation import (
     validate_tunnel_hostname,
 )
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
-from src.api.services.image_normalization import ImageNormalizationError, ensure_comfyui_input
+from src.api.services.image_normalization import (
+    ImageNormalizationError,
+    ensure_comfyui_input,
+    sniff_format,
+)
 from src.api.services.storage import R2StorageService
 from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, ModelType, Provider, Sampler, Scheduler
@@ -212,6 +216,16 @@ class AishaGenerationProvider:
         try:
             normalized = await ensure_comfyui_input(image_bytes)
         except ImageNormalizationError as e:
+            logger.warning(
+                "aisha.input_normalization_failed",
+                sniffed=sniff_format(image_bytes).value,
+                size_bytes=len(image_bytes),
+                source_output_id=str(request.source_output_id)
+                if request.source_output_id
+                else None,
+                input_image_id=str(request.input_image_id) if request.input_image_id else None,
+                error=str(e),
+            )
             raise ValueError("Input image is not decodable") from e
 
         stem = filename.rsplit(".", 1)[0]

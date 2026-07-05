@@ -18,7 +18,11 @@ from uuid import UUID
 import structlog
 
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
-from src.api.services.image_normalization import ImageNormalizationError, normalize_image
+from src.api.services.image_normalization import (
+    ImageNormalizationError,
+    normalize_image,
+    sniff_format,
+)
 from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions
 from src.api.services.media import build_upload_media
 from src.api.services.storage import (
@@ -119,6 +123,14 @@ class UserContentService:
         try:
             normalized = await normalize_image(data)
         except ImageNormalizationError as e:
+            logger.warning(
+                "user_content.upload_normalization_failed",
+                user_id=str(user_id),
+                declared_content_type=content_type,
+                sniffed=sniff_format(data).value,
+                size_bytes=len(data),
+                error=str(e),
+            )
             raise UserContentValidationError("File is not a decodable image") from e
 
         if normalized.converted:

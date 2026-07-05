@@ -11,6 +11,7 @@ from src.api.services.image_normalization import (
     ImageNormalizationError,
     NormalizedImage,
     SniffedFormat,
+    _convert_to_png_sync,
     ensure_comfyui_input,
     normalize_image,
     sniff_format,
@@ -182,6 +183,39 @@ class TestNormalizeImage:
     async def test_normalize_garbage_raises(self) -> None:
         with pytest.raises(ImageNormalizationError):
             await normalize_image(_GARBAGE)
+
+    @pytest.mark.skipif(not features.check("avif"), reason="Pillow built without AVIF support")
+    async def test_normalize_avif_converts_to_png(self) -> None:
+        result = await normalize_image(_avif())
+        assert result.format is MediaFormat.PNG
+        assert result.converted is True
+        assert result.sniffed is SniffedFormat.AVIF
+        assert sniff_format(result.data) is SniffedFormat.PNG
+
+    def test_normalize_palette_transparency_preserved(self) -> None:
+        rgba = Image.new("RGBA", (4, 4), (255, 0, 0, 0))
+        rgba.putpixel((0, 0), (0, 255, 0, 255))
+        pal = rgba.convert("P", palette=Image.Palette.ADAPTIVE)
+        buf = io.BytesIO()
+        pal.save(buf, format="PNG")
+
+        result_data = _convert_to_png_sync(buf.getvalue())
+
+        with Image.open(io.BytesIO(result_data)) as im:
+            assert im.mode == "RGBA"
+            pixel = im.getpixel((1, 1))
+            assert isinstance(pixel, tuple)
+            assert pixel[3] == 0
+
+    def test_normalize_opaque_grayscale_converts_to_rgb_not_rgba(self) -> None:
+        im = Image.new("L", (4, 4), 128)
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+
+        result_data = _convert_to_png_sync(buf.getvalue())
+
+        with Image.open(io.BytesIO(result_data)) as reopened:
+            assert reopened.mode == "RGB"
 
 
 class TestEnsureComfyUIInput:
