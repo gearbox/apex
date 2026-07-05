@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from PIL import Image
 
 from src.api.schemas.media import MediaObject, MediaOriginal
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
@@ -21,6 +23,22 @@ from src.core.enums import MediaFormat, OutputMediaType
 pytestmark = pytest.mark.unit
 
 
+def _png_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
+    im = Image.new("RGB", size, (255, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _heic_bytes(size: tuple[int, int] = (64, 48)) -> bytes:
+    # Importing user_content (above) transitively imports image_normalization,
+    # which registers the HEIF opener/writer with Pillow at module import time.
+    im = Image.new("RGB", size, (200, 100, 50))
+    buf = io.BytesIO()
+    im.save(buf, format="HEIF")
+    return buf.getvalue()
+
+
 def _make_media() -> MediaObject:
     return MediaObject(
         media_type=OutputMediaType.IMAGE,
@@ -31,6 +49,7 @@ def _make_media() -> MediaObject:
             content_type="image/png",
             size_bytes=1024,
         ),
+        variants=[],
     )
 
 
@@ -131,7 +150,7 @@ class TestUploadImage:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG",
+                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
                 filename="big.png",
                 content_type="image/png",
             )
@@ -166,7 +185,7 @@ class TestUploadImage:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG",
+                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
                 filename="photo.png",
                 content_type="image/png",
             )
@@ -193,7 +212,7 @@ class TestUploadImage:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG",
+                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
                 filename="photo.png",
                 content_type="image/png",
             )
@@ -212,10 +231,101 @@ class TestUploadImage:
         ):
             await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG",
+                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
                 filename="photo.png",
                 content_type="image/png",
             )
+
+
+# ---------------------------------------------------------------------------
+# upload_image — normalization (D1')
+# ---------------------------------------------------------------------------
+
+
+class TestUploadImageNormalization:
+    async def test_upload_mislabeled_heic_stored_as_png(self) -> None:
+        """A HEIC file mislabeled as image/webp is sniffed, converted to PNG,
+        and stored as such — the declared content type is never trusted."""
+        service, storage = _make_service()
+
+        main_result = _make_upload_result()
+        thumb_sm_result = _make_upload_result()
+        thumb_md_result = _make_upload_result()
+        storage.upload = AsyncMock(side_effect=[main_result, thumb_sm_result, thumb_md_result])
+
+        db_image = _make_db_image(format="png", content_type="image/png")
+        thumb_sm_db = _make_db_image()
+        thumb_md_db = _make_db_image()
+        service._image_repo.create = AsyncMock(side_effect=[db_image, thumb_sm_db, thumb_md_db])
+
+        result = await service.upload_image(
+            user_id=uuid4(),
+            data=_heic_bytes(),
+            filename="temp_image.webp",
+            content_type="image/webp",
+        )
+
+        assert isinstance(result, UploadedImage)
+
+        # Main upload received sniffed-and-converted PNG bytes, not the
+        # original HEIC bytes or the declared webp content type.
+        main_upload_kwargs = storage.upload.call_args_list[0].kwargs
+        assert main_upload_kwargs["content_type"] == "image/png"
+        assert main_upload_kwargs["data"][:8] == b"\x89PNG\r\n\x1a\n"
+
+        create_kwargs = service._image_repo.create.call_args_list[0].kwargs
+        assert create_kwargs["format"] == "png"
+        assert create_kwargs["content_type"] == "image/png"
+
+        # Thumbnails were generated — no longer silently skipped now that the
+        # bytes handed to Pillow are real PNG, not mislabeled HEIC.
+        assert storage.upload.call_count == 3
+        assert service._image_repo.create.call_count == 3
+
+    async def test_upload_undecodable_raises_validation_error(self) -> None:
+        """Garbage bytes fail decode and raise before anything is persisted."""
+        service, storage = _make_service()
+        storage.upload = AsyncMock()
+        service._image_repo.create = AsyncMock()
+
+        with pytest.raises(UserContentValidationError):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=b"this is not an image, just plain text bytes",
+                filename="temp_image.webp",
+                content_type="image/webp",
+            )
+
+        storage.upload.assert_not_called()
+        service._image_repo.create.assert_not_called()
+
+    async def test_upload_png_unchanged(self) -> None:
+        """Regression: a well-formed PNG upload passes through byte-for-byte."""
+        service, storage = _make_service()
+
+        upload_result = _make_upload_result()
+        storage.upload = AsyncMock(return_value=upload_result)
+
+        db_image = _make_db_image()
+        service._image_repo.create = AsyncMock(return_value=db_image)
+
+        png_bytes = _png_bytes()
+
+        with (
+            patch("src.api.services.user_content.read_dimensions", return_value=None),
+            patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
+        ):
+            result = await service.upload_image(
+                user_id=uuid4(),
+                data=png_bytes,
+                filename="photo.png",
+                content_type="image/png",
+            )
+
+        assert isinstance(result, UploadedImage)
+        upload_kwargs = storage.upload.call_args.kwargs
+        assert upload_kwargs["data"] == png_bytes
+        assert upload_kwargs["content_type"] == "image/png"
 
 
 # ---------------------------------------------------------------------------

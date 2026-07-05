@@ -16,6 +16,7 @@ from src.api.schemas.events import (
     SystemNotificationPayload,
 )
 from src.api.services.event_bus import EventBus
+from src.core.enums import NotificationLevel
 
 _encoder = msgspec.json.Encoder()
 _decoder = msgspec.json.Decoder(EventEnvelope)
@@ -149,7 +150,7 @@ class TestEventBusPublishSystem:
         mock_client = AsyncMock()
         mock_get_client.return_value = mock_client
 
-        payload = SystemNotificationPayload(level="info", title="T", message="M")
+        payload = SystemNotificationPayload(level=NotificationLevel.INFO, title="T", message="M")
         await event_bus.publish_system(
             event_type=EventType.SYSTEM_NOTIFICATION,
             payload=payload,
@@ -167,7 +168,9 @@ class TestEventBusPublishSystem:
         mock_client = AsyncMock()
         mock_get_client.return_value = mock_client
 
-        payload = SystemNotificationPayload(level="critical", title="Down", message="Outage")
+        payload = SystemNotificationPayload(
+            level=NotificationLevel.CRITICAL, title="Down", message="Outage"
+        )
         await event_bus.publish_system(event_type=EventType.SYSTEM_NOTIFICATION, payload=payload)
 
         raw_data = mock_client.publish.call_args[0][1]

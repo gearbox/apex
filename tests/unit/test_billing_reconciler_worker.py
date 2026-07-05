@@ -40,7 +40,7 @@ def _make_gpu_session(
     session.vastai_offer_id = 67890
     session.vastai_cost_per_hour_micros = 500_000
     session.vastai_gpu_name = "RTX_4090"
-    session.callback_token = "tok"
+    session.callback_token_hash = "tok"
     session.provision_attempt = 1
     session.provisioning_started_at = None
     session.account_id = uuid4()

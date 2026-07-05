@@ -10,10 +10,13 @@ and is not duplicated here — raising any exception triggers the same code path
 
 from __future__ import annotations
 
+import io
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from PIL import Image
 
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
@@ -471,6 +474,20 @@ def _make_i2i_request_with_source_output(source_output_id: UUID) -> UnifiedGener
     )
 
 
+def _webp_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
+    im = Image.new("RGB", size, (10, 20, 30))
+    buf = io.BytesIO()
+    im.save(buf, format="WEBP")
+    return buf.getvalue()
+
+
+def _png_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
+    im = Image.new("RGB", size, (255, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class TestAishaProviderI2IBridge:
     """R2 ↔ ComfyUI image bridge for image-to-image generation.
 
@@ -549,15 +566,17 @@ class TestAishaProviderI2IBridge:
         r2.download.assert_awaited_once_with("users/abc/uploads/cat.png")
 
         # ComfyUI received the bytes with the agreed filename template:
-        # f"input_{source_filename}_{job_id_short}".
+        # f"input_{stem}_{job_id_short}.{ext}" — extension is terminal.
         mock_client.upload_image.assert_awaited_once()
         upload_kwargs = mock_client.upload_image.await_args.kwargs
         assert upload_kwargs["image_data"] == b"\x89PNG\r\n\x1a\n[fake-png-bytes]"
-        # source_filename in template; suffix is the 8-char job_id prefix.
-        assert upload_kwargs["filename"].startswith("input_cat.png_")
-        # 8 hex chars after the underscore.
-        suffix = upload_kwargs["filename"].rsplit("_", 1)[1]
-        assert len(suffix) == 8
+        # source_filename stem in template; suffix is the 8-char job_id prefix
+        # followed by the terminal extension.
+        assert upload_kwargs["filename"].startswith("input_cat_")
+        assert upload_kwargs["filename"].endswith(".png")
+        # 8 hex chars between the stem and the extension.
+        job_part = upload_kwargs["filename"].rsplit("_", 1)[1].split(".")[0]
+        assert len(job_part) == 8
 
         # Workflow received the ComfyUI-stored name (which may differ from the
         # requested one) wired into LoadImage via input_image_1.
@@ -635,8 +654,10 @@ class TestAishaProviderI2IBridge:
         MockOutputRepo.return_value.get.assert_awaited_once_with(source_id)
 
         # Filename derived from storage_key tail (not original_filename).
+        # Extension is normalized to "jpeg" (MediaFormat.JPEG) and kept terminal.
         upload_kwargs = mock_client.upload_image.await_args.kwargs
-        assert upload_kwargs["filename"].startswith("input_result_001.jpg_")
+        assert upload_kwargs["filename"].startswith("input_result_001_")
+        assert upload_kwargs["filename"].endswith(".jpeg")
 
         # Workflow wired with the ComfyUI-returned name.
         ap_kwargs = workflow.apply_parameters.call_args.kwargs
@@ -789,6 +810,184 @@ class TestAishaProviderI2IBridge:
         gpu_session = mocks["gpu_session_service"].get_active_session_for_model.return_value
         assert ic_args[1] == gpu_session.bundle_name
 
+    async def test_i2i_webp_source_output_converted_to_png_for_comfyui(self) -> None:
+        """D2': a Grok-output WebP remixed via source_output_id must reach
+        ComfyUI as PNG bytes with a matching terminal filename extension."""
+        workflow = MagicMock()
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        webp_bytes = _webp_bytes()
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=webp_bytes)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        output_row = MagicMock()
+        output_row.storage_key = "outputs/job_xyz/result_001.webp"
+        source_id = uuid4()
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha_provider.OutputRepository") as MockOutputRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-webp"})
+            MockComfyClient.return_value = mock_client
+            MockOutputRepo.return_value.get = AsyncMock(return_value=output_row)
+
+            await provider.submit(
+                _make_i2i_request_with_source_output(source_id),
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+                source_output_id=source_id,
+            )
+
+        upload_kwargs = mock_client.upload_image.await_args.kwargs
+        # ComfyUI received PNG-sniffing bytes, not the original WebP.
+        assert upload_kwargs["image_data"][:8] == b"\x89PNG\r\n\x1a\n"
+        assert webp_bytes[:4] == b"RIFF"  # sanity: source really was WebP
+        # Filename carries a terminal .png extension.
+        assert re.match(r"^input_.+_[0-9a-f]{8}\.png$", upload_kwargs["filename"])
+
+    async def test_i2i_comfyui_filename_has_terminal_extension(self) -> None:
+        """Regression for the ``input_photo.png_1a2b3c4d`` bug: the job-id
+        suffix must not swallow the extension — it must stay terminal."""
+        workflow = MagicMock()
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=_png_bytes())
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        user_image_row = MagicMock()
+        user_image_row.storage_key = "users/abc/uploads/photo.png"
+        user_image_row.original_filename = "photo.png"
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-ext"})
+            MockComfyClient.return_value = mock_client
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
+
+            await provider.submit(
+                _make_i2i_request_with_user_image(uuid4()),
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        upload_kwargs = mock_client.upload_image.await_args.kwargs
+        # Old bug: "input_photo.png_1a2b3c4d" — extension swallowed mid-name,
+        # no terminal dot. The fix keeps the extension terminal.
+        assert re.search(r"\.(png|jpeg)$", upload_kwargs["filename"])
+
+    async def test_i2i_undecodable_source_raises_before_billing(self) -> None:
+        """Garbage source bytes fail the ComfyUI bridge decode and raise
+        ValueError before any billing reservation is made."""
+        workflow = MagicMock()
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=b"this is not an image, just text")
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+
+        user_image_row = MagicMock()
+        user_image_row.storage_key = "users/abc/uploads/broken.png"
+        user_image_row.original_filename = "broken.png"
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
+        ):
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
+
+            with pytest.raises(ValueError, match="not decodable"):
+                await provider.submit(
+                    _make_i2i_request_with_user_image(uuid4()),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )
+
+        billing.check_and_reserve.assert_not_called()
+        MockJobRepo.return_value.create.assert_not_called()
+
 
 class TestSanitizeFilename:
     """Defense-in-depth: source filename derives from user-supplied
@@ -884,7 +1083,10 @@ class TestAishaProviderI2IDefensive:
         )
 
         r2 = AsyncMock()
-        r2.download = AsyncMock(return_value=b"\x89PNG[bytes]")
+        # Valid PNG signature so the normalization bridge's format sniffer
+        # takes the static passthrough branch (no real Pillow decode needed
+        # for this sanitization test).
+        r2.download = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n[bytes]")
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,
@@ -934,11 +1136,12 @@ class TestAishaProviderI2IDefensive:
         # No shell metacharacters survived (semicolon, space, exclamation etc).
         assert ";" not in upload_kwargs["filename"]
         assert " " not in upload_kwargs["filename"]
-        # The job_id suffix is preserved (8 hex chars after the trailing _).
-        suffix = upload_kwargs["filename"].rsplit("_", 1)[1]
-        assert len(suffix) == 8
-        # The "input_" prefix is preserved.
+        # The job_id suffix is preserved (8 hex chars before the terminal extension).
+        job_part = upload_kwargs["filename"].rsplit("_", 1)[1].split(".")[0]
+        assert len(job_part) == 8
+        # The "input_" prefix is preserved and the extension is terminal.
         assert upload_kwargs["filename"].startswith("input_")
+        assert "." in upload_kwargs["filename"].rsplit("_", 1)[-1]
 
 
 # ---------------------------------------------------------------------------

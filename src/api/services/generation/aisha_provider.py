@@ -18,6 +18,7 @@ from src.api.services.generation.tunnel_validation import (
     validate_tunnel_hostname,
 )
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
+from src.api.services.image_normalization import ImageNormalizationError, ensure_comfyui_input
 from src.api.services.storage import R2StorageService
 from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, ModelType, Provider, Sampler, Scheduler
@@ -193,16 +194,29 @@ class AishaGenerationProvider:
             if output is None:
                 raise ValueError(f"Source output {request.source_output_id} not found")
             image_bytes = await self._r2.download(output.storage_key)
-            return image_bytes, output.storage_key.rsplit("/", 1)[-1]
+            filename = output.storage_key.rsplit("/", 1)[-1]
+        else:
+            # input_image_id is not None at this point (mutual exclusion enforced
+            # above and the early-return handled the both-None case).
+            assert request.input_image_id is not None
+            user_image = await UserImageRepository(session).get(request.input_image_id)
+            if user_image is None:
+                raise ValueError(f"Input image {request.input_image_id} not found")
+            image_bytes = await self._r2.download(user_image.storage_key)
+            filename = user_image.original_filename
 
-        # input_image_id is not None at this point (mutual exclusion enforced
-        # above and the early-return handled the both-None case).
-        assert request.input_image_id is not None
-        user_image = await UserImageRepository(session).get(request.input_image_id)
-        if user_image is None:
-            raise ValueError(f"Input image {request.input_image_id} not found")
-        image_bytes = await self._r2.download(user_image.storage_key)
-        return image_bytes, user_image.original_filename
+        # ComfyUI bridge: anything that isn't PNG/JPEG (including static WebP,
+        # which Grok outputs and ComfyUI handles unreliably) is converted to
+        # PNG here. This covers the source_output_id -> Grok-WEBP-output remix
+        # path that upload-time normalization cannot fix.
+        try:
+            normalized = await ensure_comfyui_input(image_bytes)
+        except ImageNormalizationError as e:
+            raise ValueError("Input image is not decodable") from e
+
+        stem = filename.rsplit(".", 1)[0]
+        filename = f"{stem}.{normalized.format.value}"
+        return normalized.data, filename
 
     async def submit(
         self,
@@ -406,7 +420,8 @@ class AishaGenerationProvider:
                 # name. The job_id suffix preserves uniqueness across
                 # concurrent jobs on the same node.
                 safe_source = _sanitize_filename(source_filename)
-                comfyui_filename = f"input_{safe_source}_{str(job_id)[:8]}"
+                stem, _, ext = safe_source.rpartition(".")
+                comfyui_filename = f"input_{stem or safe_source}_{str(job_id)[:8]}.{ext or 'png'}"
                 upload_result = await client.upload_image(
                     image_data=image_bytes,
                     filename=comfyui_filename,

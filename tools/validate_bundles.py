@@ -47,6 +47,7 @@ async def main() -> int:
         repo_url=settings.ai_bundles_repo_url,
         github_token=settings.ai_bundles_github_token,
         branch=settings.ai_bundles_branch,
+        default_comfyui_port=settings.comfyui_port,
         max_download_bytes=50 * 1024 * 1024,  # 50 MiB should be more than enough for index parsing
         max_member_count=100,  # sanity check to avoid OOM parsing malformed entries
         max_member_size_bytes=10

@@ -49,7 +49,14 @@ logger = structlog.get_logger(__name__)
 # Constants
 # -----------------------------------------------------------------------------
 
-ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
+ALLOWED_CONTENT_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+    "image/avif",
+}
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
 IMAGE_NOT_FOUND = "Image not found"
 OUTPUT_NOT_FOUND = "Output not found"
@@ -86,8 +93,9 @@ class StorageController(Controller):
     ) -> Response[UploadResponse | ErrorEnvelope]:
         """Upload an image for use in generation.
 
-        Accepts PNG, JPEG, or WebP images up to 20MB.
-        Returns storage details and expiration time.
+        Accepts PNG, JPEG, WebP, HEIC/HEIF, or AVIF images up to 20MB;
+        non-PNG/JPEG/WebP inputs are converted to PNG. Returns storage
+        details and expiration time.
 
         The uploaded image can be referenced by ID in i2i generation requests.
         Images are automatically deleted after the retention period.
