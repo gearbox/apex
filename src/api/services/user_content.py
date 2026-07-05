@@ -18,6 +18,11 @@ from uuid import UUID
 import structlog
 
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
+from src.api.services.image_normalization import (
+    ImageNormalizationError,
+    normalize_image,
+    sniff_format,
+)
 from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions
 from src.api.services.media import build_upload_media
 from src.api.services.storage import (
@@ -95,7 +100,13 @@ class UserContentService:
     ) -> UploadedImage:
         """Upload an image for use in generation.
 
-        Uploads to R2 and creates database record atomically.
+        Uploads to R2 and creates database record atomically. The image bytes
+        are normalized before storage (see ``image_normalization``): format is
+        determined by sniffing the bytes, not the client-declared content type
+        or filename. As a result, the returned ``content_type``/``size_bytes``
+        reflect the *stored* normalized object, which may differ from what the
+        client originally sent (e.g. a mislabeled HEIC upload is stored as
+        PNG).
 
         Args:
             user_id: Owner of the image.
@@ -110,22 +121,43 @@ class UserContentService:
             UserContentValidationError: If validation fails.
         """
         try:
+            normalized = await normalize_image(data)
+        except ImageNormalizationError as e:
+            logger.warning(
+                "user_content.upload_normalization_failed",
+                user_id=str(user_id),
+                declared_content_type=content_type,
+                sniffed=sniff_format(data).value,
+                size_bytes=len(data),
+                error=str(e),
+            )
+            raise UserContentValidationError("File is not a decodable image") from e
+
+        if normalized.converted:
+            logger.info(
+                "user_content.upload_normalized",
+                sniffed=normalized.sniffed.value,
+                format=normalized.format.value,
+                original_bytes=len(data),
+                normalized_bytes=len(normalized.data),
+                declared_content_type=content_type,
+            )
+
+        try:
             # Upload to R2 (validates size/format internally)
             result = await self._storage.upload(
                 user_id=user_id,
-                data=data,
+                data=normalized.data,
                 filename=filename,
-                content_type=content_type,
+                content_type=normalized.content_type,
                 storage_type=StorageType.UPLOAD,
             )
 
-            # Determine format for DB
-            image_format = MediaFormat.from_content_type(content_type)
             now = datetime.now(UTC)
             expires_at = now + timedelta(days=self._retention_days)
 
             # Read original dimensions before creating the DB record (F4)
-            dims = await read_dimensions(data)
+            dims = await read_dimensions(normalized.data)
 
             # Create database record
             db_image = await self._image_repo.create(
@@ -133,9 +165,9 @@ class UserContentService:
                 user_id=user_id,
                 storage_key=result.storage_key,
                 original_filename=filename,
-                content_type=content_type,
-                size_bytes=len(data),
-                format=image_format.value,
+                content_type=normalized.content_type,
+                size_bytes=len(normalized.data),
+                format=normalized.format.value,
                 expires_at=expires_at,
                 product_id=self._product_id,
                 width=dims.width if dims is not None else None,
@@ -147,13 +179,13 @@ class UserContentService:
                 image_id=str(result.id),
                 user_id=str(user_id),
                 filename=filename,
-                size_bytes=len(data),
+                size_bytes=len(normalized.data),
             )
 
             created_derivatives: list[UserImage] = []
             # Generate sm + md WEBP thumbnails — non-fatal
             try:
-                thumbnails = await make_image_thumbnails(data)
+                thumbnails = await make_image_thumbnails(normalized.data)
                 for generated in thumbnails:
                     thumb_filename = f"thumb_{generated.spec.label}_{filename}"
                     thumb_result = await self._storage.upload(

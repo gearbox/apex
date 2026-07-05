@@ -73,7 +73,7 @@ class TestUnifiedGenerationRequestSchema:
             prompt="A landscape",
             generation_type=GenerationType.T2I,
             model=ModelType.AISHA_IMAGE,
-            image_resolution="standard",
+            image_resolution=Resolution.STANDARD,
             seed=42,
             steps=8,
         )

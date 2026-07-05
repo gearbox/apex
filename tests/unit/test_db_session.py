@@ -46,13 +46,14 @@ class TestDatabaseManagerProperties:
 
 class TestHealthCheck:
     async def test_returns_true_on_success(self) -> None:
+        from collections.abc import AsyncIterator
         from contextlib import asynccontextmanager
 
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock()
 
         @asynccontextmanager
-        async def _fake_connect() -> object:
+        async def _fake_connect() -> AsyncIterator[AsyncMock]:
             yield mock_conn
 
         mock_engine = MagicMock()

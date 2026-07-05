@@ -18,6 +18,7 @@ from src.api.schemas.events import (
     SystemBroadcastRequest,
     SystemNotificationPayload,
 )
+from src.core.enums import NotificationLevel
 
 _encoder = msgspec.json.Encoder()
 _decoder = msgspec.json.Decoder(EventEnvelope)
@@ -124,7 +125,9 @@ class TestBalanceUpdatedPayload:
 
 class TestSystemNotificationPayload:
     def test_roundtrip_no_expires(self) -> None:
-        original = SystemNotificationPayload(level="info", title="Hello", message="World")
+        original = SystemNotificationPayload(
+            level=NotificationLevel.INFO, title="Hello", message="World"
+        )
         encoded = _encoder.encode(original)
         decoded = msgspec.json.decode(encoded, type=SystemNotificationPayload)
         assert decoded.level == "info"
@@ -134,14 +137,19 @@ class TestSystemNotificationPayload:
     def test_roundtrip_with_expires(self) -> None:
         expires = datetime(2026, 12, 31, 23, 59, 59, tzinfo=UTC)
         original = SystemNotificationPayload(
-            level="critical", title="Down", message="Maintenance", expires_at=expires
+            level=NotificationLevel.CRITICAL,
+            title="Down",
+            message="Maintenance",
+            expires_at=expires,
         )
         encoded = _encoder.encode(original)
         decoded = msgspec.json.decode(encoded, type=SystemNotificationPayload)
         assert decoded.expires_at is not None
 
     def test_in_envelope(self) -> None:
-        payload = SystemNotificationPayload(level="warning", title="Notice", message="Some warning")
+        payload = SystemNotificationPayload(
+            level=NotificationLevel.WARNING, title="Notice", message="Some warning"
+        )
         envelope = _make_envelope(EventType.SYSTEM_NOTIFICATION, payload)
         wire = _encoder.encode(envelope)
         decoded_envelope = _decoder.decode(wire)
@@ -161,7 +169,7 @@ class TestSSETicketResponse:
 
 class TestSystemBroadcastRequest:
     def test_roundtrip(self) -> None:
-        original = SystemBroadcastRequest(level="info", title="T", message="M")
+        original = SystemBroadcastRequest(level=NotificationLevel.INFO, title="T", message="M")
         encoded = _encoder.encode(original)
         decoded = msgspec.json.decode(encoded, type=SystemBroadcastRequest)
         assert decoded.level == "info"

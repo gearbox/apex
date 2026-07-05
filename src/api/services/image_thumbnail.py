@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import structlog
 from PIL import Image
 
+from src.api.services.image_normalization import coerce_mode_for_encode
 from src.core.thumbnails import THUMBNAIL_SPECS, ThumbnailSpec
 
 logger = structlog.get_logger(__name__)
@@ -78,11 +79,7 @@ def _make_sync(image_bytes: bytes, max_edge: int, quality: int) -> ThumbnailResu
     with Image.open(io.BytesIO(image_bytes)) as source:
         source.load()
         # Preserve alpha; WEBP supports it. Convert palette/CMYK to a safe mode.
-        img: Image.Image
-        if source.mode not in ("RGB", "RGBA"):
-            img = source.convert("RGBA" if "A" in source.mode else "RGB")
-        else:
-            img = source
+        img = coerce_mode_for_encode(source)
         img.thumbnail((max_edge, max_edge))  # in place, preserves aspect ratio
         buf = io.BytesIO()
         img.save(buf, format="WEBP", quality=quality, method=4)
@@ -103,7 +100,7 @@ def _make_all_sync(
             if source.mode in ("RGB", "RGBA"):
                 base = source.copy()
             else:
-                base = source.convert("RGBA" if "A" in source.mode else "RGB")
+                base = coerce_mode_for_encode(source)
     except Exception:
         logger.warning("thumbnail.image.decode_failed")
         return []
