@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import msgspec
@@ -17,11 +18,15 @@ import structlog
 from redis.asyncio.client import PubSub
 
 from src.api.schemas.events import (
+    BalanceUpdatedPayload,
     EventEnvelope,
     EventType,
 )
 from src.core.redis import get_redis_client
 from src.core.uid import new_id
+
+if TYPE_CHECKING:
+    from src.api.services.billing import BalanceEvent
 
 logger = structlog.get_logger(__name__)
 
@@ -68,6 +73,38 @@ class EventBus:
             channel=channel,
             event_type=event_type.value,
         )
+
+    async def publish_balance(self, event: BalanceEvent | None) -> None:
+        """Publish a pending ``BalanceEvent`` built by ``BillingService``.
+
+        No-ops on ``None`` (no SSE target, or the caller has no event bus).
+        Callers MUST invoke this strictly after committing the transaction
+        that wrote the ledger row the event describes — never before, or a
+        rolled-back transaction would produce a phantom balance update.
+
+        A publish failure here must never surface as a request error: the
+        ledger write already committed, so this is best-effort UX only.
+        """
+        if event is None:
+            return
+        payload = BalanceUpdatedPayload(
+            account_id=event.account_id,
+            balance=event.balance,
+            delta=event.delta,
+            transaction_type=event.transaction_type,
+        )
+        try:
+            for uid in event.user_ids:
+                await self.publish(
+                    user_id=uid,
+                    event_type=EventType.BALANCE_UPDATED,
+                    payload=payload,
+                )
+        except Exception:
+            logger.exception(
+                "event_bus.balance_publish_failed",
+                account_id=str(event.account_id),
+            )
 
     async def publish_system(
         self,

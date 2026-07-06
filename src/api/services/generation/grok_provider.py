@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
 import structlog
 
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.storage import R2StorageService
+from src.core.enums import GenerationType, JobStatus
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +30,10 @@ class GrokGenerationProvider:
     This class only contains Grok-specific submission logic.
     """
 
+    # Grok ignores request-level image sizing fields — its outputs use
+    # fixed sizes per aspect ratio/resolution, not resolve_dimensions().
+    supports_image_sizing: ClassVar[bool] = False
+
     def __init__(
         self,
         grok_job_service: GrokJobService,
@@ -43,6 +49,22 @@ class GrokGenerationProvider:
         are handled by the orchestrator.
         """
 
+    async def refresh_job(
+        self,
+        session: AsyncSession,
+        job: GenerationJob,
+    ) -> GenerationJob | None:
+        """Poll xAI for a fresh status on queued/running async video jobs.
+
+        No-op for image jobs (synchronous — always terminal by the time the
+        row exists) and for jobs already in a terminal status.
+        """
+        if not GenerationType(job.generation_type).is_video:
+            return None
+        if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+            return None
+        return await self._grok.poll_video_job(session, job.id)
+
     async def submit(
         self,
         request: UnifiedGenerationRequest,
@@ -55,7 +77,7 @@ class GrokGenerationProvider:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob:
+    ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.create_image_job or start_video_job."""
         if request.generation_type.is_video:
             return await self._submit_video(
@@ -122,11 +144,11 @@ class GrokGenerationProvider:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob:
+    ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.create_image_job."""
         input_image_url = await self._resolve_input_url(request, session)
 
-        job = await self._grok.create_image_job(
+        result = await self._grok.create_image_job(
             session=session,
             user_id=user_id,
             prompt=request.prompt,
@@ -145,9 +167,9 @@ class GrokGenerationProvider:
             source_job_id=source_job_id,
             source_output_id=source_output_id,
         )
-        if job is None:
+        if result.job is None:
             raise ValueError("Grok image job creation returned None")
-        return job
+        return ProviderSubmitResult(job=result.job, balance_event=result.balance_event)
 
     async def _submit_video(
         self,
@@ -161,11 +183,11 @@ class GrokGenerationProvider:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob:
+    ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.start_video_job."""
         input_image_url = await self._resolve_input_url(request, session)
 
-        job = await self._grok.start_video_job(
+        result = await self._grok.start_video_job(
             session=session,
             user_id=user_id,
             prompt=request.prompt,
@@ -184,6 +206,6 @@ class GrokGenerationProvider:
             source_job_id=source_job_id,
             source_output_id=source_output_id,
         )
-        if job is None:
+        if result.job is None:
             raise ValueError("Grok video job creation returned None")
-        return job
+        return ProviderSubmitResult(job=result.job, balance_event=result.balance_event)

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import io
+import struct
+import zlib
 
 import pytest
 from PIL import Image, features
 
 from src.api.services.image_normalization import (
     ImageNormalizationError,
+    ImageTooLargeError,
     NormalizedImage,
     SniffedFormat,
     _convert_to_png_sync,
@@ -78,6 +81,26 @@ def _tiff_with_orientation(orientation: int, size: tuple[int, int] = (20, 10)) -
     buf = io.BytesIO()
     im.save(buf, format="TIFF", exif=exif)
     return buf.getvalue()
+
+
+def _fake_large_png(width: int, height: int) -> bytes:
+    """Build a PNG with a legitimate IHDR declaring huge dimensions, but no
+    real pixel data in IDAT.
+
+    ``Image.open()`` parses only IHDR to populate ``.size`` — it never calls
+    ``.load()`` (which would decode IDAT). This lets us prove the pixel cap
+    is enforced from the header alone: if the cap check were accidentally
+    moved after a decode attempt, this file would instead fail with a
+    generic ``ImageNormalizationError`` (truncated/invalid IDAT), not
+    ``ImageTooLargeError``.
+    """
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return sig + chunk(b"IHDR", ihdr_data) + chunk(b"IDAT", b"") + chunk(b"IEND", b"")
 
 
 _GARBAGE = b"this is definitely not an image, just plain text bytes"
@@ -239,3 +262,75 @@ class TestEnsureComfyUIInput:
     async def test_ensure_comfyui_input_garbage_raises(self) -> None:
         with pytest.raises(ImageNormalizationError):
             await ensure_comfyui_input(_GARBAGE)
+
+
+# ---------------------------------------------------------------------------
+# D4 — decompression-bomb pixel cap (F4)
+# ---------------------------------------------------------------------------
+
+
+class TestPixelCap:
+    async def test_pixel_cap_rejects_oversized_png_before_decode(self) -> None:
+        """A PNG whose IHDR declares dimensions over the cap is rejected from
+        the header alone — proven by an IDAT that would fail a real decode:
+        if the cap check ran after (or instead of) a decode attempt, this
+        would raise a generic ImageNormalizationError, not ImageTooLargeError.
+        """
+        # 12000x12000 = 144 MP: over our 100 MP cap, but still under Pillow's
+        # own DecompressionBombError hard limit (~178 MP) so Image.open()
+        # itself doesn't block first — only warns — leaving our cap to fire.
+        data = _fake_large_png(12_000, 12_000)
+
+        with pytest.raises(ImageTooLargeError) as exc_info:
+            await normalize_image(data, max_megapixels=100.0)
+
+        assert exc_info.value.megapixels == pytest.approx(144.0)
+        assert exc_info.value.limit == 100.0
+
+    async def test_pixel_cap_applies_to_conversion_path(self) -> None:
+        """force_png_for_webp routes static WebP through the conversion path
+        (ensure_comfyui_input) — the cap must still apply there, not just to
+        the default passthrough path."""
+        data = _fake_large_png(12_000, 12_000)
+
+        with pytest.raises(ImageTooLargeError):
+            await ensure_comfyui_input(data, max_megapixels=100.0)
+
+    @pytest.mark.parametrize(
+        "builder,expected_sniffed",
+        [
+            (_png, SniffedFormat.PNG),
+            (_jpeg, SniffedFormat.JPEG),
+            (_webp, SniffedFormat.WEBP),
+        ],
+    )
+    async def test_pixel_cap_applies_to_passthrough_formats(
+        self, builder, expected_sniffed: SniffedFormat
+    ) -> None:
+        """The pixel cap gates passthrough formats too — a huge PNG/JPEG/
+        static WebP would never otherwise be opened at all (previously
+        passthrough bytes were trusted and returned unchecked), yet would
+        still bomb the thumbnailer downstream.
+
+        Uses a real, tiny image against an artificially tiny cap rather than
+        a huge image, so the test stays fast — the size comparison logic is
+        identical regardless of the absolute pixel counts involved.
+        """
+        data = builder()
+        assert sniff_format(data) == expected_sniffed
+
+        with pytest.raises(ImageTooLargeError):
+            await normalize_image(data, max_megapixels=0.0001)  # 100 px cap; fixture is 16x12=192px
+
+    async def test_image_too_large_error_distinct_from_decode_error(self) -> None:
+        """ImageTooLargeError and a plain decode failure are never conflated —
+        callers that need to distinguish "too big" from "not an image" (e.g.
+        to map to 413 vs 400) can rely on the subclass."""
+        assert issubclass(ImageTooLargeError, ImageNormalizationError)
+
+        with pytest.raises(ImageTooLargeError):
+            await normalize_image(_fake_large_png(12_000, 12_000), max_megapixels=100.0)
+
+        with pytest.raises(ImageNormalizationError) as exc_info:
+            await normalize_image(_GARBAGE, max_megapixels=100.0)
+        assert not isinstance(exc_info.value, ImageTooLargeError)

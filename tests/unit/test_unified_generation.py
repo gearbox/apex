@@ -10,6 +10,7 @@ import msgspec
 import pytest
 
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
     GenerationError,
@@ -255,7 +256,7 @@ def _make_mock_provider() -> MagicMock:
     job.status = JobStatus.COMPLETED.value
     job.name = "Test"
     job.created_at = datetime.now(UTC)
-    provider.submit = AsyncMock(return_value=job)
+    provider.submit = AsyncMock(return_value=ProviderSubmitResult(job=job, balance_event=None))
     return provider
 
 
@@ -496,12 +497,14 @@ class TestGenerationServiceGenerate:
 
         mock_provider = MagicMock()
         mock_provider.validate = MagicMock()
-        mock_provider.submit = AsyncMock(return_value=job)
+        mock_provider.submit = AsyncMock(
+            return_value=ProviderSubmitResult(job=job, balance_event=None)
+        )
 
         billing = AsyncMock()
         billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
         billing.assert_sufficient_balance = AsyncMock()
-        billing.refund = AsyncMock()
+        billing.refund = AsyncMock(return_value=MagicMock(event=None))
 
         pricing = AsyncMock()
         pricing.get_price = AsyncMock(return_value=50)

@@ -9,6 +9,7 @@ Handles the full lifecycle of Grok generation jobs:
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -45,9 +46,25 @@ from .enums import ResponseImageFormat
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.services.billing import BalanceEvent
     from src.db.models import GenerationJob
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class GrokJobResult:
+    """Result of ``create_image_job`` / ``start_video_job``.
+
+    ``balance_event`` is the pending event for the ``check_and_reserve``
+    debit — only meaningful on the success path (the caller commits the
+    surrounding transaction and threads it back for a post-commit publish).
+    On error paths the whole transaction is rolled back by the orchestrator,
+    so no event is ever attached there.
+    """
+
+    job: GenerationJob | None
+    balance_event: BalanceEvent | None = None
 
 
 class GrokJobError(Exception):
@@ -136,7 +153,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob | None:
+    ) -> GrokJobResult:
         """Create and execute an image generation job.
 
         This method follows the Saga pattern:
@@ -211,7 +228,7 @@ class GrokJobService:
             )
 
             # --- SAGA: Pre-flight token deduction ---
-            txn = await billing_service.check_and_reserve(
+            reserve_result = await billing_service.check_and_reserve(
                 account_id,
                 token_cost,
                 job_id,
@@ -227,7 +244,7 @@ class GrokJobService:
             )
             if job is not None:
                 job.token_cost = token_cost
-                job.debit_transaction_id = txn.id
+                job.debit_transaction_id = reserve_result.txn.id
             await session.flush()
 
             # Call Grok API
@@ -276,7 +293,7 @@ class GrokJobService:
             )
 
             logger.info("grok.image_job_completed", job_id=str(job_id), output_count=len(results))
-            return job
+            return GrokJobResult(job=job, balance_event=reserve_result.event)
 
         except GrokAPIError as e:
             logger.error("grok.api_error", job_id=str(job_id), error=str(e))
@@ -425,7 +442,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob | None:
+    ) -> GrokJobResult:
         """Start an async video generation job.
 
         Creates the job and initiates generation with Grok API.
@@ -479,7 +496,7 @@ class GrokJobService:
 
         try:
             # --- SAGA: Pre-flight token deduction ---
-            txn = await billing_service.check_and_reserve(
+            reserve_result = await billing_service.check_and_reserve(
                 account_id,
                 token_cost,
                 job_id,
@@ -495,7 +512,7 @@ class GrokJobService:
             )
             if job is not None:
                 job.token_cost = token_cost
-                job.debit_transaction_id = txn.id
+                job.debit_transaction_id = reserve_result.txn.id
             await session.flush()
 
             # Start async video generation
@@ -520,7 +537,7 @@ class GrokJobService:
             logger.info(
                 "grok.video_job_started", job_id=str(job_id), xai_request_id=started.request_id
             )
-            return job
+            return GrokJobResult(job=job, balance_event=reserve_result.event)
 
         except GrokAPIError as e:
             logger.error("grok.video_job_start_failed", job_id=str(job_id), error=str(e))

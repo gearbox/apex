@@ -72,6 +72,7 @@ class ServiceContainer:
     db_manager: DatabaseManager | None = None
     jwt_service: JWTService | None = None
     password_service: PasswordService | None = None
+    billing_service: BillingService | None = None
     grok_job_service: GrokJobService | None = None
     email_service: EmailService | None = None
     email_verification_service: EmailVerificationService | None = None
@@ -172,6 +173,7 @@ def get_user_content(
         session=session,
         product_id=product_id,
         retention_days=settings.retention_days,
+        max_input_megapixels=settings.image_max_input_megapixels,
     )
 
 
@@ -315,8 +317,14 @@ def get_sse_ticket_service() -> SSETicketService:
 
 
 def get_billing_service() -> BillingService:
-    """Provide BillingService singleton."""
-    return BillingService(event_bus=_services.event_bus)
+    """Provide the process-wide BillingService singleton.
+
+    Raises:
+        RuntimeError: If not initialized.
+    """
+    if _services.billing_service is None:
+        raise RuntimeError("BillingService not initialized")
+    return _services.billing_service
 
 
 def get_idempotency_service() -> IdempotencyService:
@@ -477,6 +485,12 @@ async def init_services(settings: Settings) -> JWTService:
     else:
         logger.warning("redis.not_configured — event_bus and sse_ticket_service disabled")
 
+    # Single BillingService singleton for the whole process — it is stateless
+    # (a pure event-builder; publishing is the caller's job via
+    # EventBus.publish_balance), so one instance safely serves every caller.
+    _services.billing_service = BillingService()
+    logger.info("billing_service.initialized")
+
     # Initialize rate limiter
     init_rate_limiter(settings)
 
@@ -559,12 +573,6 @@ async def init_services(settings: Settings) -> JWTService:
         app_name=settings.app_name,
     )
 
-    # Initialize unified job service
-    _services.unified_job_service = UnifiedJobService(
-        grok_job_service=_services.grok_job_service,
-    )
-    logger.info("unified_job_service.initialized")
-
     # Initialize and start Aisha job poller
     if settings.aisha_poller_enabled:
         poller_config = AishaPollerConfig(
@@ -625,7 +633,7 @@ async def init_services(settings: Settings) -> JWTService:
         _services.bundle_index.register_on_resync(_services.workflow_service.invalidate_cache)
         await _services.bundle_index.start()
 
-        billing_service_for_worker = BillingService(event_bus=_services.event_bus)
+        billing_service_for_worker = get_billing_service()
 
         job_sweep_service = JobSweepService(
             session_factory=_services.db_manager.session_factory,
@@ -665,7 +673,10 @@ async def init_services(settings: Settings) -> JWTService:
         )
         await _services.orphaned_tunnel_cleanup_worker.start()
 
-        assert _services.gpu_session_service is not None  # set immediately above
+        if _services.gpu_session_service is None:
+            raise RuntimeError(
+                "gpu_session_service must be initialized before billing_reconciler_worker"
+            )
         _services.billing_reconciler_worker = BillingReconcilerWorker(
             session_factory=_services.db_manager.session_factory,
             gpu_session_service=_services.gpu_session_service,
@@ -682,10 +693,11 @@ async def init_services(settings: Settings) -> JWTService:
 
     # Initialize unified generation service
     from src.api.services.generation.aisha_provider import AishaGenerationProvider
+    from src.api.services.generation.base import GenerationProvider
     from src.api.services.generation.grok_provider import GrokGenerationProvider
     from src.core.enums import Provider
 
-    generation_providers: dict[Provider, object] = {}
+    generation_providers: dict[Provider, GenerationProvider] = {}
     if _services.bundle_index is None:
         logger.warning(
             "aisha_provider.disabled",
@@ -693,13 +705,15 @@ async def init_services(settings: Settings) -> JWTService:
             hint="Ensure bundle indexing is set up if AISHA should be available",
         )
     else:
-        assert _services.workflow_service is not None  # set together with bundle_index above
+        if _services.workflow_service is None:
+            raise RuntimeError("workflow_service must be initialized before the Aisha provider")
         generation_providers[Provider.AISHA] = AishaGenerationProvider(
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,
             bundle_index=_services.bundle_index,
             r2_storage=_services.r2_storage,
             tunnel_domain=settings.aisha_cf_tunnel_domain,
+            max_input_megapixels=settings.image_max_input_megapixels,
         )
 
     if _services.grok_job_service is not None and _services.r2_storage is not None:
@@ -708,12 +722,17 @@ async def init_services(settings: Settings) -> JWTService:
             r2_storage=_services.r2_storage,
         )
 
+    # Unified job service shares the same provider registry as GenerationService
+    # so poll-on-read (refresh_job) dispatches through the same per-provider hooks.
+    _services.unified_job_service = UnifiedJobService(providers=generation_providers)
+    logger.info("unified_job_service.initialized")
+
     from src.api.services.generation.rate_limiter import ModelRateLimiter
 
     model_rate_limiter = ModelRateLimiter()
 
     _services.generation_service = GenerationService(
-        providers=generation_providers,  # type: ignore[arg-type]
+        providers=generation_providers,
         billing_service=get_billing_service(),
         pricing_service=get_pricing_service(),
         rate_limiter=model_rate_limiter,
@@ -801,7 +820,7 @@ async def init_services(settings: Settings) -> JWTService:
     if _services.gpu_session_service is not None:
         session_credit_guard = SessionCreditGuard(
             session_factory=_services.db_manager.session_factory,
-            billing_service=BillingService(event_bus=_services.event_bus),
+            billing_service=get_billing_service(),
             gpu_session_service=_services.gpu_session_service,
             settings=settings,
             event_bus=_services.event_bus,

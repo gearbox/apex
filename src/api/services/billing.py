@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -9,7 +10,6 @@ from uuid import UUID
 
 import structlog
 
-from src.api.schemas.events import BalanceUpdatedPayload, EventType
 from src.api.services.billing_errors import (
     AccountInactiveError,
     AccountNotFoundError,
@@ -25,10 +25,48 @@ from src.db.repositories.user import UserRepository
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.services.event_bus import EventBus
     from src.db.models.billing import TokenAccount, TokenTransaction
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class BalanceEvent:
+    """Pending ``balance.updated`` SSE fan-out, built but not yet published.
+
+    Carries everything ``EventBus.publish_balance`` needs. Built inside the
+    same DB transaction as the ledger write it describes, but must only be
+    published by the caller *after* that transaction commits — see
+    ``EventBus.publish_balance``.
+    """
+
+    user_ids: Sequence[UUID]
+    account_id: UUID
+    balance: int
+    delta: int
+    transaction_type: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class BillingResult:
+    """Return value of a ledger-mutating ``BillingService`` method.
+
+    ``event`` is ``None`` when there is no SSE target (e.g. no owning user
+    resolved). Publish via ``EventBus.publish_balance`` strictly after the
+    caller's transaction commits.
+    """
+
+    txn: TokenTransaction
+    event: BalanceEvent | None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SettleUsageResult:
+    """Return value of ``settle_session_usage``."""
+
+    settled_tokens: int
+    new_balance: int
+    event: BalanceEvent | None
 
 
 class BillingService:
@@ -46,12 +84,17 @@ class BillingService:
     No other code path calls ``create_transaction`` with a negative amount.
     A future chargeback/clawback handler MUST route through a *recording* primitive
     (extend ``settle_session_usage`` or add a sibling), never a refusing one.
+
+    Stateless and side-effect-free w.r.t. real-time events: every mutating
+    method below returns a ``BalanceEvent`` (via ``BillingResult`` /
+    ``SettleUsageResult``) instead of publishing it. Callers MUST publish via
+    ``EventBus.publish_balance(result.event)`` strictly after committing the
+    transaction that wrote the ledger row — publishing before commit would let
+    a rolled-back transaction produce a phantom balance update to SSE
+    subscribers.
     """
 
-    def __init__(self, event_bus: EventBus | None = None) -> None:
-        self._event_bus = event_bus
-
-    async def _publish_balance_update(
+    def _build_balance_event(
         self,
         *,
         user_ids: Sequence[UUID],
@@ -59,23 +102,20 @@ class BillingService:
         balance: int,
         delta: int,
         transaction_type: str,
-    ) -> None:
-        if self._event_bus is None or not user_ids:
-            return
+    ) -> BalanceEvent | None:
+        """Pure builder — no I/O, no event bus dependency.
 
-        payload = BalanceUpdatedPayload(
+        Returns ``None`` when there is no SSE target (empty ``user_ids``).
+        """
+        if not user_ids:
+            return None
+        return BalanceEvent(
+            user_ids=user_ids,
             account_id=account_id,
             balance=balance,
             delta=delta,
             transaction_type=transaction_type,
         )
-
-        for uid in user_ids:
-            await self._event_bus.publish(
-                user_id=uid,
-                event_type=EventType.BALANCE_UPDATED,
-                payload=payload,
-            )
 
     async def get_or_create_personal_account(
         self, user_id: UUID, *, session: AsyncSession, product_id: str
@@ -212,7 +252,7 @@ class BillingService:
         product_id: str,
         user_id: UUID | None = None,
         description: str = "Generation charge",
-    ) -> TokenTransaction:
+    ) -> BillingResult:
         """Atomically check balance and create a debit transaction.
 
         ``job_id`` may be None for billing events that are not 1:1 with a
@@ -271,7 +311,7 @@ class BillingService:
             model=metadata.get("model"),
         )
 
-        await self._publish_balance_update(
+        event = self._build_balance_event(
             user_ids=[user_id] if user_id is not None else [],
             account_id=account_id,
             balance=new_balance,
@@ -279,7 +319,7 @@ class BillingService:
             transaction_type=TransactionType.DEBIT.value,
         )
 
-        return txn
+        return BillingResult(txn=txn, event=event)
 
     async def settle_session_usage(
         self,
@@ -292,7 +332,7 @@ class BillingService:
         product_id: str,
         user_id: UUID | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> tuple[int, int]:
+    ) -> SettleUsageResult:
         """Record already-incurred GPU session usage; may drive balance negative.
 
         Records the full ``owed`` cost unconditionally — this is the *recording*
@@ -305,14 +345,14 @@ class BillingService:
         while preserving the one-debit-per-job invariant on the base reservation.
 
         Returns:
-            Tuple of (settled_tokens, new_balance) where:
-            - settled_tokens: tokens debited (== owed; full incurred cost recorded)
-            - new_balance: balance after the debit (may be negative)
+            ``SettleUsageResult`` where ``settled_tokens`` is the tokens debited
+            (== ``owed``; full incurred cost recorded) and ``new_balance`` is the
+            balance after the debit (may be negative).
         """
         if owed <= 0:
             repo = BillingRepository(session)
             balance = await repo.get_balance(account_id)
-            return 0, balance
+            return SettleUsageResult(settled_tokens=0, new_balance=balance, event=None)
 
         repo = BillingRepository(session)
 
@@ -330,7 +370,7 @@ class BillingService:
             "model_type": model_type,
         }
         if extra_metadata:
-            base_metadata.update(extra_metadata)
+            base_metadata |= extra_metadata
         description = (
             extra_metadata.get("description", f"GPU session metered usage ({model_type})")
             if extra_metadata
@@ -366,7 +406,7 @@ class BillingService:
                 incurred=owed,
             )
 
-        await self._publish_balance_update(
+        event = self._build_balance_event(
             user_ids=[user_id] if user_id is not None else [],
             account_id=account_id,
             balance=new_balance,
@@ -374,7 +414,7 @@ class BillingService:
             transaction_type=TransactionType.DEBIT.value,
         )
 
-        return owed, new_balance
+        return SettleUsageResult(settled_tokens=owed, new_balance=new_balance, event=event)
 
     async def refund(
         self,
@@ -384,7 +424,7 @@ class BillingService:
         session: AsyncSession,
         product_id: str,
         user_id: UUID | None = None,
-    ) -> TokenTransaction:
+    ) -> BillingResult:
         """Create a refund (positive) transaction linked to job_id.
 
         Raises:
@@ -430,7 +470,7 @@ class BillingService:
             reason=description,
         )
 
-        await self._publish_balance_update(
+        event = self._build_balance_event(
             user_ids=[user_id] if user_id is not None else [],
             account_id=debit.account_id,
             balance=new_balance,
@@ -438,7 +478,7 @@ class BillingService:
             transaction_type=TransactionType.REFUND.value,
         )
 
-        return txn
+        return BillingResult(txn=txn, event=event)
 
     async def partial_refund(
         self,
@@ -449,7 +489,7 @@ class BillingService:
         session: AsyncSession,
         product_id: str,
         user_id: UUID | None = None,
-    ) -> TokenTransaction:
+    ) -> BillingResult:
         """Create a partial refund for a variable-cost resource.
 
         Unlike refund(), which refunds the full original debit, this creates
@@ -516,7 +556,7 @@ class BillingService:
             reason=description,
         )
 
-        await self._publish_balance_update(
+        event = self._build_balance_event(
             user_ids=[user_id] if user_id is not None else [],
             account_id=debit.account_id,
             balance=new_balance,
@@ -524,7 +564,7 @@ class BillingService:
             transaction_type=TransactionType.REFUND.value,
         )
 
-        return txn
+        return BillingResult(txn=txn, event=event)
 
     async def credit(
         self,
@@ -537,7 +577,7 @@ class BillingService:
         session: AsyncSession,
         product_id: str,
         user_id: UUID | None = None,
-    ) -> TokenTransaction:
+    ) -> BillingResult:
         """Credit tokens to an account from a payment."""
         repo = BillingRepository(session)
 
@@ -568,7 +608,7 @@ class BillingService:
             payment_provider=payment_provider,
         )
 
-        await self._publish_balance_update(
+        event = self._build_balance_event(
             user_ids=[user_id] if user_id is not None else [],
             account_id=account_id,
             balance=new_balance,
@@ -576,7 +616,7 @@ class BillingService:
             transaction_type=TransactionType.CREDIT.value,
         )
 
-        return txn
+        return BillingResult(txn=txn, event=event)
 
     async def admin_adjust(
         self,
@@ -587,13 +627,13 @@ class BillingService:
         description: str,
         session: AsyncSession,
         product_id: str,
-    ) -> TokenTransaction:
+    ) -> BillingResult:
         """Admin adjustment: positive = credit, negative = debit.
 
         For negative adjustments, checks that result >= 0.
 
-        Resolves the owning user(s) from the locked account row and publishes
-        a ``balance.updated`` SSE event to each:
+        Resolves the owning user(s) from the locked account row and builds a
+        ``balance.updated`` BalanceEvent targeting each:
         - Personal account → ``account.user_id``
         - Enterprise account → all organisation members
         """
@@ -638,7 +678,7 @@ class BillingService:
             # Enterprise account — notify all org members
             target_user_ids = await repo.get_member_user_ids(account.organization_id)
 
-        await self._publish_balance_update(
+        event = self._build_balance_event(
             user_ids=target_user_ids,
             account_id=account_id,
             balance=new_balance,
@@ -646,7 +686,7 @@ class BillingService:
             transaction_type=TransactionType.ADMIN_ADJUSTMENT.value,
         )
 
-        return txn
+        return BillingResult(txn=txn, event=event)
 
     async def get_transaction_history(
         self,

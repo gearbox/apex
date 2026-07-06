@@ -488,6 +488,13 @@ def _png_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
     return buf.getvalue()
 
 
+def _jpeg_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
+    im = Image.new("RGB", size, (0, 255, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
 class TestAishaProviderI2IBridge:
     """R2 ↔ ComfyUI image bridge for image-to-image generation.
 
@@ -512,8 +519,9 @@ class TestAishaProviderI2IBridge:
 
         # R2 returns the source bytes for the configured user image.
         user_image_id = uuid4()
+        png_bytes = _png_bytes()
         r2 = AsyncMock()
-        r2.download = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n[fake-png-bytes]")
+        r2.download = AsyncMock(return_value=png_bytes)
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,
@@ -569,7 +577,7 @@ class TestAishaProviderI2IBridge:
         # f"input_{stem}_{job_id_short}.{ext}" — extension is terminal.
         mock_client.upload_image.assert_awaited_once()
         upload_kwargs = mock_client.upload_image.await_args.kwargs
-        assert upload_kwargs["image_data"] == b"\x89PNG\r\n\x1a\n[fake-png-bytes]"
+        assert upload_kwargs["image_data"] == png_bytes
         # source_filename stem in template; suffix is the 8-char job_id prefix
         # followed by the terminal extension.
         assert upload_kwargs["filename"].startswith("input_cat_")
@@ -602,7 +610,7 @@ class TestAishaProviderI2IBridge:
         )
 
         r2 = AsyncMock()
-        r2.download = AsyncMock(return_value=b"\xff\xd8\xff[fake-jpg]")
+        r2.download = AsyncMock(return_value=_jpeg_bytes())
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,
@@ -1083,10 +1091,10 @@ class TestAishaProviderI2IDefensive:
         )
 
         r2 = AsyncMock()
-        # Valid PNG signature so the normalization bridge's format sniffer
-        # takes the static passthrough branch (no real Pillow decode needed
-        # for this sanitization test).
-        r2.download = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n[bytes]")
+        # Real PNG bytes so the normalization bridge's format sniffer takes
+        # the static passthrough branch (the pixel-cap gate still opens the
+        # image header to read .size, so it must be Pillow-decodable).
+        r2.download = AsyncMock(return_value=_png_bytes())
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,

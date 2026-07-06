@@ -768,6 +768,15 @@ class Settings(BaseSettings):
         le=100,
         description="Maximum upload file size in MB",
     )
+    image_max_input_megapixels: float = Field(
+        default=100.0,
+        gt=0,
+        description=(
+            "Maximum decoded pixel count (in megapixels) for input images, "
+            "enforced before full decode in image_normalization.py. Guards "
+            "against decompression-bomb uploads and i2i remix inputs."
+        ),
+    )
 
     # Email
     resend_api_key: str = Field(

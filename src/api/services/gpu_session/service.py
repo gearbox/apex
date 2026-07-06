@@ -40,7 +40,7 @@ from .schemas import StopConfirmation
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-    from src.api.services.billing import BillingService
+    from src.api.services.billing import BalanceEvent, BillingService
     from src.api.services.event_bus import EventBus
     from src.api.services.jobs.sweep import JobSweepService
     from src.core.config import Settings
@@ -417,7 +417,7 @@ class GpuSessionService:
 
             # Step 7.5: billing reservation in the same transaction
             try:
-                await self._billing_service.check_and_reserve(
+                reserve_result = await self._billing_service.check_and_reserve(
                     account_id,
                     token_cost,
                     session_id,
@@ -436,6 +436,9 @@ class GpuSessionService:
                 await self._destroy_instance_best_effort(instance_id)
                 await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
                 raise
+
+        if self._event_bus is not None:
+            await self._event_bus.publish_balance(reserve_result.event)
 
         logger.info(
             "gpu_session.start.persisted",
@@ -1015,13 +1018,15 @@ class GpuSessionService:
         if session_row.account_id is not None:
             try:
                 async with self._session_factory() as db, db.begin():
-                    await self._billing_service.refund(
+                    refund_result = await self._billing_service.refund(
                         session_row.id,
                         description="GPU session pre-active stop: session never became active",
                         session=db,
                         product_id=session_row.product_id,
                         user_id=session_row.user_id,
                     )
+                if self._event_bus is not None:
+                    await self._event_bus.publish_balance(refund_result.event)
                 logger.info(
                     "gpu_session.stop_pre_active.refunded",
                     session_id=str(session_id),
@@ -1296,6 +1301,7 @@ class GpuSessionService:
         Stamps ``billing_finalized_at`` on success so the reconciler knows to skip
         this session.
         """
+        pending_event: BalanceEvent | None = None
         async with self._session_factory() as db, db.begin():
             repo = BillingRepository(db)
 
@@ -1324,7 +1330,7 @@ class GpuSessionService:
             if billable_tokens > total_settled:
                 # Remaining overage after metered debits — record full cost; may drive balance negative.
                 overage = billable_tokens - total_settled
-                settled, _ = await self._billing_service.settle_session_usage(
+                settle_result = await self._billing_service.settle_session_usage(
                     account_id,
                     overage,
                     session_id=session_row.id,
@@ -1338,11 +1344,12 @@ class GpuSessionService:
                         "billable_minutes": billable_minutes,
                     },
                 )
+                pending_event = settle_result.event
                 logger.info(
                     "gpu_session.billing.overage_charged",
                     session_id=str(session_row.id),
                     overage_tokens=overage,
-                    settled_tokens=settled,
+                    settled_tokens=settle_result.settled_tokens,
                     billable_minutes=billable_minutes,
                     total_settled=total_settled,
                     original_debit=original_debit,
@@ -1353,7 +1360,7 @@ class GpuSessionService:
                 overpaid = total_settled - billable_tokens
                 refund_amount = min(overpaid, original_debit)
                 if refund_amount > 0:
-                    await self._billing_service.partial_refund(
+                    refund_result = await self._billing_service.partial_refund(
                         session_row.id,
                         refund_amount,
                         description=(
@@ -1363,6 +1370,7 @@ class GpuSessionService:
                         product_id=session_row.product_id,
                         user_id=session_row.user_id,
                     )
+                    pending_event = refund_result.event
                     logger.info(
                         "gpu_session.billing.partial_refund",
                         session_id=str(session_row.id),
@@ -1373,6 +1381,9 @@ class GpuSessionService:
                     )
 
             await GpuSessionRepository(db).mark_billing_finalized(session_row.id, datetime.now(UTC))
+
+        if self._event_bus is not None:
+            await self._event_bus.publish_balance(pending_event)
 
     async def _publish_status_event(
         self,

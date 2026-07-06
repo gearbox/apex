@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
 import structlog
@@ -12,6 +12,7 @@ import structlog
 from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationRequest
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.comfyui_client import ComfyUIClient
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.service import ProviderResponseError
 from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
@@ -20,6 +21,7 @@ from src.api.services.generation.tunnel_validation import (
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.image_normalization import (
     ImageNormalizationError,
+    ImageTooLargeError,
     ensure_comfyui_input,
     sniff_format,
 )
@@ -89,6 +91,8 @@ class AishaGenerationProvider:
     and closes the client when done — no shared client state.
     """
 
+    supports_image_sizing: ClassVar[bool] = True
+
     def __init__(
         self,
         workflow_service: WorkflowService,
@@ -97,6 +101,7 @@ class AishaGenerationProvider:
         r2_storage: R2StorageService | None = None,
         tunnel_domain: str = "",
         tunnel_hostname_allowed_prefix: str | None = None,
+        max_input_megapixels: float = 100.0,
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
@@ -113,11 +118,20 @@ class AishaGenerationProvider:
         self._tunnel_domain = tunnel_domain
         self._tunnel_hostname_allowed_prefix = tunnel_hostname_allowed_prefix
         self._bundle_index = bundle_index
+        self._max_input_megapixels = max_input_megapixels
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
         """Aisha-specific validation beyond what the enum provides."""
         if request.model == ModelType.AISHA_VIDEO:
             raise ValueError("Aisha video generation is not yet available via the unified endpoint")
+
+    async def refresh_job(
+        self,
+        session: AsyncSession,  # noqa: ARG002
+        job: GenerationJob,  # noqa: ARG002
+    ) -> GenerationJob | None:
+        """No-op — Aisha job status is updated by the background AishaJobPoller."""
+        return None
 
     @staticmethod
     def _resolve_int(value: int | None, default: int, min_val: int, max_val: int, name: str) -> int:
@@ -214,7 +228,22 @@ class AishaGenerationProvider:
         # PNG here. This covers the source_output_id -> Grok-WEBP-output remix
         # path that upload-time normalization cannot fix.
         try:
-            normalized = await ensure_comfyui_input(image_bytes)
+            normalized = await ensure_comfyui_input(
+                image_bytes, max_megapixels=self._max_input_megapixels
+            )
+        except ImageTooLargeError as e:
+            logger.warning(
+                "aisha.input_too_large",
+                sniffed=sniff_format(image_bytes).value,
+                size_bytes=len(image_bytes),
+                megapixels=e.megapixels,
+                limit=e.limit,
+                source_output_id=str(request.source_output_id)
+                if request.source_output_id
+                else None,
+                input_image_id=str(request.input_image_id) if request.input_image_id else None,
+            )
+            raise ValueError("Input image exceeds maximum pixel count") from e
         except ImageNormalizationError as e:
             logger.warning(
                 "aisha.input_normalization_failed",
@@ -244,7 +273,7 @@ class AishaGenerationProvider:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob:
+    ) -> ProviderSubmitResult:
         """Resolve GPU session, build per-request ComfyUI client, queue workflow."""
         job_id = new_id()
 
@@ -369,7 +398,7 @@ class AishaGenerationProvider:
         )
 
         # Billing reservation
-        txn = await billing_service.check_and_reserve(
+        reserve_result = await billing_service.check_and_reserve(
             account_id,
             token_cost,
             job_id,
@@ -385,7 +414,7 @@ class AishaGenerationProvider:
         )
         if db_job is not None:
             db_job.token_cost = token_cost
-            db_job.debit_transaction_id = txn.id
+            db_job.debit_transaction_id = reserve_result.txn.id
         await session.flush()
 
         # 2. Build a session-scoped ComfyUI client.
@@ -513,4 +542,4 @@ class AishaGenerationProvider:
             raise ValueError("Failed to create Aisha job record")
 
         await session.flush()
-        return db_job
+        return ProviderSubmitResult(job=db_job, balance_event=reserve_result.event)

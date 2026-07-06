@@ -16,6 +16,7 @@ from src.api.services.storage import StorageNotFoundError, StorageValidationErro
 from src.api.services.user_content import (
     UserContentNotFoundError,
     UserContentService,
+    UserContentTooLargeError,
     UserContentValidationError,
 )
 from src.core.enums import MediaFormat, OutputMediaType
@@ -92,10 +93,15 @@ def _make_db_output(**overrides: object) -> MagicMock:
     return out
 
 
-def _make_service() -> tuple[UserContentService, AsyncMock]:
+def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentService, AsyncMock]:
     storage = AsyncMock()
     session = AsyncMock()
-    service = UserContentService(storage=storage, session=session, product_id="vex")
+    service = UserContentService(
+        storage=storage,
+        session=session,
+        product_id="vex",
+        max_input_megapixels=max_input_megapixels,
+    )
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
     service._job_repo = AsyncMock()
@@ -123,7 +129,7 @@ class TestUploadImage:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 50,
+                data=_png_bytes(),
                 filename="photo.png",
                 content_type="image/png",
             )
@@ -150,7 +156,7 @@ class TestUploadImage:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
+                data=_png_bytes(),
                 filename="big.png",
                 content_type="image/png",
             )
@@ -185,7 +191,7 @@ class TestUploadImage:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
+                data=_png_bytes(),
                 filename="photo.png",
                 content_type="image/png",
             )
@@ -212,7 +218,7 @@ class TestUploadImage:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
+                data=_png_bytes(),
                 filename="photo.png",
                 content_type="image/png",
             )
@@ -326,6 +332,28 @@ class TestUploadImageNormalization:
         upload_kwargs = storage.upload.call_args.kwargs
         assert upload_kwargs["data"] == png_bytes
         assert upload_kwargs["content_type"] == "image/png"
+
+    async def test_upload_oversized_image_maps_to_413(self) -> None:
+        """F4/D4: an image over the configured pixel cap raises
+        UserContentTooLargeError — mapped to HTTP 413 at the route
+        (see tests/unit/test_storage_routes.py::test_too_large_error_returns_413).
+
+        Uses a real, tiny image against an artificially tiny cap (rather than
+        a huge image) so the test stays fast.
+        """
+        service, storage = _make_service(max_input_megapixels=0.0001)  # 100 px cap
+        png_bytes = _png_bytes()  # 16x12 = 192 px — over the 100 px cap
+
+        with pytest.raises(UserContentTooLargeError):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=png_bytes,
+                filename="photo.png",
+                content_type="image/png",
+            )
+
+        storage.upload.assert_not_called()
+        service._image_repo.create.assert_not_called()  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

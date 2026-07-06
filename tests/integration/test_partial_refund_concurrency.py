@@ -35,7 +35,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest_asyncio.fixture
 async def billing_service() -> BillingService:
-    return BillingService(event_bus=None)
+    return BillingService()
 
 
 async def _seed_user_account_and_debit(

@@ -14,6 +14,7 @@ from uuid import uuid4
 import pytest
 
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
     AgeVerificationRequiredError,
@@ -60,7 +61,7 @@ def _make_mock_provider() -> MagicMock:
     job.status = JobStatus.COMPLETED.value
     job.name = "Test"
     job.created_at = datetime.now(UTC)
-    provider.submit = AsyncMock(return_value=job)
+    provider.submit = AsyncMock(return_value=ProviderSubmitResult(job=job, balance_event=None))
     return provider
 
 

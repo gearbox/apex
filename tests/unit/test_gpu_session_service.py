@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.events import EventType, GpuSessionStatusPayload
+from src.api.services.billing import BillingResult, SettleUsageResult
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.gpu_session import (
@@ -56,11 +57,13 @@ def _make_billing_mock() -> MagicMock:
     """
     m = MagicMock()
     m.assert_sufficient_balance = AsyncMock(return_value=None)
-    m.check_and_reserve = AsyncMock(return_value=None)
-    m.refund = AsyncMock(return_value=None)
-    m.partial_refund = AsyncMock(return_value=None)
-    # (settled_tokens, new_balance) — overridden per-test as needed
-    m.settle_session_usage = AsyncMock(return_value=(0, 0))
+    m.check_and_reserve = AsyncMock(return_value=BillingResult(txn=MagicMock(), event=None))
+    m.refund = AsyncMock(return_value=BillingResult(txn=MagicMock(), event=None))
+    m.partial_refund = AsyncMock(return_value=BillingResult(txn=MagicMock(), event=None))
+    # SettleUsageResult(settled_tokens, new_balance, event) — overridden per-test as needed
+    m.settle_session_usage = AsyncMock(
+        return_value=SettleUsageResult(settled_tokens=0, new_balance=0, event=None)
+    )
     return m
 
 

@@ -26,6 +26,7 @@ test_partial_refund_concurrency.py.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -35,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.services.billing import BillingService
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
     GenerationError,
@@ -57,12 +59,21 @@ class _WriteThenFailProvider:
     """Mimics AishaGenerationProvider.submit(): writes a job row and reserves
     a debit *before* the failure, then raises rather than returning."""
 
+    supports_image_sizing: ClassVar[bool] = True
+
     def __init__(self, gpu_session_id: UUID) -> None:
         self.written_job_id: UUID | None = None
         self._gpu_session_id = gpu_session_id
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
         pass
+
+    async def refresh_job(
+        self,
+        session: AsyncSession,  # noqa: ARG002
+        job: GenerationJob,  # noqa: ARG002
+    ) -> GenerationJob | None:
+        return None
 
     async def submit(
         self,
@@ -76,7 +87,7 @@ class _WriteThenFailProvider:
         product_id: str,
         source_job_id: UUID | None = None,  # noqa: ARG002
         source_output_id: UUID | None = None,  # noqa: ARG002
-    ) -> GenerationJob:
+    ) -> ProviderSubmitResult:
         job_id = new_id()
         self.written_job_id = job_id
         await JobRepository(session).create(
@@ -187,7 +198,7 @@ async def test_provider_raising_after_job_and_debit_write_rolls_back_fully(
     provider = _WriteThenFailProvider(gpu_session_id=gpu_session.id)
     pricing = AsyncMock()
     pricing.get_price = AsyncMock(return_value=50)
-    billing = BillingService(event_bus=None)
+    billing = BillingService()
 
     service = GenerationService(
         providers={Provider.AISHA: provider},

@@ -10,9 +10,9 @@ import msgspec
 import structlog
 from litestar import Controller, Request, Response, get, post
 from litestar.di import Provide
-from litestar.exceptions import PermissionDeniedException
+from litestar.exceptions import HTTPException, PermissionDeniedException
 from litestar.params import Parameter
-from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED
+from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_403_FORBIDDEN
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
@@ -32,11 +32,12 @@ from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import OrganizationPermissionError
+from src.api.services.event_bus import EventBus
 from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
 from src.core.config import TOKEN_PACKAGES
-from src.core.product import ProductConfig
+from src.core.product import PaymentProvider, ProductConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -245,6 +246,17 @@ class BillingController(Controller):
         ],
     ) -> Response[StripeCheckoutResponse]:
         """Create a Stripe checkout session for token purchase (idempotent via Idempotency-Key)."""
+        if not product_config.supports_payment_provider(PaymentProvider.STRIPE):
+            logger.warning(
+                "payment.provider_not_supported",
+                provider="stripe",
+                product=product_id,
+            )
+            raise HTTPException(
+                status_code=HTTP_403_FORBIDDEN,
+                detail="Payment provider not available for this product",
+            )
+
         request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
 
         check_result = await idempotency_service.check(
@@ -302,6 +314,7 @@ class BillingController(Controller):
         billing_service: BillingService,
         payment_service: PaymentService,
         product_id: str,
+        product_config: ProductConfig,
         idempotency_service: IdempotencyService,
         idempotency_key_header: Annotated[
             str,
@@ -313,6 +326,17 @@ class BillingController(Controller):
         ],
     ) -> Response[NowPaymentsInvoiceResponse]:
         """Create a NowPayments invoice for token purchase (idempotent via Idempotency-Key)."""
+        if not product_config.supports_payment_provider(PaymentProvider.NOWPAYMENTS):
+            logger.warning(
+                "payment.provider_not_supported",
+                provider="nowpayments",
+                product=product_id,
+            )
+            raise HTTPException(
+                status_code=HTTP_403_FORBIDDEN,
+                detail="Payment provider not available for this product",
+            )
+
         request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
 
         check_result = await idempotency_service.check(
@@ -374,6 +398,7 @@ class BillingWebhookController(Controller):
         request: Request[Any, Any, Any],
         session: AsyncSession,
         payment_service: PaymentService,
+        event_bus: EventBus,
         product_id: str,
     ) -> Response[dict[str, Any]]:
         """Handle Stripe webhook.
@@ -384,10 +409,11 @@ class BillingWebhookController(Controller):
         """
         payload = await request.body()
         signature = request.headers.get("stripe-signature", "")
-        await payment_service.handle_stripe_webhook(
+        balance_event = await payment_service.handle_stripe_webhook(
             payload, signature, session=session, product_id=product_id
         )
         await session.commit()
+        await event_bus.publish_balance(balance_event)
         return Response(content={"received": True}, status_code=HTTP_200_OK)
 
     @post("/nowpayments")
@@ -396,6 +422,7 @@ class BillingWebhookController(Controller):
         request: Request[Any, Any, Any],
         session: AsyncSession,
         payment_service: PaymentService,
+        event_bus: EventBus,
         product_id: str,
     ) -> Response[dict[str, Any]]:
         """Handle NowPayments IPN webhook.
@@ -406,8 +433,9 @@ class BillingWebhookController(Controller):
         """
         raw = await request.body()
         hmac_sig = request.headers.get("x-nowpayments-sig", "")
-        await payment_service.handle_nowpayments_webhook(
+        balance_event = await payment_service.handle_nowpayments_webhook(
             raw, hmac_sig, session=session, product_id=product_id
         )
         await session.commit()
+        await event_bus.publish_balance(balance_event)
         return Response(content={"received": True}, status_code=HTTP_200_OK)

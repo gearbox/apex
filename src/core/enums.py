@@ -330,9 +330,15 @@ class TransactionType(StrEnum):
 
 
 class PaymentStatus(StrEnum):
-    """Payment processing status."""
+    """Payment processing status.
+
+    PARTIALLY_PAID is informative and non-terminal: it never blocks IPN
+    reprocessing. Only COMPLETED does — a later ``finished`` IPN after a
+    partial credit must still be processed to collect the remainder.
+    """
 
     PENDING = "pending"
+    PARTIALLY_PAID = "partially_paid"
     COMPLETED = "completed"
     FAILED = "failed"
     REFUNDED = "refunded"

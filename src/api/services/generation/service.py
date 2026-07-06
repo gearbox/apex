@@ -20,6 +20,7 @@ from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
+    from src.api.services.billing import BalanceEvent
     from src.api.services.event_bus import EventBus
     from src.db.models.storage import GenerationJob
 
@@ -143,7 +144,7 @@ class GenerationService:
         if provider is None:
             raise ProviderUnavailableError(f"Provider '{provider_key.value}' is not configured")
 
-        if provider_key == Provider.GROK and (
+        if not provider.supports_image_sizing and (
             request.image_resolution is not None
             or request.width is not None
             or request.height is not None
@@ -188,8 +189,9 @@ class GenerationService:
             source_job_id = source_output.job_id
 
         job: GenerationJob | None = None
+        reserve_event: BalanceEvent | None = None
         try:
-            job = await provider.submit(
+            submit_result = await provider.submit(
                 request,
                 user_id=user_id,
                 session=session,
@@ -200,7 +202,14 @@ class GenerationService:
                 source_job_id=source_job_id,
                 source_output_id=resolved_source_output_id,
             )
+            job = submit_result.job
+            reserve_event = submit_result.balance_event
             await session.commit()
+
+            # Balance event publishes only after the commit above — the debit
+            # created inside provider.submit() is now durable.
+            if self._event_bus is not None:
+                await self._event_bus.publish_balance(reserve_event)
 
             if self._event_bus is not None:
                 from src.api.schemas.events import EventType, JobStatusPayload
@@ -222,11 +231,15 @@ class GenerationService:
             # ProviderResponseError's docstring) — refund if a debit was
             # already written, then re-raise unchanged so the route surfaces
             # the deliberate message.
-            await self._resolve_submit_failure(job, session=session, product_id=product_id)
+            await self._resolve_submit_failure(
+                job, session=session, product_id=product_id, reserve_event=reserve_event
+            )
             raise
         except Exception as exc:
             logger.exception("generation.submit_failed", model=request.model.value)
-            await self._resolve_submit_failure(job, session=session, product_id=product_id)
+            await self._resolve_submit_failure(
+                job, session=session, product_id=product_id, reserve_event=reserve_event
+            )
             # Any other exception (asyncpg errors, httpx errors carrying tunnel
             # hostnames, raw provider payload fragments, ...) MUST NOT reach
             # the client — only this fixed message may.
@@ -251,25 +264,29 @@ class GenerationService:
         *,
         session: AsyncSession,
         product_id: str,
+        reserve_event: BalanceEvent | None = None,
     ) -> None:
         """Resolve the DB transaction after a failed ``provider.submit()`` call.
 
         ``job is None`` ⇒ no external side effect is durable yet — the job
         row and its debit, if either was written, are still uncommitted in
         this same transaction. Roll back rather than committing an orphaned
-        charge for a job that never ran.
+        charge for a job that never ran. ``reserve_event`` is never published
+        in this branch (nothing committed).
 
         ``job is not None`` ⇒ the job row (and its debit) were already
         written by the provider. Refund and commit so the ledger nets to
         zero and the failed job stays visible in the user's history. A
         refund failure is treated the same as "nothing durable" — roll back
-        rather than leave an uncovered debit.
+        rather than leave an uncovered debit. On success, both the original
+        reserve's event and the refund's event describe rows that just
+        committed together in this one transaction — publish both.
         """
         if job is None:
             await session.rollback()
             return
         try:
-            await self._billing.refund(
+            refund_result = await self._billing.refund(
                 job.id,
                 description="Generation failed — tokens refunded",
                 session=session,
@@ -280,6 +297,9 @@ class GenerationService:
             await session.rollback()
             return
         await session.commit()
+        if self._event_bus is not None:
+            await self._event_bus.publish_balance(reserve_event)
+            await self._event_bus.publish_balance(refund_result.event)
 
     @staticmethod
     def _validate_inputs(request: UnifiedGenerationRequest) -> None:
