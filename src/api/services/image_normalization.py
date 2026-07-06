@@ -142,7 +142,7 @@ def coerce_mode_for_encode(img: Image.Image) -> Image.Image:
 def _convert_to_png_sync(
     data: bytes,
     *,
-    max_megapixels: float = 100.0,
+    max_megapixels: float,
     sniffed: SniffedFormat = SniffedFormat.UNKNOWN,
 ) -> bytes:
     try:
@@ -182,7 +182,7 @@ def _check_passthrough_pixel_cap(
 
 
 def _normalize_sync(
-    data: bytes, *, force_png_for_webp: bool = False, max_megapixels: float = 100.0
+    data: bytes, *, force_png_for_webp: bool = False, max_megapixels: float
 ) -> NormalizedImage:
     sniffed = sniff_format(data)
     passthrough_format = _PASSTHROUGH_FORMATS.get(sniffed)
@@ -207,7 +207,7 @@ def _normalize_sync(
     )
 
 
-async def normalize_image(data: bytes, *, max_megapixels: float = 100.0) -> NormalizedImage:
+async def normalize_image(data: bytes, *, max_megapixels: float) -> NormalizedImage:
     """Normalize arbitrary image bytes to a storable format.
 
     PNG, JPEG, and static WebP pass through unchanged. Everything else
@@ -215,15 +215,27 @@ async def normalize_image(data: bytes, *, max_megapixels: float = 100.0) -> Norm
     re-encoded as PNG. Raises ``ImageNormalizationError`` if the bytes
     cannot be decoded by Pillow, or ``ImageTooLargeError`` (a subclass) if
     the pixel count exceeds ``max_megapixels``.
+
+    Args:
+        data: Raw image bytes.
+        max_megapixels: Required cap — callers must pass
+            ``Settings.image_max_input_megapixels`` explicitly; this
+            function does not own a config default.
     """
     return await asyncio.to_thread(_normalize_sync, data, max_megapixels=max_megapixels)
 
 
-async def ensure_comfyui_input(data: bytes, *, max_megapixels: float = 100.0) -> NormalizedImage:
+async def ensure_comfyui_input(data: bytes, *, max_megapixels: float) -> NormalizedImage:
     """Like ``normalize_image``, but also converts static WebP to PNG.
 
     ComfyUI-side WebP handling is unreliable; this bridge guarantees
     ComfyUI only ever receives PNG or JPEG bytes.
+
+    Args:
+        data: Raw image bytes.
+        max_megapixels: Required cap — callers must pass
+            ``Settings.image_max_input_megapixels`` explicitly; this
+            function does not own a config default.
     """
     return await asyncio.to_thread(
         _normalize_sync, data, force_png_for_webp=True, max_megapixels=max_megapixels

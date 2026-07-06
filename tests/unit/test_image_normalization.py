@@ -140,7 +140,7 @@ class TestSniffFormat:
 class TestNormalizeImage:
     async def test_normalize_png_passthrough(self) -> None:
         data = _png()
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert isinstance(result, NormalizedImage)
         assert result.data == data
@@ -151,7 +151,7 @@ class TestNormalizeImage:
 
     async def test_normalize_jpeg_passthrough(self) -> None:
         data = _jpeg()
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert result.data == data
         assert result.format is MediaFormat.JPEG
@@ -159,14 +159,14 @@ class TestNormalizeImage:
 
     async def test_normalize_static_webp_passthrough(self) -> None:
         data = _webp()
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert result.data == data
         assert result.format is MediaFormat.WEBP
         assert result.converted is False
 
     async def test_normalize_heic_converts_to_png(self) -> None:
-        result = await normalize_image(_heic())
+        result = await normalize_image(_heic(), max_megapixels=100.0)
 
         assert result.converted is True
         assert result.format is MediaFormat.PNG
@@ -175,7 +175,7 @@ class TestNormalizeImage:
 
     async def test_normalize_animated_webp_first_frame(self) -> None:
         size = (16, 12)
-        result = await normalize_image(_webp_animated(size))
+        result = await normalize_image(_webp_animated(size), max_megapixels=100.0)
 
         assert result.converted is True
         assert result.format is MediaFormat.PNG
@@ -183,7 +183,7 @@ class TestNormalizeImage:
             assert im.size == size
 
     async def test_normalize_preserves_alpha(self) -> None:
-        result = await normalize_image(_heic(mode="RGBA"))
+        result = await normalize_image(_heic(mode="RGBA"), max_megapixels=100.0)
 
         assert result.converted is True
         with Image.open(io.BytesIO(result.data)) as im:
@@ -196,7 +196,7 @@ class TestNormalizeImage:
         original_size = (20, 10)
         data = _tiff_with_orientation(6, size=original_size)
 
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert result.converted is True
         with Image.open(io.BytesIO(result.data)) as im:
@@ -205,11 +205,11 @@ class TestNormalizeImage:
 
     async def test_normalize_garbage_raises(self) -> None:
         with pytest.raises(ImageNormalizationError):
-            await normalize_image(_GARBAGE)
+            await normalize_image(_GARBAGE, max_megapixels=100.0)
 
     @pytest.mark.skipif(not features.check("avif"), reason="Pillow built without AVIF support")
     async def test_normalize_avif_converts_to_png(self) -> None:
-        result = await normalize_image(_avif())
+        result = await normalize_image(_avif(), max_megapixels=100.0)
         assert result.format is MediaFormat.PNG
         assert result.converted is True
         assert result.sniffed is SniffedFormat.AVIF
@@ -222,7 +222,7 @@ class TestNormalizeImage:
         buf = io.BytesIO()
         pal.save(buf, format="PNG")
 
-        result_data = _convert_to_png_sync(buf.getvalue())
+        result_data = _convert_to_png_sync(buf.getvalue(), max_megapixels=100.0)
 
         with Image.open(io.BytesIO(result_data)) as im:
             assert im.mode == "RGBA"
@@ -235,7 +235,7 @@ class TestNormalizeImage:
         buf = io.BytesIO()
         im.save(buf, format="PNG")
 
-        result_data = _convert_to_png_sync(buf.getvalue())
+        result_data = _convert_to_png_sync(buf.getvalue(), max_megapixels=100.0)
 
         with Image.open(io.BytesIO(result_data)) as reopened:
             assert reopened.mode == "RGB"
@@ -246,7 +246,7 @@ class TestEnsureComfyUIInput:
         """The one behavioral delta vs normalize_image: static WebP -> PNG."""
         data = _webp()
 
-        result = await ensure_comfyui_input(data)
+        result = await ensure_comfyui_input(data, max_megapixels=100.0)
 
         assert result.converted is True
         assert result.format is MediaFormat.PNG
@@ -254,14 +254,14 @@ class TestEnsureComfyUIInput:
 
     async def test_ensure_comfyui_input_png_passthrough(self) -> None:
         data = _png()
-        result = await ensure_comfyui_input(data)
+        result = await ensure_comfyui_input(data, max_megapixels=100.0)
 
         assert result.data == data
         assert result.converted is False
 
     async def test_ensure_comfyui_input_garbage_raises(self) -> None:
         with pytest.raises(ImageNormalizationError):
-            await ensure_comfyui_input(_GARBAGE)
+            await ensure_comfyui_input(_GARBAGE, max_megapixels=100.0)
 
 
 # ---------------------------------------------------------------------------

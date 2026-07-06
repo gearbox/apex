@@ -9,7 +9,6 @@ Handles the full lifecycle of Grok generation jobs:
 
 from __future__ import annotations
 
-import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -18,6 +17,7 @@ import httpx
 import structlog
 
 from src.api.services.billing import BillingService
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
@@ -46,25 +46,9 @@ from .enums import ResponseImageFormat
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.services.billing import BalanceEvent
     from src.db.models import GenerationJob
 
 logger = structlog.get_logger(__name__)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class GrokJobResult:
-    """Result of ``create_image_job`` / ``start_video_job``.
-
-    ``balance_event`` is the pending event for the ``check_and_reserve``
-    debit — only meaningful on the success path (the caller commits the
-    surrounding transaction and threads it back for a post-commit publish).
-    On error paths the whole transaction is rolled back by the orchestrator,
-    so no event is ever attached there.
-    """
-
-    job: GenerationJob | None
-    balance_event: BalanceEvent | None = None
 
 
 class GrokJobError(Exception):
@@ -153,7 +137,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GrokJobResult:
+    ) -> ProviderSubmitResult:
         """Create and execute an image generation job.
 
         This method follows the Saga pattern:
@@ -182,7 +166,9 @@ class GrokJobService:
             token_cost: Pre-calculated token cost for this generation.
 
         Returns:
-            Created and processed GenerationJob.
+            ``ProviderSubmitResult`` wrapping the created and processed
+            GenerationJob, the post-debit balance, and the pending balance
+            event.
 
         Raises:
             GrokJobError: If job creation or processing fails.
@@ -293,7 +279,13 @@ class GrokJobService:
             )
 
             logger.info("grok.image_job_completed", job_id=str(job_id), output_count=len(results))
-            return GrokJobResult(job=job, balance_event=reserve_result.event)
+            if job is None:
+                raise GrokJobError(f"Job {job_id} disappeared after completion")
+            return ProviderSubmitResult(
+                job=job,
+                balance_after=reserve_result.txn.balance_after,
+                balance_event=reserve_result.event,
+            )
 
         except GrokAPIError as e:
             logger.error("grok.api_error", job_id=str(job_id), error=str(e))
@@ -442,7 +434,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GrokJobResult:
+    ) -> ProviderSubmitResult:
         """Start an async video generation job.
 
         Creates the job and initiates generation with Grok API.
@@ -467,7 +459,9 @@ class GrokJobService:
             token_cost: Pre-calculated token cost for this generation.
 
         Returns:
-            Created GenerationJob with status QUEUED.
+            ``ProviderSubmitResult`` wrapping the created GenerationJob with
+            status QUEUED, the post-debit balance, and the pending balance
+            event.
         """
         job_repo = JobRepository(session)
 
@@ -537,7 +531,13 @@ class GrokJobService:
             logger.info(
                 "grok.video_job_started", job_id=str(job_id), xai_request_id=started.request_id
             )
-            return GrokJobResult(job=job, balance_event=reserve_result.event)
+            if job is None:
+                raise GrokJobError(f"Job {job_id} disappeared after start")
+            return ProviderSubmitResult(
+                job=job,
+                balance_after=reserve_result.txn.balance_after,
+                balance_event=reserve_result.event,
+            )
 
         except GrokAPIError as e:
             logger.error("grok.video_job_start_failed", job_id=str(job_id), error=str(e))

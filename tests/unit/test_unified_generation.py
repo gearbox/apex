@@ -256,7 +256,9 @@ def _make_mock_provider() -> MagicMock:
     job.status = JobStatus.COMPLETED.value
     job.name = "Test"
     job.created_at = datetime.now(UTC)
-    provider.submit = AsyncMock(return_value=ProviderSubmitResult(job=job, balance_event=None))
+    provider.submit = AsyncMock(
+        return_value=ProviderSubmitResult(job=job, balance_after=100, balance_event=None)
+    )
     return provider
 
 
@@ -498,7 +500,7 @@ class TestGenerationServiceGenerate:
         mock_provider = MagicMock()
         mock_provider.validate = MagicMock()
         mock_provider.submit = AsyncMock(
-            return_value=ProviderSubmitResult(job=job, balance_event=None)
+            return_value=ProviderSubmitResult(job=job, balance_after=100, balance_event=None)
         )
 
         billing = AsyncMock()
@@ -544,6 +546,120 @@ class TestGenerationServiceGenerate:
         billing.refund.assert_awaited_once()
         assert billing.refund.await_args.args[0] == job.id
         assert session.commit.await_count == 2
+
+    async def test_job_status_publish_failure_does_not_refund_or_error(self) -> None:
+        """A post-commit publish() failure (e.g. a Redis hiccup on the
+        JOB_STATUS_CHANGED event) must never refund an already-committed,
+        already-billed job or surface as a client-facing error (R3)."""
+        job = MagicMock()
+        job.id = uuid4()
+        job.status = JobStatus.QUEUED.value
+        job.name = "Test"
+        job.created_at = datetime.now(UTC)
+
+        mock_provider = MagicMock()
+        mock_provider.validate = MagicMock()
+        mock_provider.supports_image_sizing = True
+        mock_provider.submit = AsyncMock(
+            return_value=ProviderSubmitResult(job=job, balance_after=950, balance_event=None)
+        )
+
+        billing = AsyncMock()
+        billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        billing.assert_sufficient_balance = AsyncMock()
+        billing.refund = AsyncMock()
+
+        pricing = AsyncMock()
+        pricing.get_price = AsyncMock(return_value=50)
+
+        event_bus = AsyncMock()
+        event_bus.publish_balance = AsyncMock()
+        event_bus.publish = AsyncMock(side_effect=Exception("redis unavailable"))
+
+        session = AsyncMock()
+
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=billing,
+            pricing_service=pricing,
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+            event_bus=event_bus,
+        )
+
+        request = UnifiedGenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch("src.api.services.generation.service.logger") as mock_logger,
+        ):
+            response = await service.generate(
+                request,
+                user_id=uuid4(),
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        assert response.job_id == job.id
+        assert response.balance_remaining == 950
+        billing.refund.assert_not_awaited()
+        session.rollback.assert_not_awaited()
+        mock_logger.exception.assert_called_once()
+        assert mock_logger.exception.call_args.args[0] == "generation.post_commit_publish_failed"
+
+    async def test_response_balance_from_submit_result_no_extra_ledger_scan(self) -> None:
+        """``balance_remaining`` must come from ``ProviderSubmitResult.balance_after``
+        — no extra ``get_balance()`` ledger scan after a successful submit (R6/R7)."""
+        job = MagicMock()
+        job.id = uuid4()
+        job.status = JobStatus.COMPLETED.value
+        job.name = "Test"
+        job.created_at = datetime.now(UTC)
+
+        mock_provider = MagicMock()
+        mock_provider.validate = MagicMock()
+        mock_provider.supports_image_sizing = True
+        mock_provider.submit = AsyncMock(
+            return_value=ProviderSubmitResult(job=job, balance_after=725, balance_event=None)
+        )
+
+        billing = AsyncMock()
+        billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        billing.assert_sufficient_balance = AsyncMock()
+
+        pricing = AsyncMock()
+        pricing.get_price = AsyncMock(return_value=50)
+
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=billing,
+            pricing_service=pricing,
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+        )
+
+        request = UnifiedGenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+        with patch(
+            "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+            new=AsyncMock(return_value=_make_enabled_model_mock()),
+        ):
+            response = await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        assert response.balance_remaining == 725
+        billing.get_balance.assert_not_called()
 
 
 class TestGenerationServiceRateLimit:
@@ -594,3 +710,38 @@ class TestGenerationServiceRateLimit:
             await service.generate(
                 request, user_id=uuid4(), session=mock_session, product_config=VEX_CONFIG
             )
+
+
+# ---------------------------------------------------------------------------
+# UnifiedJobService — poll-on-read unknown provider guard (R4)
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedJobServiceUnknownProvider:
+    """An unrecognized ``job.provider`` value must not crash GET /v1/jobs/{id}."""
+
+    async def test_get_job_unknown_provider_serves_stale_row(self) -> None:
+        from src.api.services.unified_jobs import UnifiedJobService
+
+        job_id = uuid4()
+        job = MagicMock()
+        job.id = job_id
+        job.provider = "some-retired-provider"
+        job.status = JobStatus.COMPLETED.value
+        job.generation_type = GenerationType.T2I.value
+        job.outputs = []
+
+        with (
+            patch("src.api.services.unified_jobs.JobRepository") as job_repo_cls,
+            patch("src.api.services.unified_jobs.OutputRepository") as output_repo_cls,
+        ):
+            job_repo_cls.return_value.get = AsyncMock(return_value=job)
+            output_repo_cls.return_value.list_by_job = AsyncMock(return_value=[])
+            output_repo_cls.return_value.batch_derivatives = AsyncMock(return_value={})
+
+            service = UnifiedJobService(providers={})
+            result = await service.get_job(job_id, uuid4(), session=AsyncMock())
+
+        assert result is not None
+        assert result.id == job_id
+        assert result.provider == "some-retired-provider"

@@ -478,12 +478,14 @@ async def init_services(settings: Settings) -> JWTService:
 
     if settings.redis_url:
         init_redis_pool(settings.redis_url)
-        _services.event_bus = EventBus()
-        logger.info("event_bus.initialized")
         _services.sse_ticket_service = SSETicketService(ttl_seconds=settings.sse_ticket_ttl_seconds)
         logger.info("sse_ticket_service.initialized")
     else:
-        logger.warning("redis.not_configured — event_bus and sse_ticket_service disabled")
+        logger.warning(
+            "redis.not_configured — event bus publishes disabled, sse_ticket_service unavailable"
+        )
+    _services.event_bus = EventBus(enabled=settings.redis_url is not None)
+    logger.info("event_bus.initialized", enabled=settings.redis_url is not None)
 
     # Single BillingService singleton for the whole process — it is stateless
     # (a pure event-builder; publishing is the caller's job via

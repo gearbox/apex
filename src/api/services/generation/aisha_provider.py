@@ -542,4 +542,8 @@ class AishaGenerationProvider:
             raise ValueError("Failed to create Aisha job record")
 
         await session.flush()
-        return ProviderSubmitResult(job=db_job, balance_event=reserve_result.event)
+        return ProviderSubmitResult(
+            job=db_job,
+            balance_after=reserve_result.txn.balance_after,
+            balance_event=reserve_result.event,
+        )

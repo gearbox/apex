@@ -429,7 +429,7 @@ class AdminController(Controller):
                 product_id=product_id,
             )
             txn = billing_result.txn
-            new_balance = await billing_service.get_balance(account_id, session=session)
+            new_balance = txn.balance_after
             result = AdminAdjustResponse(
                 transaction=_txn_to_response(txn),
                 new_balance=new_balance,

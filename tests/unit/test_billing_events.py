@@ -75,17 +75,17 @@ class TestMutatingMethodsReturnEventAndDoNotPublish:
     async def test_credit_returns_event_without_publishing(self) -> None:
         await self._assert_no_publish_and_event(
             method="credit",
-            call=lambda service, session, account, user_id: service.credit(
+            call=lambda service, session, account, _user_id: service.credit(
                 account.id,
                 100,
                 uuid4(),
                 description="test credit",
                 session=session,
                 product_id="vex",
-                user_id=user_id,
             ),
             expected_type=BillingResult,
             expected_transaction_type=TransactionType.CREDIT.value,
+            account_user_id_for_target=True,
         )
 
     async def test_admin_adjust_returns_event_without_publishing(self) -> None:
@@ -235,3 +235,102 @@ class TestEventNoneWhenNoTarget:
             )
 
         assert result.event is None
+
+
+class TestCreditAndAdminAdjustShareTargetResolution:
+    """R1: credit() resolves SSE targets from the account row, same as admin_adjust."""
+
+    async def test_credit_event_targets_personal_account_owner(self) -> None:
+        service = BillingService()
+        session = AsyncMock()
+        user_id = uuid4()
+        account = _make_account(user_id=user_id)
+        txn = _make_txn()
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=0)
+            repo.create_transaction = AsyncMock(return_value=txn)
+
+            result = await service.credit(
+                account.id,
+                100,
+                uuid4(),
+                description="personal credit",
+                session=session,
+                product_id="vex",
+            )
+
+        assert result.event is not None
+        assert result.event.user_ids == [user_id]
+
+    async def test_credit_event_targets_all_org_members(self) -> None:
+        service = BillingService()
+        session = AsyncMock()
+        org_id = uuid4()
+        member_ids = [uuid4(), uuid4(), uuid4()]
+        account = _make_account(account_type="enterprise", organization_id=org_id)
+        txn = _make_txn()
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=0)
+            repo.create_transaction = AsyncMock(return_value=txn)
+            repo.get_member_user_ids = AsyncMock(return_value=member_ids)
+
+            result = await service.credit(
+                account.id,
+                100,
+                uuid4(),
+                description="org credit",
+                session=session,
+                product_id="vex",
+            )
+
+        assert result.event is not None
+        assert result.event.user_ids == member_ids
+        repo.get_member_user_ids.assert_awaited_once_with(org_id)
+
+    async def test_admin_adjust_and_credit_share_target_resolution(self) -> None:
+        """Same account -> same resolved targets for both credit() and admin_adjust()."""
+        session = AsyncMock()
+        org_id = uuid4()
+        member_ids = [uuid4(), uuid4()]
+        account = _make_account(account_type="enterprise", organization_id=org_id)
+
+        async def _run(method_name: str) -> BillingResult:
+            service = BillingService()
+            txn = _make_txn()
+            with patch("src.api.services.billing.BillingRepository") as MockRepo:
+                repo = MockRepo.return_value
+                repo.get_account_for_update = AsyncMock(return_value=account)
+                repo.get_balance = AsyncMock(return_value=0)
+                repo.create_transaction = AsyncMock(return_value=txn)
+                repo.get_member_user_ids = AsyncMock(return_value=member_ids)
+
+                if method_name == "credit":
+                    return await service.credit(
+                        account.id,
+                        100,
+                        uuid4(),
+                        description="d",
+                        session=session,
+                        product_id="vex",
+                    )
+                return await service.admin_adjust(
+                    account.id,
+                    100,
+                    uuid4(),
+                    description="d",
+                    session=session,
+                    product_id="vex",
+                )
+
+        credit_result = await _run("credit")
+        admin_result = await _run("admin_adjust")
+
+        assert credit_result.event is not None
+        assert admin_result.event is not None
+        assert credit_result.event.user_ids == admin_result.event.user_ids == member_ids

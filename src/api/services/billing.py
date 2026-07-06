@@ -117,6 +117,16 @@ class BillingService:
             transaction_type=transaction_type,
         )
 
+    async def _resolve_event_targets(
+        self, account: TokenAccount, repo: BillingRepository
+    ) -> list[UUID]:
+        """SSE targets for an account: owner for personal, all members for enterprise."""
+        if account.user_id is not None:
+            return [account.user_id]
+        if account.organization_id is not None:
+            return await repo.get_member_user_ids(account.organization_id)
+        return []
+
     async def get_or_create_personal_account(
         self, user_id: UUID, *, session: AsyncSession, product_id: str
     ) -> TokenAccount:
@@ -576,9 +586,14 @@ class BillingService:
         payment_provider: str = "",
         session: AsyncSession,
         product_id: str,
-        user_id: UUID | None = None,
     ) -> BillingResult:
-        """Credit tokens to an account from a payment."""
+        """Credit tokens to an account from a payment.
+
+        Resolves the owning user(s) from the locked account row and builds a
+        ``balance.updated`` BalanceEvent targeting each — same resolution as
+        ``admin_adjust`` (personal → ``account.user_id``; enterprise → all
+        organisation members), via ``_resolve_event_targets``.
+        """
         repo = BillingRepository(session)
 
         account = await repo.get_account_for_update(account_id)
@@ -608,8 +623,9 @@ class BillingService:
             payment_provider=payment_provider,
         )
 
+        target_user_ids = await self._resolve_event_targets(account, repo)
         event = self._build_balance_event(
-            user_ids=[user_id] if user_id is not None else [],
+            user_ids=target_user_ids,
             account_id=account_id,
             balance=new_balance,
             delta=amount,
@@ -670,13 +686,7 @@ class BillingService:
         )
 
         # Resolve SSE target user(s) from the account we already hold
-        target_user_ids: list[UUID] = []
-        if account.user_id is not None:
-            # Personal account — single owner
-            target_user_ids = [account.user_id]
-        elif account.organization_id is not None:
-            # Enterprise account — notify all org members
-            target_user_ids = await repo.get_member_user_ids(account.organization_id)
+        target_user_ids = await self._resolve_event_targets(account, repo)
 
         event = self._build_balance_event(
             user_ids=target_user_ids,

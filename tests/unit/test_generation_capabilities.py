@@ -52,7 +52,9 @@ class TestSupportsImageSizingFlag:
         provider = MagicMock()
         provider.supports_image_sizing = False
         provider.validate = MagicMock()
-        provider.submit = AsyncMock(return_value=ProviderSubmitResult(job=job, balance_event=None))
+        provider.submit = AsyncMock(
+            return_value=ProviderSubmitResult(job=job, balance_after=100, balance_event=None)
+        )
 
         billing = AsyncMock()
         billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
@@ -112,7 +114,9 @@ class TestSupportsImageSizingFlag:
         provider = MagicMock()
         provider.supports_image_sizing = True
         provider.validate = MagicMock()
-        provider.submit = AsyncMock(return_value=ProviderSubmitResult(job=job, balance_event=None))
+        provider.submit = AsyncMock(
+            return_value=ProviderSubmitResult(job=job, balance_after=100, balance_event=None)
+        )
 
         billing = AsyncMock()
         billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))

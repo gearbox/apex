@@ -21,6 +21,7 @@ from uuid import uuid4
 import pytest
 import stripe
 
+from src.api.services.billing import BillingService
 from src.api.services.billing_errors import AccountNotFoundError, PaymentVerificationError
 from src.api.services.payment import PaymentService
 from src.core.config import Settings
@@ -274,6 +275,51 @@ class TestHandleStripeWebhook:
             await service.handle_stripe_webhook(b"{}", "sig", session=AsyncMock(), product_id="vex")
 
         billing.credit.assert_not_awaited()
+
+    async def test_stripe_webhook_returns_event_with_owner_targets(self) -> None:
+        """R1: the event returned by handle_stripe_webhook must carry the
+        credited account's owner as an SSE target — proving credit()'s
+        account-based target resolution flows through the payment layer,
+        using the real BillingService (not a mock) end to end."""
+        settings = _make_settings()
+
+        fake_event = MagicMock()
+        fake_event.type = "checkout.session.completed"
+        fake_event.id = "evt_123"
+        fake_event.data.object = {"id": "cs_test_xyz"}
+
+        owner_user_id = uuid4()
+        account = MagicMock()
+        account.user_id = owner_user_id
+        account.organization_id = None
+
+        payment = MagicMock()
+        payment.status = "pending"
+        payment.account_id = uuid4()
+        payment.tokens_granted = 500
+        payment.product_id = "vex"
+        payment.provider_metadata = {}
+
+        mock_repo = AsyncMock()
+        mock_repo.get_payment_by_external_id_for_update = AsyncMock(return_value=payment)
+        mock_repo.get_account_for_update = AsyncMock(return_value=account)
+        mock_repo.get_balance = AsyncMock(return_value=0)
+        mock_repo.create_transaction = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+        billing = BillingService()
+        service = PaymentService(billing_service=billing, settings=settings)
+
+        with (
+            patch("src.api.services.payment.BillingRepository", return_value=mock_repo),
+            patch("src.api.services.billing.BillingRepository", return_value=mock_repo),
+            patch("stripe.Webhook.construct_event", return_value=fake_event),
+        ):
+            event = await service.handle_stripe_webhook(
+                b"{}", "sig", session=AsyncMock(), product_id="vex"
+            )
+
+        assert event is not None
+        assert event.user_ids == [owner_user_id]
 
 
 def _sign_nowpayments_payload(raw_payload: bytes, ipn_secret: str) -> str:
@@ -800,3 +846,109 @@ class TestNowPaymentsIPNProportionalCreditPolicy:
             payment_id=str(payment.id),
             raw_status="some_future_status_we_dont_know",
         )
+
+    async def test_ipn_credit_returns_event_with_owner_targets(self) -> None:
+        """R1: the event returned from an IPN credit must carry the account
+        owner as an SSE target — real BillingService, not a mock."""
+        settings = _make_settings()
+        internal_payment_id = uuid4()
+        owner_user_id = uuid4()
+        account = MagicMock()
+        account.user_id = owner_user_id
+        account.organization_id = None
+
+        payment = _make_ipn_payment(internal_payment_id=internal_payment_id, tokens_granted=1000)
+
+        mock_repo = AsyncMock()
+        mock_repo.get_payment_for_update = AsyncMock(return_value=payment)
+        mock_repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+        mock_repo.get_account_for_update = AsyncMock(return_value=account)
+        mock_repo.get_balance = AsyncMock(return_value=0)
+        mock_repo.create_transaction = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+        raw_payload = _make_ipn_raw_payload(
+            payment_status="finished",
+            internal_payment_id=internal_payment_id,
+            actually_paid="10.00",
+        )
+        signature = _sign_nowpayments_payload(raw_payload, "np_ipn_vex_123")
+
+        billing = BillingService()
+        service = PaymentService(billing_service=billing, settings=settings)
+
+        with (
+            patch("src.api.services.payment.BillingRepository", return_value=mock_repo),
+            patch("src.api.services.billing.BillingRepository", return_value=mock_repo),
+        ):
+            event = await service.handle_nowpayments_webhook(
+                raw_payload, signature, session=AsyncMock(), product_id="vex"
+            )
+
+        assert event is not None
+        assert event.user_ids == [owner_user_id]
+
+    @pytest.mark.parametrize(
+        "status,paid",
+        [("finished", "10.00"), ("partially_paid", "4.00")],
+    )
+    async def test_ipn_raw_payload_persisted_on_finished_and_partial(
+        self, status: str, paid: str
+    ) -> None:
+        """R5: the raw IPN payload must be persisted alongside the extracted
+        fields on both the finished and partially_paid branches — reconciliation
+        needs the unknown-questions data the extracted fields can't answer."""
+        settings = _make_settings()
+        internal_payment_id = uuid4()
+        payment = _make_ipn_payment(internal_payment_id=internal_payment_id, tokens_granted=1000)
+        mock_repo = AsyncMock()
+        mock_repo.get_payment_for_update = AsyncMock(return_value=payment)
+        mock_repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+
+        raw_payload = _make_ipn_raw_payload(
+            payment_status=status,
+            internal_payment_id=internal_payment_id,
+            actually_paid=paid,
+        )
+        signature = _sign_nowpayments_payload(raw_payload, "np_ipn_vex_123")
+
+        billing = AsyncMock()
+        billing.credit = AsyncMock(return_value=MagicMock(event=None))
+        service = PaymentService(billing_service=billing, settings=settings)
+
+        with patch("src.api.services.payment.BillingRepository", return_value=mock_repo):
+            await service.handle_nowpayments_webhook(
+                raw_payload, signature, session=AsyncMock(), product_id="vex"
+            )
+
+        assert "ipn_payload" in payment.provider_metadata
+        assert payment.provider_metadata["ipn_payload"]["payment_status"] == status
+
+    async def test_ipn_raw_payload_persisted_on_intermediate_status(self) -> None:
+        """R5: even a non-crediting intermediate/terminal status (e.g. a
+        failed/expired IPN) must persist the raw payload — support needs it
+        for investigation even when nothing was credited."""
+        settings = _make_settings()
+        internal_payment_id = uuid4()
+        payment = _make_ipn_payment(
+            internal_payment_id=internal_payment_id, status=PaymentStatus.PENDING.value
+        )
+        mock_repo = AsyncMock()
+        mock_repo.get_payment_for_update = AsyncMock(return_value=payment)
+
+        raw_payload = _make_ipn_raw_payload(
+            payment_status="waiting",
+            internal_payment_id=internal_payment_id,
+        )
+        signature = _sign_nowpayments_payload(raw_payload, "np_ipn_vex_123")
+
+        billing = AsyncMock()
+        service = PaymentService(billing_service=billing, settings=settings)
+
+        with patch("src.api.services.payment.BillingRepository", return_value=mock_repo):
+            await service.handle_nowpayments_webhook(
+                raw_payload, signature, session=AsyncMock(), product_id="vex"
+            )
+
+        billing.credit.assert_not_awaited()
+        assert "ipn_payload" in payment.provider_metadata
+        assert payment.provider_metadata["ipn_payload"]["payment_status"] == "waiting"

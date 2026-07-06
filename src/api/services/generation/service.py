@@ -206,26 +206,6 @@ class GenerationService:
             reserve_event = submit_result.balance_event
             await session.commit()
 
-            # Balance event publishes only after the commit above — the debit
-            # created inside provider.submit() is now durable.
-            if self._event_bus is not None:
-                await self._event_bus.publish_balance(reserve_event)
-
-            if self._event_bus is not None:
-                from src.api.schemas.events import EventType, JobStatusPayload
-
-                await self._event_bus.publish(
-                    user_id=user_id,
-                    event_type=EventType.JOB_STATUS_CHANGED,
-                    payload=JobStatusPayload(
-                        job_id=job.id,
-                        status=job.status if isinstance(job.status, str) else job.status.value,
-                        previous_status="none",
-                        generation_type=request.generation_type.value,
-                        provider=request.model.provider.value,
-                    ),
-                )
-
         except GenerationError:
             # Domain errors carry user-safe messages by contract (see
             # ProviderResponseError's docstring) — refund if a debit was
@@ -245,8 +225,29 @@ class GenerationService:
             # the client — only this fixed message may.
             raise GenerationError("Generation failed due to an internal error.") from exc
 
+        # Post-commit, best-effort notifications — a publish failure must never
+        # affect the already-committed billing/job state (no refund, no client error).
+        if self._event_bus is not None:
+            try:
+                await self._event_bus.publish_balance(reserve_event)
+
+                from src.api.schemas.events import EventType, JobStatusPayload
+
+                await self._event_bus.publish(
+                    user_id=user_id,
+                    event_type=EventType.JOB_STATUS_CHANGED,
+                    payload=JobStatusPayload(
+                        job_id=job.id,
+                        status=job.status if isinstance(job.status, str) else job.status.value,
+                        previous_status="none",
+                        generation_type=request.generation_type.value,
+                        provider=request.model.provider.value,
+                    ),
+                )
+            except Exception:
+                logger.exception("generation.post_commit_publish_failed", job_id=str(job.id))
+
         # 10. Build response
-        balance = await self._billing.get_balance(account.id, session=session)
         return JobCreatedResponse(
             job_id=job.id,
             status=JobStatus(job.status),
@@ -255,7 +256,7 @@ class GenerationService:
             generation_type=request.generation_type,
             created_at=job.created_at,
             tokens_charged=token_cost,
-            balance_remaining=balance,
+            balance_remaining=submit_result.balance_after,
         )
 
     async def _resolve_submit_failure(

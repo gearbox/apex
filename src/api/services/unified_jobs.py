@@ -78,7 +78,14 @@ class UnifiedJobService:
         if job is None:
             return None
 
-        provider = self._providers.get(Provider(job.provider))
+        try:
+            provider_key = Provider(job.provider)
+        except ValueError:
+            logger.warning(
+                "unified_jobs.unknown_provider", job_id=str(job_id), provider=job.provider
+            )
+            provider_key = None
+        provider = self._providers.get(provider_key) if provider_key is not None else None
         if provider is not None:
             try:
                 updated = await provider.refresh_job(session, job)

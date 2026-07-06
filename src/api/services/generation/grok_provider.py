@@ -148,7 +148,7 @@ class GrokGenerationProvider:
         """Delegate to GrokJobService.create_image_job."""
         input_image_url = await self._resolve_input_url(request, session)
 
-        result = await self._grok.create_image_job(
+        return await self._grok.create_image_job(
             session=session,
             user_id=user_id,
             prompt=request.prompt,
@@ -167,9 +167,6 @@ class GrokGenerationProvider:
             source_job_id=source_job_id,
             source_output_id=source_output_id,
         )
-        if result.job is None:
-            raise ValueError("Grok image job creation returned None")
-        return ProviderSubmitResult(job=result.job, balance_event=result.balance_event)
 
     async def _submit_video(
         self,
@@ -187,7 +184,7 @@ class GrokGenerationProvider:
         """Delegate to GrokJobService.start_video_job."""
         input_image_url = await self._resolve_input_url(request, session)
 
-        result = await self._grok.start_video_job(
+        return await self._grok.start_video_job(
             session=session,
             user_id=user_id,
             prompt=request.prompt,
@@ -206,6 +203,3 @@ class GrokGenerationProvider:
             source_job_id=source_job_id,
             source_output_id=source_output_id,
         )
-        if result.job is None:
-            raise ValueError("Grok video job creation returned None")
-        return ProviderSubmitResult(job=result.job, balance_event=result.balance_event)

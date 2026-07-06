@@ -23,9 +23,16 @@ class ProviderSubmitResult:
     debit performed inside ``submit()``, threaded back to the orchestrator so
     it can publish strictly after its own post-submit commit (never before —
     see ``EventBus.publish_balance``).
+
+    ``balance_after`` is the post-debit balance from the reserve transaction
+    (``BillingResult.txn.balance_after``), for the API response — distinct
+    from ``balance_event``, which is the optional SSE payload and must not be
+    used as the response balance source (it's ``None`` whenever there's no
+    SSE target).
     """
 
     job: GenerationJob
+    balance_after: int
     balance_event: BalanceEvent | None = None
 
 

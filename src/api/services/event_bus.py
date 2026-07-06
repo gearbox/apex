@@ -46,6 +46,15 @@ class EventBus:
     USER_CHANNEL_PREFIX = "user:"
     SYSTEM_CHANNEL = "system:broadcast"
 
+    def __init__(self, *, enabled: bool = True) -> None:
+        """Args:
+        enabled: When ``False`` (no Redis configured), ``publish`` and
+            ``publish_system`` no-op instead of touching Redis, and
+            ``subscribe`` raises ``RuntimeError``. Keeps the DI type
+            non-optional across Redis-less deployments.
+        """
+        self._enabled = enabled
+
     def user_channel(self, user_id: UUID) -> str:
         return f"{self.USER_CHANNEL_PREFIX}{user_id}"
 
@@ -57,6 +66,9 @@ class EventBus:
         payload: object,
     ) -> None:
         """Publish an event to a user's channel."""
+        if not self._enabled:
+            logger.debug("event_bus.disabled_skip", event_type=event_type.value)
+            return
         envelope = EventEnvelope(
             event_type=event_type,
             payload=msgspec.Raw(_encoder.encode(payload)),
@@ -113,6 +125,9 @@ class EventBus:
         payload: object,
     ) -> None:
         """Publish a system-wide event (all connected users)."""
+        if not self._enabled:
+            logger.debug("event_bus.disabled_skip", event_type=event_type.value)
+            return
         envelope = EventEnvelope(
             event_type=event_type,
             payload=msgspec.Raw(_encoder.encode(payload)),
@@ -140,7 +155,15 @@ class EventBus:
         Uses get_message() so the read is never cancelled mid-flight —
         avoids the redis-py CancelledError→TimeoutError conversion that
         caused SSE stream drops on idle periods.
+
+        Raises:
+            RuntimeError: If the bus is disabled (no Redis configured). Only
+                reachable via SSE routes, which are already gated on Redis
+                being configured — this is fail-loud belt-and-braces, not an
+                expected runtime path.
         """
+        if not self._enabled:
+            raise RuntimeError("EventBus is disabled (no Redis configured) — cannot subscribe")
         client = get_redis_client()
         pubsub: PubSub = client.pubsub()
         user_channel = self.user_channel(user_id)

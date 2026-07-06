@@ -61,7 +61,9 @@ def _make_mock_provider() -> MagicMock:
     job.status = JobStatus.COMPLETED.value
     job.name = "Test"
     job.created_at = datetime.now(UTC)
-    provider.submit = AsyncMock(return_value=ProviderSubmitResult(job=job, balance_event=None))
+    provider.submit = AsyncMock(
+        return_value=ProviderSubmitResult(job=job, balance_after=100, balance_event=None)
+    )
     return provider
 
 

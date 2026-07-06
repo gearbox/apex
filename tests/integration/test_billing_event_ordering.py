@@ -176,7 +176,11 @@ class _WriteAndSucceedProvider:
         db_job.token_cost = token_cost
         db_job.debit_transaction_id = reserve_result.txn.id
         await session.flush()
-        return ProviderSubmitResult(job=db_job, balance_event=reserve_result.event)
+        return ProviderSubmitResult(
+            job=db_job,
+            balance_after=reserve_result.txn.balance_after,
+            balance_event=reserve_result.event,
+        )
 
 
 def _make_enabled_model_mock() -> MagicMock:

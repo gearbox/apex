@@ -315,11 +315,24 @@ class PaymentService:
         later ``finished`` after a partial credit credits exactly the
         remainder, with no cumulative floor-rounding drift.
 
-        Must be called only while the payment row lock (``get_payment_for_update``)
-        is held — reading ``already_credited`` before the lock would reintroduce
-        the double-credit race the lock exists to prevent.
+        Note:
+            Must be called only while the payment row lock
+            (``get_payment_for_update``) is held — reading ``already_credited``
+            before the lock would reintroduce the double-credit race the lock
+            exists to prevent.
 
-        Returns (target, delta, event). ``event`` is ``None`` when ``delta <= 0``.
+        Args:
+            payment: The locked payment row being credited.
+            ratio: Effective paid/expected ratio to apply (already snapped to
+                1.0 by the caller when within full-payment tolerance).
+            session: DB session (passed through to ``billing_service.credit``).
+            repo: Repository used to read the already-credited ledger sum.
+
+        Returns:
+            ``(target, delta, event)`` — ``target`` is the cumulative tokens
+            that should be credited at ``ratio``; ``delta`` is what this call
+            actually credited; ``event`` is the pending ``BalanceEvent`` for
+            the credit, or ``None`` when ``delta <= 0``.
         """
         already_credited = await repo.get_credited_tokens_for_payment(payment.id)
         target = int(Decimal(payment.tokens_granted) * ratio)
@@ -455,6 +468,7 @@ class PaymentService:
                 "expected_usd": str(expected_usd),
                 "ratio": str(ratio),
                 "tokens_credited_total": target,
+                "ipn_payload": payload,
             }
             await session.flush()
 
@@ -504,6 +518,7 @@ class PaymentService:
         payment.provider_metadata = {
             **payment.provider_metadata,
             "ipn_payment_id": np_payment_id,
+            "ipn_payload": payload,
         }
         await session.flush()
         return None
