@@ -20,6 +20,7 @@ import structlog
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
 from src.api.services.image_normalization import (
     ImageNormalizationError,
+    ImageTooLargeError,
     normalize_image,
     sniff_format,
 )
@@ -56,6 +57,10 @@ class UserContentValidationError(UserContentError):
     """Raised when content validation fails."""
 
 
+class UserContentTooLargeError(UserContentValidationError):
+    """Raised when an uploaded image's pixel count exceeds the configured cap."""
+
+
 class UserContentService:
     """Service for managing user-uploaded and generated content.
 
@@ -70,6 +75,7 @@ class UserContentService:
         *,
         product_id: str,
         retention_days: int = 7,
+        max_input_megapixels: float = 100.0,
     ) -> None:
         """Initialize user content service.
 
@@ -78,6 +84,9 @@ class UserContentService:
             session: Database session for metadata operations.
             product_id: Product this service is operating on.
             retention_days: Days to retain content before cleanup.
+            max_input_megapixels: Pixel-count cap enforced before decode
+                (see ``image_normalization.py``); guards against
+                decompression-bomb uploads.
         """
         self._storage = storage
         self._job_repo = JobRepository(session)
@@ -85,6 +94,7 @@ class UserContentService:
         self._image_repo = UserImageRepository(session)
         self._product_id = product_id
         self._retention_days = retention_days
+        self._max_input_megapixels = max_input_megapixels
 
     # -------------------------------------------------------------------------
     # Upload operations
@@ -121,7 +131,18 @@ class UserContentService:
             UserContentValidationError: If validation fails.
         """
         try:
-            normalized = await normalize_image(data)
+            normalized = await normalize_image(data, max_megapixels=self._max_input_megapixels)
+        except ImageTooLargeError as e:
+            logger.warning(
+                "user_content.upload_too_large",
+                user_id=str(user_id),
+                declared_content_type=content_type,
+                sniffed=sniff_format(data).value,
+                size_bytes=len(data),
+                megapixels=e.megapixels,
+                limit=e.limit,
+            )
+            raise UserContentTooLargeError(str(e)) from e
         except ImageNormalizationError as e:
             logger.warning(
                 "user_content.upload_normalization_failed",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import msgspec
@@ -17,11 +18,15 @@ import structlog
 from redis.asyncio.client import PubSub
 
 from src.api.schemas.events import (
+    BalanceUpdatedPayload,
     EventEnvelope,
     EventType,
 )
 from src.core.redis import get_redis_client
 from src.core.uid import new_id
+
+if TYPE_CHECKING:
+    from src.api.services.billing import BalanceEvent
 
 logger = structlog.get_logger(__name__)
 
@@ -41,6 +46,15 @@ class EventBus:
     USER_CHANNEL_PREFIX = "user:"
     SYSTEM_CHANNEL = "system:broadcast"
 
+    def __init__(self, *, enabled: bool = True) -> None:
+        """Args:
+        enabled: When ``False`` (no Redis configured), ``publish`` and
+            ``publish_system`` no-op instead of touching Redis, and
+            ``subscribe`` raises ``RuntimeError``. Keeps the DI type
+            non-optional across Redis-less deployments.
+        """
+        self._enabled = enabled
+
     def user_channel(self, user_id: UUID) -> str:
         return f"{self.USER_CHANNEL_PREFIX}{user_id}"
 
@@ -52,6 +66,9 @@ class EventBus:
         payload: object,
     ) -> None:
         """Publish an event to a user's channel."""
+        if not self._enabled:
+            logger.debug("event_bus.disabled_skip", event_type=event_type.value)
+            return
         envelope = EventEnvelope(
             event_type=event_type,
             payload=msgspec.Raw(_encoder.encode(payload)),
@@ -69,6 +86,38 @@ class EventBus:
             event_type=event_type.value,
         )
 
+    async def publish_balance(self, event: BalanceEvent | None) -> None:
+        """Publish a pending ``BalanceEvent`` built by ``BillingService``.
+
+        No-ops on ``None`` (no SSE target, or the caller has no event bus).
+        Callers MUST invoke this strictly after committing the transaction
+        that wrote the ledger row the event describes — never before, or a
+        rolled-back transaction would produce a phantom balance update.
+
+        A publish failure here must never surface as a request error: the
+        ledger write already committed, so this is best-effort UX only.
+        """
+        if event is None:
+            return
+        payload = BalanceUpdatedPayload(
+            account_id=event.account_id,
+            balance=event.balance,
+            delta=event.delta,
+            transaction_type=event.transaction_type,
+        )
+        try:
+            for uid in event.user_ids:
+                await self.publish(
+                    user_id=uid,
+                    event_type=EventType.BALANCE_UPDATED,
+                    payload=payload,
+                )
+        except Exception:
+            logger.exception(
+                "event_bus.balance_publish_failed",
+                account_id=str(event.account_id),
+            )
+
     async def publish_system(
         self,
         *,
@@ -76,6 +125,9 @@ class EventBus:
         payload: object,
     ) -> None:
         """Publish a system-wide event (all connected users)."""
+        if not self._enabled:
+            logger.debug("event_bus.disabled_skip", event_type=event_type.value)
+            return
         envelope = EventEnvelope(
             event_type=event_type,
             payload=msgspec.Raw(_encoder.encode(payload)),
@@ -103,7 +155,15 @@ class EventBus:
         Uses get_message() so the read is never cancelled mid-flight —
         avoids the redis-py CancelledError→TimeoutError conversion that
         caused SSE stream drops on idle periods.
+
+        Raises:
+            RuntimeError: If the bus is disabled (no Redis configured). Only
+                reachable via SSE routes, which are already gated on Redis
+                being configured — this is fail-loud belt-and-braces, not an
+                expected runtime path.
         """
+        if not self._enabled:
+            raise RuntimeError("EventBus is disabled (no Redis configured) — cannot subscribe")
         client = get_redis_client()
         pubsub: PubSub = client.pubsub()
         user_channel = self.user_channel(user_id)

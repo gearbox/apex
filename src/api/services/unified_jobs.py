@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
-from src.api.services.grok.job_service import GrokJobService
+from src.api.services.generation.base import GenerationProvider
 from src.api.services.media import build_output_media
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.models.storage import GenerationJob, GenerationOutput
@@ -33,16 +33,17 @@ class UnifiedJobService:
     """Read-side service for the cross-provider jobs API.
 
     Args:
-        grok_job_service: Grok execution service used to poll async video jobs.
-            Pass ``None`` when Grok is not configured.
+        providers: Provider registry (same mapping wired into
+            ``GenerationService``), used to poll-on-read fresh status for
+            providers with an async backend (e.g. Grok video).
     """
 
     def __init__(
         self,
         *,
-        grok_job_service: GrokJobService | None,
+        providers: dict[Provider, GenerationProvider],
     ) -> None:
-        self._grok = grok_job_service
+        self._providers = providers
 
     # -------------------------------------------------------------------------
     # Public API
@@ -57,11 +58,12 @@ class UnifiedJobService:
     ) -> UnifiedJobResponse | None:
         """Get a single job by ID, scoped to the authenticated user.
 
-        For queued/running Grok video jobs, this triggers a poll to xAI so
-        the returned status is always fresh (poll-on-read pattern).
-
-        Aisha jobs are updated by the background AishaJobPoller; this method
-        reads from the DB only — no ComfyUI calls in the request path.
+        Delegates to the resolved provider's ``refresh_job`` hook — a no-op
+        for providers without an async backend (Aisha; updated instead by the
+        background AishaJobPoller), a poll to xAI for queued/running Grok
+        video jobs. This keeps status fresh without a background worker
+        being required for MVP, while staying DB-only for providers that
+        don't need it.
 
         Args:
             job_id: Job to fetch.
@@ -76,19 +78,22 @@ class UnifiedJobService:
         if job is None:
             return None
 
-        # Poll Grok async video jobs on read — keeps status fresh without a
-        # background worker being required for MVP.
-        if (
-            self._grok is not None
-            and job.provider == Provider.GROK.value
-            and job.generation_type in ("t2v", "i2v", "v2v")
-            and job.status in (JobStatus.QUEUED.value, JobStatus.RUNNING.value)
-        ):
+        try:
+            provider_key = Provider(job.provider)
+        except ValueError:
+            logger.warning(
+                "unified_jobs.unknown_provider", job_id=str(job_id), provider=job.provider
+            )
+            provider_key = None
+        provider = self._providers.get(provider_key) if provider_key is not None else None
+        if provider is not None:
             try:
-                updated = await self._grok.poll_video_job(session, job_id)
+                updated = await provider.refresh_job(session, job)
                 if updated is not None:
                     job = updated
             except Exception:
+                # Serve the stale row on poll failure — same isolation for
+                # every provider's refresh_job, not just Grok's.
                 logger.exception("unified_jobs.poll_on_read_failed", job_id=str(job_id))
 
         return await self._build_response(job, session=session)

@@ -306,7 +306,7 @@ class TestTransitionToFailedInSweepPath:
     """
 
     async def test_transition_marks_queued_job_failed(self, db_session: AsyncSession) -> None:
-        billing = BillingService(event_bus=None)
+        billing = BillingService()
         user = await _insert_user(db_session)
         gpu_session = await _insert_gpu_session(db_session, user)
         job = await _insert_job(
@@ -331,7 +331,7 @@ class TestTransitionToFailedInSweepPath:
         assert "stopped" in result.error_message
 
     async def test_transition_marks_running_job_failed(self, db_session: AsyncSession) -> None:
-        billing = BillingService(event_bus=None)
+        billing = BillingService()
         user = await _insert_user(db_session)
         gpu_session = await _insert_gpu_session(db_session, user)
         job = await _insert_job(
@@ -354,7 +354,7 @@ class TestTransitionToFailedInSweepPath:
         assert str(result.status) == JobStatus.FAILED.value
 
     async def test_transition_is_noop_for_completed_job(self, db_session: AsyncSession) -> None:
-        billing = BillingService(event_bus=None)
+        billing = BillingService()
         user = await _insert_user(db_session)
         gpu_session = await _insert_gpu_session(db_session, user)
         job = await _insert_job(

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import io
+import struct
+import zlib
 
 import pytest
 from PIL import Image, features
 
 from src.api.services.image_normalization import (
     ImageNormalizationError,
+    ImageTooLargeError,
     NormalizedImage,
     SniffedFormat,
     _convert_to_png_sync,
@@ -80,6 +83,26 @@ def _tiff_with_orientation(orientation: int, size: tuple[int, int] = (20, 10)) -
     return buf.getvalue()
 
 
+def _fake_large_png(width: int, height: int) -> bytes:
+    """Build a PNG with a legitimate IHDR declaring huge dimensions, but no
+    real pixel data in IDAT.
+
+    ``Image.open()`` parses only IHDR to populate ``.size`` — it never calls
+    ``.load()`` (which would decode IDAT). This lets us prove the pixel cap
+    is enforced from the header alone: if the cap check were accidentally
+    moved after a decode attempt, this file would instead fail with a
+    generic ``ImageNormalizationError`` (truncated/invalid IDAT), not
+    ``ImageTooLargeError``.
+    """
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return sig + chunk(b"IHDR", ihdr_data) + chunk(b"IDAT", b"") + chunk(b"IEND", b"")
+
+
 _GARBAGE = b"this is definitely not an image, just plain text bytes"
 
 
@@ -117,7 +140,7 @@ class TestSniffFormat:
 class TestNormalizeImage:
     async def test_normalize_png_passthrough(self) -> None:
         data = _png()
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert isinstance(result, NormalizedImage)
         assert result.data == data
@@ -128,7 +151,7 @@ class TestNormalizeImage:
 
     async def test_normalize_jpeg_passthrough(self) -> None:
         data = _jpeg()
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert result.data == data
         assert result.format is MediaFormat.JPEG
@@ -136,14 +159,14 @@ class TestNormalizeImage:
 
     async def test_normalize_static_webp_passthrough(self) -> None:
         data = _webp()
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert result.data == data
         assert result.format is MediaFormat.WEBP
         assert result.converted is False
 
     async def test_normalize_heic_converts_to_png(self) -> None:
-        result = await normalize_image(_heic())
+        result = await normalize_image(_heic(), max_megapixels=100.0)
 
         assert result.converted is True
         assert result.format is MediaFormat.PNG
@@ -152,7 +175,7 @@ class TestNormalizeImage:
 
     async def test_normalize_animated_webp_first_frame(self) -> None:
         size = (16, 12)
-        result = await normalize_image(_webp_animated(size))
+        result = await normalize_image(_webp_animated(size), max_megapixels=100.0)
 
         assert result.converted is True
         assert result.format is MediaFormat.PNG
@@ -160,7 +183,7 @@ class TestNormalizeImage:
             assert im.size == size
 
     async def test_normalize_preserves_alpha(self) -> None:
-        result = await normalize_image(_heic(mode="RGBA"))
+        result = await normalize_image(_heic(mode="RGBA"), max_megapixels=100.0)
 
         assert result.converted is True
         with Image.open(io.BytesIO(result.data)) as im:
@@ -173,7 +196,7 @@ class TestNormalizeImage:
         original_size = (20, 10)
         data = _tiff_with_orientation(6, size=original_size)
 
-        result = await normalize_image(data)
+        result = await normalize_image(data, max_megapixels=100.0)
 
         assert result.converted is True
         with Image.open(io.BytesIO(result.data)) as im:
@@ -182,11 +205,11 @@ class TestNormalizeImage:
 
     async def test_normalize_garbage_raises(self) -> None:
         with pytest.raises(ImageNormalizationError):
-            await normalize_image(_GARBAGE)
+            await normalize_image(_GARBAGE, max_megapixels=100.0)
 
     @pytest.mark.skipif(not features.check("avif"), reason="Pillow built without AVIF support")
     async def test_normalize_avif_converts_to_png(self) -> None:
-        result = await normalize_image(_avif())
+        result = await normalize_image(_avif(), max_megapixels=100.0)
         assert result.format is MediaFormat.PNG
         assert result.converted is True
         assert result.sniffed is SniffedFormat.AVIF
@@ -199,7 +222,7 @@ class TestNormalizeImage:
         buf = io.BytesIO()
         pal.save(buf, format="PNG")
 
-        result_data = _convert_to_png_sync(buf.getvalue())
+        result_data = _convert_to_png_sync(buf.getvalue(), max_megapixels=100.0)
 
         with Image.open(io.BytesIO(result_data)) as im:
             assert im.mode == "RGBA"
@@ -212,7 +235,7 @@ class TestNormalizeImage:
         buf = io.BytesIO()
         im.save(buf, format="PNG")
 
-        result_data = _convert_to_png_sync(buf.getvalue())
+        result_data = _convert_to_png_sync(buf.getvalue(), max_megapixels=100.0)
 
         with Image.open(io.BytesIO(result_data)) as reopened:
             assert reopened.mode == "RGB"
@@ -223,7 +246,7 @@ class TestEnsureComfyUIInput:
         """The one behavioral delta vs normalize_image: static WebP -> PNG."""
         data = _webp()
 
-        result = await ensure_comfyui_input(data)
+        result = await ensure_comfyui_input(data, max_megapixels=100.0)
 
         assert result.converted is True
         assert result.format is MediaFormat.PNG
@@ -231,11 +254,83 @@ class TestEnsureComfyUIInput:
 
     async def test_ensure_comfyui_input_png_passthrough(self) -> None:
         data = _png()
-        result = await ensure_comfyui_input(data)
+        result = await ensure_comfyui_input(data, max_megapixels=100.0)
 
         assert result.data == data
         assert result.converted is False
 
     async def test_ensure_comfyui_input_garbage_raises(self) -> None:
         with pytest.raises(ImageNormalizationError):
-            await ensure_comfyui_input(_GARBAGE)
+            await ensure_comfyui_input(_GARBAGE, max_megapixels=100.0)
+
+
+# ---------------------------------------------------------------------------
+# D4 — decompression-bomb pixel cap (F4)
+# ---------------------------------------------------------------------------
+
+
+class TestPixelCap:
+    async def test_pixel_cap_rejects_oversized_png_before_decode(self) -> None:
+        """A PNG whose IHDR declares dimensions over the cap is rejected from
+        the header alone — proven by an IDAT that would fail a real decode:
+        if the cap check ran after (or instead of) a decode attempt, this
+        would raise a generic ImageNormalizationError, not ImageTooLargeError.
+        """
+        # 12000x12000 = 144 MP: over our 100 MP cap, but still under Pillow's
+        # own DecompressionBombError hard limit (~178 MP) so Image.open()
+        # itself doesn't block first — only warns — leaving our cap to fire.
+        data = _fake_large_png(12_000, 12_000)
+
+        with pytest.raises(ImageTooLargeError) as exc_info:
+            await normalize_image(data, max_megapixels=100.0)
+
+        assert exc_info.value.megapixels == pytest.approx(144.0)
+        assert exc_info.value.limit == 100.0
+
+    async def test_pixel_cap_applies_to_conversion_path(self) -> None:
+        """force_png_for_webp routes static WebP through the conversion path
+        (ensure_comfyui_input) — the cap must still apply there, not just to
+        the default passthrough path."""
+        data = _fake_large_png(12_000, 12_000)
+
+        with pytest.raises(ImageTooLargeError):
+            await ensure_comfyui_input(data, max_megapixels=100.0)
+
+    @pytest.mark.parametrize(
+        "builder,expected_sniffed",
+        [
+            (_png, SniffedFormat.PNG),
+            (_jpeg, SniffedFormat.JPEG),
+            (_webp, SniffedFormat.WEBP),
+        ],
+    )
+    async def test_pixel_cap_applies_to_passthrough_formats(
+        self, builder, expected_sniffed: SniffedFormat
+    ) -> None:
+        """The pixel cap gates passthrough formats too — a huge PNG/JPEG/
+        static WebP would never otherwise be opened at all (previously
+        passthrough bytes were trusted and returned unchecked), yet would
+        still bomb the thumbnailer downstream.
+
+        Uses a real, tiny image against an artificially tiny cap rather than
+        a huge image, so the test stays fast — the size comparison logic is
+        identical regardless of the absolute pixel counts involved.
+        """
+        data = builder()
+        assert sniff_format(data) == expected_sniffed
+
+        with pytest.raises(ImageTooLargeError):
+            await normalize_image(data, max_megapixels=0.0001)  # 100 px cap; fixture is 16x12=192px
+
+    async def test_image_too_large_error_distinct_from_decode_error(self) -> None:
+        """ImageTooLargeError and a plain decode failure are never conflated —
+        callers that need to distinguish "too big" from "not an image" (e.g.
+        to map to 413 vs 400) can rely on the subclass."""
+        assert issubclass(ImageTooLargeError, ImageNormalizationError)
+
+        with pytest.raises(ImageTooLargeError):
+            await normalize_image(_fake_large_png(12_000, 12_000), max_megapixels=100.0)
+
+        with pytest.raises(ImageNormalizationError) as exc_info:
+            await normalize_image(_GARBAGE, max_megapixels=100.0)
+        assert not isinstance(exc_info.value, ImageTooLargeError)

@@ -888,13 +888,15 @@ class GpuProvisioningWorker:
         if self._billing_service is not None:
             try:
                 async with self._session_factory() as db, db.begin():
-                    await self._billing_service.refund(
+                    refund_result = await self._billing_service.refund(
                         job_id=session.id,
                         description=f"GPU session failed: {reason[:200]}",
                         session=db,
                         product_id=session.product_id,
                         user_id=session.user_id,
                     )
+                if self._event_bus is not None:
+                    await self._event_bus.publish_balance(refund_result.event)
                 logger.info(
                     "gpu_session.provision.refund_issued",
                     session_id=str(session.id),

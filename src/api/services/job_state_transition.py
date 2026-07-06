@@ -294,7 +294,7 @@ class JobStateTransitionService:
 
     async def _try_refund(self, job_id: UUID, *, product_id: str) -> None:
         try:
-            await self._billing.refund(
+            refund_result = await self._billing.refund(
                 job_id=job_id,
                 description="Job failed — tokens refunded",
                 session=self._session,
@@ -307,6 +307,9 @@ class JobStateTransitionService:
                 "job.state_transition.refund_failed",
                 job_id=str(job_id),
             )
+            return
+        if self._event_bus is not None:
+            await self._event_bus.publish_balance(refund_result.event)
 
     @staticmethod
     def make_output_expires_at(retention_days: int = 7) -> datetime:

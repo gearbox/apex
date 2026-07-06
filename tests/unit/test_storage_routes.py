@@ -16,6 +16,7 @@ from litestar.status_codes import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
+    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
 )
 
 from src.api.schemas.media import MediaObject, MediaOriginal
@@ -23,6 +24,7 @@ from src.api.schemas.user_content import ImageAccess, UploadedImage
 from src.api.services.user_content import (
     UserContentError,
     UserContentNotFoundError,
+    UserContentTooLargeError,
     UserContentValidationError,
 )
 from src.core.enums import OutputMediaType
@@ -188,6 +190,25 @@ class TestUploadImageHandler:
         )
 
         assert response.status_code == HTTP_400_BAD_REQUEST
+
+    async def test_too_large_error_returns_413(self) -> None:
+        """F4/D4: UserContentTooLargeError (pixel cap exceeded) maps to 413,
+        distinct from the generic 400 for other validation failures."""
+        from src.api.routes.storage import StorageController
+
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(
+            side_effect=UserContentTooLargeError("Input image exceeds maximum pixel count")
+        )
+
+        response = await StorageController.upload_image.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            user_content=user_content,
+            data=_upload_form(),
+        )
+
+        assert response.status_code == HTTP_413_REQUEST_ENTITY_TOO_LARGE
 
     async def test_content_error_returns_400(self) -> None:
         from src.api.routes.storage import StorageController

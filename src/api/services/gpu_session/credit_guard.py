@@ -42,7 +42,7 @@ from src.db.repositories.gpu_session import GpuSessionRepository
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-    from src.api.services.billing import BillingService
+    from src.api.services.billing import BillingService, SettleUsageResult
     from src.api.services.event_bus import EventBus
     from src.api.services.gpu_session.service import GpuSessionService
     from src.core.config import Settings
@@ -208,7 +208,14 @@ class SessionCreditGuard:
         rate = self._settings.gpu_session_tokens_per_minute
 
         # --- Metered settlement (nets base reservation; idempotent) ---
-        _settled, new_balance = await self._settle_metered(session, consumed_tokens)
+        settle_result = await self._settle_metered(session, consumed_tokens)
+        new_balance = settle_result.new_balance
+        # The transaction inside _settle_metered has already committed by the
+        # time control returns here (the `return` statement inside its `async
+        # with db.begin()` block triggers commit before the value comes back) —
+        # safe to publish immediately.
+        if self._event_bus is not None:
+            await self._event_bus.publish_balance(settle_result.event)
 
         # --- Classify warning level ---
         new_level = self._classify_level(new_balance)
@@ -263,7 +270,7 @@ class SessionCreditGuard:
             if minutes_remaining > warning_minutes + hysteresis_minutes:
                 await self._clear_warning(session)
 
-    async def _settle_metered(self, session: GpuSession, consumed_tokens: int) -> tuple[int, int]:
+    async def _settle_metered(self, session: GpuSession, consumed_tokens: int) -> SettleUsageResult:
         """Settle metered usage for the session, netting the base reservation.
 
         Computes owed = max(0, consumed_tokens - total_settled) within the same

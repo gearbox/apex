@@ -40,8 +40,8 @@ pytestmark = pytest.mark.asyncio
 
 @pytest_asyncio.fixture
 async def billing_service() -> BillingService:
-    """BillingService instance without EventBus (SSE is out of scope for DB integration)."""
-    return BillingService(event_bus=None)
+    """Stateless BillingService instance (event publishing is the caller's job)."""
+    return BillingService()
 
 
 async def _seed_balance(session: AsyncSession, account_id, amount: int) -> None:
@@ -83,7 +83,7 @@ async def test_reservation_accepts_non_job_uuid_as_job_id(
     # A UUID that is explicitly NOT in generation_jobs — mimics GpuSession.id.
     fake_session_id = uuid4()
 
-    txn = await billing_service.check_and_reserve(
+    result = await billing_service.check_and_reserve(
         account.id,
         500,
         fake_session_id,
@@ -96,6 +96,7 @@ async def test_reservation_accepts_non_job_uuid_as_job_id(
         product_id="vex",
         user_id=user.id,
     )
+    txn = result.txn
 
     # Reservation must have succeeded and be retrievable via the job lookup.
     assert txn.amount == -500
@@ -122,7 +123,7 @@ async def test_overage_debit_with_null_job_id_succeeds(
     await _seed_balance(db_session, account.id, 1000)
     parent_session_id = uuid4()
 
-    txn = await billing_service.check_and_reserve(
+    result = await billing_service.check_and_reserve(
         account.id,
         100,
         None,  # job_id=None for non-job billing events
@@ -135,6 +136,7 @@ async def test_overage_debit_with_null_job_id_succeeds(
         product_id="vex",
         user_id=user.id,
     )
+    txn = result.txn
 
     assert txn.amount == -100
     assert txn.job_id is None
@@ -171,7 +173,7 @@ async def test_partial_refund_against_non_job_reservation(
     )
 
     # Refund 100 of it (session used only 4 min out of 5-min reservation, say)
-    refund_txn = await billing_service.partial_refund(
+    refund_result = await billing_service.partial_refund(
         session_id,
         100,
         description="GPU session partial refund: used 4min, reserved 5min minimum",
@@ -179,6 +181,7 @@ async def test_partial_refund_against_non_job_reservation(
         product_id="vex",
         user_id=user.id,
     )
+    refund_txn = refund_result.txn
 
     assert refund_txn.amount == 100
     assert refund_txn.job_id == session_id

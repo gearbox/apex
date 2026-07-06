@@ -50,7 +50,11 @@ def _make_settings() -> Settings:
 
 
 async def _seed_pending_payment(
-    engine: AsyncEngine, *, external_id: str, tokens_granted: int
+    engine: AsyncEngine,
+    *,
+    external_id: str,
+    tokens_granted: int,
+    amount_usd: Decimal = Decimal("9.99"),
 ) -> tuple[User, TokenAccount, Payment]:
     """Seed a user, personal account, and a single pending Stripe payment. Commits."""
     user = User(
@@ -72,7 +76,7 @@ async def _seed_pending_payment(
         payment_provider="stripe",
         external_id=external_id,
         status="pending",
-        amount_usd=Decimal("9.99"),
+        amount_usd=amount_usd,
         tokens_granted=tokens_granted,
         currency="USD",
         product_id="vex",
@@ -123,9 +127,7 @@ async def test_concurrent_stripe_webhook_deliveries_credit_exactly_once(
                 AsyncSession(bind=db_engine, expire_on_commit=False) as session,
                 session.begin(),
             ):
-                service = PaymentService(
-                    billing_service=BillingService(event_bus=None), settings=settings
-                )
+                service = PaymentService(billing_service=BillingService(), settings=settings)
                 with patch("stripe.Webhook.construct_event", return_value=fake_event):
                     await service.handle_stripe_webhook(
                         b"{}", "sig_ignored", session=session, product_id="vex"
@@ -217,9 +219,7 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
                 AsyncSession(bind=db_engine, expire_on_commit=False) as session,
                 session.begin(),
             ):
-                service = PaymentService(
-                    billing_service=BillingService(event_bus=None), settings=settings
-                )
+                service = PaymentService(billing_service=BillingService(), settings=settings)
                 await service.handle_nowpayments_webhook(
                     raw_payload, signature, session=session, product_id="vex"
                 )
@@ -254,5 +254,93 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
                 )
             ).scalar_one()
             assert balance == 500
+    finally:
+        await _cleanup(db_engine, account.id, user.id)
+
+
+async def test_concurrent_partial_ipns_never_overcredit(db_engine: AsyncEngine) -> None:
+    """Two concurrent 'partially_paid' IPN deliveries for the same payment
+    (D2 telescoping delta-credit) must serialize via the row lock and credit
+    the target exactly once — not once each (double-credit)."""
+    invoice_id = f"np_invoice_{uuid4().hex[:12]}"
+    user, account, payment = await _seed_pending_payment(
+        db_engine,
+        external_id=invoice_id,
+        tokens_granted=1000,
+        amount_usd=Decimal("10.00"),
+    )
+    payment.payment_provider = "nowpayments"
+
+    settings = _make_settings()
+    ipn_secret = settings.nowpayments_ipn_secret_for("vex")
+
+    order_id_json_string = json.dumps(
+        {
+            "account_id": str(account.id),
+            "package_id": "starter",
+            "payment_id": str(payment.id),
+        }
+    )
+    # ratio = 4.00 / 10.00 = 0.4 → target = floor(1000 * 0.4) = 400.
+    raw_payload = (
+        '{"payment_status":"partially_paid","payment_id":"5077125061",'
+        f"{json.dumps('order_id')}:{json.dumps(order_id_json_string)},"
+        '"actually_paid":4.00}'
+    ).encode()
+
+    parsed = json.loads(raw_payload, parse_float=str, parse_int=str)
+    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
+    signature = hmac.new(ipn_secret.encode(), canonical, hashlib.sha512).hexdigest()
+
+    try:
+
+        async def deliver() -> str:
+            async with (
+                AsyncSession(bind=db_engine, expire_on_commit=False) as session,
+                session.begin(),
+            ):
+                service = PaymentService(billing_service=BillingService(), settings=settings)
+                await service.handle_nowpayments_webhook(
+                    raw_payload, signature, session=session, product_id="vex"
+                )
+                await session.commit()
+                return "delivered"
+
+        results = list(await asyncio.gather(deliver(), deliver()))
+        assert results == ["delivered", "delivered"]
+
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            credit_count = (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM token_transactions "
+                        "WHERE account_id = :aid AND transaction_type = 'credit'"
+                    ),
+                    {"aid": account.id},
+                )
+            ).scalar_one()
+            assert credit_count == 1, (
+                f"Expected exactly 1 credit transaction, got {credit_count}. "
+                "The row lock did NOT prevent a double-credit on concurrent partial IPNs."
+            )
+
+            balance = (
+                await session.execute(
+                    text(
+                        "SELECT COALESCE(SUM(amount), 0) FROM token_transactions "
+                        "WHERE account_id = :aid"
+                    ),
+                    {"aid": account.id},
+                )
+            ).scalar_one()
+            assert balance == 400, f"Expected exactly the 400-token target, got {balance}"
+
+            status = (
+                await session.execute(
+                    text("SELECT status FROM payments WHERE id = :pid"),
+                    {"pid": payment.id},
+                )
+            ).scalar_one()
+            assert status == "partially_paid"
     finally:
         await _cleanup(db_engine, account.id, user.id)

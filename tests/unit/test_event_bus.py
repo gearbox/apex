@@ -181,6 +181,40 @@ class TestEventBusPublishSystem:
 
 
 # ---------------------------------------------------------------------------
+# Disabled mode — Redis-less deployments (R2)
+# ---------------------------------------------------------------------------
+
+
+class TestEventBusDisabledMode:
+    @patch("src.api.services.event_bus.get_redis_client")
+    async def test_disabled_bus_publish_noops_without_redis(
+        self, mock_get_client: MagicMock, user_id, job_status_payload
+    ) -> None:
+        """A disabled bus must never touch Redis on publish/publish_system."""
+        bus = EventBus(enabled=False)
+
+        await bus.publish(
+            user_id=user_id,
+            event_type=EventType.JOB_STATUS_CHANGED,
+            payload=job_status_payload,
+        )
+        await bus.publish_system(
+            event_type=EventType.SYSTEM_NOTIFICATION,
+            payload=SystemNotificationPayload(level=NotificationLevel.INFO, title="T", message="M"),
+        )
+
+        mock_get_client.assert_not_called()
+
+    async def test_disabled_bus_subscribe_raises(self, user_id) -> None:
+        """subscribe() on a disabled bus fails loud rather than touching Redis."""
+        bus = EventBus(enabled=False)
+
+        with pytest.raises(RuntimeError):
+            async for _ in bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Subscribe — get_message-based implementation
 # ---------------------------------------------------------------------------
 

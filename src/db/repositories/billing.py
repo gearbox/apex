@@ -382,6 +382,23 @@ class BillingRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_credited_tokens_for_payment(self, payment_id: UUID) -> int:
+        """Sum of CREDIT-type ledger amounts referencing this payment.
+
+        Used by the NowPayments IPN handler's telescoping delta-credit: the
+        authoritative "already credited" figure for a payment must come from
+        the ledger, never a counter in ``provider_metadata``, so redelivered
+        IPNs and out-of-order partial/finished sequences stay drift-free.
+        Call only while holding the payment row lock (``get_payment_for_update``).
+        """
+        result = await self._session.execute(
+            select(func.coalesce(func.sum(TokenTransaction.amount), 0)).where(
+                TokenTransaction.payment_id == payment_id,
+                TokenTransaction.transaction_type == TransactionType.CREDIT.value,
+            )
+        )
+        return int(result.scalar_one())
+
     async def create_payment(
         self,
         *,

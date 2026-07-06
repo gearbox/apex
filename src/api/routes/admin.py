@@ -379,6 +379,7 @@ class AdminController(Controller):
         data: AdminAdjustRequest,
         session: AsyncSession,
         billing_service: BillingService,
+        event_bus: EventBus,
         product_id: str,
         idempotency_service: IdempotencyService,
         idempotency_key_header: Annotated[
@@ -419,7 +420,7 @@ class AdminController(Controller):
 
         record_id = check_result
         try:
-            txn = await billing_service.admin_adjust(
+            billing_result = await billing_service.admin_adjust(
                 account_id,
                 data.amount,
                 admin_user.id,
@@ -427,7 +428,8 @@ class AdminController(Controller):
                 session=session,
                 product_id=product_id,
             )
-            new_balance = await billing_service.get_balance(account_id, session=session)
+            txn = billing_result.txn
+            new_balance = txn.balance_after
             result = AdminAdjustResponse(
                 transaction=_txn_to_response(txn),
                 new_balance=new_balance,
@@ -441,6 +443,7 @@ class AdminController(Controller):
                 session=session,
             )
             await session.commit()
+            await event_bus.publish_balance(billing_result.event)
             return Response(content=result, status_code=HTTP_200_OK)
 
         except Exception:

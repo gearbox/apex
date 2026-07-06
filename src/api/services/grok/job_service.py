@@ -17,6 +17,7 @@ import httpx
 import structlog
 
 from src.api.services.billing import BillingService
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
@@ -136,7 +137,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob | None:
+    ) -> ProviderSubmitResult:
         """Create and execute an image generation job.
 
         This method follows the Saga pattern:
@@ -165,7 +166,9 @@ class GrokJobService:
             token_cost: Pre-calculated token cost for this generation.
 
         Returns:
-            Created and processed GenerationJob.
+            ``ProviderSubmitResult`` wrapping the created and processed
+            GenerationJob, the post-debit balance, and the pending balance
+            event.
 
         Raises:
             GrokJobError: If job creation or processing fails.
@@ -211,7 +214,7 @@ class GrokJobService:
             )
 
             # --- SAGA: Pre-flight token deduction ---
-            txn = await billing_service.check_and_reserve(
+            reserve_result = await billing_service.check_and_reserve(
                 account_id,
                 token_cost,
                 job_id,
@@ -227,7 +230,7 @@ class GrokJobService:
             )
             if job is not None:
                 job.token_cost = token_cost
-                job.debit_transaction_id = txn.id
+                job.debit_transaction_id = reserve_result.txn.id
             await session.flush()
 
             # Call Grok API
@@ -276,7 +279,13 @@ class GrokJobService:
             )
 
             logger.info("grok.image_job_completed", job_id=str(job_id), output_count=len(results))
-            return job
+            if job is None:
+                raise GrokJobError(f"Job {job_id} disappeared after completion")
+            return ProviderSubmitResult(
+                job=job,
+                balance_after=reserve_result.txn.balance_after,
+                balance_event=reserve_result.event,
+            )
 
         except GrokAPIError as e:
             logger.error("grok.api_error", job_id=str(job_id), error=str(e))
@@ -425,7 +434,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-    ) -> GenerationJob | None:
+    ) -> ProviderSubmitResult:
         """Start an async video generation job.
 
         Creates the job and initiates generation with Grok API.
@@ -450,7 +459,9 @@ class GrokJobService:
             token_cost: Pre-calculated token cost for this generation.
 
         Returns:
-            Created GenerationJob with status QUEUED.
+            ``ProviderSubmitResult`` wrapping the created GenerationJob with
+            status QUEUED, the post-debit balance, and the pending balance
+            event.
         """
         job_repo = JobRepository(session)
 
@@ -479,7 +490,7 @@ class GrokJobService:
 
         try:
             # --- SAGA: Pre-flight token deduction ---
-            txn = await billing_service.check_and_reserve(
+            reserve_result = await billing_service.check_and_reserve(
                 account_id,
                 token_cost,
                 job_id,
@@ -495,7 +506,7 @@ class GrokJobService:
             )
             if job is not None:
                 job.token_cost = token_cost
-                job.debit_transaction_id = txn.id
+                job.debit_transaction_id = reserve_result.txn.id
             await session.flush()
 
             # Start async video generation
@@ -520,7 +531,13 @@ class GrokJobService:
             logger.info(
                 "grok.video_job_started", job_id=str(job_id), xai_request_id=started.request_id
             )
-            return job
+            if job is None:
+                raise GrokJobError(f"Job {job_id} disappeared after start")
+            return ProviderSubmitResult(
+                job=job,
+                balance_after=reserve_result.txn.balance_after,
+                balance_event=reserve_result.event,
+            )
 
         except GrokAPIError as e:
             logger.error("grok.video_job_start_failed", job_id=str(job_id), error=str(e))

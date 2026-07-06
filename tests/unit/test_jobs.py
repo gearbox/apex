@@ -23,7 +23,7 @@ from src.api.schemas.jobs import (
 from src.api.schemas.media import MediaObject, MediaOriginal
 from src.api.schemas.pagination import CursorPage
 from src.api.services.unified_jobs import UnifiedJobService
-from src.core.enums import GenerationType, JobStatus, OutputMediaType
+from src.core.enums import GenerationType, JobStatus, OutputMediaType, Provider
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -173,8 +173,19 @@ def _session_for_list(
     return session
 
 
-def _service(grok_job_service: AsyncMock | None = None) -> UnifiedJobService:
-    return UnifiedJobService(grok_job_service=grok_job_service)
+def _service(*, grok_provider: AsyncMock | None = None) -> UnifiedJobService:
+    """Build a UnifiedJobService with an optional fake Grok-keyed provider.
+
+    Gating logic (video-type check, terminal-status check) now lives inside
+    each provider's own ``refresh_job`` — UnifiedJobService just resolves
+    ``job.provider`` to a provider and delegates unconditionally. Real
+    per-provider gating is covered in test_generation_capabilities.py against
+    the actual GrokGenerationProvider/AishaGenerationProvider classes.
+    """
+    providers: dict[Provider, AsyncMock] = {}
+    if grok_provider is not None:
+        providers[Provider.GROK] = grok_provider
+    return UnifiedJobService(providers=providers)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +242,8 @@ class TestGetJob:
         assert result.error == "GPU OOM"
         assert result.created_at == created
 
-    async def test_no_grok_poll_when_grok_service_is_none(self) -> None:
+    async def test_no_refresh_when_no_provider_mapped_for_job(self) -> None:
+        """No provider registered for this job's provider string → serve DB row as-is."""
         user_id = uuid4()
         job = _make_job(
             user_id=user_id,
@@ -241,14 +253,13 @@ class TestGetJob:
         )
         session = _session_for_get(job)
 
-        result = await UnifiedJobService(grok_job_service=None).get_job(
-            job.id, user_id, session=session
-        )
+        result = await _service().get_job(job.id, user_id, session=session)
 
         assert result is not None
         assert result.status == JobStatus.RUNNING
 
-    async def test_grok_video_queued_job_is_polled(self) -> None:
+    async def test_refresh_delegates_to_resolved_provider(self) -> None:
+        """get_job resolves the provider from job.provider and calls refresh_job(session, job)."""
         user_id = uuid4()
         job = _make_job(
             user_id=user_id,
@@ -263,19 +274,20 @@ class TestGetJob:
             generation_type=GenerationType.T2V.value,
             status=JobStatus.COMPLETED.value,
         )
-        # get_job fetches the original job; then 2 more execute calls for _build_response
         session = _session_for_get(job)
 
-        grok = AsyncMock()
-        grok.poll_video_job = AsyncMock(return_value=updated)
+        grok_provider = AsyncMock()
+        grok_provider.refresh_job = AsyncMock(return_value=updated)
 
-        result = await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
+        result = await _service(grok_provider=grok_provider).get_job(
+            job.id, user_id, session=session
+        )
 
-        grok.poll_video_job.assert_awaited_once_with(session, job.id)
+        grok_provider.refresh_job.assert_awaited_once_with(session, job)
         assert result is not None
         assert result.status == JobStatus.COMPLETED
 
-    async def test_grok_video_running_job_is_polled(self) -> None:
+    async def test_refresh_returning_none_keeps_stale_job(self) -> None:
         user_id = uuid4()
         job = _make_job(
             user_id=user_id,
@@ -285,48 +297,19 @@ class TestGetJob:
         )
         session = _session_for_get(job)
 
-        grok = AsyncMock()
-        grok.poll_video_job = AsyncMock(return_value=None)  # None means no update
+        grok_provider = AsyncMock()
+        grok_provider.refresh_job = AsyncMock(return_value=None)  # None means no update
 
-        await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
-
-        grok.poll_video_job.assert_awaited_once()
-
-    async def test_grok_poll_not_triggered_for_image_job(self) -> None:
-        user_id = uuid4()
-        job = _make_job(
-            user_id=user_id,
-            provider="grok",
-            generation_type=GenerationType.T2I.value,
-            status=JobStatus.RUNNING.value,
+        result = await _service(grok_provider=grok_provider).get_job(
+            job.id, user_id, session=session
         )
-        session = _session_for_get(job)
 
-        grok = AsyncMock()
-        grok.poll_video_job = AsyncMock()
+        grok_provider.refresh_job.assert_awaited_once()
+        assert result is not None
+        assert result.status == JobStatus.RUNNING
 
-        await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
-
-        grok.poll_video_job.assert_not_awaited()
-
-    async def test_grok_poll_not_triggered_for_completed_job(self) -> None:
-        user_id = uuid4()
-        job = _make_job(
-            user_id=user_id,
-            provider="grok",
-            generation_type=GenerationType.T2V.value,
-            status=JobStatus.COMPLETED.value,
-        )
-        session = _session_for_get(job)
-
-        grok = AsyncMock()
-        grok.poll_video_job = AsyncMock()
-
-        await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
-
-        grok.poll_video_job.assert_not_awaited()
-
-    async def test_grok_poll_not_triggered_for_non_grok_provider(self) -> None:
+    async def test_refresh_not_triggered_for_provider_not_in_registry(self) -> None:
+        """job.provider="aisha" but only Provider.GROK is registered → no refresh call."""
         user_id = uuid4()
         job = _make_job(
             user_id=user_id,
@@ -336,14 +319,14 @@ class TestGetJob:
         )
         session = _session_for_get(job)
 
-        grok = AsyncMock()
-        grok.poll_video_job = AsyncMock()
+        grok_provider = AsyncMock()
+        grok_provider.refresh_job = AsyncMock()
 
-        await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
+        await _service(grok_provider=grok_provider).get_job(job.id, user_id, session=session)
 
-        grok.poll_video_job.assert_not_awaited()
+        grok_provider.refresh_job.assert_not_awaited()
 
-    async def test_grok_poll_failure_is_swallowed_and_original_job_returned(self) -> None:
+    async def test_refresh_failure_is_swallowed_and_original_job_returned(self) -> None:
         user_id = uuid4()
         job = _make_job(
             user_id=user_id,
@@ -353,31 +336,15 @@ class TestGetJob:
         )
         session = _session_for_get(job)
 
-        grok = AsyncMock()
-        grok.poll_video_job = AsyncMock(side_effect=RuntimeError("xAI unreachable"))
+        grok_provider = AsyncMock()
+        grok_provider.refresh_job = AsyncMock(side_effect=RuntimeError("xAI unreachable"))
 
-        result = await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
+        result = await _service(grok_provider=grok_provider).get_job(
+            job.id, user_id, session=session
+        )
 
         assert result is not None
         assert result.status == JobStatus.QUEUED
-
-    async def test_grok_poll_returning_none_falls_back_to_original_job(self) -> None:
-        user_id = uuid4()
-        job = _make_job(
-            user_id=user_id,
-            provider="grok",
-            generation_type=GenerationType.T2V.value,
-            status=JobStatus.RUNNING.value,
-        )
-        session = _session_for_get(job)
-
-        grok = AsyncMock()
-        grok.poll_video_job = AsyncMock(return_value=None)
-
-        result = await _service(grok_job_service=grok).get_job(job.id, user_id, session=session)
-
-        assert result is not None
-        assert result.status == JobStatus.RUNNING
 
 
 # ---------------------------------------------------------------------------

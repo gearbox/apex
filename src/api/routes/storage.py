@@ -22,6 +22,7 @@ from litestar.status_codes import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
+    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
 )
 
 from src.api.dependencies.auth import get_current_user_id
@@ -40,6 +41,7 @@ from src.api.services.user_content import (
     UserContentError,
     UserContentNotFoundError,
     UserContentService,
+    UserContentTooLargeError,
     UserContentValidationError,
 )
 
@@ -162,6 +164,16 @@ class StorageController(Controller):
                 status_code=HTTP_201_CREATED,
             )
 
+        except UserContentTooLargeError as e:
+            logger.warning("storage.upload_too_large", error=str(e))
+            return Response(
+                content=ErrorEnvelope(
+                    error="file_too_large",
+                    message=str(e),
+                    status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                ),
+                status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
         except UserContentValidationError as e:
             logger.warning("storage.upload_validation_failed", error=str(e))
             return Response(
