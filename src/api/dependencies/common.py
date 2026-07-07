@@ -32,6 +32,7 @@ from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.grok.video_worker import GrokVideoWorker
+from src.api.services.health.checkers.workers import WorkerHeartbeatChecker
 from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
@@ -51,6 +52,7 @@ from src.core.product import ProductConfig
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
+from src.workers.base import PeriodicWorker
 from src.workers.token_cleanup import TokenCleanupWorker
 
 logger = structlog.get_logger(__name__)
@@ -866,6 +868,26 @@ async def init_services(settings: Settings) -> JWTService:
             redis_enabled=redis_enabled,
         )
         await _services.health_snapshot_cleanup_worker.start()
+
+    # Register the worker heartbeat checker last, now that every worker that
+    # will ever exist this process has been constructed. health_registry is
+    # held by reference inside health_service, so registering after the
+    # fact still takes effect for future checks.
+    all_workers: list[PeriodicWorker] = [
+        w
+        for w in (
+            _services.token_cleanup_worker,
+            _services.aisha_job_poller,
+            _services.gpu_provisioning_worker,
+            _services.orphaned_tunnel_cleanup_worker,
+            _services.billing_reconciler_worker,
+            _services.health_snapshot_worker,
+            _services.health_snapshot_cleanup_worker,
+            _services.grok_video_worker,
+        )
+        if w is not None
+    ]
+    health_registry.register(WorkerHeartbeatChecker(workers=all_workers))
 
     return _services.jwt_service  # Return for storing in app.state
 

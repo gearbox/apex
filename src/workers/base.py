@@ -134,6 +134,7 @@ class PeriodicWorker(ABC):
         self._drain_timeout = drain_timeout_seconds
         self._running = False
         self._task: asyncio.Task[None] | None = None
+        self._started_at: datetime | None = None
         self._last_tick_at: datetime | None = None
         self._last_tick_duration_ms: int | None = None
 
@@ -154,6 +155,15 @@ class PeriodicWorker(ABC):
     @property
     def interval_seconds(self) -> float:
         return self._interval
+
+    @property
+    def initial_delay_seconds(self) -> float:
+        return self._initial_delay
+
+    @property
+    def started_at(self) -> datetime | None:
+        """UTC timestamp of the most recent start() call, or None if never started."""
+        return self._started_at
 
     @property
     def is_running(self) -> bool:
@@ -187,6 +197,7 @@ class PeriodicWorker(ABC):
         if self._running:
             return
         self._running = True
+        self._started_at = datetime.now(UTC)
         self._task = asyncio.create_task(self._run_loop())
         logger.info("worker.started", name=self._name, interval_s=self._interval)
 
