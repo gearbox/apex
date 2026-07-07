@@ -57,7 +57,7 @@ from src.api.services.billing_errors import (
     RefundNotEligibleError,
 )
 from src.api.services.idempotency import IdempotencyConflictError
-from src.core.config import get_settings
+from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
 from src.core.product_registry import PRODUCT_REGISTRY
 
@@ -260,7 +260,7 @@ def global_exception_handler(request: Request[Any, Any, Any], exc: Exception) ->
     )
 
 
-def _build_openapi_config(settings: Any) -> OpenAPIConfig:
+def _build_openapi_config(settings: Settings) -> OpenAPIConfig:
     """Build the OpenAPI schema/docs configuration.
 
     Only called when ``settings.enable_docs`` is true — see ``create_app()``.
