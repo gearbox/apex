@@ -107,7 +107,7 @@ test-integration-local:
 	pytest tests/integration/ -v --tb=short
 
 test-all:
-	docker compose -f docker-compose.test.yml run --build test-runner \
+	docker compose -f docker-compose.test.yml run --build --rm test-runner \
 		pytest tests/ -v --tb=short --no-header
 	docker compose -f docker-compose.test.yml down -v
 
