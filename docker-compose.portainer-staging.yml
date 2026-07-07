@@ -10,6 +10,7 @@
 # Required env vars (set in Portainer stack environment):
 #   API_IMAGE               ghcr.io/yourorg/apex-api:staging
 #   POSTGRES_PASSWORD       strong password
+#   REDIS_PASSWORD          strong password (generate: openssl rand -base64 24)
 #   JWT_SECRET_KEY          output of: python -c "import secrets; print(secrets.token_urlsafe(48))"
 #   R2_ACCOUNT_ID           Cloudflare account ID
 #   R2_ACCESS_KEY_ID        R2 API token key ID
@@ -55,11 +56,12 @@ services:
     image: redis:7-alpine
     container_name: apex-redis-staging
     restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
     ports: []
     volumes:
       - redis_staging_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -117,7 +119,7 @@ services:
       DB_ECHO: "false"
 
       # --- Redis ---
-      REDIS_URL: "redis://redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
 
       # --- JWT ---
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
