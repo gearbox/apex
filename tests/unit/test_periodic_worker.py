@@ -18,6 +18,9 @@ class _CountingWorker(PeriodicWorker):
 
 
 class _FailingWorker(PeriodicWorker):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+
     async def run_once(self) -> None:
         raise RuntimeError("boom")
 
@@ -84,6 +87,27 @@ class TestStopDrainsInFlightTick:
         await asyncio.sleep(0.02)  # let the tick start
         await worker.stop()
         assert worker.completed is True
+
+
+class TestStopWakesFromIdleSleepImmediately:
+    async def test_stop_does_not_wait_out_a_long_interval(self) -> None:
+        """A worker idling between ticks must wake as soon as stop() is
+        called, not run out drain_timeout_seconds (or the full interval).
+
+        Regression test: the inter-tick sleep used to be a plain
+        asyncio.sleep(), which stop()'s _running=False couldn't interrupt —
+        every long-interval worker (hourly/daily sweeps) would block
+        shutdown for the full drain_timeout_seconds (30s default).
+        """
+        worker = _CountingWorker(**_worker_kwargs(interval_seconds=100, drain_timeout_seconds=30))
+        await worker.start()
+        await asyncio.sleep(0.02)  # let the first tick finish; loop is now idling
+
+        start = asyncio.get_running_loop().time()
+        await worker.stop()
+        elapsed = asyncio.get_running_loop().time() - start
+
+        assert elapsed < 1.0
 
 
 class TestStopCancelsAfterDrainTimeout:

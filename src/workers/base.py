@@ -134,6 +134,7 @@ class PeriodicWorker(ABC):
         self._drain_timeout = drain_timeout_seconds
         self._running = False
         self._task: asyncio.Task[None] | None = None
+        self._stop_event = asyncio.Event()
         self._started_at: datetime | None = None
         self._last_tick_at: datetime | None = None
         self._last_tick_duration_ms: int | None = None
@@ -197,6 +198,7 @@ class PeriodicWorker(ABC):
         if self._running:
             return
         self._running = True
+        self._stop_event = asyncio.Event()
         self._started_at = datetime.now(UTC)
         self._task = asyncio.create_task(self._run_loop())
         logger.info("worker.started", name=self._name, interval_s=self._interval)
@@ -204,13 +206,16 @@ class PeriodicWorker(ABC):
     async def stop(self) -> None:
         """Signal the loop to stop and drain the in-flight tick. Idempotent.
 
-        ``_running`` is cleared before waiting so the loop exits at the next
-        sleep boundary on its own; a hung tick is only cancelled once
-        ``drain_timeout_seconds`` elapses.
+        ``_running`` is cleared and ``_stop_event`` is set before waiting, so
+        a task idling in its inter-tick sleep wakes immediately instead of
+        running out the clock on ``drain_timeout_seconds``. A tick actually
+        in progress (inside ``run_once``) is still given up to
+        ``drain_timeout_seconds`` to finish before being cancelled.
         """
         if not self._running:
             return
         self._running = False
+        self._stop_event.set()
 
         if self._task is not None:
             task = self._task
@@ -225,9 +230,14 @@ class PeriodicWorker(ABC):
         await self._lease.release()
         logger.info("worker.stopped", name=self._name)
 
+    async def _interruptible_sleep(self, seconds: float) -> None:
+        """Sleep, but wake immediately if stop() is called."""
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
+
     async def _run_loop(self) -> None:
         if self._initial_delay:
-            await asyncio.sleep(self._initial_delay)
+            await self._interruptible_sleep(self._initial_delay)
 
         while self._running:
             try:
@@ -249,4 +259,4 @@ class PeriodicWorker(ABC):
                 logger.exception("worker.tick_error", name=self._name)
 
             if self._running:
-                await asyncio.sleep(self._interval + random.uniform(0.0, self._jitter))  # noqa: S311
+                await self._interruptible_sleep(self._interval + random.uniform(0.0, self._jitter))  # noqa: S311
