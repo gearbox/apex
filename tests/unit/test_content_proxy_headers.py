@@ -100,3 +100,11 @@ class TestNosniffAlwaysPresent:
             )
             assert isinstance(result, Stream)
             assert result.headers["X-Content-Type-Options"] == "nosniff"
+
+
+class TestInlineSafeSetDerivation:
+    def test_inline_safe_is_stored_images_plus_mp4(self) -> None:
+        from src.api.routes.content import _INLINE_SAFE_CONTENT_TYPES
+        from src.api.services.storage.r2 import ALLOWED_CONTENT_TYPES
+
+        assert frozenset(ALLOWED_CONTENT_TYPES) | {"video/mp4"} == _INLINE_SAFE_CONTENT_TYPES

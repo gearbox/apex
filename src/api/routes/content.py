@@ -27,19 +27,23 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.security import auth_guard, content_auth_guard
 from src.api.services.content_proxy import ContentNotFoundError, ContentProxyService
 from src.api.services.storage.exceptions import StorageError
-from src.api.services.storage.r2 import R2StorageService
+from src.api.services.storage.r2 import (
+    ALLOWED_CONTENT_TYPES as _STORED_IMAGE_CONTENT_TYPES,
+)
+from src.api.services.storage.r2 import (
+    R2StorageService,
+)
 
 logger = structlog.get_logger(__name__)
 
-# Content types the proxy will serve inline (rendered by <img>/<video>).
-# Mirrors storage.r2.ALLOWED_CONTENT_TYPES (upload images) plus the video
-# type Grok/Aisha outputs actually produce. Everything else — including a
-# hostile stored ContentType such as text/html or image/svg+xml — is forced
-# to download as application/octet-stream. Single source of truth; do not
-# scatter these literals elsewhere.
-_INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(
-    {"image/png", "image/jpeg", "image/webp", "video/mp4"}
-)
+# Types the proxy serves inline. Derived, not mirrored:
+#   - stored images are exactly r2.ALLOWED_CONTENT_TYPES (upload normalization
+#     guarantees png/jpeg/webp — see services/image_normalization.py),
+#   - video outputs add mp4.
+# NOTE: routes/storage.py::ALLOWED_CONTENT_TYPES is a DIFFERENT, wider set
+# (the client-declared upload gate, incl. heic/heif/avif that are normalized
+# to PNG before storage). Do NOT unify with that one.
+_INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(_STORED_IMAGE_CONTENT_TYPES) | {"video/mp4"}
 
 
 class ContentProxyController(Controller):
