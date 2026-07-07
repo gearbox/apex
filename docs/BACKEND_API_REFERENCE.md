@@ -952,11 +952,13 @@ Provides stable, non-expiring authenticated URLs for user content. The server re
 ### Response Headers
 
 All successful responses include:
-- `Content-Type` — from R2 object metadata
+- `Content-Type` — the stored R2 `ContentType` **only if it's on the inline-safe allowlist** (`image/png`, `image/jpeg`, `image/webp`, `video/mp4`); otherwise `application/octet-stream`
 - `Content-Length` — from R2 object metadata
 - `Cache-Control: private, max-age=10800, immutable` — 3-hour client cache (default; configurable via `CONTENT_URL_TTL`)
 - `ETag: "<content_id>"` — the output/upload UUID, for conditional requests
 - `X-Content-Id: <content_id>` — same UUID, without quotes
+- `X-Content-Type-Options: nosniff` — always present, blocks MIME-sniffing
+- `Content-Disposition: inline` for inline-safe content types, `attachment` otherwise — a stored content-type outside the allowlist (e.g. `text/html`, `image/svg+xml`) is forced to download rather than rendered inline, even though it streams with a coerced `Content-Type`
 
 #### `GET /v1/content/outputs/{output_id}`
 
@@ -2161,10 +2163,15 @@ Note:     Always 200 — use this for Docker/container restart decisions only.
 Checks PostgreSQL and Redis connectivity. Returns 200 if ready, 503 if not.
 
 ```
-Response: { status: "ready" | "not_ready", checks: { postgres: string, redis?: string, r2?: string } }
+Response: { status: "ready" | "not_ready", checks: { postgres: string, redis?: string, r2?: string }, build_sha: string }
 Status:   200 if ready, 503 if not ready
 Note:     R2 is checked but excluded from the ready/not_ready determination (slow HeadBucket).
           Use this for CI readiness waits and traffic-routing decisions.
+          build_sha is the git SHA baked into the running image (Settings.build_sha,
+          default "unknown" if not injected at build time) — populated on both the
+          ready and not-ready branches. The staging deploy workflow polls this field
+          to confirm a redeploy actually swapped in the new image, not just that some
+          container is answering on the ready path.
 ```
 
 #### `GET /v1/admin/health/`
@@ -2284,7 +2291,15 @@ The registry timeout for this checker is 15 s (increased from the 5 s default fo
 
 ## 22. OpenAPI Documentation Endpoints
 
-The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
+**Gated behind `ENABLE_DOCS` — off by default.** The OpenAPI schema and every
+endpoint under `/docs/` enumerate the full API surface, including
+`/v1/internal/*` and admin routes, which is free reconnaissance if left
+public. `Settings.enable_docs` (env: `ENABLE_DOCS`) defaults to `false`; when
+false, `create_app()` passes `openapi_config=None` and every path below
+returns 404. Set `ENABLE_DOCS=true` in dev/staging to expose them — **never
+enable in production.** This is independent of `DEBUG`.
+
+When enabled, the backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema and documentation UI endpoints live under `/docs/`:
 
 | Endpoint | Description |
 |----------|-------------|
@@ -2295,7 +2310,7 @@ The backend's `OpenAPIConfig` is configured with `path="/docs"`, so all schema a
 | `GET /docs/elements` | Stoplight Elements UI |
 | `GET /docs/rapidoc` | RapiDoc UI |
 
-**Export command:**
+**Export command** (requires `ENABLE_DOCS=true` on the target server):
 ```bash
 curl http://localhost:8000/docs/openapi.json > src/lib/api/schema.json
 npx openapi-typescript src/lib/api/schema.json -o src/lib/api/types.ts
