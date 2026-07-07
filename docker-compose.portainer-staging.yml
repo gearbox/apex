@@ -201,7 +201,8 @@ services:
   # Exposes staging.yourdomain.com → http://api:8100 via Zero Trust
   # ===========================================================================
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # cloudflared 2026.6.1
+    image: cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283
     container_name: apex-cloudflared-staging
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
