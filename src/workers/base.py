@@ -222,6 +222,12 @@ class PeriodicWorker(ABC):
             try:
                 await asyncio.wait_for(task, timeout=self._drain_timeout)
             except TimeoutError:
+                # asyncio.TimeoutError is TimeoutError (unified since Python 3.11).
+                # wait_for() has already cancelled `task` and awaited that
+                # cancellation to completion before raising here (its documented
+                # contract, fixed for good in https://bugs.python.org/issue32751) —
+                # task is guaranteed done at this point. The suppress below is a
+                # no-op safety net, not a second real wait.
                 logger.warning("worker.drain_timeout", name=self._name)
                 with suppress(asyncio.CancelledError):
                     await task
