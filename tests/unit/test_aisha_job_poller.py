@@ -114,32 +114,22 @@ class TestConstructor:
 
 
 class TestStartStop:
-    async def test_start_creates_task(self) -> None:
-        poller = _make_poller()
-        with patch.object(poller, "_loop", new=AsyncMock()):
-            await poller.start()
-            assert poller._task is not None
-            await poller.stop()
+    """Generic start/stop lifecycle is covered by test_periodic_worker.py.
 
-    async def test_start_is_idempotent(self) -> None:
-        poller = _make_poller()
-        with patch.object(poller, "_loop", new=AsyncMock()):
-            await poller.start()
-            task1 = poller._task
-            await poller.start()
-            task2 = poller._task
-            assert task1 is task2
-            await poller.stop()
+    Only AishaJobPoller-specific behavior (config.enabled gating) lives here.
+    """
 
     async def test_disabled_poller_does_not_start(self) -> None:
         poller = _make_poller(enabled=False)
         await poller.start()
-        assert poller._task is None
+        assert poller.is_running is False
 
-    async def test_stop_is_idempotent(self) -> None:
+    async def test_enabled_poller_starts(self) -> None:
         poller = _make_poller()
-        await poller.stop()
-        await poller.stop()
+        with patch.object(poller, "_run_loop", new=AsyncMock()):
+            await poller.start()
+            assert poller.is_running is True
+            await poller.stop()
 
 
 # ---------------------------------------------------------------------------

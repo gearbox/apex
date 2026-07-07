@@ -77,7 +77,6 @@ async def test_cleanup_refresh_tokens_executes_delete(
     mock_session.execute.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_worker_runs_cleanup_on_interval() -> None:
     db_manager_mock = MagicMock(spec=DatabaseManager)
 
@@ -92,7 +91,6 @@ async def test_worker_runs_cleanup_on_interval() -> None:
     db_manager_mock.session.return_value = AsyncContextManagerMock()
 
     worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
-    worker._running = True  # Avoid starting actual asyncio task that spins immediately
 
     with (
         patch("src.workers.token_cleanup.UserRepository") as user_repo_cls,
@@ -108,7 +106,7 @@ async def test_worker_runs_cleanup_on_interval() -> None:
         auth_repo_mock.cleanup_expired_password_reset_tokens.return_value = 2
         auth_token_repo_cls.return_value = auth_repo_mock
 
-        await worker._run_once()
+        await worker.run_once()
 
         # Verify repository methods called
         user_repo_mock.cleanup_expired_tokens.assert_called_once()
@@ -125,7 +123,6 @@ async def test_worker_runs_cleanup_on_interval() -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_worker_continues_on_exception() -> None:
     db_manager_mock = MagicMock(spec=DatabaseManager)
 
@@ -149,71 +146,9 @@ async def test_worker_continues_on_exception() -> None:
         user_repo_cls.return_value = user_repo_mock
 
         # Call it once, it should catch the exception and log it instead of raising
-        await worker._run_once()
+        await worker.run_once()
 
         logger_mock.exception.assert_called_once()
         args, kwargs = logger_mock.exception.call_args
         assert args[0] == "token_cleanup_worker.error"
         assert kwargs["error"] == "Database failure"
-
-
-@pytest.mark.asyncio
-async def test_start_noop_when_already_running() -> None:
-    db_manager_mock = MagicMock(spec=DatabaseManager)
-    worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
-    worker._running = True
-    worker._task = MagicMock()  # sentinel — must not be replaced
-
-    original_task = worker._task
-    await worker.start()
-
-    assert worker._task is original_task  # unchanged — early return hit
-
-
-@pytest.mark.asyncio
-async def test_stop_cancels_task_and_clears_state() -> None:
-    import asyncio
-
-    db_manager_mock = MagicMock(spec=DatabaseManager)
-    worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
-    worker._running = True
-
-    # Create a real long-running task so cancel() actually does something
-    async def _forever() -> None:
-        await asyncio.sleep(9999)
-
-    worker._task = asyncio.create_task(_forever())
-
-    await worker.stop()
-
-    assert not worker._running
-    assert worker._task is None
-
-
-@pytest.mark.asyncio
-async def test_stop_noop_when_not_running() -> None:
-    db_manager_mock = MagicMock(spec=DatabaseManager)
-    worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
-    worker._running = False
-    # Should not raise
-    await worker.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_loop_stops_when_running_set_false() -> None:
-    db_manager_mock = MagicMock(spec=DatabaseManager)
-    worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=9999)
-    worker._running = True
-
-    call_count = 0
-
-    async def _fake_run_once() -> None:
-        nonlocal call_count
-        call_count += 1
-        worker._running = False  # stop after first iteration
-
-    worker._run_once = _fake_run_once  # type: ignore[method-assign]
-
-    await worker._run_loop()
-
-    assert call_count == 1

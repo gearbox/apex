@@ -13,8 +13,6 @@ Intentionally slow — orphans are not an emergency.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -26,6 +24,7 @@ from src.api.services.cloudflare.schemas import TunnelListEntry
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIRateLimitError
 from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -49,7 +48,7 @@ _LIVE_STATUSES = (
 )
 
 
-class OrphanedTunnelCleanupWorker:
+class OrphanedTunnelCleanupWorker(PeriodicWorker):
     """Reconciles CF tunnels and Vast.ai instances against the gpu_sessions table.
 
     Tunnel sweep: detects tunnels that are (a) ours (by name prefix), (b) older than
@@ -72,47 +71,21 @@ class OrphanedTunnelCleanupWorker:
         cf_client: CloudflareTunnelClient,
         vastai_client: VastAIClient,
         settings: Settings,
+        redis_enabled: bool = False,
     ) -> None:
+        super().__init__(
+            name="gpu_orphan_cleanup",
+            interval_seconds=settings.orphaned_tunnel_cleanup_interval_minutes * 60,
+            initial_delay_seconds=60.0,
+            jitter_seconds=30.0,
+            redis_enabled=redis_enabled,
+        )
         self._session_factory = session_factory
         self._cf = cf_client
         self._vastai = vastai_client
         self._settings = settings
-        self._running = False
-        self._task: asyncio.Task[None] | None = None
 
-    async def start(self) -> None:
-        """Start the cleanup worker."""
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        logger.info(
-            "gpu_orphan_cleanup_worker.started",
-            interval_minutes=self._settings.orphaned_tunnel_cleanup_interval_minutes,
-        )
-
-    async def stop(self) -> None:
-        """Stop the cleanup worker."""
-        if not self._running:
-            return
-        self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        logger.info("gpu_orphan_cleanup_worker.stopped")
-
-    async def _run_loop(self) -> None:
-        """Main periodic loop."""
-        while self._running:
-            try:
-                await self._sweep_once()
-            except Exception:
-                logger.exception("gpu_orphan_cleanup_worker.sweep_error")
-            await asyncio.sleep(self._settings.orphaned_tunnel_cleanup_interval_minutes * 60)
-
-    async def _sweep_once(self) -> None:
+    async def run_once(self) -> None:
         """One cleanup sweep: orphaned tunnels AND orphaned Vast.ai instances."""
         await self._sweep_tunnels()
         await self._sweep_instances()
