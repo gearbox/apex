@@ -50,17 +50,21 @@ class TestRedactedUrl:
         assert _redacted_url("redis://localhost:6379") == "redis://localhost:6379"
 
     def test_pool_initialized_log_never_contains_password(self) -> None:
-        import structlog
-
+        # Mocks the module logger directly rather than structlog.testing.capture_logs():
+        # capture_logs() patches the *global* processors list, which is fragile across
+        # this test session (cache_logger_on_first_use permanently binds module-level
+        # loggers to whatever list is live on their first real call — see
+        # tests/unit/api/conftest.py for the full story). Asserting on the mock's call
+        # args is deterministic regardless of what else in the suite touches structlog.
         with (
             patch("src.core.redis.aioredis.ConnectionPool.from_url"),
-            structlog.testing.capture_logs() as captured,
+            patch("src.core.redis.logger") as mock_logger,
         ):
             init_redis_pool("redis://:supersecret@redis:6379/0")
 
-        logged = [entry for entry in captured if entry.get("event") == "redis.pool_initialized"]
-        assert logged, "expected a redis.pool_initialized log entry"
-        assert "supersecret" not in str(logged[0])
+        mock_logger.info.assert_called_once_with(
+            "redis.pool_initialized", url="redis://redis:6379/0"
+        )
 
 
 class TestGetRedisPool:
