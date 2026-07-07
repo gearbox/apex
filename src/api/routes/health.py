@@ -53,11 +53,16 @@ class HealthController(Controller):
 
         Checks: PostgreSQL, Redis.
         Excludes: R2 (slow HeadBucket, not critical for accepting traffic).
+
+        build_sha is populated on both the ready and not-ready branches so
+        the staging deploy verification step (which polls this endpoint) can
+        confirm the new image is live even during a partial-readiness window.
         """
         is_ready, checks = await health_service.readiness()
         body = ReadinessResponse(
             status="ready" if is_ready else "not_ready",
             checks=checks,
+            build_sha=get_settings().build_sha,
         )
         return Response(content=body, status_code=200 if is_ready else 503)
 

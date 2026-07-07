@@ -311,21 +311,18 @@ jobs:
         run: |
           echo "Triggering Portainer redeploy for staging stack..."
 
-          # Fire-and-forget: we verify success via the health check below,
-          # not via the webhook response code.
-          curl \
+          HTTP_CODE=$(curl \
             -H "CF-Access-Client-Id: ${{ secrets.CF_CLIENT_ID }}" \
             -H "CF-Access-Client-Secret: ${{ secrets.CF_CLIENT_SECRET }}" \
-            --silent \
-            --output /dev/null \
-            --max-time 300 \
-            --retry 3 \
-            --retry-delay 10 \
-            --retry-all-errors \
+            --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --max-time 300 --retry 3 --retry-delay 10 --retry-all-errors \
             --request POST \
-            "${{ secrets.PORTAINER_WEBHOOK_URL }}" || true
-
-          echo "Portainer redeploy triggered (response code not checked — health check validates deployment)."
+            "${{ secrets.PORTAINER_WEBHOOK_URL }}")
+          echo "Portainer webhook returned HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "ERROR: Portainer webhook failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
 
       - name: Wait for staging to be healthy
         run: |
@@ -345,6 +342,31 @@ jobs:
           done
 
           echo "Staging is healthy at $STAGING_URL"
+
+      - name: Verify deployed build SHA matches
+        run: |
+          echo "Confirming staging is serving the SHA we just deployed..."
+          STAGING_URL="${{ vars.STAGING_URL }}/health/ready"
+          MAX_ATTEMPTS=24    # 24 x 10s = 4 minutes max wait
+          ATTEMPT=0
+
+          while true; do
+            set +e
+            DEPLOYED_SHA=$(curl --silent --fail --max-time 5 "$STAGING_URL" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('build_sha',''))")
+            set -e
+            if [ "$DEPLOYED_SHA" = "${{ github.sha }}" ]; then
+              echo "Deployed build_sha: $DEPLOYED_SHA (matches expected ${{ github.sha }})"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+              echo "ERROR: staging is serving '$DEPLOYED_SHA', expected '${{ github.sha }}' — redeploy did not take effect"
+              exit 1
+            fi
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — deployed_sha='$DEPLOYED_SHA', waiting 10s..."
+            sleep 10
+          done
 
       - name: Notify deployment success
         if: success()

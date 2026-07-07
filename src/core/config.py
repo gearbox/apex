@@ -518,6 +518,10 @@ class Settings(BaseSettings):
             "typically enabled only in dev/staging. Never enable in production."
         ),
     )
+    build_sha: str = Field(
+        default="unknown",
+        description="Git SHA of the running build, injected at image build time.",
+    )
 
     # ASGI Granian settings
     asgi_workers: int = Field(

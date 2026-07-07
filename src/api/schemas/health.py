@@ -52,6 +52,7 @@ class ReadinessResponse(msgspec.Struct, kw_only=True):
 
     status: str
     checks: dict[str, str]
+    build_sha: str
 
 
 class HealthSnapshotResponse(msgspec.Struct, kw_only=True):
