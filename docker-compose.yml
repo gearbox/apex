@@ -32,7 +32,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-apex}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-apex}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -69,7 +69,7 @@ services:
       DEBUG: ${DEBUG:-false}
       
       # Database - connects to postgres service
-      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:-apex}@postgres:5432/${POSTGRES_DB:-apex}"
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-apex}"
       DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
       DB_ECHO: ${DB_ECHO:-false}
@@ -154,7 +154,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:-apex}@postgres:5432/${POSTGRES_DB:-apex}"
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-apex}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-apex}"
     command: ["alembic", "upgrade", "head"]
     networks:
       - apex-network
