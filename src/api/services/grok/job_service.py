@@ -54,13 +54,9 @@ logger = structlog.get_logger(__name__)
 class GrokJobError(Exception):
     """Base exception for Grok job service errors."""
 
-    pass
-
 
 class GrokJobNotFoundError(GrokJobError):
     """Raised when a job is not found."""
-
-    pass
 
 
 class GrokJobService:

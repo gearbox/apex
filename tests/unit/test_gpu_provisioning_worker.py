@@ -225,8 +225,7 @@ class TestLifecycle:
             call_count += 1
             if call_count == 1:
                 raise RuntimeError("transient error")
-            else:
-                second_call.set()
+            second_call.set()
 
         worker._sweep_once = flaky_sweep  # type: ignore[method-assign]
         worker._settings.gpu_provision_poll_interval_seconds = 0.001  # type: ignore[assignment]

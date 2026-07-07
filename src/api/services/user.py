@@ -27,25 +27,17 @@ logger = structlog.get_logger(__name__)
 class UserServiceError(Exception):
     """Base user service error."""
 
-    pass
-
 
 class UserNotFoundError(UserServiceError):
     """User not found."""
-
-    pass
 
 
 class EmailAlreadyExistsError(UserServiceError):
     """Email is already taken."""
 
-    pass
-
 
 class InvalidPasswordError(UserServiceError):
     """Current password is incorrect."""
-
-    pass
 
 
 class UserService:

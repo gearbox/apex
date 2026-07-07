@@ -340,7 +340,7 @@ class TestEventBusSubscribe:
             cancel_on_second.calls = getattr(cancel_on_second, "calls", 0) + 1  # type: ignore[attr-defined]
             if cancel_on_second.calls >= 2:  # type: ignore[attr-defined]
                 raise asyncio.CancelledError
-            return None  # type: ignore[return-value]
+            return  # type: ignore[return-value]
 
         pubsub = AsyncMock()
         pubsub.get_message = AsyncMock(side_effect=cancel_on_second)

@@ -2312,7 +2312,7 @@ class TestFinalizeBillingRetry:
             if call_count == 1:
                 raise RuntimeError("transient db hiccup")
             # Second call succeeds (no-op for test)
-            return None
+            return
 
         with (
             patch.object(service, "_apply_finalize_billing", new=flaky_apply),

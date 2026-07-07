@@ -573,4 +573,3 @@ class R2StorageService:
         Note: aioboto3 manages connections per-context, so this is a no-op.
         Kept for protocol compliance.
         """
-        pass

@@ -31,43 +31,29 @@ logger = structlog.get_logger(__name__)
 class AuthError(Exception):
     """Base authentication error."""
 
-    pass
-
 
 class InvalidCredentialsError(AuthError):
     """Invalid email or password."""
-
-    pass
 
 
 class EmailAlreadyExistsError(AuthError):
     """Email is already registered."""
 
-    pass
-
 
 class UserNotFoundError(AuthError):
     """User not found."""
-
-    pass
 
 
 class UserInactiveError(AuthError):
     """User account is deactivated."""
 
-    pass
-
 
 class InvalidRefreshTokenError(AuthError):
     """Refresh token is invalid, expired, or revoked."""
 
-    pass
-
 
 class TokenReuseDetectedError(AuthError):
     """Potential token theft detected - revoked token was reused."""
-
-    pass
 
 
 @dataclass

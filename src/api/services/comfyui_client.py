@@ -11,13 +11,9 @@ logger = structlog.get_logger(__name__)
 class ComfyUIClientError(Exception):
     """Base exception for ComfyUI client errors."""
 
-    pass
-
 
 class ComfyUIConnectionError(ComfyUIClientError):
     """Raised when connection to ComfyUI fails."""
-
-    pass
 
 
 class ComfyUIAPIError(ComfyUIClientError):

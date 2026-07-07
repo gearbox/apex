@@ -37,13 +37,9 @@ logger = structlog.get_logger(__name__)
 class GrokClientError(Exception):
     """Base exception for Grok client errors."""
 
-    pass
-
 
 class GrokConnectionError(GrokClientError):
     """Raised when connection to xAI API fails."""
-
-    pass
 
 
 class GrokAPIError(GrokClientError):
@@ -62,25 +58,17 @@ class GrokAPIError(GrokClientError):
 class GrokModerationError(GrokAPIError):
     """Raised when content is rejected by moderation."""
 
-    pass
-
 
 class GrokRateLimitError(GrokAPIError):
     """Raised when rate limited by xAI API."""
-
-    pass
 
 
 class GrokInvalidRequestError(GrokAPIError):
     """Raised when request is invalid."""
 
-    pass
-
 
 class GrokTimeoutError(GrokAPIError):
     """Raised when request times out."""
-
-    pass
 
 
 # -----------------------------------------------------------------------------
@@ -272,15 +260,14 @@ class GrokClient:
                     image_format=image_format.value,
                 )
                 return [self._parse_image_response(response, image_format)]
-            else:
-                responses: Sequence[ImageResponse] = await self.client.image.sample_batch(
-                    model=model.value,
-                    prompt=prompt,
-                    n=n,
-                    aspect_ratio=aspect_ratio.value,
-                    image_format=image_format.value,
-                )
-                return [self._parse_image_response(r, image_format) for r in responses]
+            responses: Sequence[ImageResponse] = await self.client.image.sample_batch(
+                model=model.value,
+                prompt=prompt,
+                n=n,
+                aspect_ratio=aspect_ratio.value,
+                image_format=image_format.value,
+            )
+            return [self._parse_image_response(r, image_format) for r in responses]
 
         except Exception as e:
             raise self._convert_exception(e) from e

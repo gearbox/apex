@@ -248,10 +248,6 @@ class JWTService:
 class InvalidTokenError(Exception):
     """Raised when token is invalid or expired."""
 
-    pass
-
 
 class TokenExpiredError(InvalidTokenError):
     """Raised when token has expired."""
-
-    pass
