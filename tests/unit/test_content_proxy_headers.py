@@ -23,11 +23,15 @@ from src.api.routes.content import ContentProxyController
 pytestmark = pytest.mark.unit
 
 
-def _make_r2_mock(content_type: str, content_length: int = 1234) -> MagicMock:
+def _make_r2_mock(
+    content_type: str | None,
+    content_length: int = 1234,
+) -> MagicMock:
+    head: dict[str, object] = {"ContentLength": content_length}
+    if content_type is not None:
+        head["ContentType"] = content_type
     client_mock = AsyncMock()
-    client_mock.head_object = AsyncMock(
-        return_value={"ContentType": content_type, "ContentLength": content_length}
-    )
+    client_mock.head_object = AsyncMock(return_value=head)
 
     r2_mock = MagicMock()
     r2_mock._settings.bucket_name = "test-bucket"
@@ -100,6 +104,20 @@ class TestNosniffAlwaysPresent:
             )
             assert isinstance(result, Stream)
             assert result.headers["X-Content-Type-Options"] == "nosniff"
+
+
+class TestMissingContentTypeFallsBackToDownload:
+    async def test_head_without_content_type_defaults_to_octet_stream_attachment(self) -> None:
+        r2_mock = _make_r2_mock(content_type=None)
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock, "users/abc/outputs/file", "etag123", 3600
+        )
+
+        assert isinstance(result, Stream)
+        assert result.media_type == "application/octet-stream"
+        assert result.headers["X-Content-Type-Options"] == "nosniff"
+        assert result.headers["Content-Disposition"] == "attachment"
 
 
 class TestInlineSafeSetDerivation:
