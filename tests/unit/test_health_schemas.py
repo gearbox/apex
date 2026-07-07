@@ -22,10 +22,15 @@ class TestLivenessResponse:
 
 class TestReadinessResponse:
     def test_serialize(self) -> None:
-        r = ReadinessResponse(status="ready", checks={"postgres": "healthy", "redis": "healthy"})
+        r = ReadinessResponse(
+            status="ready",
+            checks={"postgres": "healthy", "redis": "healthy"},
+            build_sha="abc123",
+        )
         data = msgspec.json.decode(msgspec.json.encode(r))
         assert data["status"] == "ready"
         assert data["checks"]["postgres"] == "healthy"
+        assert data["build_sha"] == "abc123"
 
 
 class TestDetailedHealthResponse:

@@ -511,6 +511,17 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", description="API server host")  # noqa: S104
     api_port: int = Field(default=8000, description="API server port")
     debug: bool = Field(default=False, description="Enable debug mode")
+    enable_docs: bool = Field(
+        default=False,
+        description=(
+            "Expose the OpenAPI schema and Swagger UI at /docs. Off by default; "
+            "typically enabled only in dev/staging. Never enable in production."
+        ),
+    )
+    build_sha: str = Field(
+        default="unknown",
+        description="Git SHA of the running build, injected at image build time.",
+    )
 
     # ASGI Granian settings
     asgi_workers: int = Field(

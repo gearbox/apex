@@ -50,15 +50,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0   # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6.3.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1   # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39   # v8.2.0
         with:
           enable-cache: true           # Cache uv's package cache between runs
 
@@ -83,15 +83,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0   # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6.3.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1   # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39   # v8.2.0
         with:
           enable-cache: true
 
@@ -112,7 +112,7 @@ jobs:
           JWT_SECRET_KEY: "ci-unit-test-secret-key-32-bytes-long"
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
         if: always()                   # Upload even if tests fail
         with:
           name: unit-coverage
@@ -145,15 +145,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0   # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6.3.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1   # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39   # v8.2.0
         with:
           enable-cache: true
 
@@ -185,7 +185,7 @@ jobs:
           R2_BUCKET_NAME: apex-test
 
       - name: Upload integration coverage report
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
         if: always()
         with:
           name: integration-coverage
@@ -204,24 +204,24 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0   # v7
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
 
       - name: Download unit coverage report
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c   # v8.0.1
         with:
           name: unit-coverage
           path: .
 
       - name: Download integration coverage report
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c   # v8.0.1
         with:
           name: integration-coverage
           path: .
 
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e   # v8.2.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
@@ -249,14 +249,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0   # v7
 
       # Speeds up multi-platform builds significantly
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5   # v4.1.0
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee   # v4.2.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -265,7 +265,7 @@ jobs:
       # Generates image tags and labels from git metadata
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9   # v6.1.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -279,7 +279,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf   # v7.2.0
         with:
           context: .
           file: Dockerfile
@@ -311,21 +311,18 @@ jobs:
         run: |
           echo "Triggering Portainer redeploy for staging stack..."
 
-          # Fire-and-forget: we verify success via the health check below,
-          # not via the webhook response code.
-          curl \
+          HTTP_CODE=$(curl \
             -H "CF-Access-Client-Id: ${{ secrets.CF_CLIENT_ID }}" \
             -H "CF-Access-Client-Secret: ${{ secrets.CF_CLIENT_SECRET }}" \
-            --silent \
-            --output /dev/null \
-            --max-time 300 \
-            --retry 3 \
-            --retry-delay 10 \
-            --retry-all-errors \
+            --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --max-time 300 --retry 3 --retry-delay 10 --retry-all-errors \
             --request POST \
-            "${{ secrets.PORTAINER_WEBHOOK_URL }}" || true
-
-          echo "Portainer redeploy triggered (response code not checked — health check validates deployment)."
+            "${{ secrets.PORTAINER_WEBHOOK_URL }}")
+          echo "Portainer webhook returned HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "ERROR: Portainer webhook failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
 
       - name: Wait for staging to be healthy
         run: |
@@ -345,6 +342,31 @@ jobs:
           done
 
           echo "Staging is healthy at $STAGING_URL"
+
+      - name: Verify deployed build SHA matches
+        run: |
+          echo "Confirming staging is serving the SHA we just deployed..."
+          STAGING_URL="${{ vars.STAGING_URL }}/health/ready"
+          MAX_ATTEMPTS=24    # 24 x 10s = 4 minutes max wait
+          ATTEMPT=0
+
+          while true; do
+            set +e
+            DEPLOYED_SHA=$(curl --silent --fail --max-time 5 "$STAGING_URL" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('build_sha',''))")
+            set -e
+            if [ "$DEPLOYED_SHA" = "${{ github.sha }}" ]; then
+              echo "Deployed build_sha: $DEPLOYED_SHA (matches expected ${{ github.sha }})"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+              echo "ERROR: staging is serving '$DEPLOYED_SHA', expected '${{ github.sha }}' — redeploy did not take effect"
+              exit 1
+            fi
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — deployed_sha='$DEPLOYED_SHA', waiting 10s..."
+            sleep 10
+          done
 
       - name: Notify deployment success
         if: success()

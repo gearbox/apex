@@ -46,6 +46,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 ENV PYTHONUNBUFFERED=1
 
+# Git SHA of this build, injected by CI (build-args: BUILD_SHA=${{ github.sha }}).
+# Promoted from ARG to ENV so it survives into the running container and the
+# app can echo it via /health/ready for deploy verification.
+ARG BUILD_SHA=""
+ENV BUILD_SHA=${BUILD_SHA}
+
 # Copy application code
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser alembic/ ./alembic/

@@ -200,6 +200,24 @@ async def optional_auth_guard(
 
     Sets user_id/auth_user in connection state if authenticated.
 
+    Contract — read before attaching this guard to a new route:
+        (a) This guard MUST only be attached to routes whose response is
+            identical, or safely narrower, when the caller is anonymous.
+            It is not a "try to authenticate" convenience — it is a promise
+            that anonymous access to this route is intentional and safe.
+        (b) A product-mismatched token always degrades to anonymous here,
+            never raises 401. Do not rely on this guard to reject
+            cross-product tokens — that is ``auth_guard``'s job.
+        (c) Attaching this guard to a route that returns user-scoped or
+            sensitive data merely because a token happened to be present is
+            a security bug: an anonymous caller could get the same response
+            by omitting the token, so the "optional" auth buys nothing and
+            the route silently depends on callers behaving honestly.
+        Routes using this guard are enumerated and pinned in
+        ``tests/unit/security/test_optional_auth_guard_usage.py`` — adding a
+        new route requires updating that allowlist, forcing a conscious
+        review of (a)-(c) for the new route.
+
     Args:
         connection: ASGI connection.
         _: Route handler (unused).

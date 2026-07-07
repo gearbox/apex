@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import src.core.redis as redis_module
-from src.core.redis import close_redis_pool, get_redis_client, get_redis_pool, init_redis_pool
+from src.core.redis import (
+    _redacted_url,
+    close_redis_pool,
+    get_redis_client,
+    get_redis_pool,
+    init_redis_pool,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -31,6 +37,34 @@ class TestInitRedisPool:
         assert result is mock_pool
         assert redis_module._pool is mock_pool
         mock_from_url.assert_called_once_with("redis://localhost:6379", decode_responses=True)
+
+
+class TestRedactedUrl:
+    def test_strips_password(self) -> None:
+        assert _redacted_url("redis://:supersecret@redis:6379/0") == "redis://redis:6379/0"
+
+    def test_strips_username_and_password(self) -> None:
+        assert _redacted_url("redis://user:supersecret@redis:6379/0") == "redis://redis:6379/0"
+
+    def test_no_credentials_unchanged(self) -> None:
+        assert _redacted_url("redis://localhost:6379") == "redis://localhost:6379"
+
+    def test_pool_initialized_log_never_contains_password(self) -> None:
+        # Mocks the module logger directly rather than structlog.testing.capture_logs():
+        # capture_logs() patches the *global* processors list, which is fragile across
+        # this test session (cache_logger_on_first_use permanently binds module-level
+        # loggers to whatever list is live on their first real call — see
+        # tests/unit/api/conftest.py for the full story). Asserting on the mock's call
+        # args is deterministic regardless of what else in the suite touches structlog.
+        with (
+            patch("src.core.redis.aioredis.ConnectionPool.from_url"),
+            patch("src.core.redis.logger") as mock_logger,
+        ):
+            init_redis_pool("redis://:supersecret@redis:6379/0")
+
+        mock_logger.info.assert_called_once_with(
+            "redis.pool_initialized", url="redis://redis:6379/0"
+        )
 
 
 class TestGetRedisPool:

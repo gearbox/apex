@@ -59,6 +59,9 @@ def test_env_staging_example_loads_into_settings(monkeypatch: pytest.MonkeyPatch
         "POSTGRES_USER",
         "POSTGRES_PASSWORD",
         "POSTGRES_DB",
+        # Consumed by the redis container's --requirepass and folded into
+        # REDIS_URL by compose interpolation, not read directly by apex.
+        "REDIS_PASSWORD",
         # Consumed by the cloudflared sidecar (compose service), not by apex
         "CLOUDFLARE_TUNNEL_TOKEN",
     }

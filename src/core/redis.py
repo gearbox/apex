@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit, urlunsplit
+
 import redis.asyncio as aioredis
 import structlog
 
@@ -10,11 +12,20 @@ logger = structlog.get_logger(__name__)
 _pool: aioredis.ConnectionPool | None = None
 
 
+def _redacted_url(redis_url: str) -> str:
+    """Strip userinfo (password) from a redis:// URL for safe logging."""
+    parts = urlsplit(redis_url)
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def init_redis_pool(redis_url: str) -> aioredis.ConnectionPool:
     """Create and store a global connection pool."""
     global _pool
     _pool = aioredis.ConnectionPool.from_url(redis_url, decode_responses=True)
-    logger.info("redis.pool_initialized", url=redis_url)
+    logger.info("redis.pool_initialized", url=_redacted_url(redis_url))
     return _pool
 
 

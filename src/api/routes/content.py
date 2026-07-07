@@ -27,9 +27,23 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.security import auth_guard, content_auth_guard
 from src.api.services.content_proxy import ContentNotFoundError, ContentProxyService
 from src.api.services.storage.exceptions import StorageError
-from src.api.services.storage.r2 import R2StorageService
+from src.api.services.storage.r2 import (
+    ALLOWED_CONTENT_TYPES as _STORED_IMAGE_CONTENT_TYPES,
+)
+from src.api.services.storage.r2 import (
+    R2StorageService,
+)
 
 logger = structlog.get_logger(__name__)
+
+# Types the proxy serves inline. Derived, not mirrored:
+#   - stored images are exactly r2.ALLOWED_CONTENT_TYPES (upload normalization
+#     guarantees png/jpeg/webp — see services/image_normalization.py),
+#   - video outputs add mp4.
+# NOTE: routes/storage.py::ALLOWED_CONTENT_TYPES is a DIFFERENT, wider set
+# (the client-declared upload gate, incl. heic/heif/avif that are normalized
+# to PNG before storage). Do NOT unify with that one.
+_INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(_STORED_IMAGE_CONTENT_TYPES) | {"video/mp4"}
 
 
 class ContentProxyController(Controller):
@@ -155,17 +169,23 @@ class ContentProxyController(Controller):
                     Bucket=r2._settings.bucket_name,
                     Key=storage_key,
                 )
-            content_type = head.get("ContentType", "application/octet-stream")
+            stored_content_type = head.get("ContentType", "application/octet-stream")
             size_bytes = head.get("ContentLength", 0)
+
+            is_inline_safe = stored_content_type in _INLINE_SAFE_CONTENT_TYPES
+            media_type = stored_content_type if is_inline_safe else "application/octet-stream"
+            disposition = "inline" if is_inline_safe else "attachment"
 
             return Stream(
                 _streaming_body(),
-                media_type=content_type,
+                media_type=media_type,
                 headers={
                     "Content-Length": str(size_bytes),
                     "Cache-Control": f"private, max-age={cache_ttl}, immutable",
                     "ETag": f'"{etag}"',
                     "X-Content-Id": etag,
+                    "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": disposition,
                 },
             )
 

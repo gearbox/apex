@@ -8,20 +8,25 @@
 
 services:
   postgres:
-    # Expose port for local database tools (DBeaver, pgAdmin, etc.)
+    # Expose port for local database tools (DBeaver, pgAdmin, etc.).
+    # Loopback-bound — matches the base compose file; compose overlays
+    # replace (not merge) the `ports` list, so this must repeat the binding
+    # rather than just the port, or it would silently drop the base file's
+    # 127.0.0.1 restriction.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     # Expose port for local Redis tools (redis-cli, RedisInsight, etc.)
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
 
   api:
     build:
       context: .
       dockerfile: Dockerfile.dev
     environment:
+      ENABLE_DOCS: "true"
       DEBUG: "true"
       DB_ECHO: "true"
       LOG_FORMAT: "console"
