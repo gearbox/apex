@@ -7,6 +7,8 @@ rather than the old container still serving traffic.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 from litestar.testing import AsyncTestClient
 
@@ -18,7 +20,7 @@ _PRODUCT_HEADERS = {"X-Product-Id": "vex"}
 
 
 @pytest.fixture(autouse=True)
-def _clear_settings_cache() -> None:
+def _clear_settings_cache() -> Generator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 from litestar.status_codes import HTTP_200_OK, HTTP_404_NOT_FOUND
 from litestar.testing import AsyncTestClient
@@ -16,7 +18,7 @@ _PRODUCT_HEADERS = {"X-Product-Id": "vex"}
 
 
 @pytest.fixture(autouse=True)
-def _clear_settings_cache() -> None:
+def _clear_settings_cache() -> Generator[None]:
     """get_settings() is lru_cache'd — flipping env-driven settings mid-suite
     requires clearing it before *and* after each test to avoid ordering-dependent
     flakes against other test modules.

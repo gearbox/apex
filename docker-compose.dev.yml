@@ -26,6 +26,7 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     environment:
+      ENABLE_DOCS: "true"
       DEBUG: "true"
       DB_ECHO: "true"
       LOG_FORMAT: "console"
