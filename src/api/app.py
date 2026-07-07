@@ -260,6 +260,33 @@ def global_exception_handler(request: Request[Any, Any, Any], exc: Exception) ->
     )
 
 
+def _build_openapi_config(settings: Any) -> OpenAPIConfig:
+    """Build the OpenAPI schema/docs configuration.
+
+    Only called when ``settings.enable_docs`` is true — see ``create_app()``.
+    """
+    return OpenAPIConfig(
+        title="Apex Generation API",
+        version="0.3.1",
+        description=(
+            "Apex REST API for AI content generation.\n\n"
+            "## Providers\n\n"
+            "- **Aisha**: Custom workflow-based generation\n"
+            "- **Grok**: xAI's image and video generation\n\n"
+            "## Authentication\n\n"
+            "Authentication is handled via OAuth2/JWT (implementation pending).\n"
+        ),
+        contact=Contact(name="API Support"),
+        servers=[
+            Server(
+                url=f"http://{settings.api_host}:{settings.api_port}",
+                description="Local development server",
+            ),
+        ],
+        path="/docs",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
     """Application lifespan manager.
@@ -316,27 +343,8 @@ def create_app() -> Litestar:
         ],
     )
 
-    # OpenAPI documentation configuration
-    openapi_config = OpenAPIConfig(
-        title="Apex Generation API",
-        version="0.3.1",
-        description=(
-            "Apex REST API for AI content generation.\n\n"
-            "## Providers\n\n"
-            "- **Aisha**: Custom workflow-based generation\n"
-            "- **Grok**: xAI's image and video generation\n\n"
-            "## Authentication\n\n"
-            "Authentication is handled via OAuth2/JWT (implementation pending).\n"
-        ),
-        contact=Contact(name="API Support"),
-        servers=[
-            Server(
-                url=f"http://{settings.api_host}:{settings.api_port}",
-                description="Local development server",
-            ),
-        ],
-        path="/docs",
-    )
+    # OpenAPI documentation — off by default; see Settings.enable_docs.
+    openapi_config = _build_openapi_config(settings) if settings.enable_docs else None
 
     app = Litestar(
         route_handlers=[
