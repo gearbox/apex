@@ -145,6 +145,20 @@ class GenerationType(StrEnum):
         return self == GenerationType.V2V
 
 
+class VideoPollStatus(StrEnum):
+    """Observed outcome of one xAI video-job poll.
+
+    Distinct from JobStatus: this describes what the provider reported for a
+    single poll, not the GenerationJob's persisted status. The caller (worker
+    or read-through poller) is responsible for driving the actual JobStatus
+    transition based on this outcome.
+    """
+
+    STILL_RUNNING = "still_running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class JobStatus(StrEnum):
     """Job execution status."""
 

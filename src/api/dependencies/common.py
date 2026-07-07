@@ -31,6 +31,7 @@ from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWork
 from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
+from src.api.services.grok.video_worker import GrokVideoWorker
 from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
@@ -75,6 +76,7 @@ class ServiceContainer:
     password_service: PasswordService | None = None
     billing_service: BillingService | None = None
     grok_job_service: GrokJobService | None = None
+    grok_video_worker: GrokVideoWorker | None = None
     email_service: EmailService | None = None
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
@@ -539,14 +541,15 @@ async def init_services(settings: Settings) -> JWTService:
     # Start Grok video polling worker
     if workers_enabled and settings.grok_configured and _services.grok_job_service is not None:
         if settings.grok_video_worker_in_process:
-            from src.api.services.grok.video_worker import GrokVideoWorkerManager
-
-            await GrokVideoWorkerManager.start(
+            _services.grok_video_worker = GrokVideoWorker(
                 db_manager=_services.db_manager,
                 job_service=_services.grok_job_service,
+                billing_service=get_billing_service(),
                 settings=settings,
                 event_bus=_services.event_bus,
+                redis_enabled=redis_enabled,
             )
+            await _services.grok_video_worker.start()
             logger.info("grok.video_worker_in_process_started")
         else:
             logger.info(
@@ -910,6 +913,9 @@ async def shutdown_services() -> None:
     if _services.health_snapshot_cleanup_worker is not None:
         await _services.health_snapshot_cleanup_worker.stop()
 
+    if _services.grok_video_worker is not None:
+        await _services.grok_video_worker.stop()
+
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
         logger.info("r2.closed")
@@ -921,12 +927,6 @@ async def shutdown_services() -> None:
     if _services.grok_job_service is not None:
         await _services.grok_job_service.close()
         logger.info("grok.closed")
-
-    settings = get_settings()
-    if settings.grok_configured and settings.grok_video_worker_in_process:
-        from src.api.services.grok.video_worker import GrokVideoWorkerManager
-
-        await GrokVideoWorkerManager.stop()
 
     if _services.health_http_client is not None:
         await _services.health_http_client.aclose()
