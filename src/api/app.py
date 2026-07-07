@@ -346,7 +346,7 @@ def create_app() -> Litestar:
     # OpenAPI documentation — off by default; see Settings.enable_docs.
     openapi_config = _build_openapi_config(settings) if settings.enable_docs else None
 
-    app = Litestar(
+    return Litestar(
         route_handlers=[
             HealthController,
             AdminHealthController,
@@ -409,8 +409,6 @@ def create_app() -> Litestar:
         signature_types=[UploadFile],
         request_max_body_size=settings.max_upload_size_bytes,
     )
-
-    return app
 
 
 # Application instance

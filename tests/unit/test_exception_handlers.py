@@ -110,8 +110,7 @@ class TestHttpExceptionHandler:
         req = _mock_request()
         exc = HTTPException(detail=detail, status_code=status_code)
         with capture_logs():
-            result = http_exception_handler(req, exc)
-        return result
+            return http_exception_handler(req, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +282,7 @@ class TestGlobalExceptionHandler:
         req = _mock_request()
         exc = RuntimeError(arg0)
         with capture_logs():
-            result = global_exception_handler(req, exc)
-        return result
+            return global_exception_handler(req, exc)
 
     def test_logs_error_with_exc_type(self) -> None:
         req = _mock_request()

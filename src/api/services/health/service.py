@@ -182,5 +182,5 @@ class HealthService:
             ComponentStatus.inactive: 1,
             ComponentStatus.healthy: 0,
         }
-        worst = max(statuses, key=lambda s: priority.get(s, 0))
-        return worst
+        # Return worst-case status based on priority mapping
+        return max(statuses, key=lambda s: priority.get(s, 0))

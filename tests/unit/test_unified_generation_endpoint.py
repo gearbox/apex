@@ -133,7 +133,7 @@ class TestRouteHandlerReturns400:
     ) -> Any:
         """Invoke the route handler directly; return the response object."""
         with MagicMock() as controller_self:
-            response = await UnifiedGenerationController.generate.fn(
+            return await UnifiedGenerationController.generate.fn(
                 controller_self,
                 current_user_id=uuid4(),
                 data=request,
@@ -144,7 +144,6 @@ class TestRouteHandlerReturns400:
                 idempotency_service=idempotency_service,
                 idempotency_key_header="test-key-123",
             )
-        return response
 
     async def test_generation_error_from_provider_returns_400(self) -> None:
         svc, idempotency, session = _make_route_handler_mocks(
