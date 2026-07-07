@@ -10,6 +10,18 @@ class Product(StrEnum):
     SYNTHARA = "synthara"
 
 
+class WorkerMode(StrEnum):
+    """Which in-process background workers a Granian process should run.
+
+    ``workers_only`` (a dedicated worker process, no API routes) is
+    deliberately not modeled yet — it needs its own ``src.workers.runner``
+    entrypoint, which is a separate arc.
+    """
+
+    all = "all"
+    api_only = "api_only"
+
+
 class Provider(StrEnum):
     """Generation provider."""
 
@@ -401,6 +413,7 @@ class ComponentCategory(StrEnum):
     cloud_provider = "cloud_provider"
     platform_api = "platform_api"
     gpu_session = "gpu_session"
+    workers = "workers"
 
 
 class GpuSessionStatus(StrEnum):
