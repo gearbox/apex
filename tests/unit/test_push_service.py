@@ -7,8 +7,16 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import pytest
+from pywebpush import WebPushException
+
 from src.api.schemas.push import PushNotificationPayload
-from src.api.services.push import PushSendError, PushService, PushSubscriptionExpiredError
+from src.api.services.push import (
+    PushSendError,
+    PushService,
+    PushSubscriptionExpiredError,
+    PywebpushSender,
+)
 
 _REPO_PATH = "src.api.services.push.PushSubscriptionRepository"
 
@@ -20,6 +28,12 @@ _PAYLOAD = PushNotificationPayload(
     category="job",
     level="info",
 )
+
+
+def _response(status_code: int) -> MagicMock:
+    response = MagicMock()
+    response.status_code = status_code
+    return response
 
 
 def _make_subscription(
@@ -59,6 +73,68 @@ class FakeSender:
                 raise PushSendError("boom")
         finally:
             self._concurrent -= 1
+
+
+# ---------------------------------------------------------------------------
+# PywebpushSender
+# ---------------------------------------------------------------------------
+
+
+class TestPywebpushSender:
+    def test_send_sync_calls_pywebpush_with_subscription_and_vapid_claims(self) -> None:
+        sender = PywebpushSender(private_key="private", subject="mailto:ops@example.com")
+
+        with patch("src.api.services.push.webpush") as mock_webpush:
+            sender._send_sync(
+                endpoint="https://push.example/endpoint",
+                p256dh="p256dh",
+                auth="auth",
+                payload={"title": "Hello"},
+            )
+
+        mock_webpush.assert_called_once()
+        kwargs = mock_webpush.call_args.kwargs
+        assert kwargs["subscription_info"] == {
+            "endpoint": "https://push.example/endpoint",
+            "keys": {"p256dh": "p256dh", "auth": "auth"},
+        }
+        assert kwargs["data"] == '{"title": "Hello"}'
+        assert kwargs["vapid_private_key"] == "private"
+        assert kwargs["vapid_claims"] == {"sub": "mailto:ops@example.com"}
+
+    def test_send_sync_maps_404_410_to_expired_subscription(self) -> None:
+        sender = PywebpushSender(private_key="private", subject="mailto:ops@example.com")
+
+        with (
+            patch(
+                "src.api.services.push.webpush",
+                side_effect=WebPushException("gone", response=_response(410)),
+            ),
+            pytest.raises(PushSubscriptionExpiredError),
+        ):
+            sender._send_sync(
+                endpoint="https://push.example/endpoint",
+                p256dh="p256dh",
+                auth="auth",
+                payload={"title": "Hello"},
+            )
+
+    def test_send_sync_maps_other_webpush_errors_to_send_error(self) -> None:
+        sender = PywebpushSender(private_key="private", subject="mailto:ops@example.com")
+
+        with (
+            patch(
+                "src.api.services.push.webpush",
+                side_effect=WebPushException("server error", response=_response(500)),
+            ),
+            pytest.raises(PushSendError),
+        ):
+            sender._send_sync(
+                endpoint="https://push.example/endpoint",
+                p256dh="p256dh",
+                auth="auth",
+                payload={"title": "Hello"},
+            )
 
 
 class TrackingRepo:
