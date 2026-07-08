@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import select
@@ -11,6 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import ModelType
 from src.db.models.generation_model import GenerationModel
+
+if TYPE_CHECKING:
+    from src.core.product import ProductConfig
 
 __all__ = ["GenerationModelRepository"]
 
@@ -39,7 +43,9 @@ class GenerationModelRepository:
         )
         return result.scalars().all()
 
-    async def list_enabled_for_product(self, product_config: object) -> list[GenerationModel]:
+    async def list_enabled_for_product(
+        self, product_config: ProductConfig
+    ) -> list[GenerationModel]:
         """List models that are both DB-enabled AND allowed by product config.
 
         Args:
@@ -48,9 +54,6 @@ class GenerationModelRepository:
         Returns:
             List of GenerationModel records accessible for the product.
         """
-        from src.core.product import ProductConfig
-
-        assert isinstance(product_config, ProductConfig)
         db_models = await self.list_enabled()
         allowed: list[GenerationModel] = []
         for m in db_models:

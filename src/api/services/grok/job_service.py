@@ -378,7 +378,8 @@ class GrokJobService:
             return
 
         # Download image from xAI CDN
-        assert result.url is not None  # Checked by has_url above
+        if result.url is None:
+            raise RuntimeError("result.url is None despite has_url check — invariant violated")
         response = await self.http_client.get(result.url)
         response.raise_for_status()
         image_data = response.content

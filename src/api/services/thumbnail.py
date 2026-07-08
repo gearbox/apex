@@ -19,6 +19,8 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+FFMPEG_PATH = "/usr/bin/ffmpeg"
+
 
 async def extract_video_thumbnail(video_bytes: bytes) -> bytes | None:
     """Extract the first frame of a video as JPEG bytes.
@@ -49,7 +51,7 @@ def _extract_sync(video_bytes: bytes) -> bytes | None:
     try:
         result = subprocess.run(  # noqa: S603
             [
-                "ffmpeg",
+                FFMPEG_PATH,
                 "-y",  # overwrite output
                 "-i",
                 str(tmp_in_path),  # input file

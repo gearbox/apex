@@ -173,8 +173,7 @@ async def _revoke_with_force_handling(
 
 
 async def _grant_superadmin_impl(session: AsyncSession, email: str, product: str) -> None:
-    async def op(service: object, user: User) -> None:
-        assert isinstance(service, AdminManagementService)
+    async def op(service: AdminManagementService, user: User) -> None:
         await service.grant_role(
             actor_id=SYSTEM_USER_ID,
             target_user_id=user.id,
@@ -205,8 +204,7 @@ def grant_superadmin(
 
 
 async def _grant_admin_impl(session: AsyncSession, email: str, product: str) -> None:
-    async def op(service: object, user: User) -> None:
-        assert isinstance(service, AdminManagementService)
+    async def op(service: AdminManagementService, user: User) -> None:
         await service.grant_role(
             actor_id=SYSTEM_USER_ID,
             target_user_id=user.id,
@@ -290,8 +288,7 @@ async def _grant_permission_impl(
         console.print(f"[red]Invalid permission '{permission}'. Valid: {valid}[/red]")
         raise typer.Exit(1) from None
 
-    async def op(service: object, user: User) -> None:
-        assert isinstance(service, AdminManagementService)
+    async def op(service: AdminManagementService, user: User) -> None:
         await service.grant_permission(
             actor_id=SYSTEM_USER_ID,
             target_user_id=user.id,
@@ -330,8 +327,7 @@ async def _revoke_permission_impl(
         console.print(f"[red]Invalid permission '{permission}'. Valid: {valid}[/red]")
         raise typer.Exit(1) from None
 
-    async def op(service: object, user: User) -> None:
-        assert isinstance(service, AdminManagementService)
+    async def op(service: AdminManagementService, user: User) -> None:
         await service.revoke_permission(
             actor_id=SYSTEM_USER_ID,
             target_user_id=user.id,

@@ -141,7 +141,7 @@ class BundleIndexService:
         self._github_token = github_token
         self._branch = branch
         self._sync_interval = sync_interval_minutes
-        self._cache_dir = cache_dir or Path("/tmp/apex-bundle-cache")
+        self._cache_dir = cache_dir or Path(tempfile.gettempdir()) / "apex-bundle-cache"
         # model_type -> entry (only default_bundle=true entries)
         self._model_index: dict[str, _BundleIndexEntry] = {}
         # bundle_name -> entry (all entries)
@@ -611,7 +611,10 @@ class BundleIndexService:
             headers["If-None-Match"] = self._etag
 
         client = self._http_client if self._http_client is not None else self._owned_client
-        assert client is not None  # guaranteed by __init__
+        if client is None:
+            raise RuntimeError(
+                "BundleIndexService has no HTTP client — invariant violated in __init__"
+            )
 
         tmp_path: Path | None = None
         new_etag: str | None = None
