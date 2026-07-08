@@ -981,6 +981,42 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
+    # Web Push Notifications
+    # -------------------------------------------------------------------------
+
+    vapid_public_key: str | None = Field(
+        default=None,
+        description=(
+            "VAPID public key (base64url, uncompressed EC point) for Web Push. "
+            "Generate with tools/generate_vapid_keys.py. Push is enabled only when "
+            "this, vapid_private_key, and vapid_subject are all set AND redis_url "
+            "is configured."
+        ),
+    )
+    vapid_private_key: str | None = Field(
+        default=None,
+        description=(
+            "VAPID private key (base64url, raw 32-byte scalar) for Web Push. "
+            "Never commit this value — generate with tools/generate_vapid_keys.py "
+            "and set via environment/secrets only."
+        ),
+    )
+    vapid_subject: str | None = Field(
+        default=None,
+        description=(
+            "VAPID 'sub' claim identifying the sending application, e.g. "
+            "'mailto:ops@apex.ai'. Required by the Web Push protocol so push "
+            "services can contact the operator about a misbehaving sender."
+        ),
+    )
+    push_broadcast_concurrency: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Max concurrent Web Push sends per broadcast fan-out batch.",
+    )
+
+    # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
 
@@ -1085,6 +1121,16 @@ class Settings(BaseSettings):
     def aisha_cf_configured(self) -> bool:
         """Check if Cloudflare API is configured for per-session GPU node tunnels."""
         return bool(self.aisha_cf_api_token and self.aisha_cf_account_id and self.aisha_cf_zone_id)
+
+    @property
+    def push_enabled(self) -> bool:
+        """Check if Web Push is configured: all three VAPID fields plus Redis."""
+        return bool(
+            self.vapid_public_key
+            and self.vapid_private_key
+            and self.vapid_subject
+            and self.redis_url
+        )
 
     @property
     def grok_billing(self) -> GrokBillingConfig:

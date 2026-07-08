@@ -10,6 +10,8 @@
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
 > **Last synced:** 2026-06-18 — `master` @ `4ffc1c7f18954f1520a0333f38d5965f84b55708`
+>
+> _2026-07-08: Added Web Push notifications (§15b) — `GET /v1/push/vapid-public-key`, `POST /v1/push/subscriptions`, `DELETE /v1/push/subscriptions`. Delivers notifications even when the app is closed, unlike SSE (§15). Frontend must regenerate types._
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
 
@@ -1813,6 +1815,137 @@ async function openEventStream(apiFetch: Fetcher) {
 ```
 
 > **Reconnection note:** `EventSource` auto-reconnects on error, but the ticket is single-use and already expired. Always close and re-obtain a fresh ticket on error.
+
+---
+
+## 15b. Push Notifications (Web Push)
+
+Backend-driven **Web Push** notifications, delivered via the browser Push API and a service worker — unlike SSE (§15), these arrive **even when the app is closed or the tab isn't open**. Requires the frontend PWA to register a service worker and a `PushSubscription`.
+
+> **Requires VAPID + Redis**: Push is only active when `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, and `REDIS_URL` are all configured on the server. When disabled, all three endpoints below return `503 Service Unavailable`.
+
+### Flow
+
+```
+1. Client (authenticated)  GET  /v1/push/vapid-public-key       →  { public_key: "..." }
+2. Client                  navigator.serviceWorker.register(...) + pushManager.subscribe({ applicationServerKey: public_key })
+3. Client                  POST /v1/push/subscriptions           →  registers the PushSubscription with the backend
+4. Server                  pushes notifications as relevant events occur (see mapping table below)
+5. Client (on logout / permission revoked)  DELETE /v1/push/subscriptions
+```
+
+### Endpoints
+
+#### `GET /v1/push/vapid-public-key` *(authenticated)*
+
+```
+Response: { public_key: string }   // base64url, pass directly as applicationServerKey
+Status:   200 OK
+Errors:   401 unauthorized, 503 (push not configured)
+```
+
+#### `POST /v1/push/subscriptions` *(authenticated)*
+
+```
+Request: {
+  endpoint: string,               // from PushSubscription.toJSON().endpoint
+  keys: { p256dh: string, auth: string },
+  user_agent?: string | null
+}
+Response: { id: string, endpoint: string, created_at: string }
+Status:   201 Created
+Errors:   401 unauthorized, 422 validation_error, 503 (push not configured)
+Note:     Upserts by endpoint. If the endpoint was previously registered under a
+          different user (shared device, account switch), it is reassigned to the
+          current user.
+```
+
+#### `DELETE /v1/push/subscriptions` *(authenticated)*
+
+```
+Request: { endpoint: string }
+Response: (empty body)
+Status:   204 No Content
+Errors:   401 unauthorized, 503 (push not configured)
+Note:     Idempotent — returns 204 even if the endpoint was never registered, or
+          already belongs to a different user (no ownership leak).
+```
+
+### Wire Payload Contract
+
+Every push message body is exactly this JSON shape — the service worker's `push` event handler should parse it directly and call `registration.showNotification(payload.title, {...})`:
+
+```typescript
+interface PushNotificationPayload {
+  title: string;
+  body: string;
+  url: string;    // relative deep link to open on notification click
+  tag: string;     // used for OS-level notification coalescing (repeat tag replaces prior)
+  category: "job" | "gpu_credit" | "system" | "balance";
+  level: "info" | "warning" | "critical";
+}
+```
+
+### Event → Notification Mapping
+
+The backend maps a subset of the same real-time events used by SSE (§15) into push notifications. Mapping logic is pure and one-way — it never affects SSE delivery.
+
+| SSE event | Pushed when | Notes |
+|-----------|-------------|-------|
+| `job.status_changed` | Only terminal states: `completed`, `failed` | `tag: "job-{job_id}"`, `url: "/gallery/{job_id}"` |
+| `gpu_session.credit_warning` | Every level (`warning`, `critical`) | `tag: "gpu-credit-{session_id}"` — repeated warnings coalesce instead of stacking |
+| `system.notification` | Always — broadcast to **every** subscription | `tag: "system-notification"` |
+| `balance.updated` | Only `delta > 0` **and** `transaction_type` is `credit` or `admin_adjustment` | Per-generation debits and refunds never push (avoids spam) |
+| `job.progress`, `gpu_session.status_changed` | Never | Ignored entirely |
+
+### Delivery Guarantees
+
+- **Best-effort**, same as SSE — if the push dispatcher process is down or Redis drops the connection, notifications are lost (no replay/persistence queue).
+- **Expired subscriptions** (the push service returns HTTP 404/410) are pruned automatically — no client action needed; the next `POST /v1/push/subscriptions` re-registers.
+- **No per-category preferences yet** — a subscribed user receives all four categories above. Granular opt-out is planned for a future release.
+- **No presence suppression** — a user with an open SSE connection still receives push notifications for the same event today.
+
+### Frontend Usage Example
+
+```typescript
+async function registerPushNotifications(apiFetch: Fetcher) {
+  const registration = await navigator.serviceWorker.register('/sw.js');
+
+  const { public_key } = await apiFetch<{ public_key: string }>('/v1/push/vapid-public-key');
+
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: public_key,
+  });
+
+  const { endpoint, keys } = subscription.toJSON() as {
+    endpoint: string;
+    keys: { p256dh: string; auth: string };
+  };
+
+  await apiFetch('/v1/push/subscriptions', {
+    method: 'POST',
+    body: JSON.stringify({ endpoint, keys, user_agent: navigator.userAgent }),
+  });
+}
+
+// sw.js — service worker push handler
+self.addEventListener('push', (event) => {
+  const payload = event.data.json();
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      tag: payload.tag,
+      data: { url: payload.url },
+    })
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(clients.openWindow(event.notification.data.url));
+});
+```
 
 ---
 
