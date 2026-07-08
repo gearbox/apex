@@ -14,8 +14,8 @@ import os
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-optional-auth-guard-audit-key-32-bytes")
 
-from src.api.app import create_app  # noqa: E402
-from src.api.security import optional_auth_guard  # noqa: E402
+from src.api.app import create_app
+from src.api.security import optional_auth_guard
 
 # Routes explicitly reviewed and confirmed safe for anonymous-degrading auth.
 # Discovered via: grep -rn "optional_auth_guard" src/api/routes/

@@ -24,24 +24,20 @@ from .schemas import (
 )
 
 __all__ = [
-    # Protocol
-    "StorageService",
-    # Implementation
-    "R2StorageService",
-    "R2StorageSettings",
-    # Schemas
     "DownloadResult",
     "MediaFormat",
-    "StorageStats",
-    "StorageType",
-    "StoredFile",
-    "UploadResult",
-    # Exceptions
+    "R2StorageService",
+    "R2StorageSettings",
     "StorageConnectionError",
     "StorageDeleteError",
     "StorageDownloadError",
     "StorageError",
     "StorageNotFoundError",
+    "StorageService",
+    "StorageStats",
+    "StorageType",
     "StorageUploadError",
     "StorageValidationError",
+    "StoredFile",
+    "UploadResult",
 ]

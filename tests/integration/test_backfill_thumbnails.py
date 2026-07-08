@@ -229,7 +229,7 @@ async def test_upload_no_derivatives_gets_sm_and_md(db_session: AsyncSession) ->
     upload = await _make_upload(db_session, user)
     r2 = _make_mock_r2()
 
-    output_stats, upload_stats = await run_backfill(
+    _output_stats, upload_stats = await run_backfill(
         db_session,
         r2,
         product=None,
@@ -366,7 +366,7 @@ async def test_complete_upload_is_skipped(db_session: AsyncSession) -> None:
         )
     r2 = _make_mock_r2()
 
-    output_stats, upload_stats = await run_backfill(
+    _output_stats, upload_stats = await run_backfill(
         db_session,
         r2,
         product=None,

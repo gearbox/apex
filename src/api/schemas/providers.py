@@ -31,7 +31,7 @@ class ImageConstraints(msgspec.Struct, kw_only=True):
     """Default quality tier. None for models with fixed sizing."""
 
     tier_megapixels: dict[str, float] | None = None
-    """Target megapixel budget per tier. Actual W×H depends on model and aspect ratio."""
+    """Target megapixel budget per tier. Actual W*H depends on model and aspect ratio."""
 
 
 class VideoConstraints(msgspec.Struct, kw_only=True):

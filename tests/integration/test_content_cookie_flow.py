@@ -425,7 +425,7 @@ class TestAuthControllerCookies:
     async def test_logout_clears_content_cookie(
         self,
         jwt_service: JWTService,  # noqa: ARG002
-        settings: Settings,  # noqa: ARG002
+        settings: Settings,
     ) -> None:
         from unittest.mock import AsyncMock, MagicMock
 

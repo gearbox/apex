@@ -1,6 +1,6 @@
 """Tests for provisioning callback auth, progress persistence, and session response schema.
 
-Covers design decisions D1–D4 from the phase-2 spec:
+Covers design decisions D1-D4 from the phase-2 spec:
   D1 — hashed token auth
   D2 — retry path generates fresh token
   D3 — progress persistence (latest-state-wins)
@@ -147,7 +147,7 @@ class TestTokenValidation:
 
 class TestCallbackAuth:
     async def test_valid_token_returns_200(self) -> None:
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session()
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -159,7 +159,7 @@ class TestCallbackAuth:
         assert status == 200
 
     async def test_wrong_token_returns_401_no_write(self) -> None:
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session()
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -172,7 +172,7 @@ class TestCallbackAuth:
         mock_repo.update_provisioning_progress.assert_not_called()
 
     async def test_missing_hash_returns_401(self) -> None:
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session(callback_token_hash=None)
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -187,7 +187,7 @@ class TestCallbackAuth:
     async def test_session_not_found_returns_401(self) -> None:
         from structlog.testing import capture_logs
 
-        svc, db = _make_service()
+        svc, _db = _make_service()
         missing_id = uuid4()
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -226,7 +226,7 @@ class TestCallbackAuth:
 
 class TestProgressPersistence:
     async def test_downloading_phase_updates_progress(self) -> None:
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session()
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -247,7 +247,7 @@ class TestProgressPersistence:
         """A callback with ts older than the stored ts must be ignored (200, no write)."""
         newer_ts = datetime(2026, 6, 9, 11, 0, 0, tzinfo=UTC)
         older_ts = datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)
-        svc, db = _make_service()
+        svc, _db = _make_service()
         # Session already has a newer stored ts in provisioning_progress
         session = _make_session(
             provisioning_progress={"ts": newer_ts.isoformat(), "message": "later update"}
@@ -266,7 +266,7 @@ class TestProgressPersistence:
         """A callback with ts >= stored ts must be applied."""
         older_ts = datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)
         newer_ts = datetime(2026, 6, 9, 11, 0, 0, tzinfo=UTC)
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session(
             provisioning_progress={"ts": older_ts.isoformat(), "message": "earlier"}
         )
@@ -282,7 +282,7 @@ class TestProgressPersistence:
 
     async def test_non_download_phase_with_download_field_drops_download(self) -> None:
         """Download blob sent for a non-download phase must be silently dropped."""
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session()
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -315,7 +315,7 @@ class TestStatusGate:
     @pytest.mark.parametrize("status", ["active", "stopped", "failed", "stale", "paused"])
     async def test_non_provisioning_status_ignored_200(self, status: str) -> None:
         """Callbacks against non-provisioning sessions return 200 with no write."""
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session(status=status)
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -332,7 +332,7 @@ class TestStatusGate:
         [GpuSessionStatus.pending, GpuSessionStatus.provisioning, GpuSessionStatus.resuming],
     )
     async def test_provisioning_statuses_accepted(self, status: GpuSessionStatus) -> None:
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session(status=status)
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -348,7 +348,7 @@ class TestStatusGate:
 class TestReadyCallback:
     async def test_ready_phase_updates_progress_not_status(self) -> None:
         """'ready' callback must update phase/progress but NOT change session status."""
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session(status=GpuSessionStatus.provisioning)
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
@@ -369,7 +369,7 @@ class TestReadyCallback:
 class TestFailedCallback:
     async def test_failed_phase_persists_error_without_changing_status(self) -> None:
         """'failed' callback writes provisioning_phase='failed'; worker picks it up on next sweep."""
-        svc, db = _make_service()
+        svc, _db = _make_service()
         session = _make_session(status=GpuSessionStatus.provisioning)
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()

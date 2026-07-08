@@ -10,8 +10,8 @@ from .exceptions import (
 )
 
 __all__ = [
-    "CloudflareTunnelClient",
     "CloudflareError",
+    "CloudflareTunnelClient",
     "DNSRecordError",
     "TunnelConfigError",
     "TunnelCreationError",

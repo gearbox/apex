@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.18.9"
+version = "0.18.10"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -87,6 +87,9 @@ select = [
     "ISC",  # Catches the missing-comma-in-a-list silent string-join bug
     "PIE",  # Misc linters
     "RET",  # flake8-return
+    "ASYNC",  # flake8-async enforces async discipline
+    "DTZ",    # flake8-datetimez enforces tz-aware datetimes
+    "RUF",    # Ruff-native rules
     # "T20",  # No stray print
 ]
 ignore = [

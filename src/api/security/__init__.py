@@ -23,24 +23,20 @@ from .password import PasswordService
 from .utils import generate_token, hash_token
 
 __all__ = [
-    # Guards
     "AuthenticatedUser",
-    "auth_guard",
-    "content_auth_guard",
-    "extract_token_from_header",
-    "optional_auth_guard",
-    # Content cookie helpers
-    "build_content_cookie",
-    "clear_content_cookie",
-    "effective_cookie_domain",
-    # JWT
     "InvalidTokenError",
     "JWTConfig",
     "JWTService",
+    "PasswordService",
     "TokenExpiredError",
     "TokenPayload",
-    # Password
-    "PasswordService",
+    "auth_guard",
+    "build_content_cookie",
+    "clear_content_cookie",
+    "content_auth_guard",
+    "effective_cookie_domain",
+    "extract_token_from_header",
     "generate_token",
     "hash_token",
+    "optional_auth_guard",
 ]

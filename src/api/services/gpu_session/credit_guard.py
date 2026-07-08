@@ -135,7 +135,7 @@ class SessionCreditGuard:
         return sessions
 
     def _compute_floor_tokens(self) -> int:
-        """Derived floor: ceil(interval_minutes) × rate × safety_factor.
+        """Derived floor: ceil(interval_minutes) * rate * safety_factor.
 
         The floor is the minimum balance required to cover one more full monitor
         cycle. Sessions below this threshold cannot afford even one more cycle
@@ -144,7 +144,7 @@ class SessionCreditGuard:
         interval_minutes = self._settings.health_snapshot_interval_seconds / 60.0
         rate = self._settings.gpu_session_tokens_per_minute
         safety = self._settings.gpu_session_credit_safety_factor
-        return int(ceil(interval_minutes * rate * safety))
+        return ceil(interval_minutes * rate * safety)
 
     def _compute_owed(self, session: GpuSession, *, now: datetime) -> int:
         """Compute cumulative tokens consumed by the session up to now.

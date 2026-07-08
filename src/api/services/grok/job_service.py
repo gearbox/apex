@@ -342,7 +342,7 @@ class GrokJobService:
             try:
                 await billing_service.refund(
                     job_id,
-                    description=f"Unexpected error refund: {str(e)}",
+                    description=f"Unexpected error refund: {e!s}",
                     session=session,
                     product_id=product_id,
                 )
@@ -594,7 +594,7 @@ class GrokJobService:
             try:
                 await billing_service.refund(
                     job_id,
-                    description=f"Unexpected error refund: {str(e)}",
+                    description=f"Unexpected error refund: {e!s}",
                     session=session,
                     product_id=product_id,
                 )

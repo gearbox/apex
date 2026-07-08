@@ -47,7 +47,7 @@ TOKEN_PACKAGES: dict[str, TokenPackage] = {
 }
 
 
-# Unsafe placeholder that ships as the default – reject it at startup
+# Unsafe placeholder that ships as the default - reject it at startup
 _INSECURE_JWT_DEFAULTS: frozenset[str] = frozenset(
     {
         "CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
@@ -420,7 +420,7 @@ class Settings(BaseSettings):
         ge=1,
         description=(
             "Token cost per active minute of GPU session runtime. "
-            "The start-time reservation is computed as MIN_BILLABLE_MINUTES × rate "
+            "The start-time reservation is computed as MIN_BILLABLE_MINUTES * rate "
             "(see src.api.services.gpu_session.service._MIN_BILLABLE_MINUTES). "
             "Keeping reservation and rate coupled prevents settings drift from "
             "causing over-refunds between session start and finalize."
@@ -433,7 +433,7 @@ class Settings(BaseSettings):
         le=600,
         description=(
             "Seconds a session may be unreachable before the health reconciler marks it stale. "
-            "Must be ≥ 2× the reconciler cycle (60s default) to absorb a single transient blip. "
+            "Must be ≥ 2× the reconciler cycle (60s default) to absorb a single transient blip. "  # noqa: RUF001
             "last_reachable_at is stamped at activation and on every healthy probe."
         ),
     )

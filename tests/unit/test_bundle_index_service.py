@@ -7,10 +7,11 @@ import tarfile as tarfile_module
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 import yaml
-from pydantic import ValidationError
+from pydantic_core import ValidationError
 
 from src.api.services.bundle_index import (
     BundleIndexService,
@@ -808,7 +809,6 @@ class TestFetchAndExtract:
     async def test_atomic_swap_on_extraction(self, tmp_path: Path) -> None:
         """Stale cache_dir content is replaced; staging and old dirs are cleaned up."""
         # Pre-populate cache_dir with stale content
-        tmp_path.mkdir(parents=True, exist_ok=True)
         (tmp_path / "stale.txt").write_text("old")
 
         tarball = _make_test_tarball(
@@ -1051,7 +1051,9 @@ class TestTarballHardening:
         with pytest.raises(RuntimeError, match="max download size"):
             await svc._fetch_and_extract()
 
-        assert not tmp_path.exists() or not (tmp_path / "bundle-index.yaml").exists()
+        cache_dir = anyio.Path(tmp_path)
+        bundle_index = anyio.Path(tmp_path / "bundle-index.yaml")
+        assert not await cache_dir.exists() or not await bundle_index.exists()
 
     async def test_content_length_header_exceeds_cap_short_circuits(self, tmp_path: Path) -> None:
         """Content-Length header above cap raises before stream is fully consumed."""

@@ -131,7 +131,7 @@ class TestExplicitOverride:
             explicit_width=2048,
             explicit_height=2048,
         )
-        # 2048×2048 = 4.19 MP; must clamp to ≤1.0 MP
+        # 2048*2048 = 4.19 MP; must clamp to ≤1.0 MP
         assert dims.megapixels <= max_mp + 0.05
 
     def test_explicit_dims_respect_max_edge(self) -> None:

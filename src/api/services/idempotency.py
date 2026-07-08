@@ -23,7 +23,7 @@ class IdempotencyConflictError(Exception):
 class IdempotencyReplayResult:
     """Cached response from a previous identical request."""
 
-    __slots__ = ("status_code", "body")
+    __slots__ = ("body", "status_code")
 
     def __init__(self, status_code: int, body: dict[str, Any]) -> None:
         self.status_code = status_code
