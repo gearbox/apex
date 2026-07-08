@@ -12,7 +12,12 @@ from litestar import Controller, Request, Response, get, post
 from litestar.di import Provide
 from litestar.exceptions import HTTPException, PermissionDeniedException
 from litestar.params import Parameter
-from litestar.status_codes import HTTP_200_OK, HTTP_201_CREATED, HTTP_403_FORBIDDEN
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_201_CREATED,
+    HTTP_400_BAD_REQUEST,
+    HTTP_403_FORBIDDEN,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
@@ -32,7 +37,7 @@ from src.api.schemas.billing import (
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
-from src.api.services.billing_errors import OrganizationPermissionError
+from src.api.services.billing_errors import OrganizationPermissionError, TopUpAmountError
 from src.api.services.event_bus import EventBus
 from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.api.services.payment import PaymentService
@@ -310,6 +315,9 @@ class BillingController(Controller):
             await session.commit()
             return Response(content=response, status_code=HTTP_201_CREATED)
 
+        except TopUpAmountError as exc:
+            await idempotency_service.fail(record_id, session=session)
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except Exception:
             await idempotency_service.fail(record_id, session=session)
             raise
@@ -390,6 +398,9 @@ class BillingController(Controller):
             await session.commit()
             return Response(content=response, status_code=HTTP_201_CREATED)
 
+        except TopUpAmountError as exc:
+            await idempotency_service.fail(record_id, session=session)
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except Exception:
             await idempotency_service.fail(record_id, session=session)
             raise

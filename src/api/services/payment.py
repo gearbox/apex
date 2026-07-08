@@ -17,6 +17,7 @@ import structlog
 from src.api.services.billing_errors import (
     AccountNotFoundError,
     PaymentVerificationError,
+    TopUpAmountError,
 )
 from src.core.enums import PaymentStatus
 from src.core.product import PaymentProvider
@@ -76,12 +77,12 @@ class PaymentService:
         """Validate range and build the price quote for a top-up amount.
 
         Raises:
-            ValueError: ``amount_usd`` is outside the configured min/max bounds.
+            TopUpAmountError: ``amount_usd`` is outside the configured min/max bounds.
         """
         min_usd = self._settings.billing_min_topup_usd
         max_usd = self._settings.billing_max_topup_usd
         if not min_usd <= amount_usd <= max_usd:
-            raise ValueError(
+            raise TopUpAmountError(
                 f"amount_usd must be between {min_usd} and {max_usd} (got {amount_usd})"
             )
 

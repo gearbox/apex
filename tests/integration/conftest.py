@@ -133,9 +133,7 @@ def _host_port(container_name: str) -> str:
     ports = _inspect_container(container_name).get("NetworkSettings", {}).get("Ports", {})
     if bindings := ports.get(_POSTGRES_CONTAINER_PORT):
         return str(bindings[0]["HostPort"])
-    raise RuntimeError(
-        f"Docker did not publish {_POSTGRES_CONTAINER_PORT} for {container_name}."
-    )
+    raise RuntimeError(f"Docker did not publish {_POSTGRES_CONTAINER_PORT} for {container_name}.")
 
 
 def _remove_postgres_container(container_name: str) -> None:
