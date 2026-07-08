@@ -1,13 +1,10 @@
-"""Tests for HealthSnapshotWorker."""
+"""Tests for HealthSnapshotWorker and HealthSnapshotCleanupWorker."""
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.api.services.health.worker import (
-    _LEADER_LOCK_KEY,
-    HealthSnapshotWorker,
-)
+from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
 
 
 def _make_worker(**kwargs: object) -> HealthSnapshotWorker:
@@ -15,35 +12,21 @@ def _make_worker(**kwargs: object) -> HealthSnapshotWorker:
         "health_service": AsyncMock(),
         "db_manager": MagicMock(),
         "interval_seconds": 60,
-        "retention_days": 30,
         "redis_url": None,
     } | kwargs
     return HealthSnapshotWorker(**defaults)  # type: ignore[arg-type]
 
 
-class TestStartStop:
-    async def test_start_creates_tasks(self) -> None:
-        worker = _make_worker()
-        await worker.start()
-        assert worker._task is not None
-        assert worker._cleanup_task is not None
-        assert worker._running is True
-        await worker.stop()
+def _make_cleanup_worker(**kwargs: object) -> HealthSnapshotCleanupWorker:
+    defaults: dict[str, object] = {
+        "db_manager": MagicMock(),
+        "retention_days": 30,
+    } | kwargs
+    return HealthSnapshotCleanupWorker(**defaults)  # type: ignore[arg-type]
 
-    async def test_stop_cancels_tasks(self) -> None:
-        worker = _make_worker()
-        await worker.start()
-        await worker.stop()
-        assert worker._task is None
-        assert worker._running is False
 
-    async def test_double_start_is_noop(self) -> None:
-        worker = _make_worker()
-        await worker.start()
-        first_task = worker._task
-        await worker.start()
-        assert worker._task is first_task
-        await worker.stop()
+# Generic start/stop/tick-error lifecycle is covered by test_periodic_worker.py.
+# Only HealthSnapshotWorker/HealthSnapshotCleanupWorker-specific behavior lives here.
 
 
 class TestRunOnce:
@@ -54,10 +37,10 @@ class TestRunOnce:
         )
 
         worker = _make_worker(health_service=mock_service)
-        worker._persist_snapshot = AsyncMock()
-        worker._publish_to_redis = AsyncMock()
+        worker._persist_snapshot = AsyncMock()  # type: ignore[method-assign]
+        worker._publish_to_redis = AsyncMock()  # type: ignore[method-assign]
 
-        await worker._run_once()
+        await worker.run_once()
 
         mock_service.check_all_and_build.assert_awaited_once()
         worker._persist_snapshot.assert_awaited_once()
@@ -70,10 +53,10 @@ class TestRunOnce:
         )
 
         worker = _make_worker(health_service=mock_service)
-        worker._persist_snapshot = AsyncMock(side_effect=ConnectionError("db gone"))
+        worker._persist_snapshot = AsyncMock(side_effect=ConnectionError("db gone"))  # type: ignore[method-assign]
 
         # Should not raise
-        await worker._run_once()
+        await worker.run_once()
 
     async def test_publishes_to_redis_on_success(self) -> None:
         """Verify snapshot is published to health:stream Redis channel."""
@@ -83,14 +66,14 @@ class TestRunOnce:
         mock_service = AsyncMock()
         mock_service.check_all_and_build = AsyncMock(return_value=detailed)
         worker = _make_worker(health_service=mock_service, redis_url="redis://localhost")
-        worker._persist_snapshot = AsyncMock()
+        worker._persist_snapshot = AsyncMock()  # type: ignore[method-assign]
 
         with patch("src.core.redis.get_redis_client") as mock_get_redis:
             mock_client = AsyncMock()
             mock_client.publish = AsyncMock()
             mock_get_redis.return_value = mock_client
 
-            await worker._run_once()
+            await worker.run_once()
 
             mock_client.publish.assert_awaited_once()
             channel = mock_client.publish.call_args[0][0]
@@ -107,98 +90,40 @@ class TestRunOnce:
         )
 
         worker = _make_worker(health_service=mock_service, redis_url="redis://localhost")
-        worker._persist_snapshot = AsyncMock()
+        worker._persist_snapshot = AsyncMock()  # type: ignore[method-assign]
         with patch("src.core.redis.get_redis_client") as mock_redis:
             mock_redis.return_value.publish = AsyncMock(side_effect=ConnectionError("no redis"))
-            await worker._run_once()
+            await worker.run_once()
 
+    async def test_credit_guard_runs_after_checks(self) -> None:
+        mock_service = AsyncMock()
+        mock_service.check_all_and_build = AsyncMock(
+            return_value={"status": "healthy", "checked_at": "x"}
+        )
+        mock_guard = AsyncMock()
 
-class TestLeaderLock:
-    async def test_no_redis_always_leader(self) -> None:
-        worker = _make_worker(redis_url=None)
-        assert await worker._try_acquire_leader_lock() is True
+        worker = _make_worker(health_service=mock_service, session_credit_guard=mock_guard)
+        worker._persist_snapshot = AsyncMock()  # type: ignore[method-assign]
+        worker._publish_to_redis = AsyncMock()  # type: ignore[method-assign]
 
-    async def test_acquires_lock_with_dynamic_ttl(self) -> None:
-        worker = _make_worker(redis_url="redis://localhost", interval_seconds=300)
-        with patch("src.core.redis.get_redis_client") as mock_redis:
-            mock_client = AsyncMock()
-            mock_client.set = AsyncMock(return_value=True)
-            mock_redis.return_value = mock_client
+        await worker.run_once()
 
-            assert await worker._try_acquire_leader_lock() is True
-            mock_client.set.assert_awaited_once_with(
-                _LEADER_LOCK_KEY,
-                "1",
-                nx=True,
-                ex=600,  # max(300 * 2, 90) = 600
-            )
+        mock_guard.run_cycle.assert_awaited_once()
 
-    async def test_lock_ttl_minimum_90s(self) -> None:
-        worker = _make_worker(redis_url="redis://localhost", interval_seconds=10)
-        with patch("src.core.redis.get_redis_client") as mock_redis:
-            mock_client = AsyncMock()
-            mock_client.set = AsyncMock(return_value=True)
-            mock_redis.return_value = mock_client
+    async def test_credit_guard_error_does_not_crash(self) -> None:
+        mock_service = AsyncMock()
+        mock_service.check_all_and_build = AsyncMock(
+            return_value={"status": "healthy", "checked_at": "x"}
+        )
+        mock_guard = AsyncMock()
+        mock_guard.run_cycle = AsyncMock(side_effect=RuntimeError("boom"))
 
-            await worker._try_acquire_leader_lock()
-            call_kwargs = mock_client.set.call_args
-            assert call_kwargs.kwargs["ex"] == 90  # max(10 * 2, 90) = 90
+        worker = _make_worker(health_service=mock_service, session_credit_guard=mock_guard)
+        worker._persist_snapshot = AsyncMock()  # type: ignore[method-assign]
+        worker._publish_to_redis = AsyncMock()  # type: ignore[method-assign]
 
-    async def test_skips_when_lock_held(self) -> None:
-        worker = _make_worker(redis_url="redis://localhost")
-        with patch("src.core.redis.get_redis_client") as mock_redis:
-            mock_client = AsyncMock()
-            mock_client.set = AsyncMock(return_value=None)  # NX failed
-            mock_redis.return_value = mock_client
-
-            assert await worker._try_acquire_leader_lock() is False
-
-    async def test_redis_error_proceeds_anyway(self) -> None:
-        worker = _make_worker(redis_url="redis://localhost")
-        with patch("src.core.redis.get_redis_client") as mock_redis:
-            mock_redis.side_effect = ConnectionError("redis down")
-            # Should proceed (degrade gracefully)
-            assert await worker._try_acquire_leader_lock() is True
-
-
-class TestCleanupOnce:
-    async def test_cleanup_calls_repository(self) -> None:
-        mock_db_manager = MagicMock()
-        mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-        mock_db_manager.session.return_value = mock_session
-
-        worker = _make_worker(db_manager=mock_db_manager, retention_days=7)
-
-        with patch("src.api.services.health.worker.HealthSnapshotRepository") as mock_repo_cls:
-            mock_repo = AsyncMock()
-            mock_repo.cleanup = AsyncMock(return_value=10)
-            mock_repo_cls.return_value = mock_repo
-
-            await worker._cleanup_once()
-
-            mock_repo.cleanup.assert_awaited_once_with(retention_days=7)
-            mock_session.commit.assert_awaited_once()
-
-    async def test_cleanup_once_zero_deleted_no_log(self) -> None:
-        """_cleanup_once does not log when no rows are deleted."""
-        mock_db_manager = MagicMock()
-        mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-        mock_db_manager.session.return_value = mock_session
-
-        worker = _make_worker(db_manager=mock_db_manager)
-
-        with patch("src.api.services.health.worker.HealthSnapshotRepository") as mock_repo_cls:
-            mock_repo = AsyncMock()
-            mock_repo.cleanup = AsyncMock(return_value=0)
-            mock_repo_cls.return_value = mock_repo
-
-            await worker._cleanup_once()
-
-        mock_session.commit.assert_awaited_once()
+        # Should not raise
+        await worker.run_once()
 
 
 class TestPersistSnapshot:
@@ -222,11 +147,70 @@ class TestPersistSnapshot:
         mock_session.commit.assert_awaited_once()
 
 
-class TestStopNotRunning:
-    async def test_stop_when_not_running_is_noop(self) -> None:
-        """stop() returns immediately when _running is False."""
-        worker = _make_worker()
-        assert worker._running is False
-        # Should not raise or do anything
-        await worker.stop()
-        assert worker._task is None
+class TestHealthSnapshotCleanupWorker:
+    async def test_run_once_calls_repository(self) -> None:
+        mock_db_manager = MagicMock()
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_db_manager.session.return_value = mock_session
+
+        worker = _make_cleanup_worker(db_manager=mock_db_manager, retention_days=7)
+
+        with patch("src.api.services.health.worker.HealthSnapshotRepository") as mock_repo_cls:
+            mock_repo = AsyncMock()
+            mock_repo.cleanup = AsyncMock(return_value=10)
+            mock_repo_cls.return_value = mock_repo
+
+            await worker.run_once()
+
+            mock_repo.cleanup.assert_awaited_once_with(retention_days=7)
+            mock_session.commit.assert_awaited_once()
+
+    async def test_run_once_zero_deleted_no_log(self) -> None:
+        """run_once does not log when no rows are deleted."""
+        mock_db_manager = MagicMock()
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_db_manager.session.return_value = mock_session
+
+        worker = _make_cleanup_worker(db_manager=mock_db_manager)
+
+        with (
+            patch("src.api.services.health.worker.HealthSnapshotRepository") as mock_repo_cls,
+            patch("src.api.services.health.worker.logger") as mock_logger,
+        ):
+            mock_repo = AsyncMock()
+            mock_repo.cleanup = AsyncMock(return_value=0)
+            mock_repo_cls.return_value = mock_repo
+
+            await worker.run_once()
+
+        mock_session.commit.assert_awaited_once()
+        mock_logger.info.assert_not_called()
+
+    async def test_deletes_old_snapshots_logs_count(self) -> None:
+        mock_db_manager = MagicMock()
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_db_manager.session.return_value = mock_session
+
+        worker = _make_cleanup_worker(db_manager=mock_db_manager, retention_days=14)
+
+        with (
+            patch("src.api.services.health.worker.HealthSnapshotRepository") as mock_repo_cls,
+            patch("src.api.services.health.worker.logger") as mock_logger,
+        ):
+            mock_repo = AsyncMock()
+            mock_repo.cleanup = AsyncMock(return_value=42)
+            mock_repo_cls.return_value = mock_repo
+
+            await worker.run_once()
+
+        mock_logger.info.assert_called_once_with(
+            "health.snapshot_cleanup_worker.cleanup",
+            deleted=42,
+            retention_days=14,
+        )

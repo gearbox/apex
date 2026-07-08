@@ -28,6 +28,8 @@ def settings() -> MagicMock:
     s.retention_days = 7
     s.grok_video_poll_interval = 5
     s.grok_video_max_poll_time = 600
+    s.grok_video_max_concurrent_polls = 8
+    s.redis_url = None
     return s
 
 
@@ -99,6 +101,7 @@ class TestGrokVideoWorkerCLIRun:
                 "src.workers.grok_video.GrokVideoWorker",
                 return_value=mock_worker,
             ),
+            patch("src.workers.grok_video.BillingService"),
         ):
             runner = GrokVideoWorkerCLI(settings)
 
@@ -135,6 +138,7 @@ class TestGrokVideoWorkerCLIRun:
             patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
             patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
             patch("src.workers.grok_video.GrokVideoWorker", return_value=mock_worker),
+            patch("src.workers.grok_video.BillingService"),
         ):
             runner = GrokVideoWorkerCLI(settings)
 
@@ -161,6 +165,7 @@ class TestGrokVideoWorkerCLIRun:
         mock_grok_client = AsyncMock()
         mock_job_service = AsyncMock()
         mock_worker = AsyncMock()
+        mock_billing_service = MagicMock()
 
         with (
             patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
@@ -171,6 +176,7 @@ class TestGrokVideoWorkerCLIRun:
             patch(
                 "src.workers.grok_video.GrokVideoWorker", return_value=mock_worker
             ) as mock_worker_cls,
+            patch("src.workers.grok_video.BillingService", return_value=mock_billing_service),
         ):
             runner = GrokVideoWorkerCLI(settings)
 
@@ -183,5 +189,7 @@ class TestGrokVideoWorkerCLIRun:
         mock_worker_cls.assert_called_once_with(
             db_manager=mock_db_manager,
             job_service=mock_job_service,
+            billing_service=mock_billing_service,
             settings=settings,
+            redis_enabled=False,
         )

@@ -30,6 +30,7 @@ from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.api.services.vastai.schemas import VastAIInstance
 from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.workers.base import PeriodicWorker
 
 from ._env_builder import build_acs_env
 from ._events import publish_status_event
@@ -106,7 +107,7 @@ def _classify_terminal_state(instance: VastAIInstance) -> str | None:
     return None
 
 
-class GpuProvisioningWorker:
+class GpuProvisioningWorker(PeriodicWorker):
     """Advances non-terminal GPU sessions toward their terminal states.
 
     Started in app lifespan (Phase 1F). One sweep per
@@ -132,7 +133,14 @@ class GpuProvisioningWorker:
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
+        redis_enabled: bool = False,
     ) -> None:
+        super().__init__(
+            name="gpu_provisioning",
+            interval_seconds=settings.gpu_provision_poll_interval_seconds,
+            jitter_seconds=2.0,
+            redis_enabled=redis_enabled,
+        )
         self._session_factory = session_factory
         self._vastai = vastai_client
         self._cf = cf_client
@@ -142,43 +150,8 @@ class GpuProvisioningWorker:
         self._billing_service = billing_service
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
-        self._running = False
-        self._task: asyncio.Task[None] | None = None
 
-    async def start(self) -> None:
-        """Start the provisioning worker."""
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        logger.info(
-            "gpu_provisioning_worker.started",
-            interval_s=self._settings.gpu_provision_poll_interval_seconds,
-        )
-
-    async def stop(self) -> None:
-        """Stop the provisioning worker."""
-        if not self._running:
-            return
-        self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        logger.info("gpu_provisioning_worker.stopped")
-
-    async def _run_loop(self) -> None:
-        """Main periodic loop."""
-        while self._running:
-            try:
-                await self._sweep_once()
-            except Exception:
-                logger.exception("gpu_provisioning_worker.sweep_error")
-            # Always sleep even on errors to avoid tight-loop on transient failures
-            await asyncio.sleep(self._settings.gpu_provision_poll_interval_seconds)
-
-    async def _sweep_once(self) -> None:
+    async def run_once(self) -> None:
         """One full sweep: query non-terminal sessions and advance each."""
         started = time.monotonic()
 

@@ -11,8 +11,6 @@ Runs once every ``settings.billing_reconciler_interval_minutes`` (default 10).
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -21,6 +19,7 @@ import structlog
 
 from src.db.models.gpu_session import GpuSession
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-class BillingReconcilerWorker:
+class BillingReconcilerWorker(PeriodicWorker):
     """Reconciles stopped GPU sessions whose billing finalization is pending.
 
     See module docstring. Lifecycle and loop shape mirror
@@ -44,48 +43,20 @@ class BillingReconcilerWorker:
         session_factory: async_sessionmaker[AsyncSession],
         gpu_session_service: GpuSessionService,
         settings: Settings,
+        redis_enabled: bool = False,
     ) -> None:
+        super().__init__(
+            name="billing_reconciler",
+            interval_seconds=settings.billing_reconciler_interval_minutes * 60,
+            initial_delay_seconds=30.0,
+            jitter_seconds=10.0,
+            redis_enabled=redis_enabled,
+        )
         self._session_factory = session_factory
         self._service = gpu_session_service
         self._settings = settings
-        self._running = False
-        self._task: asyncio.Task[None] | None = None
 
-    async def start(self) -> None:
-        """Start the reconciler worker."""
-        if self._running or self._task is not None:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        logger.info(
-            "billing_reconciler_worker.started",
-            interval_minutes=self._settings.billing_reconciler_interval_minutes,
-            grace_period_minutes=self._settings.billing_reconciler_grace_period_minutes,
-            quarantine_threshold=self._settings.billing_reconciler_quarantine_threshold,
-        )
-
-    async def stop(self) -> None:
-        """Stop the reconciler worker."""
-        if not self._running:
-            return
-        self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        logger.info("billing_reconciler_worker.stopped")
-
-    async def _run_loop(self) -> None:
-        """Main periodic loop."""
-        while self._running:
-            try:
-                await self._sweep_once()
-            except Exception:
-                logger.exception("billing_reconciler_worker.sweep_error")
-            await asyncio.sleep(self._settings.billing_reconciler_interval_minutes * 60)
-
-    async def _sweep_once(self) -> None:
+    async def run_once(self) -> None:
         """One reconciliation sweep."""
         started = time.monotonic()
         grace_cutoff = datetime.now(UTC) - timedelta(

@@ -16,7 +16,6 @@ All writes go through JobStateTransitionService.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -38,6 +37,7 @@ from src.api.services.storage import R2StorageService, StorageType
 from src.core.enums import JobStatus
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
+from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -72,7 +72,7 @@ class AishaPollerConfig:
     retention_days: int = 7
 
 
-class AishaJobPoller:
+class AishaJobPoller(PeriodicWorker):
     """Polls ComfyUI for in-progress Aisha generation jobs and drives transitions.
 
     Mirrors GpuProvisioningWorker: started from on_startup, owns a tick loop,
@@ -87,14 +87,18 @@ class AishaJobPoller:
         billing_service: BillingService,
         r2_storage: R2StorageService | None,
         config: AishaPollerConfig,
+        redis_enabled: bool = False,
     ) -> None:
+        super().__init__(
+            name="aisha_job_poller",
+            interval_seconds=config.tick_interval_seconds,
+            redis_enabled=redis_enabled,
+        )
         self._session_factory = session_factory
         self._event_bus = event_bus
         self._billing = billing_service
         self._r2 = r2_storage
         self._config = config
-        self._running = False
-        self._task: asyncio.Task[None] | None = None
 
         if suffix := (config.tunnel_allowed_suffix or "").strip():
             self._allowed_tunnel_suffix = suffix if suffix.startswith(".") else f".{suffix}"
@@ -119,45 +123,17 @@ class AishaJobPoller:
         )
 
     async def start(self) -> None:
-        """Spawn the polling loop. Idempotent."""
+        """Spawn the polling loop. Idempotent. No-op if disabled via config."""
         if not self._config.enabled:
             logger.info("aisha_job_poller.disabled")
             return
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._loop())
-        logger.info(
-            "aisha_job_poller.started",
-            tick_interval_s=self._config.tick_interval_seconds,
-            max_concurrent=self._config.max_concurrent_polls,
-        )
-
-    async def stop(self) -> None:
-        """Cancel the loop and await graceful drain. Idempotent."""
-        if not self._running:
-            return
-        self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        logger.info("aisha_job_poller.stopped")
+        await super().start()
 
     # -------------------------------------------------------------------------
     # Internal loop
     # -------------------------------------------------------------------------
 
-    async def _loop(self) -> None:
-        while self._running:
-            try:
-                await self._tick()
-            except Exception:
-                logger.exception("aisha_job_poller.tick_error")
-            await asyncio.sleep(self._config.tick_interval_seconds)
-
-    async def _tick(self) -> None:
+    async def run_once(self) -> None:
         async with self._session_factory() as session:
             repo = JobRepository(session)
             jobs = list(await repo.list_aisha_jobs_for_polling(limit=200))

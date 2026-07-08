@@ -9,6 +9,7 @@ Handles the full lifecycle of Grok generation jobs:
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -22,6 +23,8 @@ from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
     GrokImageResult,
+    GrokRateLimitError,
+    GrokTimeoutError,
     GrokVideoJobStarted,
     GrokVideoResult,
 )
@@ -35,6 +38,7 @@ from src.core.enums import (
     MediaFormat,
     ModelType,
     Provider,
+    VideoPollStatus,
     VideoResolution,
 )
 from src.core.uid import new_id
@@ -49,6 +53,19 @@ if TYPE_CHECKING:
     from src.db.models import GenerationJob
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class VideoPollOutcome:
+    """Result of polling xAI for one video job, independent of JobStatus.
+
+    ``poll_video_job_for_worker`` returns this instead of mutating job.status
+    directly — the periodic worker drives the actual state transition (and
+    any refund) through JobStateTransitionService.
+    """
+
+    status: VideoPollStatus
+    error_message: str | None = None
 
 
 class GrokJobError(Exception):
@@ -594,9 +611,15 @@ class GrokJobService:
         session: AsyncSession,
         job_id: UUID,
     ) -> GenerationJob | None:
-        """Poll a video job for completion.
+        """Poll a video job for completion (read-through path).
 
-        Checks xAI API for result and stores video if ready.
+        Used by GrokGenerationProvider.refresh_job to poll-on-read within a
+        request. Mutates job.status directly via JobRepository — this path
+        predates JobStateTransitionService and returns the job synchronously
+        for the caller to serialize into the API response, so it is kept as
+        a thin wrapper around ``_poll_video_result`` rather than migrated.
+        The periodic worker uses ``poll_video_job_for_worker`` instead, which
+        drives every transition through JobStateTransitionService.
 
         Args:
             session: Database session.
@@ -608,9 +631,13 @@ class GrokJobService:
         Raises:
             GrokJobNotFoundError: If job doesn't exist.
             GrokJobError: If job is not a video job or polling fails.
+
+        Note:
+            Transient xAI errors (rate limit, deadline exceeded) are not
+            raised here — they are reported as STILL_RUNNING (job returned
+            unchanged) so a status request never 500s on an xAI hiccup.
         """
         job_repo = JobRepository(session)
-        output_repo = OutputRepository(session)
         job = await job_repo.get(job_id)
 
         if job is None:
@@ -620,52 +647,119 @@ class GrokJobService:
         if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
             return job
 
-        # Get xAI request ID
-        request_id = job.external_request_id
-        if not request_id:
-            raise GrokJobError(f"Job {job_id} has no xAI request ID")
-
+        was_queued = job.status == JobStatus.QUEUED.value
         try:
-            # Check for result
-            result: GrokVideoResult | None = await self._grok.get_video_result(request_id)
+            outcome = await self._poll_video_result(session, job)
+        except (GrokRateLimitError, GrokTimeoutError) as e:
+            logger.warning("grok.video_poll_transient", job_id=str(job.id), error=str(e))
+            return job
 
-            if result is None:
-                # Still processing, update to running if needed
-                if job.status == JobStatus.QUEUED.value:
-                    job = await job_repo.update_status(job_id, JobStatus.RUNNING)
-                return job
+        if outcome.status == VideoPollStatus.STILL_RUNNING:
+            if was_queued:
+                job = await job_repo.update_status(job_id, JobStatus.RUNNING)
+            return job
 
-            # Video is ready, download and store
-            await self._store_video_result(
-                session=session,
-                output_repo=output_repo,
-                user_id=job.user_id,
-                job_id=job_id,
-                result=result,
-                product_id=job.product_id,
-            )
-
-            # Mark complete
-            job = await job_repo.update_status(
+        if outcome.status == VideoPollStatus.COMPLETED:
+            return await job_repo.update_status(
                 job_id,
                 JobStatus.COMPLETED,
                 completed_at=datetime.now(UTC),
             )
 
-            logger.info("grok.video_job_completed", job_id=str(job_id))
-            return job
+        # FAILED
+        job = await job_repo.update_status(
+            job_id,
+            JobStatus.FAILED,
+            completed_at=datetime.now(UTC),
+        )
+        if job is not None:
+            job.error_message = outcome.error_message
+            await session.flush()
+        raise GrokJobError(f"Video polling failed: {outcome.error_message}")
 
-        except GrokAPIError as e:
-            logger.error("grok.video_job_poll_failed", job_id=str(job_id), error=str(e))
-            job = await job_repo.update_status(
-                job_id,
-                JobStatus.FAILED,
-                completed_at=datetime.now(UTC),
+    async def poll_video_job_for_worker(
+        self,
+        session: AsyncSession,
+        job_id: UUID,
+    ) -> VideoPollOutcome:
+        """Poll a video job for the periodic worker.
+
+        Unlike ``poll_video_job``, this never mutates job.status — on
+        completion it downloads and persists outputs (flushed, not
+        committed, so the caller's later commit is atomic with the status
+        transition) but leaves every JobStatus change to the caller via
+        JobStateTransitionService.
+
+        Args:
+            session: Database session (one per job, per the worker's
+                session-per-job pattern).
+            job_id: Job ID to poll.
+
+        Returns:
+            The observed poll outcome.
+
+        Raises:
+            GrokJobNotFoundError: If job doesn't exist.
+            GrokJobError: If the job has no xAI request ID.
+            GrokRateLimitError: If xAI rate-limited this poll. Not handled
+                here by design — the caller (worker) decides how to react
+                (skip this tick, no transition; see D1/D2).
+            GrokTimeoutError: If this poll hit xAI's deadline. Same handling
+                as GrokRateLimitError.
+        """
+        job_repo = JobRepository(session)
+        job = await job_repo.get(job_id)
+
+        if job is None:
+            raise GrokJobNotFoundError(f"Job {job_id} not found")
+
+        if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+            return VideoPollOutcome(status=VideoPollStatus.STILL_RUNNING)
+
+        return await self._poll_video_result(session, job)
+
+    async def _poll_video_result(
+        self,
+        session: AsyncSession,
+        job: GenerationJob,
+    ) -> VideoPollOutcome:
+        """Poll xAI for one job's result; download+store on completion.
+
+        Does not mutate job.status — shared by the read-through
+        (``poll_video_job``) and worker (``poll_video_job_for_worker``)
+        entry points, which each drive the status transition differently.
+        """
+        request_id = job.external_request_id
+        if not request_id:
+            raise GrokJobError(f"Job {job.id} has no xAI request ID")
+
+        output_repo = OutputRepository(session)
+
+        try:
+            result: GrokVideoResult | None = await self._grok.get_video_result(request_id)
+
+            if result is None:
+                return VideoPollOutcome(status=VideoPollStatus.STILL_RUNNING)
+
+            await self._store_video_result(
+                session=session,
+                output_repo=output_repo,
+                user_id=job.user_id,
+                job_id=job.id,
+                result=result,
+                product_id=job.product_id,
             )
-            if job is not None:
-                job.error_message = str(e)
-                await session.flush()
-            raise GrokJobError(f"Video polling failed: {e}") from e
+            logger.info("grok.video_job_completed", job_id=str(job.id))
+            return VideoPollOutcome(status=VideoPollStatus.COMPLETED)
+
+        except (GrokRateLimitError, GrokTimeoutError):
+            # Transient: rate limits and deadline-exceeded must not fail the
+            # job. Re-raise; each entry point decides (worker: skip this
+            # tick; read-through: report STILL_RUNNING). See D1.
+            raise
+        except GrokAPIError as e:
+            logger.error("grok.video_job_poll_failed", job_id=str(job.id), error=str(e))
+            return VideoPollOutcome(status=VideoPollStatus.FAILED, error_message=str(e))
 
     async def _store_video_result(
         self,

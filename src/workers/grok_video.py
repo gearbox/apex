@@ -18,6 +18,7 @@ from typing import NoReturn
 
 import structlog
 
+from src.api.services.billing import BillingService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.grok.video_worker import GrokVideoWorker
@@ -64,6 +65,14 @@ class GrokVideoWorkerCLI:
         )
         logger.info("grok_worker.db_initialized")
 
+        # Redis for the leader lease — lets this standalone process and any
+        # in-process worker share ownership safely (see GrokVideoWorker init).
+        if self._settings.redis_url:
+            from src.core.redis import init_redis_pool
+
+            init_redis_pool(self._settings.redis_url)
+            logger.info("grok_worker.redis_initialized")
+
         # Initialize R2 storage
         r2_settings = R2StorageSettings(
             account_id=self._settings.r2_account_id,
@@ -90,11 +99,18 @@ class GrokVideoWorkerCLI:
         await job_service.connect()
         logger.info("grok_worker.job_service_initialized")
 
-        # Create and start worker
+        # Billing service is stateless — see src.api.services.billing docstring.
+        billing_service = BillingService()
+
+        # Create and start worker. redis_enabled lets this standalone process
+        # share the same leader lease key as any in-process worker, so
+        # running both simultaneously is safe (only one actually ticks).
         self._worker = GrokVideoWorker(
             db_manager=db_manager,
             job_service=job_service,
+            billing_service=billing_service,
             settings=self._settings,
+            redis_enabled=self._settings.redis_url is not None,
         )
         await self._worker.start()
 
@@ -115,6 +131,10 @@ class GrokVideoWorkerCLI:
         await grok_client.close()
         await r2_storage.close()
         await db_manager.close()
+        if self._settings.redis_url:
+            from src.core.redis import close_redis_pool
+
+            await close_redis_pool()
         logger.info("grok_worker.stopped")
 
     def handle_signal(self) -> None:

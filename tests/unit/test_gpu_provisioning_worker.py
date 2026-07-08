@@ -171,71 +171,10 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
 
 
 # ---------------------------------------------------------------------------
-# TestLifecycle
+# Lifecycle (start/stop/tick-error-recovery) is covered generically by
+# tests/unit/test_periodic_worker.py — GpuProvisioningWorker has no lifecycle
+# overrides beyond PeriodicWorker, so no worker-specific lifecycle tests here.
 # ---------------------------------------------------------------------------
-
-
-class TestLifecycle:
-    async def test_start_creates_task_and_sets_running(self) -> None:
-        worker, _ = _make_worker()
-        worker._run_loop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker.start()
-
-        assert worker._running is True
-        assert worker._task is not None
-        await worker.stop()
-
-    async def test_stop_cancels_task_and_clears_running(self) -> None:
-        worker, _ = _make_worker()
-        worker._run_loop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker.start()
-        await worker.stop()
-
-        assert worker._running is False
-        assert worker._task is None
-
-    async def test_start_is_idempotent(self) -> None:
-        worker, _ = _make_worker()
-        worker._run_loop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker.start()
-        task_first = worker._task
-        await worker.start()
-        task_second = worker._task
-
-        assert task_first is task_second
-        await worker.stop()
-
-    async def test_stop_without_start_is_noop(self) -> None:
-        worker, _ = _make_worker()
-        # Should not raise
-        await worker.stop()
-        assert worker._running is False
-
-    async def test_loop_recovers_from_sweep_exception(self) -> None:
-        """A sweep that raises must not kill the loop — next iteration still runs."""
-        worker, _ = _make_worker()
-        call_count = 0
-        second_call = asyncio.Event()
-
-        async def flaky_sweep() -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("transient error")
-            second_call.set()
-
-        worker._sweep_once = flaky_sweep  # type: ignore[method-assign]
-        worker._settings.gpu_provision_poll_interval_seconds = 0.001  # type: ignore[assignment]
-
-        await worker.start()
-        await asyncio.wait_for(second_call.wait(), timeout=2.0)
-        await worker.stop()
-
-        assert call_count >= 2
-
 
 # ---------------------------------------------------------------------------
 # TestSweep
@@ -251,7 +190,7 @@ class TestSweep:
             MockRepo.return_value = mock_repo
             mock_repo.list_by_status.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["vastai_client"].get_instance.assert_not_called()
 
@@ -273,7 +212,7 @@ class TestSweep:
             MockRepo.return_value = mock_repo
             mock_repo.list_by_status.return_value = sessions
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         worker._advance_pending.assert_called_once()
         worker._advance_provisioning.assert_called_once()
@@ -302,7 +241,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = sessions
 
             # Should not raise
-            await worker._sweep_once()
+            await worker.run_once()
 
         assert call_count == 2
 
@@ -858,7 +797,7 @@ class TestSweepConcurrency:
             MockRepo.return_value = mock_repo
             mock_repo.list_by_status.return_value = sessions
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         assert max_in_flight <= 2, f"Expected <=2 concurrent, observed {max_in_flight}"
         # Sanity: we actually exercised concurrency (otherwise the test is trivially true)
@@ -890,7 +829,7 @@ class TestSweepConcurrency:
             MockRepo.return_value = mock_repo
             mock_repo.list_by_status.return_value = sessions
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         assert max_in_flight == 1
 

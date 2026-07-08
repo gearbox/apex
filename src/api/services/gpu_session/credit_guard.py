@@ -67,7 +67,7 @@ class CreditGuardOutcome:
 class SessionCreditGuard:
     """Per-cycle credit evaluation and metered settlement for active GPU sessions.
 
-    Designed to run on the same cadence as HealthSnapshotWorker._run_once(),
+    Designed to run on the same cadence as HealthSnapshotWorker.run_once(),
     outside the health check timed section so its latency doesn't inflate the
     health check duration.
     """

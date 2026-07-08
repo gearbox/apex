@@ -96,36 +96,10 @@ def _make_worker(**overrides: Any) -> tuple[BillingReconcilerWorker, dict[str, A
 
 
 # ---------------------------------------------------------------------------
-# TestLifecycle
+# Lifecycle (start/stop/tick-error-recovery) is covered generically by
+# tests/unit/test_periodic_worker.py — BillingReconcilerWorker has no
+# lifecycle overrides beyond PeriodicWorker.
 # ---------------------------------------------------------------------------
-
-
-class TestLifecycle:
-    async def test_start_idempotent(self) -> None:
-        worker, _ = _make_worker()
-        worker._run_loop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker.start()
-        task_first = worker._task
-        await worker.start()
-        assert worker._task is task_first
-
-        await worker.stop()
-
-    async def test_stop_idempotent(self) -> None:
-        worker, _ = _make_worker()
-        # stop without start must not raise
-        await worker.stop()
-        assert worker._running is False
-
-        # start then stop twice
-        worker._run_loop = AsyncMock()  # type: ignore[method-assign]
-        await worker.start()
-        await worker.stop()
-        await worker.stop()
-        assert worker._running is False
-        assert worker._task is None
-
 
 # ---------------------------------------------------------------------------
 # TestSweep
@@ -142,7 +116,7 @@ class TestSweep:
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["gpu_session_service"].finalize_billing_for_session.assert_not_called()
 
@@ -159,7 +133,7 @@ class TestSweep:
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = [candidate]
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["gpu_session_service"].finalize_billing_for_session.assert_called_once_with(candidate)
         mock_repo.increment_billing_finalization_attempts.assert_not_called()
@@ -178,7 +152,7 @@ class TestSweep:
             # Returns 1 — below the quarantine threshold of 10
             mock_repo.increment_billing_finalization_attempts.return_value = 1
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mock_repo.increment_billing_finalization_attempts.assert_called_once_with(candidate.id)
         # No quarantine error — just still_failing
@@ -203,7 +177,7 @@ class TestSweep:
             # Returns 5 — equals the quarantine threshold
             mock_repo.increment_billing_finalization_attempts.return_value = 5
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         # Must log quarantine=True at ERROR
         mock_logger.error.assert_called_once()
@@ -228,7 +202,7 @@ class TestSweep:
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         expected_cutoff = fixed_now - timedelta(minutes=3)
         mock_repo.list_pending_billing_finalization.assert_called_once_with(
@@ -245,7 +219,7 @@ class TestSweep:
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mock_repo.list_pending_billing_finalization.assert_called_once()
         _, call_kwargs = mock_repo.list_pending_billing_finalization.call_args
@@ -275,35 +249,11 @@ class TestSweep:
             # candidate_a fails → bump path; configure increment to return below threshold
             mock_repo.increment_billing_finalization_attempts.return_value = 1
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         assert len(finalize_calls) == 2
         assert finalize_calls[0] is candidate_a
         assert finalize_calls[1] is candidate_b
 
-    async def test_sweep_exception_does_not_kill_loop(self) -> None:
-        """If _sweep_once raises, the loop logs the error and continues next iteration."""
-        worker, _ = _make_worker()
-
-        call_count = 0
-
-        async def flaky_sweep() -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("DB connection lost")
-            # Second call succeeds; stop the loop so it doesn't run forever.
-            worker._running = False
-
-        with (
-            patch.object(worker, "_sweep_once", side_effect=flaky_sweep),
-            patch(
-                "src.api.services.gpu_session.billing_reconciler_worker.asyncio.sleep",
-                new_callable=AsyncMock,
-            ),
-        ):
-            worker._running = True
-            # Run the loop directly (not as a task) so it's fully deterministic.
-            await worker._run_loop()
-
-        assert call_count == 2
+    # Tick-error recovery (a failing run_once must not kill the loop) is
+    # covered generically by test_periodic_worker.py::TestTickErrorLogged.

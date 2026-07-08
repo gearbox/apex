@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.core.enums import WorkerMode
+
 
 class GrokBillingConfig(BaseModel):
     """Grok moderation billing policy configuration."""
@@ -490,6 +492,12 @@ class Settings(BaseSettings):
             "For multi-worker Granian, use the standalone worker instead."
         ),
     )
+    grok_video_max_concurrent_polls: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Maximum concurrent xAI status polls per Grok video worker tick.",
+    )
 
     # Generation defaults — bundle.yaml overrides these per-model when present
     default_steps: int = Field(default=12, description="Default generation steps")
@@ -528,7 +536,23 @@ class Settings(BaseSettings):
         default=1,
         ge=1,
         le=32,
-        description="Number of worker processes for ASGI server. Increase in production based on CPU cores and expected load.",
+        description=(
+            "Number of worker processes for ASGI server. Increase in production based on "
+            "CPU cores and expected load. Values > 1 require REDIS_URL (for worker leader "
+            "election) unless WORKER_MODE=api_only."
+        ),
+    )
+
+    # -------------------------------------------------------------------------
+    # Background workers
+    # -------------------------------------------------------------------------
+    worker_mode: WorkerMode = Field(
+        default=WorkerMode.all,
+        description=(
+            "Which in-process background workers this process runs. 'all' (default) starts "
+            "every worker alongside the API. 'api_only' starts none — use for API-only "
+            "Granian processes when workers run elsewhere."
+        ),
     )
 
     # App URL (used for building verification / reset links)
@@ -1001,6 +1025,22 @@ class Settings(BaseSettings):
                 '  python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_multi_worker_requires_redis(self) -> "Settings":
+        """Reject asgi_workers > 1 without Redis unless workers are disabled.
+
+        Multiple Granian processes each start every worker loop; without Redis
+        there is no leader election, so every process would double-provision
+        GPU nodes, double-poll jobs, etc. WORKER_MODE=api_only sidesteps this
+        entirely by not starting any worker loop.
+        """
+        if self.asgi_workers > 1 and self.worker_mode is WorkerMode.all and self.redis_url is None:
+            raise ValueError(
+                "asgi_workers > 1 requires REDIS_URL for worker leader election, "
+                "or set WORKER_MODE=api_only"
+            )
         return self
 
     # -------------------------------------------------------------------------

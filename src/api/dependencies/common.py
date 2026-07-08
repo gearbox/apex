@@ -31,8 +31,10 @@ from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWork
 from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
+from src.api.services.grok.video_worker import GrokVideoWorker
+from src.api.services.health.checkers.workers import WorkerHeartbeatChecker
 from src.api.services.health.service import HealthService
-from src.api.services.health.worker import HealthSnapshotWorker
+from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.organization import OrganizationService
@@ -45,10 +47,12 @@ from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
 from src.api.services.workflow_service import WorkflowService
 from src.core.config import Settings, get_settings
+from src.core.enums import WorkerMode
 from src.core.product import ProductConfig
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
+from src.workers.base import PeriodicWorker
 from src.workers.token_cleanup import TokenCleanupWorker
 
 logger = structlog.get_logger(__name__)
@@ -74,6 +78,7 @@ class ServiceContainer:
     password_service: PasswordService | None = None
     billing_service: BillingService | None = None
     grok_job_service: GrokJobService | None = None
+    grok_video_worker: GrokVideoWorker | None = None
     email_service: EmailService | None = None
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
@@ -83,6 +88,7 @@ class ServiceContainer:
     sse_ticket_service: SSETicketService | None = None
     health_service: HealthService | None = None
     health_snapshot_worker: HealthSnapshotWorker | None = None
+    health_snapshot_cleanup_worker: HealthSnapshotCleanupWorker | None = None
     health_http_client: httpx.AsyncClient | None = None
     # GPU session stack (optional — requires Vast.ai + CF configuration)
     gpu_session_service: GpuSessionService | None = None
@@ -458,6 +464,14 @@ async def init_services(settings: Settings) -> JWTService:
     Returns:
         JWT service for storing in app state.
     """
+    # Whether this process starts periodic background worker loops.
+    # api_only Granian processes construct every request-time service as
+    # usual but skip every worker's construction and start() call.
+    workers_enabled = settings.worker_mode is WorkerMode.all
+    redis_enabled = settings.redis_url is not None
+    if not workers_enabled:
+        logger.info("workers.disabled_by_mode", worker_mode=settings.worker_mode.value)
+
     # Initialize database
     _services.db_manager = init_db(
         settings.database_url,
@@ -527,16 +541,17 @@ async def init_services(settings: Settings) -> JWTService:
         logger.warning("grok.not_configured")
 
     # Start Grok video polling worker
-    if settings.grok_configured and _services.grok_job_service is not None:
+    if workers_enabled and settings.grok_configured and _services.grok_job_service is not None:
         if settings.grok_video_worker_in_process:
-            from src.api.services.grok.video_worker import GrokVideoWorkerManager
-
-            await GrokVideoWorkerManager.start(
+            _services.grok_video_worker = GrokVideoWorker(
                 db_manager=_services.db_manager,
                 job_service=_services.grok_job_service,
+                billing_service=get_billing_service(),
                 settings=settings,
                 event_bus=_services.event_bus,
+                redis_enabled=redis_enabled,
             )
+            await _services.grok_video_worker.start()
             logger.info("grok.video_worker_in_process_started")
         else:
             logger.info(
@@ -576,7 +591,7 @@ async def init_services(settings: Settings) -> JWTService:
     )
 
     # Initialize and start Aisha job poller
-    if settings.aisha_poller_enabled:
+    if workers_enabled and settings.aisha_poller_enabled:
         poller_config = AishaPollerConfig(
             enabled=True,
             tick_interval_seconds=settings.aisha_poller_tick_interval_seconds,
@@ -594,6 +609,7 @@ async def init_services(settings: Settings) -> JWTService:
             billing_service=get_billing_service(),
             r2_storage=_services.r2_storage,
             config=poller_config,
+            redis_enabled=redis_enabled,
         )
         await _services.aisha_job_poller.start()
         logger.info("aisha_job_poller.started")
@@ -654,37 +670,41 @@ async def init_services(settings: Settings) -> JWTService:
             job_sweep_service=job_sweep_service,
         )
 
-        _services.gpu_provisioning_worker = GpuProvisioningWorker(
-            session_factory=_services.db_manager.session_factory,
-            vastai_client=vastai_client,
-            cf_client=cf_client,
-            bundle_index=_services.bundle_index,
-            http_client=_services.gpu_session_http_client,
-            settings=settings,
-            billing_service=billing_service_for_worker,
-            event_bus=_services.event_bus,
-            job_sweep_service=job_sweep_service,
-        )
-        await _services.gpu_provisioning_worker.start()
-
-        _services.orphaned_tunnel_cleanup_worker = OrphanedTunnelCleanupWorker(
-            session_factory=_services.db_manager.session_factory,
-            cf_client=cf_client,
-            vastai_client=vastai_client,
-            settings=settings,
-        )
-        await _services.orphaned_tunnel_cleanup_worker.start()
-
-        if _services.gpu_session_service is None:
-            raise RuntimeError(
-                "gpu_session_service must be initialized before billing_reconciler_worker"
+        if workers_enabled:
+            _services.gpu_provisioning_worker = GpuProvisioningWorker(
+                session_factory=_services.db_manager.session_factory,
+                vastai_client=vastai_client,
+                cf_client=cf_client,
+                bundle_index=_services.bundle_index,
+                http_client=_services.gpu_session_http_client,
+                settings=settings,
+                billing_service=billing_service_for_worker,
+                event_bus=_services.event_bus,
+                job_sweep_service=job_sweep_service,
+                redis_enabled=redis_enabled,
             )
-        _services.billing_reconciler_worker = BillingReconcilerWorker(
-            session_factory=_services.db_manager.session_factory,
-            gpu_session_service=_services.gpu_session_service,
-            settings=settings,
-        )
-        await _services.billing_reconciler_worker.start()
+            await _services.gpu_provisioning_worker.start()
+
+            _services.orphaned_tunnel_cleanup_worker = OrphanedTunnelCleanupWorker(
+                session_factory=_services.db_manager.session_factory,
+                cf_client=cf_client,
+                vastai_client=vastai_client,
+                settings=settings,
+                redis_enabled=redis_enabled,
+            )
+            await _services.orphaned_tunnel_cleanup_worker.start()
+
+            if _services.gpu_session_service is None:
+                raise RuntimeError(
+                    "gpu_session_service must be initialized before billing_reconciler_worker"
+                )
+            _services.billing_reconciler_worker = BillingReconcilerWorker(
+                session_factory=_services.db_manager.session_factory,
+                gpu_session_service=_services.gpu_session_service,
+                settings=settings,
+                redis_enabled=redis_enabled,
+            )
+            await _services.billing_reconciler_worker.start()
 
         logger.info("gpu_session_stack.initialized")
     else:
@@ -706,9 +726,9 @@ async def init_services(settings: Settings) -> JWTService:
             reason="bundle index is not configured",
             hint="Ensure bundle indexing is set up if AISHA should be available",
         )
+    elif _services.workflow_service is None:
+        raise RuntimeError("workflow_service must be initialized before the Aisha provider")
     else:
-        if _services.workflow_service is None:
-            raise RuntimeError("workflow_service must be initialized before the Aisha provider")
         generation_providers[Provider.AISHA] = AishaGenerationProvider(
             workflow_service=_services.workflow_service,
             gpu_session_service=_services.gpu_session_service,
@@ -746,12 +766,14 @@ async def init_services(settings: Settings) -> JWTService:
     )
 
     # Initialize and start token cleanup worker
-    _services.token_cleanup_worker = TokenCleanupWorker(
-        db_manager=_services.db_manager,
-        interval=settings.token_cleanup_interval_seconds,
-    )
-    await _services.token_cleanup_worker.start()
-    logger.info("token_cleanup_worker.started")
+    if workers_enabled:
+        _services.token_cleanup_worker = TokenCleanupWorker(
+            db_manager=_services.db_manager,
+            interval=settings.token_cleanup_interval_seconds,
+            redis_enabled=redis_enabled,
+        )
+        await _services.token_cleanup_worker.start()
+        logger.info("token_cleanup_worker.started")
 
     # Initialize health check registry and service
     from src.api.services.health.checkers.cloud_provider import GrokChecker
@@ -829,16 +851,43 @@ async def init_services(settings: Settings) -> JWTService:
         )
         logger.info("session_credit_guard.initialized")
 
-    # Initialize and start health snapshot worker
-    _services.health_snapshot_worker = HealthSnapshotWorker(
-        health_service=_services.health_service,
-        db_manager=_services.db_manager,
-        interval_seconds=settings.health_snapshot_interval_seconds,
-        retention_days=settings.health_snapshot_retention_days,
-        redis_url=settings.redis_url,
-        session_credit_guard=session_credit_guard,
-    )
-    await _services.health_snapshot_worker.start()
+    # Initialize and start health snapshot + snapshot-cleanup workers
+    if workers_enabled:
+        _services.health_snapshot_worker = HealthSnapshotWorker(
+            health_service=_services.health_service,
+            db_manager=_services.db_manager,
+            interval_seconds=settings.health_snapshot_interval_seconds,
+            redis_url=settings.redis_url,
+            session_credit_guard=session_credit_guard,
+        )
+        await _services.health_snapshot_worker.start()
+
+        _services.health_snapshot_cleanup_worker = HealthSnapshotCleanupWorker(
+            db_manager=_services.db_manager,
+            retention_days=settings.health_snapshot_retention_days,
+            redis_enabled=redis_enabled,
+        )
+        await _services.health_snapshot_cleanup_worker.start()
+
+    # Register the worker heartbeat checker last, now that every worker that
+    # will ever exist this process has been constructed. health_registry is
+    # held by reference inside health_service, so registering after the
+    # fact still takes effect for future checks.
+    all_workers: list[PeriodicWorker] = [
+        w
+        for w in (
+            _services.token_cleanup_worker,
+            _services.aisha_job_poller,
+            _services.gpu_provisioning_worker,
+            _services.orphaned_tunnel_cleanup_worker,
+            _services.billing_reconciler_worker,
+            _services.health_snapshot_worker,
+            _services.health_snapshot_cleanup_worker,
+            _services.grok_video_worker,
+        )
+        if w is not None
+    ]
+    health_registry.register(WorkerHeartbeatChecker(workers=all_workers))
 
     return _services.jwt_service  # Return for storing in app.state
 
@@ -883,6 +932,12 @@ async def shutdown_services() -> None:
     if _services.health_snapshot_worker is not None:
         await _services.health_snapshot_worker.stop()
 
+    if _services.health_snapshot_cleanup_worker is not None:
+        await _services.health_snapshot_cleanup_worker.stop()
+
+    if _services.grok_video_worker is not None:
+        await _services.grok_video_worker.stop()
+
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
         logger.info("r2.closed")
@@ -894,12 +949,6 @@ async def shutdown_services() -> None:
     if _services.grok_job_service is not None:
         await _services.grok_job_service.close()
         logger.info("grok.closed")
-
-    settings = get_settings()
-    if settings.grok_configured and settings.grok_video_worker_in_process:
-        from src.api.services.grok.video_worker import GrokVideoWorkerManager
-
-        await GrokVideoWorkerManager.stop()
 
     if _services.health_http_client is not None:
         await _services.health_http_client.aclose()

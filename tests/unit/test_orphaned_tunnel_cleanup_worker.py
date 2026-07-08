@@ -158,39 +158,10 @@ def _make_orphan_session(
 
 
 # ---------------------------------------------------------------------------
-# TestLifecycle
+# Lifecycle (start/stop/tick-error-recovery) is covered generically by
+# tests/unit/test_periodic_worker.py — OrphanedTunnelCleanupWorker has no
+# lifecycle overrides beyond PeriodicWorker.
 # ---------------------------------------------------------------------------
-
-
-class TestLifecycle:
-    async def test_start_stop(self) -> None:
-        worker, _ = _make_worker()
-        worker._run_loop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker.start()
-        assert worker._running is True
-        assert worker._task is not None
-
-        await worker.stop()
-        assert worker._running is False
-        assert worker._task is None
-
-    async def test_start_is_idempotent(self) -> None:
-        worker, _ = _make_worker()
-        worker._run_loop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker.start()
-        task_first = worker._task
-        await worker.start()
-        assert worker._task is task_first
-
-        await worker.stop()
-
-    async def test_stop_without_start_is_noop(self) -> None:
-        worker, _ = _make_worker()
-        await worker.stop()
-        assert worker._running is False
-
 
 # ---------------------------------------------------------------------------
 # TestSweep
@@ -213,7 +184,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = [live_session]
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["cf_client"].delete_tunnel.assert_not_called()
         mocks["cf_client"].delete_session_tunnel.assert_not_called()
@@ -234,7 +205,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["cf_client"].delete_session_tunnel.assert_called_once_with("tun-term", "dns-term")
 
@@ -255,7 +226,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["cf_client"].delete_tunnel.assert_not_called()
         mocks["cf_client"].delete_session_tunnel.assert_not_called()
@@ -273,7 +244,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["cf_client"].delete_tunnel.assert_not_called()
 
@@ -300,7 +271,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         # Despite being orphaned + past the grace period, the soft-deleted
         # tunnel must not be touched.
@@ -332,7 +303,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         # Both tunnels were attempted
         assert call_count == 2
@@ -352,7 +323,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         assert mocks["cf_client"].delete_session_tunnel.call_count == 3
 
@@ -366,7 +337,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["cf_client"].delete_tunnel.assert_not_called()
 
@@ -384,7 +355,7 @@ class TestSweep:
             mock_repo.list_by_status.return_value = []
             mock_repo.list_orphaned_instance_candidates.return_value = []
 
-            await worker._sweep_once()
+            await worker.run_once()
 
         mocks["cf_client"].delete_session_tunnel.assert_not_called()
         mocks["cf_client"].delete_tunnel.assert_called_once_with("tun-nodns")

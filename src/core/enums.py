@@ -10,6 +10,18 @@ class Product(StrEnum):
     SYNTHARA = "synthara"
 
 
+class WorkerMode(StrEnum):
+    """Which in-process background workers a Granian process should run.
+
+    ``workers_only`` (a dedicated worker process, no API routes) is
+    deliberately not modeled yet — it needs its own ``src.workers.runner``
+    entrypoint, which is a separate arc.
+    """
+
+    all = "all"
+    api_only = "api_only"
+
+
 class Provider(StrEnum):
     """Generation provider."""
 
@@ -131,6 +143,20 @@ class GenerationType(StrEnum):
     def requires_video_input(self) -> bool:
         """Check if this generation type requires an input video."""
         return self == GenerationType.V2V
+
+
+class VideoPollStatus(StrEnum):
+    """Observed outcome of one xAI video-job poll.
+
+    Distinct from JobStatus: this describes what the provider reported for a
+    single poll, not the GenerationJob's persisted status. The caller (worker
+    or read-through poller) is responsible for driving the actual JobStatus
+    transition based on this outcome.
+    """
+
+    STILL_RUNNING = "still_running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class JobStatus(StrEnum):
@@ -401,6 +427,7 @@ class ComponentCategory(StrEnum):
     cloud_provider = "cloud_provider"
     platform_api = "platform_api"
     gpu_session = "gpu_session"
+    workers = "workers"
 
 
 class GpuSessionStatus(StrEnum):

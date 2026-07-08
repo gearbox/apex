@@ -1,14 +1,14 @@
-"""Background worker: periodic health checks → DB snapshot + Redis publish.
+"""Background workers: periodic health checks -> DB snapshot + Redis publish,
+and daily retention cleanup of old snapshots.
 
-Runs as an asyncio.Task started in the app lifespan. In multi-worker
-Granian deployments, a Redis leader lock ensures only one process runs
-the snapshot loop.
+Two separate PeriodicWorker subclasses (D7): snapshot persistence and
+retention cleanup run on very different cadences (60s vs daily), so they
+each get their own tick loop and their own leader lease key rather than
+sharing one class with two internal tasks.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +17,7 @@ import structlog
 
 from src.api.services.health import HEALTH_STREAM_CHANNEL
 from src.db.repositories.health import HealthSnapshotRepository
+from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
     from src.api.services.gpu_session.credit_guard import SessionCreditGuard
@@ -27,87 +28,35 @@ logger = structlog.get_logger()
 
 _encoder = msgspec.json.Encoder()
 
-# Redis leader lock key
-_LEADER_LOCK_KEY = "health:snapshot_worker:lock"
 
-
-class HealthSnapshotWorker:
-    """Periodic health snapshot persistence + SSE publish.
-
-    Lifecycle: start() creates an asyncio.Task; stop() cancels it.
-    The worker is started in the app lifespan and stopped on shutdown.
-    """
+class HealthSnapshotWorker(PeriodicWorker):
+    """Periodic health snapshot persistence + SSE publish."""
 
     def __init__(
         self,
         health_service: HealthService,
         db_manager: DatabaseManager,
         interval_seconds: int,
-        retention_days: int,
         redis_url: str | None = None,
         session_credit_guard: SessionCreditGuard | None = None,
     ) -> None:
+        super().__init__(
+            name="health_snapshot",
+            interval_seconds=interval_seconds,
+            initial_delay_seconds=5.0,
+            redis_enabled=redis_url is not None,
+        )
         self._health_service = health_service
         self._db_manager = db_manager
-        self._interval = interval_seconds
-        self._retention_days = retention_days
         self._redis_url = redis_url
         self._session_credit_guard = session_credit_guard
-        self._running = False
-        self._task: asyncio.Task[None] | None = None
-        self._cleanup_task: asyncio.Task[None] | None = None
-
-    async def start(self) -> None:
-        """Start the snapshot worker and cleanup task."""
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-        logger.info(
-            "health.snapshot_worker.started",
-            interval_s=self._interval,
-            retention_days=self._retention_days,
-        )
-
-    async def stop(self) -> None:
-        """Stop the worker and cleanup task."""
-        if not self._running:
-            return
-        self._running = False
-        for task in (self._task, self._cleanup_task):
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-        self._task = None
-        self._cleanup_task = None
-        logger.info("health.snapshot_worker.stopped")
 
     # ------------------------------------------------------------------
-    # Snapshot loop
+    # Snapshot tick
     # ------------------------------------------------------------------
 
-    async def _run_loop(self) -> None:
-        """Main periodic loop: check → persist → publish."""
-        # Brief initial delay to let the app finish starting
-        await asyncio.sleep(5)
-
-        while self._running:
-            try:
-                if not await self._try_acquire_leader_lock():
-                    await asyncio.sleep(self._interval)
-                    continue
-
-                await self._run_once()
-            except Exception:
-                logger.exception("health.snapshot_worker.tick_error")
-
-            if self._running:
-                await asyncio.sleep(self._interval)
-
-    async def _run_once(self) -> None:
-        """Execute a single snapshot cycle."""
+    async def run_once(self) -> None:
+        """Execute a single snapshot cycle: check → persist → publish."""
         start = time.monotonic()
 
         detailed = await self._health_service.check_all_and_build()
@@ -167,66 +116,29 @@ class HealthSnapshotWorker:
         data = _encoder.encode(detailed).decode()
         await client.publish(HEALTH_STREAM_CHANNEL, data)
 
-    # ------------------------------------------------------------------
-    # Leader lock (Granian multi-worker safety)
-    # ------------------------------------------------------------------
 
-    async def _try_acquire_leader_lock(self) -> bool:
-        """Try to acquire the Redis leader lock.
+class HealthSnapshotCleanupWorker(PeriodicWorker):
+    """Daily retention cleanup of old health snapshots."""
 
-        Returns True if this process should run the snapshot loop.
-        Without Redis, always returns True (single-process assumption).
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        retention_days: int,
+        *,
+        redis_enabled: bool = False,
+    ) -> None:
+        super().__init__(
+            name="health_snapshot_cleanup",
+            interval_seconds=86400,
+            initial_delay_seconds=60.0,
+            jitter_seconds=300.0,
+            redis_enabled=redis_enabled,
+        )
+        self._db_manager = db_manager
+        self._retention_days = retention_days
 
-        Lock TTL is derived from the snapshot interval with headroom
-        to prevent expiry during a slow check cycle.
-        """
-        if self._redis_url is None:
-            return True
-
-        # TTL = 2x interval, minimum 90s — ensures the lock survives
-        # one full cycle even if checks are slow
-        lock_ttl = max(self._interval * 2, 90)
-
-        try:
-            from src.core.redis import get_redis_client
-
-            client = get_redis_client()
-            acquired = await client.set(
-                _LEADER_LOCK_KEY,
-                "1",
-                nx=True,
-                ex=lock_ttl,
-            )
-            return bool(acquired)
-        except Exception:
-            logger.warning("health.snapshot_worker.lock_error")
-            # If Redis is down, proceed anyway (degraded but better than no checks)
-            return True
-
-    # ------------------------------------------------------------------
-    # Retention cleanup
-    # ------------------------------------------------------------------
-
-    async def _cleanup_loop(self) -> None:
-        """Daily cleanup of old health snapshots. Only runs on the leader."""
-        # Wait until after initial startup + first snapshot cycle
-        await asyncio.sleep(60)
-
-        while self._running:
-            try:
-                if await self._try_acquire_leader_lock():
-                    await self._cleanup_once()
-                else:
-                    logger.debug("health.snapshot_worker.cleanup_skipped_not_leader")
-            except Exception:
-                logger.exception("health.snapshot_worker.cleanup_error")
-
-            if self._running:
-                # Run daily
-                await asyncio.sleep(86400)
-
-    async def _cleanup_once(self) -> None:
-        """Delete snapshots older than retention period."""
+    async def run_once(self) -> None:
+        """Delete snapshots older than the retention period."""
         async with self._db_manager.session() as session:
             repo = HealthSnapshotRepository(session)
             count = await repo.cleanup(retention_days=self._retention_days)
@@ -234,7 +146,7 @@ class HealthSnapshotWorker:
 
         if count > 0:
             logger.info(
-                "health.snapshot_worker.cleanup",
+                "health.snapshot_cleanup_worker.cleanup",
                 deleted=count,
                 retention_days=self._retention_days,
             )
