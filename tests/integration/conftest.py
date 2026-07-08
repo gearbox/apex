@@ -9,14 +9,17 @@ Fixture scope hierarchy:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 import subprocess
-from collections.abc import AsyncGenerator, Callable, Coroutine
+import time
+from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -39,7 +42,16 @@ from src.db.repositories.user_image import UserImageRepository
 # Test database URL
 # ---------------------------------------------------------------------------
 
-_DEFAULT_TEST_DB_URL = "postgresql+asyncpg://apex_test:apex_test@localhost:5433/apex_test"
+_POSTGRES_IMAGE = os.environ.get("TEST_POSTGRES_IMAGE", "postgres:16-alpine")
+_POSTGRES_USER = "apex_test"
+_POSTGRES_PASSWORD = "apex_test"
+_POSTGRES_DB = "apex_test"
+_POSTGRES_CONTAINER_PORT = "5432/tcp"
+_POSTGRES_HOST = "127.0.0.1"
+_POSTGRES_HEALTH_TIMEOUT_SECONDS = 60.0
+_DEFAULT_TEST_DB_URL = (
+    f"postgresql+asyncpg://{_POSTGRES_USER}:{_POSTGRES_PASSWORD}@localhost:5433/{_POSTGRES_DB}"
+)
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DB_URL)
 
 # ---------------------------------------------------------------------------
@@ -59,6 +71,154 @@ ResetTokenFactory = Callable[..., Coroutine[Any, Any, tuple[PasswordResetToken, 
 # ---------------------------------------------------------------------------
 # Session-scoped engine + schema bootstrap
 # ---------------------------------------------------------------------------
+
+
+def _run_docker(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run a docker CLI command and surface useful diagnostics on failure."""
+    command = ["docker", *args]
+    result = subprocess.run(  # noqa: S603
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        rendered = " ".join(command)
+        raise RuntimeError(
+            f"Docker command failed ({rendered}):\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+    return result
+
+
+def _container_logs(container_name: str) -> str:
+    result = _run_docker(["logs", "--tail", "100", container_name], check=False)
+    return f"stdout: {result.stdout}\nstderr: {result.stderr}"
+
+
+def _inspect_container(container_name: str) -> dict[str, Any]:
+    result = _run_docker(["inspect", container_name])
+    inspected = json.loads(result.stdout)
+    if not inspected:
+        raise RuntimeError(f"Docker container {container_name!r} was not found.")
+    return inspected[0]
+
+
+def _wait_for_postgres_health(container_name: str) -> None:
+    deadline = time.monotonic() + _POSTGRES_HEALTH_TIMEOUT_SECONDS
+    last_status = "unknown"
+
+    while time.monotonic() < deadline:
+        state = _inspect_container(container_name).get("State", {})
+        container_status = state.get("Status", "unknown")
+        health_status = state.get("Health", {}).get("Status", container_status)
+        last_status = str(health_status)
+
+        if health_status == "healthy":
+            return
+        if container_status == "exited":
+            raise RuntimeError(
+                f"PostgreSQL test container exited before becoming healthy.\n"
+                f"{_container_logs(container_name)}"
+            )
+
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        f"PostgreSQL test container did not become healthy within "
+        f"{_POSTGRES_HEALTH_TIMEOUT_SECONDS:.0f}s; last status: {last_status}.\n"
+        f"{_container_logs(container_name)}"
+    )
+
+
+def _host_port(container_name: str) -> str:
+    ports = _inspect_container(container_name).get("NetworkSettings", {}).get("Ports", {})
+    bindings = ports.get(_POSTGRES_CONTAINER_PORT)
+    if not bindings:
+        raise RuntimeError(f"Docker did not publish {_POSTGRES_CONTAINER_PORT} for {container_name}.")
+    return str(bindings[0]["HostPort"])
+
+
+def _remove_postgres_container(container_name: str) -> None:
+    _run_docker(["rm", "-f", "-v", container_name], check=False)
+
+
+def _start_postgres_container() -> tuple[str, str]:
+    _run_docker(["info"])
+    _run_docker(["pull", _POSTGRES_IMAGE])
+
+    container_name = f"apex-postgres-test-{os.getpid()}-{secrets.token_hex(4)}"
+    try:
+        _run_docker(
+            [
+                "run",
+                "--detach",
+                "--name",
+                container_name,
+                "--env",
+                f"POSTGRES_USER={_POSTGRES_USER}",
+                "--env",
+                f"POSTGRES_PASSWORD={_POSTGRES_PASSWORD}",
+                "--env",
+                f"POSTGRES_DB={_POSTGRES_DB}",
+                "--tmpfs",
+                "/var/lib/postgresql/data",
+                "--publish",
+                f"{_POSTGRES_HOST}::5432",
+                "--health-cmd",
+                f"pg_isready -U {_POSTGRES_USER} -d {_POSTGRES_DB}",
+                "--health-interval",
+                "1s",
+                "--health-timeout",
+                "3s",
+                "--health-retries",
+                "60",
+                "--health-start-period",
+                "2s",
+                _POSTGRES_IMAGE,
+            ]
+        )
+        _wait_for_postgres_health(container_name)
+        return container_name, _host_port(container_name)
+    except Exception:
+        _remove_postgres_container(container_name)
+        raise
+
+
+@pytest.fixture(scope="session")
+def test_database_url() -> Generator[str]:
+    """Provide the integration database URL, managing Docker unless one is supplied."""
+    explicit_database_url = os.environ.get("TEST_DATABASE_URL")
+    if explicit_database_url:
+        yield explicit_database_url
+        return
+
+    container_name, host_port = _start_postgres_container()
+    db_url = (
+        f"postgresql+asyncpg://{_POSTGRES_USER}:{_POSTGRES_PASSWORD}@"
+        f"{_POSTGRES_HOST}:{host_port}/{_POSTGRES_DB}"
+    )
+    previous_test_database_url = os.environ.get("TEST_DATABASE_URL")
+    previous_database_url = os.environ.get("DATABASE_URL")
+
+    global TEST_DATABASE_URL  # noqa: PLW0603
+    TEST_DATABASE_URL = db_url
+    os.environ["TEST_DATABASE_URL"] = db_url
+    os.environ["DATABASE_URL"] = db_url
+
+    try:
+        yield db_url
+    finally:
+        if previous_test_database_url is None:
+            os.environ.pop("TEST_DATABASE_URL", None)
+        else:
+            os.environ["TEST_DATABASE_URL"] = previous_test_database_url
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        _remove_postgres_container(container_name)
 
 
 def _run_migrations(db_url: str) -> None:
@@ -85,11 +245,11 @@ def _run_migrations(db_url: str) -> None:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def db_engine() -> AsyncGenerator[AsyncEngine]:
+async def db_engine(test_database_url: str) -> AsyncGenerator[AsyncEngine]:
     """Create async engine; run Alembic migrations once; yield; dispose."""
-    _run_migrations(TEST_DATABASE_URL)
+    _run_migrations(test_database_url)
 
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
+    engine = create_async_engine(test_database_url, echo=False, poolclass=NullPool)
     yield engine
     await engine.dispose()
 
