@@ -7,10 +7,11 @@ import tarfile as tarfile_module
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 import yaml
-from pydantic import ValidationError
+from pydantic_core import ValidationError
 
 from src.api.services.bundle_index import (
     BundleIndexService,
@@ -148,7 +149,7 @@ class TestParseGithubUrl:
             _parse_github_url("git@github.com:gearbox/ai-bundles.git")
 
     def test_gitlab_rejected(self) -> None:
-        with pytest.raises(ValueError, match="https://github.com/"):
+        with pytest.raises(ValueError, match=r"https://github\.com/"):
             _parse_github_url("https://gitlab.com/gearbox/ai-bundles.git")
 
     def test_single_segment_rejected(self) -> None:
@@ -160,7 +161,7 @@ class TestParseGithubUrl:
             _parse_github_url("https://github.com//empty-owner")
 
     def test_dash_prefix_rejected(self) -> None:
-        with pytest.raises(ValueError, match="https://github.com/"):
+        with pytest.raises(ValueError, match=r"https://github\.com/"):
             _parse_github_url("-not-a-url")
 
 
@@ -446,7 +447,7 @@ class TestParseHardware:
         bundle_dir.mkdir()
 
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="bundle.yaml"):
+        with pytest.raises(ValueError, match=r"bundle\.yaml"):
             svc._parse_hardware(bundle_dir)
 
     def test_raises_with_field_name_on_missing_int_field(self, tmp_path: Path) -> None:
@@ -454,7 +455,7 @@ class TestParseHardware:
         hw = {k: v for k, v in _HW_YAML.items() if k != "min_disk_gb"}
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="hardware.min_disk_gb"):
+        with pytest.raises(ValueError, match=r"hardware\.min_disk_gb"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_raises_on_non_integer_field_value(self, tmp_path: Path) -> None:
@@ -462,7 +463,7 @@ class TestParseHardware:
         hw = {**_HW_YAML, "min_disk_gb": "one hundred"}
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="min_disk_gb.*integer"):
+        with pytest.raises(ValueError, match=r"min_disk_gb.*integer"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_rejects_float_for_int_field(self, tmp_path: Path) -> None:
@@ -473,7 +474,7 @@ class TestParseHardware:
         hw = {**_HW_YAML, "min_disk_gb": 150.5}
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="min_disk_gb.*integer"):
+        with pytest.raises(ValueError, match=r"min_disk_gb.*integer"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_rejects_decimal_string_for_int_field(self, tmp_path: Path) -> None:
@@ -481,7 +482,7 @@ class TestParseHardware:
         hw = {**_HW_YAML, "min_disk_gb": "150.5"}
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="min_disk_gb.*integer"):
+        with pytest.raises(ValueError, match=r"min_disk_gb.*integer"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_rejects_bool_for_int_field(self, tmp_path: Path) -> None:
@@ -489,7 +490,7 @@ class TestParseHardware:
         hw = {**_HW_YAML, "num_gpus": True}
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="num_gpus.*bool"):
+        with pytest.raises(ValueError, match=r"num_gpus.*bool"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_accepts_integer_valued_string(self, tmp_path: Path) -> None:
@@ -512,7 +513,7 @@ class TestParseHardware:
         hw = {**_HW_YAML, "gpu_whitelist": "RTX_4090"}  # string instead of list
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="gpu_whitelist.*list"):
+        with pytest.raises(ValueError, match=r"gpu_whitelist.*list"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_raises_on_non_string_gpu_whitelist_entry(self, tmp_path: Path) -> None:
@@ -528,7 +529,7 @@ class TestParseHardware:
         hw = {**_HW_YAML, "comfyui_port": "not a number"}
         _write_bundle_yaml(tmp_path / "bad", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="hardware.comfyui_port.*integer"):
+        with pytest.raises(ValueError, match=r"hardware\.comfyui_port.*integer"):
             svc._parse_hardware(tmp_path / "bad")
 
     def test_comfyui_port_default_applied_when_missing(self, tmp_path: Path) -> None:
@@ -564,21 +565,21 @@ class TestParseHardware:
         hw = {**_HW_YAML, "template_hash_id": ""}
         _write_bundle_yaml(tmp_path / "b", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="template_hash_id.*non-empty"):
+        with pytest.raises(ValueError, match=r"template_hash_id.*non-empty"):
             svc._parse_hardware(tmp_path / "b")
 
     def test_template_hash_id_whitespace_only_rejected(self, tmp_path: Path) -> None:
         hw = {**_HW_YAML, "template_hash_id": "   "}
         _write_bundle_yaml(tmp_path / "b", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="template_hash_id.*non-empty"):
+        with pytest.raises(ValueError, match=r"template_hash_id.*non-empty"):
             svc._parse_hardware(tmp_path / "b")
 
     def test_template_hash_id_non_string_rejected(self, tmp_path: Path) -> None:
         hw = {**_HW_YAML, "template_hash_id": 12345}
         _write_bundle_yaml(tmp_path / "b", hw)
         svc = _make_service(tmp_path)
-        with pytest.raises(ValueError, match="template_hash_id.*string"):
+        with pytest.raises(ValueError, match=r"template_hash_id.*string"):
             svc._parse_hardware(tmp_path / "b")
 
 
@@ -808,7 +809,6 @@ class TestFetchAndExtract:
     async def test_atomic_swap_on_extraction(self, tmp_path: Path) -> None:
         """Stale cache_dir content is replaced; staging and old dirs are cleaned up."""
         # Pre-populate cache_dir with stale content
-        tmp_path.mkdir(parents=True, exist_ok=True)
         (tmp_path / "stale.txt").write_text("old")
 
         tarball = _make_test_tarball(
@@ -1051,7 +1051,9 @@ class TestTarballHardening:
         with pytest.raises(RuntimeError, match="max download size"):
             await svc._fetch_and_extract()
 
-        assert not tmp_path.exists() or not (tmp_path / "bundle-index.yaml").exists()
+        cache_dir = anyio.Path(tmp_path)
+        bundle_index = anyio.Path(tmp_path / "bundle-index.yaml")
+        assert not await cache_dir.exists() or not await bundle_index.exists()
 
     async def test_content_length_header_exceeds_cap_short_circuits(self, tmp_path: Path) -> None:
         """Content-Length header above cap raises before stream is fully consumed."""

@@ -35,7 +35,7 @@ class JobStatusPayload(msgspec.Struct, kw_only=True):
 
 class JobProgressPayload(msgspec.Struct, kw_only=True):
     job_id: UUID
-    progress_pct: int  # 0–100
+    progress_pct: int  # 0 to 100
     generation_type: str
 
 

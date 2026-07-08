@@ -261,7 +261,7 @@ class TestUpdateProfile:
         assert call_kwargs["date_of_birth"] == date(1999, 9, 9)
 
     async def test_dob_exactly_18_today_verifies_and_stores(self) -> None:
-        today = date.today()
+        today = datetime.now(UTC).date()
         dob_exactly_18 = today.replace(year=today.year - 18)
         user = _make_user(age_verified_at=None, date_of_birth=None)
         verified_user = _make_user(
@@ -284,7 +284,7 @@ class TestUpdateProfile:
         user = _make_user(age_verified_at=None, date_of_birth=None)
         svc, mock_repo, _ = _make_service(user)
         mock_repo.email_exists = AsyncMock(return_value=False)
-        today = date.today()
+        today = datetime.now(UTC).date()
 
         with pytest.raises(AgeVerificationError, match="at least 18"):
             await svc.update_profile(

@@ -39,8 +39,8 @@ class OrganizationController(Controller):
 
     path = "/v1/organizations"
     tags: Sequence[str] | None = ["Organizations"]
-    guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     @post("/")
     async def create_organization(

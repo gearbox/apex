@@ -57,8 +57,8 @@ class GpuSessionController(Controller):
 
     path = "/v1/sessions"
     tags: Sequence[str] | None = ["GPU Sessions"]
-    guards = [auth_guard]
-    dependencies = {
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
         "current_user_id": Provide(get_current_user_id),
     }
 

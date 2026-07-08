@@ -72,8 +72,8 @@ class AdminHealthController(Controller):
 
     path = "/v1/admin/health"
     tags: Sequence[str] | None = ["admin", "health"]
-    guards = [auth_guard]
-    dependencies = {
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
         "admin_user": Provide(get_current_admin_user),
     }
 
@@ -81,7 +81,7 @@ class AdminHealthController(Controller):
     async def detailed(
         self,
         health_service: HealthService,
-        admin_user: User,  # noqa: ARG002  — triggers admin authorization check
+        admin_user: User,  # noqa: ARG002
     ) -> DetailedHealthResponse:
         """Full system health — all categories, latencies, metadata."""
         data: dict[str, Any] = await health_service.detailed()
@@ -100,7 +100,7 @@ class AdminHealthController(Controller):
     async def stream(
         self,
         health_service: HealthService,
-        admin_user: User,  # noqa: ARG002  — triggers admin authorization check
+        admin_user: User,  # noqa: ARG002
     ) -> ServerSentEvent:
         """SSE stream of real-time health snapshots for the admin panel."""
         settings = get_settings()
@@ -115,7 +115,7 @@ class AdminHealthController(Controller):
     async def history(
         self,
         session: AsyncSession,
-        admin_user: User,  # noqa: ARG002  — triggers admin authorization check
+        admin_user: User,  # noqa: ARG002
         after: str | None = None,
         before: str | None = None,
         limit: int = 60,

@@ -96,6 +96,21 @@ class TestConfigureLogging:
         std_logger = logging.getLogger("test.stdlib.bridge")
         std_logger.info("stdlib test message after configure_logging")
 
+    def test_structlog_positional_args_format_event(
+        self, minimal_settings: Settings, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        configure_logging(minimal_settings)
+
+        structlog.get_logger("test.structlog.format").info(
+            "%s.event",
+            "formatted",
+            key="value",
+        )
+
+        output = capsys.readouterr().out
+        assert "formatted.event" in output
+        assert "positional_args" not in output
+
 
 # ---------------------------------------------------------------------------
 # get_logger

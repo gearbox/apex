@@ -40,8 +40,8 @@ class AdminManagementController(Controller):
 
     path = "/v1/admin/manage"
     tags: Sequence[str] | None = ["Admin Management"]
-    guards = [auth_guard]
-    dependencies = {
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
         "superadmin": Provide(get_current_superadmin_user),
         "admin_mgmt": Provide(lambda: AdminManagementService(), sync_to_thread=False),
     }

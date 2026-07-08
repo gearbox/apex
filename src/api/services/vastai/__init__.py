@@ -11,11 +11,11 @@ from .exceptions import (
 )
 
 __all__ = [
+    "InstanceNotFoundError",
+    "NoCapacityError",
+    "OfferTakenError",
     "VastAIClient",
     "VastAIError",
-    "VastAIRateLimitError",
-    "NoCapacityError",
     "VastAIPaymentError",
-    "InstanceNotFoundError",
-    "OfferTakenError",
+    "VastAIRateLimitError",
 ]

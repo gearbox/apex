@@ -43,9 +43,9 @@ pytestmark = pytest.mark.asyncio
 def _make_settings() -> Settings:
     return Settings(
         jwt_secret_key="a_valid_test_secret_key_that_is_long_enough_256bits",
-        stripe_secret_key_vex="sk_test_vex",  # noqa: S106
-        stripe_webhook_secret_vex="whsec_test_vex",  # noqa: S106
-        nowpayments_ipn_secret_vex="ipn_secret_vex",  # noqa: S106
+        stripe_secret_key_vex="sk_test_vex",
+        stripe_webhook_secret_vex="whsec_test_vex",
+        nowpayments_ipn_secret_vex="ipn_secret_vex",
     )
 
 

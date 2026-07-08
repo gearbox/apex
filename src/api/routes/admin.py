@@ -109,8 +109,8 @@ class AdminController(Controller):
 
     path = "/v1/admin"
     tags: Sequence[str] | None = ["Admin"]
-    guards = [auth_guard]
-    dependencies = {
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
         "admin_user": Provide(get_current_admin_user),
     }
 

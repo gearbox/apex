@@ -32,7 +32,7 @@ class _FakeAsyncSession(AsyncSession):
     commit / flush are overwritten with AsyncMocks by the fixture.
     """
 
-    def __init__(self) -> None:  # noqa: D107
+    def __init__(self) -> None:
         pass  # intentionally skip AsyncSession.__init__
 
 
@@ -151,7 +151,7 @@ def _create_org_app(
 
     def _org_balance_handler(
         request: object,  # noqa: ARG001
-        exc: OrganizationBalanceError,  # noqa: ARG001
+        exc: OrganizationBalanceError,
     ) -> Response:
         return Response(
             content={"detail": str(exc), "balance": exc.balance},

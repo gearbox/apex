@@ -805,7 +805,7 @@ class BundleIndexService:
         """
         # Directories, symlinks, hardlinks, devices: no body. Use built-in extract.
         if not member.isreg():
-            tf.extract(member, dest, set_attrs=False)  # noqa: S202  # filter applied above
+            tf.extract(member, dest, set_attrs=False)  # filter applied above
             return 0
 
         target = dest / member.name

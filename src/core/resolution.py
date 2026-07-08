@@ -32,7 +32,7 @@ class ResolvedDimensions:
 
 def _snap(value: float, multiple: int) -> int:
     """Round value to the nearest positive multiple of `multiple`."""
-    snapped = int(round(value / multiple)) * multiple
+    snapped = round(value / multiple) * multiple
     return max(multiple, snapped)
 
 
@@ -72,7 +72,7 @@ def resolve_dimensions(
 
     Exactly one of (tier) or (explicit_width AND explicit_height) drives sizing;
     callers must enforce mutual exclusion before this point. If explicit dims are
-    given they are snapped + clamped (forgiving). If a tier is given, W×H is
+    given they are snapped + clamped (forgiving). If a tier is given, W*H is
     computed to hit the tier's MP budget (clamped to max_megapixels) for the
     requested aspect ratio.
 

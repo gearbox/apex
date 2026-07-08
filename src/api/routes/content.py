@@ -51,7 +51,7 @@ class ContentProxyController(Controller):
 
     path = "/v1/content"
     tags: Sequence[str] | None = ["Content"]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     @get("/outputs/{output_id:uuid}", guards=[content_auth_guard])
     async def proxy_output(

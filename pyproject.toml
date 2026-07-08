@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.18.9"
+version = "0.18.10"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -87,6 +87,11 @@ select = [
     "ISC",  # Catches the missing-comma-in-a-list silent string-join bug
     "PIE",  # Misc linters
     "RET",  # flake8-return
+    "ASYNC",  # flake8-async enforces async discipline
+    "DTZ",  # flake8-datetimez enforces tz-aware datetimes
+    "RUF",  # Ruff-native rules
+    "LOG",  # flake8-logging
+    "G",    # logging-format
     # "T20",  # No stray print
 ]
 ignore = [
@@ -97,6 +102,7 @@ ignore = [
     "S607",   # FIX in production, Starting a process with a partial executable path
     "ISC001", # conflicts with the formatter
 ]
+logger-objects = ["structlog.get_logger", "src.core.logging.get_logger"]  # so LOG/G see structlog
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
     "S101",   # Ignore use of assert detected

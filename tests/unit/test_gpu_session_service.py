@@ -48,6 +48,10 @@ _JOB_REPO_PATH = "src.api.services.gpu_session.service.JobRepository"
 # ---------------------------------------------------------------------------
 
 
+def _datetime_utc(*args: Any, **kwargs: Any) -> datetime:
+    return datetime(*args, tzinfo=kwargs.pop("tzinfo", UTC), **kwargs)
+
+
 def _make_billing_mock() -> MagicMock:
     """Return a MagicMock whose async billing methods are explicit AsyncMocks.
 
@@ -807,7 +811,7 @@ class TestStartSession:
         call_args = mocks["billing_service"].check_and_reserve.call_args
         # Positional: (account_id, token_cost, session_id)
         assert call_args.args[0] == mocks["account_id"]
-        assert call_args.args[1] == 500  # _MIN_BILLABLE_MINUTES (5) × tokens_per_minute (100)
+        assert call_args.args[1] == 500  # _MIN_BILLABLE_MINUTES (5) * tokens_per_minute (100)
 
         # The session_id passed to check_and_reserve must equal the id passed to repo.create
         # (both come from the same new_id() call inside start_session)
@@ -977,7 +981,7 @@ class TestPauseSession:
         assert result.status == GpuSessionStatus.paused
 
     async def test_sets_paused_at(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         product_id = "vex"
         session = _make_gpu_session(user_id=user_id, product_id=product_id, paused_at=None)
@@ -1083,7 +1087,7 @@ class TestResumeSession:
         assert result.status == GpuSessionStatus.resuming
 
     async def test_sets_resumed_at(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(
             user_id=user_id, status=GpuSessionStatus.paused, resumed_at=None
@@ -1306,7 +1310,7 @@ class TestStopSession:
         )
 
     async def test_confirmed_from_paused(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.paused)
 
@@ -1326,7 +1330,7 @@ class TestStopSession:
         assert result.status == GpuSessionStatus.stopped
 
     async def test_confirmed_from_stale(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.stale)
 
@@ -1511,7 +1515,7 @@ class TestFinalizeBilling:
         ):
             mock_dt.now.return_value = stopped_now
             # datetime.fromisoformat / UTC / timedelta still need to work
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
 
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
@@ -1586,7 +1590,7 @@ class TestFinalizeBilling:
         billing.settle_session_usage.assert_awaited_once()
         args = billing.settle_session_usage.await_args.args
         kwargs = billing.settle_session_usage.await_args.kwargs
-        assert args[1] == 100  # overage = (6 × 100) - 500 reserved
+        assert args[1] == 100  # overage = (6 * 100) - 500 reserved
         assert kwargs["session_id"] == session.id
         assert kwargs["extra_metadata"]["billable_minutes"] == 6
 
@@ -1684,7 +1688,7 @@ class TestPauseResumeDuration:
 
     async def test_resume_updates_total_paused_seconds_with_pause_duration(self) -> None:
         """resumed_at - paused_at must be persisted via repo.add_paused_seconds."""
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         paused_at = datetime.now(UTC) - timedelta(minutes=10)
         session = _make_gpu_session(
@@ -1700,7 +1704,7 @@ class TestPauseResumeDuration:
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
         ):
             mock_dt.now.return_value = resume_now
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
@@ -1737,7 +1741,7 @@ class TestPauseResumeDuration:
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
         ):
             mock_dt.now.return_value = resume_now
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = session
@@ -1884,7 +1888,7 @@ class TestStopFromPausedRollup:
         settings = _make_settings()
         settings.gpu_session_tokens_per_minute = 100
 
-        service, mocks = _make_service(settings=settings)
+        service, _mocks = _make_service(settings=settings)
         user_id = uuid4()
         started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         paused = started + timedelta(minutes=10)
@@ -1903,7 +1907,7 @@ class TestStopFromPausedRollup:
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
         ):
             mock_dt.now.return_value = stop_now
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
 
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
@@ -1951,7 +1955,7 @@ class TestStopFromPausedRollup:
             patch("src.api.services.gpu_session.service.BillingRepository") as MockBR,
         ):
             mock_dt.now.return_value = stop_now
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
 
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
@@ -1959,7 +1963,7 @@ class TestStopFromPausedRollup:
 
             mock_billing_repo = AsyncMock()
             MockBR.return_value = mock_billing_repo
-            # Original debit of 500 (5 min × 100 tok/min). Billable below covers
+            # Original debit of 500 (5 min * 100 tok/min). Billable below covers
             # the same 500-token base reservation.
             mock_billing_repo.get_debit_for_job.return_value = MagicMock(
                 amount=-500, account_id=mocks["account_id"]
@@ -2015,7 +2019,7 @@ class TestStopFromPausedRollup:
             patch("src.api.services.gpu_session.service.BillingRepository") as MockBR,
         ):
             mock_dt.now.return_value = stop_now
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
 
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
@@ -2042,7 +2046,7 @@ class TestStopFromPausedRollup:
 
         billing = mocks["billing_service"]
         # 35 min wall - 20 min paused = 15 min active
-        # 15 × 100 = 1500 billable, debit 500 → 1000 overage
+        # 15 * 100 = 1500 billable, debit 500 → 1000 overage
         billing.settle_session_usage.assert_awaited_once()
         args = billing.settle_session_usage.await_args.args
         assert args[1] == 1000
@@ -2074,7 +2078,7 @@ class TestStopFromPausedRollup:
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
         ):
             mock_dt.now.return_value = stop_now
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
 
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
@@ -2116,7 +2120,7 @@ class TestStopFromPausedRollup:
             patch("src.api.services.gpu_session.service.datetime") as mock_dt,
         ):
             mock_dt.now.return_value = stop_now
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = _datetime_utc
 
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
@@ -2160,7 +2164,7 @@ class TestLedgerAuthorityForBilling:
             (1000) as cap, not a freshly-computed value.
 
         Construction: original debit = 500 tokens (lower than what new rate
-        would imply). Session runs 1 min → billable = 5 min × 100 = 500.
+        would imply). Session runs 1 min → billable = 5 min * 100 = 500.
         Refund = max(0, 500 - 500) = 0. No refund issued. Verifies the
         ledger value is read.
         """
@@ -2187,7 +2191,7 @@ class TestLedgerAuthorityForBilling:
         ):
             mock_billing_repo = AsyncMock()
             MockBR.return_value = mock_billing_repo
-            # Ledger debit is 500. Billable = 5×100 = 500. No refund, no overage.
+            # Ledger debit is 500. Billable = 5 * 100 = 500. No refund, no overage.
             mock_billing_repo.get_debit_for_job.return_value = MagicMock(
                 amount=-500, account_id=mocks["account_id"]
             )
@@ -2375,7 +2379,7 @@ class TestFinalizeBillingForSession:
     """
 
     async def test_returns_true_when_billing_finalized_at_set_after_call(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         session = _make_gpu_session(user_id=uuid4())
         refreshed = _make_gpu_session(billing_finalized_at=datetime.now(UTC))
 
@@ -2634,7 +2638,7 @@ class TestStopWithJobSweep:
 
     async def test_stop_without_sweep_service_still_works(self) -> None:
         """Service with no sweep (job_sweep_service=None) stops normally."""
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         assert service._job_sweep is None
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)

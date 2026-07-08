@@ -66,13 +66,13 @@ async def main() -> int:
     # Use start() if you want it to *raise* on the first sync; sync() logs
     # and swallows. For a CLI validator we want the loud version:
     try:
-        await svc._sync_once(raise_on_error=True)  # noqa: SLF001 — tooling
+        await svc._sync_once(raise_on_error=True)
     except Exception:
         log.exception("validate_bundles.sync_failed")
         return 2
 
-    model_index = list(svc._model_index)  # noqa: SLF001 — tooling
-    bundle_index = list(svc._bundle_index)  # noqa: SLF001 — tooling
+    model_index = list(svc._model_index)
+    bundle_index = list(svc._bundle_index)
 
     log.info(
         "validate_bundles.result",

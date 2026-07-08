@@ -66,8 +66,8 @@ class BillingController(Controller):
 
     path = "/v1/billing"
     tags: Sequence[str] | None = ["Billing"]
-    guards = [auth_guard]
-    dependencies = {
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
         "current_user_id": Provide(get_current_user_id),
     }
 

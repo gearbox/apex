@@ -120,8 +120,8 @@ class ProvidersController(Controller):
 
     path = "/v1/providers"
     tags: Sequence[str] | None = ["Providers"]
-    guards = [optional_auth_guard]
-    dependencies = {"current_user_id": Provide(get_optional_user_id)}
+    guards = [optional_auth_guard]  # noqa: RUF012
+    dependencies = {"current_user_id": Provide(get_optional_user_id)}  # noqa: RUF012
 
     @get("/")
     async def list_providers(

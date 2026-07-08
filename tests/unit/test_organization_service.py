@@ -94,7 +94,7 @@ class TestCreateOrganization:
                 lambda _: repo,
             )
             svc = OrganizationService()
-            org, account = await svc.create_organization(
+            _org, _account = await svc.create_organization(
                 "My Org", uuid4(), session=session, product_id="vex"
             )
 

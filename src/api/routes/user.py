@@ -62,8 +62,8 @@ class UserController(Controller):
 
     path = "/v1/users"
     tags: Sequence[str] | None = ["Users"]
-    guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     @get("/me")
     async def get_profile(

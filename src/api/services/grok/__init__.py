@@ -615,15 +615,15 @@ class GrokClient:
 # -----------------------------------------------------------------------------
 
 __all__ = [
+    "GrokAPIError",
     "GrokClient",
     "GrokClientError",
     "GrokConnectionError",
-    "GrokAPIError",
+    "GrokImageResult",
+    "GrokInvalidRequestError",
     "GrokModerationError",
     "GrokRateLimitError",
-    "GrokInvalidRequestError",
     "GrokTimeoutError",
-    "GrokImageResult",
-    "GrokVideoResult",
     "GrokVideoJobStarted",
+    "GrokVideoResult",
 ]

@@ -288,7 +288,7 @@ def _build_openapi_config(settings: Settings) -> OpenAPIConfig:
 
 
 @asynccontextmanager
-async def lifespan(app: Litestar) -> AsyncGenerator[None]:  # noqa: ARG001
+async def lifespan(app: Litestar) -> AsyncGenerator[None]:
     """Application lifespan manager.
 
     Initializes services on startup and cleans up on shutdown.

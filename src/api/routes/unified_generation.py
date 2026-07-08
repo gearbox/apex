@@ -62,8 +62,8 @@ class UnifiedGenerationController(Controller):
 
     path = "/v1/generate"
     tags: Sequence[str] | None = ["Generation"]
-    guards = [auth_guard]
-    dependencies = {
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
         "current_user_id": Provide(get_current_user_id),
     }
 

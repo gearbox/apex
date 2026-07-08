@@ -34,8 +34,8 @@ class GalleryController(Controller):
 
     path = "/v1/gallery"
     tags: Sequence[str] | None = ["Gallery"]
-    guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     @get("/")
     async def list_gallery(

@@ -43,8 +43,8 @@ class UnifiedJobController(Controller):
 
     path = "/v1/jobs"
     tags: Sequence[str] | None = ["Jobs"]
-    guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     # -------------------------------------------------------------------------
     # GET /v1/jobs
