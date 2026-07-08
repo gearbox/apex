@@ -43,7 +43,7 @@ class AdminManagementController(Controller):
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "superadmin": Provide(get_current_superadmin_user),
-        "admin_mgmt": Provide(lambda: AdminManagementService(), sync_to_thread=False),
+        "admin_mgmt": Provide(AdminManagementService, sync_to_thread=False),
     }
 
     @get("/admins")

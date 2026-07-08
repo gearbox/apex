@@ -75,6 +75,7 @@ def _run_migrations(db_url: str) -> None:
         env=env,
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(

@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import text
 
+from src.api.services.health.base import ComponentHealth
 from src.core.enums import ComponentCategory, ComponentStatus
-
-from ..base import ComponentHealth
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

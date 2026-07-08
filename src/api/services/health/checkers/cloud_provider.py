@@ -15,9 +15,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.services.health.base import ComponentHealth
 from src.core.enums import ComponentCategory, ComponentStatus
-
-from ..base import ComponentHealth
 
 if TYPE_CHECKING:
     import httpx

@@ -20,8 +20,8 @@ _ENV_STAGING_EXAMPLE = _REPO_ROOT / ".env.staging.example"
 def _parse_env_file(path: Path) -> dict[str, str]:
     """Parse a .env file the way docker compose / pydantic-settings does."""
     out: dict[str, str] = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         if "=" not in line:

@@ -67,6 +67,7 @@ def _extract_sync(video_bytes: bytes) -> bytes | None:
             ],
             capture_output=True,
             timeout=30,
+            check=False,
         )
 
         if result.returncode != 0:

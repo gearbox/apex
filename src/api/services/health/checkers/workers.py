@@ -6,9 +6,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from src.api.services.health.base import ComponentHealth
 from src.core.enums import ComponentCategory, ComponentStatus
-
-from ..base import ComponentHealth
 
 if TYPE_CHECKING:
     from src.workers.base import PeriodicWorker
