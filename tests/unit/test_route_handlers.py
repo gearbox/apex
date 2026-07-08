@@ -2716,7 +2716,7 @@ class TestContentStreamFromR2:
         @asynccontextmanager
         async def _failing_get_client() -> AsyncIterator[None]:
             raise StorageError("r2 unreachable")
-            yield  # noqa: unreachable
+            yield
 
         r2_mock._get_client = _failing_get_client
 

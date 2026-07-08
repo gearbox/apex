@@ -1112,9 +1112,10 @@ class GpuSessionService:
             # Programming-error guard: _stop_confirmed is only reachable via
             # stop_session for sessions with started_at IS NOT NULL. If this fires
             # in production, something bypassed the public API.
-            assert session_row.started_at is not None, (
-                "_stop_confirmed reached with started_at=NULL — caller bypassed stop_session"
-            )
+            if session_row.started_at is None:
+                raise RuntimeError(
+                    "_stop_confirmed reached with started_at=NULL — caller bypassed stop_session"
+                )
             previous_status = str(session_row.status)
 
             if session_row.status == GpuSessionStatus.paused and session_row.paused_at is not None:

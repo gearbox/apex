@@ -93,14 +93,11 @@ select = [
     "LOG",  # flake8-logging
     "G",    # logging-format
     "TRY",  # exception hygiene
-    # "T20",  # No stray print
+    "T20",  # No stray print
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
     "B008",   # do not perform function calls in argument defaults
-    "S101",   # FIX in production, Ignore use of assert detected
-    "S108",   # FIX in production, probable insecure usage of temporary file or directory
-    "S607",   # FIX in production, Starting a process with a partial executable path
     "ISC001", # conflicts with the formatter
     "TRY003", # conflicts with explicit RuntimeError
 ]
@@ -113,6 +110,9 @@ logger-objects = ["structlog.get_logger", "src.core.logging.get_logger"]  # so L
     "S107",   # Ignore possible hardcoded password assigned to function default within the tests directory
     "S607",   # Ignore starting a process with a partial executable path
 ]
+"src/cli/**/*.py" = ["T20"]   # Typer/Rich print legitimately
+"tools/**/*.py" = ["T20"]   # Typer/Rich print legitimately
+"tests/contract/*.py" = ["T20"]   # TODO: Review after implementing automation, now print legitimately
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

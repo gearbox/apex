@@ -216,7 +216,10 @@ class AishaGenerationProvider:
         else:
             # input_image_id is not None at this point (mutual exclusion enforced
             # above and the early-return handled the both-None case).
-            assert request.input_image_id is not None
+            if request.input_image_id is None:
+                raise RuntimeError(
+                    "input_image_id is None after mutual-exclusion checks — invariant violated"
+                )
             user_image = await UserImageRepository(session).get(request.input_image_id)
             if user_image is None:
                 raise ValueError(f"Input image {request.input_image_id} not found")

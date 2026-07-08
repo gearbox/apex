@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import msgspec
@@ -39,14 +39,14 @@ from src.api.services.pricing import PricingService
 from src.core.config import TOKEN_PACKAGES
 from src.core.product import PaymentProvider, ProductConfig
 
+if TYPE_CHECKING:
+    from src.db.models.billing import TokenTransaction
+
 logger = structlog.get_logger(__name__)
 
 
-def _txn_to_response(txn: object) -> TransactionResponse:
+def _txn_to_response(txn: TokenTransaction) -> TransactionResponse:
     """Convert a TokenTransaction model to a response struct."""
-    from src.db.models.billing import TokenTransaction
-
-    assert isinstance(txn, TokenTransaction)
     return TransactionResponse(
         id=txn.id,
         transaction_type=txn.transaction_type,
