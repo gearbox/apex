@@ -43,6 +43,10 @@ class PaymentVerificationError(Exception):
     """Webhook signature verification failed. → HTTP 400"""
 
 
+class TopUpAmountError(ValueError):
+    """Top-up amount is outside configured payment bounds. → HTTP 400"""
+
+
 class OrganizationPermissionError(Exception):
     """Insufficient org role for this action. → HTTP 403"""
 

@@ -9,7 +9,7 @@ providers with 403 *before* the idempotency key is consumed.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -22,6 +22,7 @@ from src.api.schemas.billing import (
     TopUpNowPaymentsRequest,
     TopUpStripeRequest,
 )
+from src.api.services.billing_errors import TopUpAmountError
 from src.core.product_registry import SYNTHARA_CONFIG, VEX_CONFIG
 
 pytestmark = pytest.mark.unit
@@ -41,7 +42,7 @@ class TestTopupStripeProviderGuard:
             await BillingController.topup_stripe.fn(
                 MagicMock(),
                 current_user_id=uuid4(),
-                data=TopUpStripeRequest(package_id="starter"),
+                data=TopUpStripeRequest(amount_usd=100),
                 session=AsyncMock(),
                 billing_service=AsyncMock(),
                 payment_service=AsyncMock(),
@@ -71,7 +72,7 @@ class TestTopupStripeProviderGuard:
         response = await BillingController.topup_stripe.fn(
             MagicMock(),
             current_user_id=uuid4(),
-            data=TopUpStripeRequest(package_id="starter"),
+            data=TopUpStripeRequest(amount_usd=100),
             session=AsyncMock(),
             billing_service=billing_service,
             payment_service=payment_service,
@@ -96,7 +97,7 @@ class TestTopupNowPaymentsProviderGuard:
             await BillingController.topup_nowpayments.fn(
                 MagicMock(),
                 current_user_id=uuid4(),
-                data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+                data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
                 session=AsyncMock(),
                 billing_service=AsyncMock(),
                 payment_service=AsyncMock(),
@@ -125,7 +126,7 @@ class TestTopupNowPaymentsProviderGuard:
         response = await BillingController.topup_nowpayments.fn(
             MagicMock(),
             current_user_id=uuid4(),
-            data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+            data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
             session=AsyncMock(),
             billing_service=billing_service,
             payment_service=payment_service,
@@ -154,7 +155,7 @@ class TestRejectedTopupIdempotencyKey:
             await BillingController.topup_nowpayments.fn(
                 MagicMock(),
                 current_user_id=uuid4(),
-                data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+                data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
                 session=AsyncMock(),
                 billing_service=AsyncMock(),
                 payment_service=AsyncMock(),
@@ -182,7 +183,7 @@ class TestRejectedTopupIdempotencyKey:
         response = await BillingController.topup_nowpayments.fn(
             MagicMock(),
             current_user_id=uuid4(),
-            data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+            data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
             session=AsyncMock(),
             billing_service=billing_service,
             payment_service=payment_service,
@@ -197,3 +198,90 @@ class TestRejectedTopupIdempotencyKey:
         assert check_kwargs["idempotency_key"] == shared_key
         assert check_kwargs["product_id"] == "vex"
         assert response.status_code == 201
+
+
+class TestTopupAmountValidation:
+    async def test_topup_stripe_amount_error_returns_400_and_releases_key(self) -> None:
+        record_id = uuid4()
+        billing_service = AsyncMock()
+        billing_service.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        payment_service = AsyncMock()
+        payment_service.create_stripe_checkout = AsyncMock(
+            side_effect=TopUpAmountError("amount_usd must be between 5 and 10000 (got 1)")
+        )
+        idempotency_service = AsyncMock()
+        idempotency_service.check = AsyncMock(return_value=record_id)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await BillingController.topup_stripe.fn(
+                MagicMock(),
+                current_user_id=uuid4(),
+                data=TopUpStripeRequest(amount_usd=1),
+                session=AsyncMock(),
+                billing_service=billing_service,
+                payment_service=payment_service,
+                product_id="vex",
+                product_config=VEX_CONFIG,
+                idempotency_service=idempotency_service,
+                idempotency_key_header="key-amount-low",
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "amount_usd must be between" in str(exc_info.value.detail)
+        idempotency_service.fail.assert_awaited_once_with(record_id, session=ANY)
+
+    async def test_topup_nowpayments_amount_error_returns_400_and_releases_key(self) -> None:
+        record_id = uuid4()
+        billing_service = AsyncMock()
+        billing_service.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        payment_service = AsyncMock()
+        payment_service.create_nowpayments_invoice = AsyncMock(
+            side_effect=TopUpAmountError("amount_usd must be between 5 and 10000 (got 10001)")
+        )
+        idempotency_service = AsyncMock()
+        idempotency_service.check = AsyncMock(return_value=record_id)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await BillingController.topup_nowpayments.fn(
+                MagicMock(),
+                current_user_id=uuid4(),
+                data=TopUpNowPaymentsRequest(amount_usd=10001, pay_currency="btc"),
+                session=AsyncMock(),
+                billing_service=billing_service,
+                payment_service=payment_service,
+                product_id="vex",
+                product_config=VEX_CONFIG,
+                idempotency_service=idempotency_service,
+                idempotency_key_header="key-amount-high",
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "amount_usd must be between" in str(exc_info.value.detail)
+        idempotency_service.fail.assert_awaited_once_with(record_id, session=ANY)
+
+    async def test_topup_stripe_generic_value_error_is_not_mapped_to_400(self) -> None:
+        record_id = uuid4()
+        billing_service = AsyncMock()
+        billing_service.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        payment_service = AsyncMock()
+        payment_service.create_stripe_checkout = AsyncMock(
+            side_effect=ValueError("Stripe secret key not configured for product vex")
+        )
+        idempotency_service = AsyncMock()
+        idempotency_service.check = AsyncMock(return_value=record_id)
+
+        with pytest.raises(ValueError, match="Stripe secret key"):
+            await BillingController.topup_stripe.fn(
+                MagicMock(),
+                current_user_id=uuid4(),
+                data=TopUpStripeRequest(amount_usd=100),
+                session=AsyncMock(),
+                billing_service=billing_service,
+                payment_service=payment_service,
+                product_id="vex",
+                product_config=VEX_CONFIG,
+                idempotency_service=idempotency_service,
+                idempotency_key_header="key-config-error",
+            )
+
+        idempotency_service.fail.assert_awaited_once_with(record_id, session=ANY)

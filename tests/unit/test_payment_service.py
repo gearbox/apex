@@ -74,7 +74,7 @@ class TestCreateStripeCheckout:
         ):
             result = await service.create_stripe_checkout(
                 account_id,
-                "starter",
+                100,
                 uuid4(),
                 session=AsyncMock(),
                 product_config=VEX_CONFIG,
@@ -98,12 +98,62 @@ class TestCreateStripeCheckout:
         assert create_kwargs["product_id"] == "vex"
         assert create_kwargs["external_id"] == "cs_test_abc123"
 
-    async def test_raises_for_unknown_package(self) -> None:
-        service = PaymentService(billing_service=AsyncMock(), settings=_make_settings())
-        with pytest.raises(ValueError, match="Invalid package_id"):
+    async def test_stripe_checkout_charges_total_due_and_grants_full_tokens(self) -> None:
+        """D1: amount_usd=100 hits the 5% tier -> total_due=95.00, but
+        tokens_granted is the full pre-discount value (100 * tokens_per_usd)."""
+        settings = _make_settings()
+        service = PaymentService(billing_service=AsyncMock(), settings=settings)
+
+        mock_repo = AsyncMock()
+        mock_repo.get_account = AsyncMock(return_value=MagicMock(id=uuid4()))
+        mock_repo.create_payment = AsyncMock()
+
+        fake_session = MagicMock(id="cs_test_tier", url="https://checkout.stripe.com/pay/x")
+        create_async_mock = AsyncMock(return_value=fake_session)
+
+        def _fake_stripe_client(*, api_key: str) -> MagicMock:
+            del api_key
+            client = MagicMock()
+            client.v1.checkout.sessions.create_async = create_async_mock
+            return client
+
+        with (
+            patch("src.api.services.payment.BillingRepository", return_value=mock_repo),
+            patch("stripe.StripeClient", side_effect=_fake_stripe_client),
+        ):
+            await service.create_stripe_checkout(
+                uuid4(), 100, uuid4(), session=AsyncMock(), product_config=VEX_CONFIG
+            )
+
+        params = create_async_mock.call_args.kwargs["params"]
+        assert params["line_items"][0]["price_data"]["unit_amount"] == 9500  # $95.00 in cents
+        assert params["metadata"]["credits_usd"] == "100"
+
+        create_kwargs = mock_repo.create_payment.call_args.kwargs
+        assert create_kwargs["amount_usd"] == Decimal("95.00")
+        assert create_kwargs["tokens_granted"] == 100 * settings.billing_tokens_per_usd
+        assert create_kwargs["provider_metadata"]["credits_usd"] == 100
+        assert create_kwargs["provider_metadata"]["discount_pct"] == 5
+
+    async def test_amount_below_min_rejected(self) -> None:
+        settings = _make_settings()
+        service = PaymentService(billing_service=AsyncMock(), settings=settings)
+        with pytest.raises(ValueError, match="amount_usd must be between"):
             await service.create_stripe_checkout(
                 uuid4(),
-                "not-a-real-package",
+                settings.billing_min_topup_usd - 1,
+                uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+    async def test_amount_above_max_rejected(self) -> None:
+        settings = _make_settings()
+        service = PaymentService(billing_service=AsyncMock(), settings=settings)
+        with pytest.raises(ValueError, match="amount_usd must be between"):
+            await service.create_stripe_checkout(
+                uuid4(),
+                settings.billing_max_topup_usd + 1,
                 uuid4(),
                 session=AsyncMock(),
                 product_config=VEX_CONFIG,
@@ -118,7 +168,7 @@ class TestCreateStripeCheckout:
             pytest.raises(AccountNotFoundError),
         ):
             await service.create_stripe_checkout(
-                uuid4(), "starter", uuid4(), session=AsyncMock(), product_config=VEX_CONFIG
+                uuid4(), 100, uuid4(), session=AsyncMock(), product_config=VEX_CONFIG
             )
 
     async def test_raises_when_product_key_unconfigured(self) -> None:
@@ -134,7 +184,7 @@ class TestCreateStripeCheckout:
         ):
             await service.create_stripe_checkout(
                 uuid4(),
-                "starter",
+                100,
                 uuid4(),
                 session=AsyncMock(),
                 product_config=SYNTHARA_CONFIG,
@@ -170,7 +220,7 @@ class TestCreateNowPaymentsInvoice:
             patch("httpx.AsyncClient", return_value=mock_http_client),
         ):
             result = await service.create_nowpayments_invoice(
-                account_id, "starter", "btc", uuid4(), session=AsyncMock(), product_id="vex"
+                account_id, 100, "btc", uuid4(), session=AsyncMock(), product_id="vex"
             )
 
         assert result.invoice_url == "https://nowpayments.io/pay/xyz"
@@ -184,6 +234,73 @@ class TestCreateNowPaymentsInvoice:
         sent_json = mock_http_client.post.call_args.kwargs["json"]
         order = json.loads(sent_json["order_id"])
         assert order["payment_id"] == str(create_kwargs["id"])
+        assert "package_id" not in order
+        assert order["credits_usd"] == 100
+
+    async def test_nowpayments_invoice_price_is_total_due(self) -> None:
+        """D1: amount_usd=100 hits the 5% tier -> price_amount=95.0 (total_due
+        as float), tokens_granted stays the full pre-discount value."""
+        settings = _make_settings()
+        service = PaymentService(billing_service=AsyncMock(), settings=settings)
+
+        account_id = uuid4()
+        mock_repo = AsyncMock()
+        mock_repo.get_account = AsyncMock(return_value=MagicMock(id=account_id))
+        mock_repo.create_payment = AsyncMock()
+
+        fake_response = MagicMock()
+        fake_response.raise_for_status = MagicMock()
+        fake_response.json = MagicMock(
+            return_value={"id": "np_invoice_tier", "invoice_url": "https://nowpayments.io/pay/x"}
+        )
+
+        mock_http_client = AsyncMock()
+        mock_http_client.post = AsyncMock(return_value=fake_response)
+        mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+        mock_http_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("src.api.services.payment.BillingRepository", return_value=mock_repo),
+            patch("httpx.AsyncClient", return_value=mock_http_client),
+        ):
+            await service.create_nowpayments_invoice(
+                account_id, 100, "btc", uuid4(), session=AsyncMock(), product_id="vex"
+            )
+
+        sent_json = mock_http_client.post.call_args.kwargs["json"]
+        assert sent_json["price_amount"] == 95.0
+
+        create_kwargs = mock_repo.create_payment.call_args.kwargs
+        assert create_kwargs["amount_usd"] == Decimal("95.00")
+        assert create_kwargs["tokens_granted"] == 100 * settings.billing_tokens_per_usd
+        assert create_kwargs["provider_metadata"]["credits_usd"] == 100
+        assert create_kwargs["provider_metadata"]["discount_pct"] == 5
+
+    async def test_amount_below_min_rejected(self) -> None:
+        settings = _make_settings()
+        service = PaymentService(billing_service=AsyncMock(), settings=settings)
+        with pytest.raises(ValueError, match="amount_usd must be between"):
+            await service.create_nowpayments_invoice(
+                uuid4(),
+                settings.billing_min_topup_usd - 1,
+                "btc",
+                uuid4(),
+                session=AsyncMock(),
+                product_id="vex",
+            )
+
+    async def test_amount_above_max_rejected(self) -> None:
+        settings = _make_settings()
+        service = PaymentService(billing_service=AsyncMock(), settings=settings)
+        with pytest.raises(ValueError, match="amount_usd must be between"):
+            await service.create_nowpayments_invoice(
+                uuid4(),
+                settings.billing_max_topup_usd + 1,
+                "btc",
+                uuid4(),
+                session=AsyncMock(),
+                product_id="vex",
+            )
 
 
 class TestHandleStripeWebhook:
@@ -378,6 +495,53 @@ class TestHandleNowPaymentsWebhook:
         billing.credit.assert_awaited_once()
         # ratio == 1.0 (price_amount == amount_usd) → full tokens_granted credited.
         assert billing.credit.await_args.args[1] == 1000
+        assert payment.status == "completed"
+
+    async def test_order_id_json_parseable_by_webhook_without_package_id(self) -> None:
+        """D7/C4: order_id created by the new tier-based invoice flow has no
+        package_id at all — the webhook parser must resolve payment_id from
+        this new-shape order_id just as readily as from an old-shape one."""
+        settings = _make_settings()
+        internal_payment_id = uuid4()
+        account_id = uuid4()
+
+        order_id_str = json.dumps(
+            {
+                "account_id": str(account_id),
+                "payment_id": str(internal_payment_id),
+                "credits_usd": 100,
+            }
+        )
+        raw_payload = (
+            '{"payment_status":"finished","payment_id":"5077125061",'
+            f"{json.dumps('order_id')}:{json.dumps(order_id_str)},"
+            '"price_amount":10.00}'
+        ).encode()
+        signature = _sign_nowpayments_payload(raw_payload, "np_ipn_vex_123")
+
+        payment = MagicMock()
+        payment.id = internal_payment_id
+        payment.status = "pending"
+        payment.account_id = account_id
+        payment.tokens_granted = 1000
+        payment.product_id = "vex"
+        payment.amount_usd = Decimal("10.00")
+        payment.provider_metadata = {}
+
+        mock_repo = AsyncMock()
+        mock_repo.get_payment_for_update = AsyncMock(return_value=payment)
+        mock_repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+
+        billing = AsyncMock()
+        service = PaymentService(billing_service=billing, settings=settings)
+
+        with patch("src.api.services.payment.BillingRepository", return_value=mock_repo):
+            await service.handle_nowpayments_webhook(
+                raw_payload, signature, session=AsyncMock(), product_id="vex"
+            )
+
+        mock_repo.get_payment_for_update.assert_awaited_once_with(internal_payment_id)
+        billing.credit.assert_awaited_once()
         assert payment.status == "completed"
 
     async def test_wrong_signature_raises(self) -> None:
@@ -712,7 +876,7 @@ class TestNowPaymentsIPNProportionalCreditPolicy:
         assert mock_logger.warning.call_args.args[0] == "payment.underpaid_credited"
 
     @pytest.mark.parametrize("actually_paid", ["9.95", "10.05"])
-    async def test_ipn_finished_within_tolerance_credits_full(self, actually_paid: str) -> None:
+    async def test_ipn_ratio_within_band_snaps_to_full_tokens(self, actually_paid: str) -> None:
         """Ratios in [0.99, 1.01] snap to fully paid, no warning."""
         settings = _make_settings()
         internal_payment_id = uuid4()

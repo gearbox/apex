@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 import msgspec
@@ -51,15 +51,20 @@ class PricingRuleResponse(msgspec.Struct, kw_only=True):
     notes: str | None
 
 
-class TokenPackageResponse(msgspec.Struct, kw_only=True):
-    """Available token purchase package."""
+class TopUpTierResponse(msgspec.Struct, kw_only=True):
+    """A single top-up discount tier."""
 
-    id: str
-    name: str
-    tokens: int
-    bonus_tokens: int
-    total_tokens: int
-    price_usd: str  # string to avoid float precision issues in JSON
+    threshold_usd: int
+    discount_pct: int
+
+
+class TopUpOptionsResponse(msgspec.Struct, kw_only=True):
+    """Top-up pricing configuration for the UI: bounds, rate, and tiers."""
+
+    min_amount_usd: int
+    max_amount_usd: int
+    tokens_per_usd: int
+    tiers: list[TopUpTierResponse]  # ascending by threshold_usd; presets for the UI cards
 
 
 class PaymentResponse(msgspec.Struct, kw_only=True):
@@ -117,15 +122,21 @@ class BillingAccountResponse(msgspec.Struct, kw_only=True):
 
 
 class TopUpStripeRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
-    """Request to create a Stripe checkout session."""
+    """Request to create a Stripe checkout session.
 
-    package_id: str
+    ``amount_usd`` is the nominal credits amount the user chose. The real
+    min/max bounds (``Settings.billing_min_topup_usd`` / ``billing_max_topup_usd``)
+    are enforced in ``PaymentService`` — msgspec ``Meta`` cannot read runtime
+    settings, so only a static lower bound is declared here.
+    """
+
+    amount_usd: Annotated[int, msgspec.Meta(ge=1)]
 
 
 class TopUpNowPaymentsRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
-    """Request to create a NowPayments invoice."""
+    """Request to create a NowPayments invoice. See ``TopUpStripeRequest`` re: bounds."""
 
-    package_id: str
+    amount_usd: Annotated[int, msgspec.Meta(ge=1)]
     pay_currency: str
 
 

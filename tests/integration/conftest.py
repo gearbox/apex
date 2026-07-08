@@ -85,9 +85,7 @@ def _run_docker(args: list[str], *, check: bool = True) -> subprocess.CompletedP
     if check and result.returncode != 0:
         rendered = " ".join(command)
         raise RuntimeError(
-            f"Docker command failed ({rendered}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
+            f"Docker command failed ({rendered}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     return result
 
@@ -99,10 +97,9 @@ def _container_logs(container_name: str) -> str:
 
 def _inspect_container(container_name: str) -> dict[str, Any]:
     result = _run_docker(["inspect", container_name])
-    inspected = json.loads(result.stdout)
-    if not inspected:
-        raise RuntimeError(f"Docker container {container_name!r} was not found.")
-    return inspected[0]
+    if inspected := json.loads(result.stdout):
+        return inspected[0]
+    raise RuntimeError(f"Docker container {container_name!r} was not found.")
 
 
 def _wait_for_postgres_health(container_name: str) -> None:
@@ -134,10 +131,9 @@ def _wait_for_postgres_health(container_name: str) -> None:
 
 def _host_port(container_name: str) -> str:
     ports = _inspect_container(container_name).get("NetworkSettings", {}).get("Ports", {})
-    bindings = ports.get(_POSTGRES_CONTAINER_PORT)
-    if not bindings:
-        raise RuntimeError(f"Docker did not publish {_POSTGRES_CONTAINER_PORT} for {container_name}.")
-    return str(bindings[0]["HostPort"])
+    if bindings := ports.get(_POSTGRES_CONTAINER_PORT):
+        return str(bindings[0]["HostPort"])
+    raise RuntimeError(f"Docker did not publish {_POSTGRES_CONTAINER_PORT} for {container_name}.")
 
 
 def _remove_postgres_container(container_name: str) -> None:
@@ -189,8 +185,7 @@ def _start_postgres_container() -> tuple[str, str]:
 @pytest.fixture(scope="session")
 def test_database_url() -> Generator[str]:
     """Provide the integration database URL, managing Docker unless one is supplied."""
-    explicit_database_url = os.environ.get("TEST_DATABASE_URL")
-    if explicit_database_url:
+    if explicit_database_url := os.environ.get("TEST_DATABASE_URL"):
         yield explicit_database_url
         return
 
