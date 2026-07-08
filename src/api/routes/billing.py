@@ -23,9 +23,10 @@ from src.api.schemas.billing import (
     PricingRuleResponse,
     SetBillingAccountRequest,
     StripeCheckoutResponse,
-    TokenPackageResponse,
     TopUpNowPaymentsRequest,
+    TopUpOptionsResponse,
     TopUpStripeRequest,
+    TopUpTierResponse,
     TransactionResponse,
 )
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
@@ -36,8 +37,9 @@ from src.api.services.event_bus import EventBus
 from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
-from src.core.config import TOKEN_PACKAGES
+from src.core.config import Settings
 from src.core.product import PaymentProvider, ProductConfig
+from src.core.topup_pricing import topup_tiers_for
 
 if TYPE_CHECKING:
     from src.db.models.billing import TokenTransaction
@@ -167,20 +169,27 @@ class BillingController(Controller):
             for r in rules
         ]
 
-    @get("/packages")
-    async def get_packages(self) -> list[TokenPackageResponse]:
-        """Get available token purchase packages."""
-        return [
-            TokenPackageResponse(
-                id=p.id,
-                name=p.name,
-                tokens=p.tokens,
-                bonus_tokens=p.bonus_tokens,
-                total_tokens=p.total_tokens,
-                price_usd=str(p.price_usd),
-            )
-            for p in TOKEN_PACKAGES.values()
-        ]
+    @get("/topup/options")
+    async def get_topup_options(
+        self,
+        settings: Settings,
+        product_id: str,
+    ) -> TopUpOptionsResponse:
+        """Get top-up pricing configuration: bounds, rate, and discount tiers.
+
+        Single source of truth with the actual charge — both this endpoint and
+        the top-up creation paths call ``topup_tiers_for``/``build_quote``.
+        """
+        tiers = topup_tiers_for(product_id, settings)
+        return TopUpOptionsResponse(
+            min_amount_usd=settings.billing_min_topup_usd,
+            max_amount_usd=settings.billing_max_topup_usd,
+            tokens_per_usd=settings.billing_tokens_per_usd,
+            tiers=[
+                TopUpTierResponse(threshold_usd=t.threshold_usd, discount_pct=t.discount_pct)
+                for t in tiers
+            ],
+        )
 
     @get("/account")
     async def get_billing_account(
@@ -280,7 +289,7 @@ class BillingController(Controller):
             )
             result = await payment_service.create_stripe_checkout(
                 account.id,
-                data.package_id,
+                data.amount_usd,
                 current_user_id,
                 session=session,
                 product_config=product_config,
@@ -360,7 +369,7 @@ class BillingController(Controller):
             )
             result = await payment_service.create_nowpayments_invoice(
                 account.id,
-                data.package_id,
+                data.amount_usd,
                 data.pay_currency,
                 current_user_id,
                 session=session,

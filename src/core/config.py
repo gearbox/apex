@@ -1,7 +1,5 @@
 """Application configuration using pydantic-settings."""
 
-import dataclasses
-from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -9,6 +7,7 @@ from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.enums import WorkerMode
+from src.core.topup_pricing import build_tiers
 
 
 class GrokBillingConfig(BaseModel):
@@ -19,32 +18,6 @@ class GrokBillingConfig(BaseModel):
     #            (default — conservative, matches xAI's stated text API policy)
     # "refund" = refund when respect_moderation=False
     #            (use if xAI formally confirms no charge for image/video moderation)
-
-
-@dataclasses.dataclass(frozen=True)
-class TokenPackage:
-    """Definition of a purchasable token package."""
-
-    id: str
-    name: str
-    tokens: int
-    price_usd: Decimal
-    bonus_tokens: int = 0
-
-    @property
-    def total_tokens(self) -> int:
-        return self.tokens + self.bonus_tokens
-
-
-TOKEN_PACKAGES: dict[str, TokenPackage] = {
-    p.id: p
-    for p in [
-        TokenPackage("starter", "Starter", 1_000, Decimal("9.99")),
-        TokenPackage("basic", "Basic", 5_000, Decimal("39.99")),
-        TokenPackage("pro", "Pro", 15_000, Decimal("99.99"), bonus_tokens=1_500),
-        TokenPackage("enterprise", "Enterprise", 50_000, Decimal("299.99"), bonus_tokens=10_000),
-    ]
-}
 
 
 # Unsafe placeholder that ships as the default - reject it at startup
@@ -907,6 +880,34 @@ class Settings(BaseSettings):
         description="Path+query appended to frontend_origin for the Stripe cancel redirect.",
     )
 
+    # Tiered free-amount top-up
+    billing_pricing_tiers: dict[int, int] = Field(
+        default={10: 0, 50: 0, 100: 5, 250: 10},
+        description=(
+            "Top-up discount tiers: threshold_usd -> discount_pct. An amount qualifies for "
+            "the highest threshold at or below it. Env: BILLING_PRICING_TIERS as a JSON "
+            'object, e.g. \'{"10":0,"50":0,"100":5,"250":10}\'.'
+        ),
+    )
+    billing_tokens_per_usd: int = Field(
+        default=100,
+        gt=0,
+        description=(
+            "Tokens granted per USD of credits (pre-discount), derived from the former "
+            "starter package rate (1,000 tokens / $9.99 ~= 100)."
+        ),
+    )
+    billing_min_topup_usd: int = Field(
+        default=5,
+        gt=0,
+        description="Minimum top-up amount in whole USD.",
+    )
+    billing_max_topup_usd: int = Field(
+        default=10_000,
+        gt=0,
+        description="Maximum top-up amount in whole USD.",
+    )
+
     # -------------------------------------------------------------------------
     # Branding & Product Segmentation Settings
     # -------------------------------------------------------------------------
@@ -1077,6 +1078,51 @@ class Settings(BaseSettings):
                 "asgi_workers > 1 requires REDIS_URL for worker leader election, "
                 "or set WORKER_MODE=api_only"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_billing_pricing_tiers(self) -> "Settings":
+        """Fail loud on a malformed top-up pricing config.
+
+        An operator-configured pricing table must never be silently coerced —
+        a typo here directly determines what customers are charged.
+        """
+        tiers = build_tiers(self.billing_pricing_tiers)
+
+        if not tiers:
+            raise ValueError("billing_pricing_tiers must not be empty")
+
+        prev_discount = -1
+        for tier in tiers:
+            if tier.threshold_usd <= 0:
+                raise ValueError(
+                    f"billing_pricing_tiers thresholds must be positive (got {tier.threshold_usd})"
+                )
+            if not 0 <= tier.discount_pct <= 90:
+                raise ValueError(
+                    "billing_pricing_tiers discounts must be in [0, 90] "
+                    f"(got {tier.discount_pct} at threshold {tier.threshold_usd})"
+                )
+            if tier.discount_pct < prev_discount:
+                raise ValueError(
+                    "billing_pricing_tiers discounts must be non-decreasing with ascending "
+                    "thresholds (prevents split-payment arbitrage from a config typo)"
+                )
+            prev_discount = tier.discount_pct
+
+        if self.billing_min_topup_usd >= self.billing_max_topup_usd:
+            raise ValueError(
+                "billing_min_topup_usd must be less than billing_max_topup_usd "
+                f"(got min={self.billing_min_topup_usd}, max={self.billing_max_topup_usd})"
+            )
+
+        lowest_threshold = tiers[0].threshold_usd
+        if lowest_threshold < self.billing_min_topup_usd:
+            raise ValueError(
+                "billing_min_topup_usd must be <= the lowest configured tier threshold "
+                f"(got min={self.billing_min_topup_usd}, lowest threshold={lowest_threshold})"
+            )
+
         return self
 
     # -------------------------------------------------------------------------

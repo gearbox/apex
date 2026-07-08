@@ -11,6 +11,8 @@
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
 > **Last synced:** 2026-06-18 — `master` @ `4ffc1c7f18954f1520a0333f38d5965f84b55708`
 >
+> _2026-07-08: **Breaking change** — replaced fixed token packages with tiered free-amount top-up (§11). `POST /v1/billing/topup/{stripe,nowpayments}` now take `{ amount_usd: int }` instead of `{ package_id: string }`; `GET /v1/billing/packages` is removed, replaced by `GET /v1/billing/topup/options`. Frontend must regenerate types (`gen:api`) and update the top-up UI to a preset-amounts + free-input flow (separate prompt)._
+>
 > _2026-07-08: Added Web Push notifications (§15b) — `GET /v1/push/vapid-public-key`, `POST /v1/push/subscriptions`, `DELETE /v1/push/subscriptions`. Delivers notifications even when the app is closed, unlike SSE (§15). Frontend must regenerate types._
 
 This document captures the API surface that the frontend depends on. It is a **stable reference**, not a live mirror. When endpoints change in the backend, update this document and regenerate `types.ts`.
@@ -1145,20 +1147,28 @@ PricingRuleResponse: {
 }
 ```
 
-#### `GET /v1/billing/packages`
+#### `GET /v1/billing/topup/options`
 
 ```
-Response: TokenPackageResponse[]
+Response: TopUpOptionsResponse
 
-TokenPackageResponse: {
-  id: string,
-  name: string,
-  tokens: int,
-  bonus_tokens: int,
-  total_tokens: int,
-  price_usd: string      // decimal string e.g. "9.99"
+TopUpOptionsResponse: {
+  min_amount_usd: int,
+  max_amount_usd: int,
+  tokens_per_usd: int,
+  tiers: TopUpTierResponse[]     // ascending by threshold_usd; presets for the UI cards
+}
+
+TopUpTierResponse: {
+  threshold_usd: int,
+  discount_pct: int
 }
 ```
+
+Note: an `amount_usd` qualifies for the highest tier whose `threshold_usd <= amount_usd` (0% if
+none match). The discount reduces the price paid, not the token count — see the `POST` endpoints
+below. This same tier table is the single source of truth for both this endpoint and the actual
+charge (`src/core/topup_pricing.py`), so the UI summary and the charge can never disagree.
 
 #### `GET /v1/billing/account`
 
@@ -1177,36 +1187,45 @@ Note:     Sets preferred billing account (personal vs enterprise)
 #### `POST /v1/billing/topup/stripe`
 
 ```
-Request:  { package_id: string }
+Request:  { amount_usd: int }   // whole USD, the nominal credits amount before discount
 Response: { checkout_url: string, session_id: string, payment_id: UUID }
 Status:   201 Created
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Errors:   409 idempotency_conflict
-Note:     Redirect user to checkout_url for Stripe Checkout.
+          400 if amount_usd is outside the configured min/max top-up bounds
+              (see GET /v1/billing/topup/options)
+Note:     Redirect user to checkout_url for Stripe Checkout. The amount charged
+          (Stripe unit_amount, and the stored Payment.amount_usd) is amount_usd with
+          the resolved tier discount applied; tokens_granted is always the full,
+          pre-discount value (amount_usd * tokens_per_usd).
           Supply a fresh UUIDv4 Idempotency-Key per checkout attempt to prevent duplicate payments.
 ```
 
 #### `POST /v1/billing/topup/nowpayments`
 
 ```
-Request:  { package_id: string, pay_currency: string }
+Request:  { amount_usd: int, pay_currency: string }
 Response: { invoice_url: string, payment_id: UUID }
 Status:   201 Created
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Errors:   409 idempotency_conflict
+          400 if amount_usd is outside the configured min/max top-up bounds
+Note:     Same discount-on-price semantics as the Stripe path. NowPayments IPN
+          under/overpayments are credited proportionally to actually_paid/amount_usd
+          (uncapped on overpayment) — never held for manual review.
 ```
 
 ### Billing — Public (no auth)
 
 > **Correction (was inaccurate):** there are currently **no unauthenticated billing endpoints**.
-> The `PublicBillingController` exists in the codebase but is **not mounted** in the app, and the
-> `{ packages, prices }` / `PricingRulePublicResponse` shape it described is **not exposed** by the
-> running API.
+> The unmounted `PublicBillingController` (previously described here) has been deleted along with
+> `TOKEN_PACKAGES` — it duplicated the authenticated packages endpoint and was never wired into
+> the app.
 >
-> `GET /v1/billing/packages` and `GET /v1/billing/pricing` live on the authenticated
+> `GET /v1/billing/topup/options` and `GET /v1/billing/pricing` live on the authenticated
 > `BillingController` (whole controller is behind `auth_guard`) and require
 > `Authorization: Bearer <access_token>`. Their responses are exactly the authenticated shapes
-> documented at the top of this section (`TokenPackageResponse[]` and `PricingRuleResponse[]`).
+> documented at the top of this section (`TopUpOptionsResponse` and `PricingRuleResponse[]`).
 > If a genuinely public pricing surface is needed, it must be mounted first.
 
 ### Billing — Webhooks (no auth)

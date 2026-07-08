@@ -41,7 +41,7 @@ class TestTopupStripeProviderGuard:
             await BillingController.topup_stripe.fn(
                 MagicMock(),
                 current_user_id=uuid4(),
-                data=TopUpStripeRequest(package_id="starter"),
+                data=TopUpStripeRequest(amount_usd=100),
                 session=AsyncMock(),
                 billing_service=AsyncMock(),
                 payment_service=AsyncMock(),
@@ -71,7 +71,7 @@ class TestTopupStripeProviderGuard:
         response = await BillingController.topup_stripe.fn(
             MagicMock(),
             current_user_id=uuid4(),
-            data=TopUpStripeRequest(package_id="starter"),
+            data=TopUpStripeRequest(amount_usd=100),
             session=AsyncMock(),
             billing_service=billing_service,
             payment_service=payment_service,
@@ -96,7 +96,7 @@ class TestTopupNowPaymentsProviderGuard:
             await BillingController.topup_nowpayments.fn(
                 MagicMock(),
                 current_user_id=uuid4(),
-                data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+                data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
                 session=AsyncMock(),
                 billing_service=AsyncMock(),
                 payment_service=AsyncMock(),
@@ -125,7 +125,7 @@ class TestTopupNowPaymentsProviderGuard:
         response = await BillingController.topup_nowpayments.fn(
             MagicMock(),
             current_user_id=uuid4(),
-            data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+            data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
             session=AsyncMock(),
             billing_service=billing_service,
             payment_service=payment_service,
@@ -154,7 +154,7 @@ class TestRejectedTopupIdempotencyKey:
             await BillingController.topup_nowpayments.fn(
                 MagicMock(),
                 current_user_id=uuid4(),
-                data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+                data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
                 session=AsyncMock(),
                 billing_service=AsyncMock(),
                 payment_service=AsyncMock(),
@@ -182,7 +182,7 @@ class TestRejectedTopupIdempotencyKey:
         response = await BillingController.topup_nowpayments.fn(
             MagicMock(),
             current_user_id=uuid4(),
-            data=TopUpNowPaymentsRequest(package_id="starter", pay_currency="btc"),
+            data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="btc"),
             session=AsyncMock(),
             billing_service=billing_service,
             payment_service=payment_service,

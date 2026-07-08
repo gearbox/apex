@@ -18,9 +18,9 @@ from src.api.services.billing_errors import (
     AccountNotFoundError,
     PaymentVerificationError,
 )
-from src.core.config import TOKEN_PACKAGES
 from src.core.enums import PaymentStatus
 from src.core.product import PaymentProvider
+from src.core.topup_pricing import TopUpQuote, build_quote, topup_tiers_for
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
@@ -72,10 +72,38 @@ class PaymentService:
         self._billing = billing_service
         self._settings = settings
 
+    def _quote_for_amount(self, amount_usd: int, *, product_id: str, provider: str) -> TopUpQuote:
+        """Validate range and build the price quote for a top-up amount.
+
+        Raises:
+            ValueError: ``amount_usd`` is outside the configured min/max bounds.
+        """
+        min_usd = self._settings.billing_min_topup_usd
+        max_usd = self._settings.billing_max_topup_usd
+        if not min_usd <= amount_usd <= max_usd:
+            raise ValueError(
+                f"amount_usd must be between {min_usd} and {max_usd} (got {amount_usd})"
+            )
+
+        tiers = topup_tiers_for(product_id, self._settings)
+        quote = build_quote(
+            amount_usd, tiers=tiers, tokens_per_usd=self._settings.billing_tokens_per_usd
+        )
+        logger.info(
+            "payment.topup_quote",
+            credits_usd=quote.credits_usd,
+            discount_pct=quote.discount_pct,
+            total_due=str(quote.total_due),
+            tokens_granted=quote.tokens_granted,
+            provider=provider,
+            product_id=product_id,
+        )
+        return quote
+
     async def create_stripe_checkout(
         self,
         account_id: UUID,
-        package_id: str,
+        amount_usd: int,
         user_id: UUID,
         *,
         session: AsyncSession,
@@ -83,16 +111,13 @@ class PaymentService:
     ) -> StripeCheckoutResult:
         """Create a Stripe Checkout Session.
 
-        1. Validate package_id exists in TOKEN_PACKAGES config.
+        1. Validate amount_usd against configured min/max bounds and build a quote.
         2. Create Stripe Checkout Session with metadata.
         3. Store Payment(status='pending') in DB.
         4. Return checkout_url and session_id.
         """
-        package = TOKEN_PACKAGES.get(package_id)
-        if package is None:
-            raise ValueError(f"Invalid package_id: {package_id}")
-
         product_id = product_config.slug
+        quote = self._quote_for_amount(amount_usd, product_id=product_id, provider="stripe")
 
         repo = BillingRepository(session)
         account = await repo.get_account(account_id)
@@ -113,17 +138,20 @@ class PaymentService:
                         "price_data": {
                             "currency": "usd",
                             "product_data": {
-                                "name": f"{package.name} Token Package",
-                                "description": f"{package.total_tokens} tokens",
+                                "name": "Usage credits",
+                                "description": (
+                                    f"{quote.tokens_granted} tokens "
+                                    f"(${quote.credits_usd} credit, {quote.discount_pct}% off)"
+                                ),
                             },
-                            "unit_amount": int(package.price_usd * 100),
+                            "unit_amount": int(quote.total_due * 100),
                         },
                         "quantity": 1,
                     }
                 ],
                 "metadata": {
                     "account_id": str(account_id),
-                    "package_id": package_id,
+                    "credits_usd": str(quote.credits_usd),
                 },
                 "success_url": success_url,
                 "cancel_url": cancel_url,
@@ -137,10 +165,14 @@ class PaymentService:
             payment_provider=PaymentProvider.STRIPE.value,
             external_id=checkout_session.id,
             status=PaymentStatus.PENDING.value,
-            amount_usd=package.price_usd,
-            tokens_granted=package.total_tokens,
+            amount_usd=quote.total_due,
+            tokens_granted=quote.tokens_granted,
             currency="USD",
-            provider_metadata={"checkout_session_id": checkout_session.id},
+            provider_metadata={
+                "checkout_session_id": checkout_session.id,
+                "credits_usd": quote.credits_usd,
+                "discount_pct": quote.discount_pct,
+            },
             created_by=user_id,
             product_id=product_id,
         )
@@ -224,7 +256,7 @@ class PaymentService:
     async def create_nowpayments_invoice(
         self,
         account_id: UUID,
-        package_id: str,
+        amount_usd: int,
         pay_currency: str,
         user_id: UUID,
         *,
@@ -233,16 +265,14 @@ class PaymentService:
     ) -> NowPaymentsInvoiceResult:
         """Create a NowPayments invoice.
 
-        1. Validate package_id and pay_currency.
+        1. Validate amount_usd against configured min/max bounds and build a quote.
         2. POST to NowPayments API.
         3. Store Payment(status='pending') in DB.
         4. Return invoice_url and payment_id.
         """
         import httpx
 
-        package = TOKEN_PACKAGES.get(package_id)
-        if package is None:
-            raise ValueError(f"Invalid package_id: {package_id}")
+        quote = self._quote_for_amount(amount_usd, product_id=product_id, provider="nowpayments")
 
         repo = BillingRepository(session)
         account = await repo.get_account(account_id)
@@ -253,8 +283,8 @@ class PaymentService:
         order_id = json.dumps(
             {
                 "account_id": str(account_id),
-                "package_id": package_id,
                 "payment_id": str(payment_id),
+                "credits_usd": quote.credits_usd,
             }
         )
 
@@ -266,14 +296,27 @@ class PaymentService:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "price_amount": float(package.price_usd),
+                    "price_amount": float(quote.total_due),
                     "price_currency": "usd",
                     "pay_currency": pay_currency,
                     "order_id": order_id,
-                    "order_description": f"{package.name} Token Package - {package.total_tokens} tokens",
+                    "order_description": (
+                        f"{quote.tokens_granted} tokens "
+                        f"(${quote.credits_usd} credit, {quote.discount_pct}% off)"
+                    ),
                 },
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError:
+                logger.warning(
+                    "payment.invoice_creation_failed",
+                    provider="nowpayments",
+                    status_code=resp.status_code,
+                    body=resp.text,
+                    product_id=product_id,
+                )
+                raise
             data = resp.json()
 
         np_id = str(data.get("id", ""))
@@ -285,10 +328,14 @@ class PaymentService:
             payment_provider=PaymentProvider.NOWPAYMENTS.value,
             external_id=np_id,
             status=PaymentStatus.PENDING.value,
-            amount_usd=package.price_usd,
-            tokens_granted=package.total_tokens,
+            amount_usd=quote.total_due,
+            tokens_granted=quote.tokens_granted,
             currency=pay_currency.upper(),
-            provider_metadata=data,
+            provider_metadata={
+                **data,
+                "credits_usd": quote.credits_usd,
+                "discount_pct": quote.discount_pct,
+            },
             created_by=user_id,
             product_id=product_id,
         )
