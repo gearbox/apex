@@ -10,7 +10,7 @@ from uuid import uuid4
 from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
 from src.api.services.grok.job_service import VideoPollOutcome
 from src.api.services.grok.video_worker import GrokVideoWorker
-from src.core.enums import GenerationType, JobStatus, VideoPollStatus
+from src.core.enums import GenerationType, JobStatus, Provider, VideoPollStatus
 
 
 def _make_settings(**overrides: object) -> MagicMock:
@@ -198,6 +198,17 @@ class TestQueuedToRunningTransition:
         event_bus.publish.assert_awaited_once()
 
 
+def _patched_job_repository(jobs: list[object]) -> tuple[Any, AsyncMock]:
+    """Return (patcher, mock repo instance) for JobRepository, list_pending_video_jobs -> jobs."""
+    mock_repo = MagicMock()
+    mock_repo.list_pending_video_jobs = AsyncMock(return_value=jobs)
+    patcher = patch(
+        "src.api.services.grok.video_worker.JobRepository",
+        return_value=mock_repo,
+    )
+    return patcher, mock_repo
+
+
 class TestRunOnceFanOut:
     async def test_session_per_job_isolation(self) -> None:
         """job A raising inside _poll_one must not poison job B's processing."""
@@ -205,12 +216,6 @@ class TestRunOnceFanOut:
         job_b = _make_job()
 
         list_session = AsyncMock()
-        scalars_result = MagicMock()
-        scalars_result.all.return_value = [job_a, job_b]
-        exec_result = MagicMock()
-        exec_result.scalars.return_value = scalars_result
-        list_session.execute = AsyncMock(return_value=exec_result)
-
         job_session_a = AsyncMock()
         job_session_b = AsyncMock()
         sessions = iter([list_session, job_session_a, job_session_b])
@@ -229,27 +234,40 @@ class TestRunOnceFanOut:
 
         worker._poll_one = fake_poll_one  # type: ignore[method-assign]
 
-        await worker.run_once()  # must not raise despite job A's exception
+        patcher, _ = _patched_job_repository([job_a, job_b])
+        with patcher:
+            await worker.run_once()  # must not raise despite job A's exception
 
         assert processed == [job_b]
 
     async def test_empty_candidate_list_is_noop(self) -> None:
         list_session = AsyncMock()
-        scalars_result = MagicMock()
-        scalars_result.all.return_value = []
-        exec_result = MagicMock()
-        exec_result.scalars.return_value = scalars_result
-        list_session.execute = AsyncMock(return_value=exec_result)
-
         db_manager = MagicMock()
         db_manager.session.side_effect = lambda: _SessionCtx(list_session)
 
         worker = _make_worker(db_manager=db_manager)
         worker._poll_one = AsyncMock()  # type: ignore[method-assign]
 
-        await worker.run_once()
+        patcher, _ = _patched_job_repository([])
+        with patcher:
+            await worker.run_once()
 
         worker._poll_one.assert_not_awaited()
+
+    async def test_candidate_query_filters_grok_provider(self) -> None:
+        """run_once must route through the provider-scoped repo query (H2 fix),
+        not an inline query that would also match Aisha jobs."""
+        list_session = AsyncMock()
+        db_manager = MagicMock()
+        db_manager.session.side_effect = lambda: _SessionCtx(list_session)
+
+        worker = _make_worker(db_manager=db_manager)
+
+        patcher, mock_repo = _patched_job_repository([])
+        with patcher:
+            await worker.run_once()
+
+        mock_repo.list_pending_video_jobs.assert_awaited_once_with(provider=Provider.GROK)
 
 
 class TestTransientPollErrors:

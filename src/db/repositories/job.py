@@ -360,8 +360,9 @@ class JobRepository(BaseRepository[GenerationJob]):
         """List pending video generation jobs for polling.
 
         Returns jobs that are queued or running, have a video generation
-        type, and have an ``external_request_id`` set (indicating the
-        provider accepted the request).
+        type (T2V, I2V, or V2V — Grok's ``grok-imagine-video`` supports all
+        three), have an ``external_request_id`` set (indicating the provider
+        accepted the request), and are not soft-deleted.
 
         Args:
             provider: Provider enum to filter by.
@@ -369,7 +370,7 @@ class JobRepository(BaseRepository[GenerationJob]):
         Returns:
             List of GenerationJob instances needing polling.
         """
-        video_types = [GenerationType.T2V, GenerationType.I2V]
+        video_types = [GenerationType.T2V, GenerationType.I2V, GenerationType.V2V]
         pending_statuses = [JobStatus.QUEUED, JobStatus.RUNNING]
 
         result = await self._session.execute(
@@ -378,5 +379,6 @@ class JobRepository(BaseRepository[GenerationJob]):
             .where(GenerationJob.status.in_(pending_statuses))
             .where(GenerationJob.generation_type.in_(video_types))
             .where(GenerationJob.external_request_id.isnot(None))
+            .where(GenerationJob.is_deleted.is_(False))
         )
         return result.scalars().all()

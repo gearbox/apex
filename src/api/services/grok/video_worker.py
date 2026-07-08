@@ -14,13 +14,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import select
 
 from src.api.schemas.events import EventType, JobProgressPayload
 from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
 from src.api.services.job_state_transition import JobStateTransitionService
-from src.core.enums import GenerationType, JobStatus, VideoPollStatus
-from src.db.models import GenerationJob
+from src.core.enums import JobStatus, Provider, VideoPollStatus
+from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
@@ -31,16 +30,9 @@ if TYPE_CHECKING:
     from src.api.services.grok.job_service import GrokJobService
     from src.core.config import Settings
     from src.db import DatabaseManager
+    from src.db.models import GenerationJob
 
 logger = structlog.get_logger(__name__)
-
-_VIDEO_GENERATION_TYPES = (
-    GenerationType.T2V,
-    GenerationType.I2V,
-    GenerationType.V2V,
-    GenerationType.FLF2V,
-)
-_PENDING_STATUSES = (JobStatus.QUEUED, JobStatus.RUNNING)
 
 
 class GrokVideoWorker(PeriodicWorker):
@@ -106,13 +98,9 @@ class GrokVideoWorker(PeriodicWorker):
     async def run_once(self) -> None:
         """Fetch candidate jobs in one session, then poll each in its own session."""
         async with self._db_manager.session() as session:
-            result = await session.execute(
-                select(GenerationJob)
-                .where(GenerationJob.status.in_(_PENDING_STATUSES))
-                .where(GenerationJob.generation_type.in_(_VIDEO_GENERATION_TYPES))
-                .where(GenerationJob.external_request_id.isnot(None))
+            jobs = list(
+                await JobRepository(session).list_pending_video_jobs(provider=Provider.GROK)
             )
-            jobs = list(result.scalars().all())
 
         if not jobs:
             return

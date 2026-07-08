@@ -507,3 +507,73 @@ async def test_list_pending_video_jobs_custom_provider(
 
     assert aisha_job.id in job_ids
     assert len(job_ids) == 1
+
+
+async def test_list_pending_video_jobs_excludes_aisha_t2v(
+    job_repo: JobRepository, make_user, make_job, make_gpu_session
+) -> None:
+    """Regression (H2): an Aisha T2V job with a ComfyUI-style external_request_id
+    must not be picked up when polling for Grok, even though it shares
+    GenerationJob and matches on status/generation_type/external_request_id."""
+    user = await make_user(email=f"vidpoll-h2-{uuid4().hex[:6]}@example.com")
+
+    gpu_session = await make_gpu_session(user=user)
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.AISHA.value,
+        external_request_id="comfyui-prompt-id-001",
+        gpu_session_id=gpu_session.id,
+    )
+    grok_job = await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-req-001",
+    )
+
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
+    job_ids = {j.id for j in jobs}
+
+    assert job_ids == {grok_job.id}
+
+
+async def test_list_pending_video_jobs_includes_v2v(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """Grok supports V2V (grok-imagine-video) — it must be pollable."""
+    user = await make_user(email=f"vidpoll-v2v-{uuid4().hex[:6]}@example.com")
+
+    v2v_job = await make_job(
+        user=user,
+        status="queued",
+        generation_type="v2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-v2v-001",
+    )
+
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
+    job_ids = {j.id for j in jobs}
+
+    assert v2v_job.id in job_ids
+
+
+async def test_list_pending_video_jobs_excludes_soft_deleted(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """A pending job that has been soft-deleted must not be polled."""
+    user = await make_user(email=f"vidpoll-del-{uuid4().hex[:6]}@example.com")
+
+    await make_job(
+        user=user,
+        status="queued",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-deleted-001",
+        is_deleted=True,
+    )
+
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
+    assert not list(jobs)
