@@ -29,7 +29,11 @@ import msgspec
 T = TypeVar("T")
 
 
-class CursorPage(msgspec.Struct, Generic[T], kw_only=True):  # noqa: UP046 Because msgspec resolves generic type annotations at decode-time and needs T as a named TypeVar in the module scope — PEP 695 [T] syntax doesn't expose it as a name, causing the NameError. The Generic[T] form is required here.
+# Ignore UP046 because msgspec resolves generic type annotations at decode-time
+# and needs T as a named TypeVar in the module scope — PEP 695 [T] syntax
+# doesn't expose it as a name, causing the NameError.
+# The Generic[T] form is required here.
+class CursorPage(msgspec.Struct, Generic[T], kw_only=True):  # noqa: UP046
     """Cursor-paginated response used by all list endpoints.
 
     No total count — uses limit+1 fetch pattern.

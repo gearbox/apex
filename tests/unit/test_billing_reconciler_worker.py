@@ -212,7 +212,7 @@ class TestSweep:
 
     async def test_max_per_sweep_caps_query_limit(self) -> None:
         """Repository query receives limit=billing_reconciler_max_per_sweep."""
-        worker, mocks = _make_worker(settings=_make_settings(billing_reconciler_max_per_sweep=7))
+        worker, _mocks = _make_worker(settings=_make_settings(billing_reconciler_max_per_sweep=7))
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()

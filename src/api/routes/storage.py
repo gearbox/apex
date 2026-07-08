@@ -83,8 +83,8 @@ class StorageController(Controller):
 
     path = "/v1/storage"
     tags: Sequence[str] | None = ["Storage"]
-    guards = [auth_guard]
-    dependencies = {"current_user_id": Provide(get_current_user_id)}
+    guards = [auth_guard]  # noqa: RUF012
+    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     @post("/upload")
     async def upload_image(
@@ -294,7 +294,7 @@ class StorageController(Controller):
         Returns paginated list of uploads ordered by creation date (newest first).
 
         Query parameters:
-          - ``limit``: Page size 1–100 (default 50)
+          - ``limit``: Page size 1-100 (default 50)
           - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
             field.  Pass to fetch the next page.
         """
@@ -440,7 +440,7 @@ class StorageController(Controller):
         Returns paginated list ordered by creation date (newest first).
 
         Query parameters:
-          - ``limit``: Page size 1–100 (default 50)
+          - ``limit``: Page size 1-100 (default 50)
           - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
             field.  Pass to fetch the next page.
         """

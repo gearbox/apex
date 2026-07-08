@@ -66,7 +66,7 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
 
         # Generate random seed if not provided
         if self.seed is None:
-            self.seed = random.randint(0, 2**31 - 1)  # noqa: S311, It's just a random generation seed
+            self.seed = random.randint(0, 2**31 - 1)  # noqa: S311
 
     def get_calculated_width(self) -> int:
         """Return resolved width, or derive from height + aspect ratio as fallback."""

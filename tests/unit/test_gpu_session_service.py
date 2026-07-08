@@ -981,7 +981,7 @@ class TestPauseSession:
         assert result.status == GpuSessionStatus.paused
 
     async def test_sets_paused_at(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         product_id = "vex"
         session = _make_gpu_session(user_id=user_id, product_id=product_id, paused_at=None)
@@ -1087,7 +1087,7 @@ class TestResumeSession:
         assert result.status == GpuSessionStatus.resuming
 
     async def test_sets_resumed_at(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(
             user_id=user_id, status=GpuSessionStatus.paused, resumed_at=None
@@ -1310,7 +1310,7 @@ class TestStopSession:
         )
 
     async def test_confirmed_from_paused(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.paused)
 
@@ -1330,7 +1330,7 @@ class TestStopSession:
         assert result.status == GpuSessionStatus.stopped
 
     async def test_confirmed_from_stale(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.stale)
 
@@ -1688,7 +1688,7 @@ class TestPauseResumeDuration:
 
     async def test_resume_updates_total_paused_seconds_with_pause_duration(self) -> None:
         """resumed_at - paused_at must be persisted via repo.add_paused_seconds."""
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         user_id = uuid4()
         paused_at = datetime.now(UTC) - timedelta(minutes=10)
         session = _make_gpu_session(
@@ -1888,7 +1888,7 @@ class TestStopFromPausedRollup:
         settings = _make_settings()
         settings.gpu_session_tokens_per_minute = 100
 
-        service, mocks = _make_service(settings=settings)
+        service, _mocks = _make_service(settings=settings)
         user_id = uuid4()
         started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         paused = started + timedelta(minutes=10)
@@ -2379,7 +2379,7 @@ class TestFinalizeBillingForSession:
     """
 
     async def test_returns_true_when_billing_finalized_at_set_after_call(self) -> None:
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         session = _make_gpu_session(user_id=uuid4())
         refreshed = _make_gpu_session(billing_finalized_at=datetime.now(UTC))
 
@@ -2638,7 +2638,7 @@ class TestStopWithJobSweep:
 
     async def test_stop_without_sweep_service_still_works(self) -> None:
         """Service with no sweep (job_sweep_service=None) stops normally."""
-        service, mocks = _make_service()
+        service, _mocks = _make_service()
         assert service._job_sweep is None
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)

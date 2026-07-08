@@ -71,7 +71,7 @@ async def _redis_stream() -> AsyncGenerator[dict[str, str]]:
                     }
                 else:
                     yield {"comment": "keepalive"}
-            except asyncio.TimeoutError:  # noqa: UP041 - timeout from asyncio.wait_for will return as asyncio.TimeoutError
+            except asyncio.TimeoutError:  # noqa: UP041
                 yield {"comment": "keepalive"}
     except asyncio.CancelledError:
         logger.debug("health.sse.client_disconnected")

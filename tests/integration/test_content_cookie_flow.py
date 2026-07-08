@@ -88,7 +88,7 @@ def _make_content_app(jwt_service: JWTService, product_id: str = PRODUCT_ID) -> 
 
     class FakeContentController(Controller):
         path = "/v1/content"
-        dependencies = {"current_user_id": Provide(get_current_user_id)}
+        dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
         @get("/outputs/{output_id:uuid}", guards=[content_auth_guard])
         async def proxy_output(self, current_user_id: UUID, output_id: UUID) -> dict[str, str]:

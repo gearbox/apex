@@ -129,7 +129,7 @@ class TestAishaProviderMissingPromptId:
     async def test_raises_provider_response_error_when_queue_prompt_returns_empty(
         self,
     ) -> None:
-        provider, mocks = _make_provider_with_mocks()
+        provider, _mocks = _make_provider_with_mocks()
 
         billing = AsyncMock()
         billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))

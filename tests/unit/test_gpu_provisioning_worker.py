@@ -195,7 +195,7 @@ class TestSweep:
         mocks["vastai_client"].get_instance.assert_not_called()
 
     async def test_sweep_processes_each_non_terminal_status(self) -> None:
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
 
         sessions = [
             _make_gpu_session(status=GpuSessionStatus.pending),
@@ -219,7 +219,7 @@ class TestSweep:
         worker._advance_resuming.assert_called_once()
 
     async def test_sweep_exception_in_one_session_does_not_abort_others(self) -> None:
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
 
         sessions = [
             _make_gpu_session(status=GpuSessionStatus.pending),
@@ -335,7 +335,7 @@ class TestAdvancePending:
         worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_PENDING_TIMEOUT)
 
     async def test_pending_without_instance_id_marks_failed(self) -> None:
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_instance_id=None)
 
         with patch(_REPO_PATH) as MockRepo:
@@ -632,7 +632,7 @@ class TestAdvanceResuming:
         assert "started_at" not in call_kwargs
 
     async def test_timeout_marks_failed_without_retry(self) -> None:
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         old_resumed = datetime.now(UTC) - timedelta(minutes=10)
         session = _make_gpu_session(
             status=GpuSessionStatus.resuming,
@@ -649,7 +649,7 @@ class TestAdvanceResuming:
 
     async def test_missing_resumed_at_marks_failed(self) -> None:
         """resumed_at=None triggers timeout logic (treat as timed out)."""
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(
             status=GpuSessionStatus.resuming,
             resumed_at=None,
@@ -670,7 +670,7 @@ class TestAdvanceResuming:
 class TestStaleTransitionGuard:
     async def test_transition_skipped_if_user_stopped_session_mid_sweep(self) -> None:
         """If the session was stopped by the user during the sweep, no update_status call."""
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.pending)
 
         with patch(_REPO_PATH) as MockRepo:
@@ -771,7 +771,7 @@ class TestSweepConcurrency:
         """With gpu_provision_worker_concurrency=2 and 5 sessions, at most 2 _advance
         calls run in parallel at any instant.
         """
-        worker, mocks = _make_worker(settings=_make_settings(gpu_provision_worker_concurrency=2))
+        worker, _mocks = _make_worker(settings=_make_settings(gpu_provision_worker_concurrency=2))
         sessions = [_make_gpu_session(status=GpuSessionStatus.pending) for _ in range(5)]
 
         # Track how many _advance calls are in-flight concurrently
@@ -981,7 +981,7 @@ class TestMarkFailed:
     async def test_mark_failed_issues_full_refund_via_billing_service(self) -> None:
         """billing_service.refund must be called after the 'failed' transition."""
         billing_mock = AsyncMock()
-        worker, mocks = _make_worker(billing_service=billing_mock)
+        worker, _mocks = _make_worker(billing_service=billing_mock)
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             vastai_instance_id=None,
@@ -1150,7 +1150,7 @@ class TestMarkFailedWithJobSweep:
 
     async def test_mark_failed_completes_normally_after_sweep(self) -> None:
         """Teardown + status transition complete after sweep_session_best_effort call."""
-        worker, mocks = _make_worker_with_sweep()
+        worker, _mocks = _make_worker_with_sweep()
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             vastai_instance_id=None,
@@ -1191,7 +1191,7 @@ class TestMarkFailedWithJobSweep:
 
     async def test_mark_failed_without_sweep_service_still_works(self) -> None:
         """Worker with no sweep (job_sweep_service=None) behaves as before."""
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         assert worker._job_sweep is None
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
@@ -1520,7 +1520,7 @@ class TestAdvanceProvisioningFastFail:
 
     async def test_provisioning_without_instance_id_marks_failed(self) -> None:
         """vastai_instance_id=None at provisioning stage → fail immediately."""
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, vastai_instance_id=None)
         worker._mark_failed = AsyncMock()  # type: ignore[method-assign]
 
@@ -1559,7 +1559,7 @@ class TestAdvanceProvisioningFastFail:
 
 class TestHandleTerminalStateIfAny:
     async def test_none_instance_returns_false(self) -> None:
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.pending)
         worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
 
@@ -1569,7 +1569,7 @@ class TestHandleTerminalStateIfAny:
         worker._retry_or_fail.assert_not_called()
 
     async def test_non_terminal_instance_returns_false(self) -> None:
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.pending)
         instance = VastAIInstance(id=1, actual_status="running", cur_state="running")
         worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
@@ -1580,7 +1580,7 @@ class TestHandleTerminalStateIfAny:
         worker._retry_or_fail.assert_not_called()
 
     async def test_terminal_instance_returns_true_and_calls_retry_or_fail(self) -> None:
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_instance_id=1)
         instance = VastAIInstance(id=1, actual_status="exited", cur_state="exited")
         worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
@@ -1596,7 +1596,7 @@ class TestHandleTerminalStateIfAny:
         """The stage kwarg must appear as a structured field in the warning log."""
         from structlog.testing import capture_logs
 
-        worker, mocks = _make_worker()
+        worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, vastai_instance_id=1)
         instance = VastAIInstance(id=1, actual_status="exited", cur_state="exited")
         worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]

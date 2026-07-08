@@ -518,7 +518,7 @@ class TestAuthServiceMissingBranches:
         )
 
         # Should not raise even though email fails
-        user, tokens = await svc.register(email="new@example.com", password="pw", product_id="vex")
+        user, _tokens = await svc.register(email="new@example.com", password="pw", product_id="vex")
         assert user is mock_user
 
     @pytest.mark.asyncio
