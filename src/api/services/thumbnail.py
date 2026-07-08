@@ -78,14 +78,13 @@ def _extract_sync(video_bytes: bytes) -> bytes | None:
         if not result.stdout:
             logger.warning("thumbnail.ffmpeg_empty_output")
             return None
-
-        return result.stdout
-
     except FileNotFoundError:
         logger.warning("thumbnail.ffmpeg_not_found")
         return None
     except subprocess.TimeoutExpired:
         logger.warning("thumbnail.ffmpeg_timeout")
         return None
+    else:
+        return result.stdout
     finally:
         tmp_in_path.unlink(missing_ok=True)

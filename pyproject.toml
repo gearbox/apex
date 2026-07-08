@@ -92,6 +92,7 @@ select = [
     "RUF",  # Ruff-native rules
     "LOG",  # flake8-logging
     "G",    # logging-format
+    "TRY",  # exception hygiene
     # "T20",  # No stray print
 ]
 ignore = [
@@ -101,6 +102,7 @@ ignore = [
     "S108",   # FIX in production, probable insecure usage of temporary file or directory
     "S607",   # FIX in production, Starting a process with a partial executable path
     "ISC001", # conflicts with the formatter
+    "TRY003", # conflicts with explicit RuntimeError
 ]
 logger-objects = ["structlog.get_logger", "src.core.logging.get_logger"]  # so LOG/G see structlog
 [tool.ruff.lint.per-file-ignores]

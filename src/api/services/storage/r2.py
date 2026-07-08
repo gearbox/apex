@@ -247,13 +247,13 @@ class R2StorageService:
             )
 
         except ClientError as e:
-            logger.error("r2.upload_failed", key=storage_key, error=str(e))
+            logger.exception("r2.upload_failed", key=storage_key, error=str(e))
             raise StorageUploadError(
                 f"Failed to upload file: {_get_error_message(e)}",
                 cause=e,
             ) from e
         except Exception as e:
-            logger.error("r2.upload_unexpected_error", error=str(e))
+            logger.exception("r2.upload_unexpected_error", error=str(e))
             raise StorageUploadError(f"Upload failed: {e}", cause=e) from e
 
     async def download(self, storage_key: str) -> bytes:
@@ -272,13 +272,13 @@ class R2StorageService:
             error_code = _get_error_code(e)
             if error_code in ("NoSuchKey", "404"):
                 raise StorageNotFoundError(f"File not found: {storage_key}") from e
-            logger.error("r2.download_failed", key=storage_key, error=str(e))
+            logger.exception("r2.download_failed", key=storage_key, error=str(e))
             raise StorageDownloadError(
                 f"Failed to download file: {_get_error_message(e)}",
                 cause=e,
             ) from e
         except Exception as e:
-            logger.error("r2.download_unexpected_error", error=str(e))
+            logger.exception("r2.download_unexpected_error", error=str(e))
             raise StorageDownloadError(f"Download failed: {e}", cause=e) from e
 
     async def sign_key(self, storage_key: str, *, expires_in: int = 3600) -> str:
@@ -338,7 +338,7 @@ class R2StorageService:
             error_code = _get_error_code(e)
             if error_code in ("NoSuchKey", "404"):
                 raise StorageNotFoundError(f"File not found: {storage_key}") from e
-            logger.error("r2.presigned_url_failed", key=storage_key, error=str(e))
+            logger.exception("r2.presigned_url_failed", key=storage_key, error=str(e))
             raise StorageDownloadError(
                 f"Failed to generate URL: {_get_error_message(e)}",
                 cause=e,
@@ -368,7 +368,7 @@ class R2StorageService:
                 return True
 
         except ClientError as e:
-            logger.error("r2.delete_failed", key=storage_key, error=str(e))
+            logger.exception("r2.delete_failed", key=storage_key, error=str(e))
             raise StorageDeleteError(
                 f"Failed to delete file: {_get_error_message(e)}",
                 cause=e,
@@ -398,7 +398,7 @@ class R2StorageService:
                 return deleted_count
 
         except ClientError as e:
-            logger.error("r2.batch_delete_failed", error=str(e))
+            logger.exception("r2.batch_delete_failed", error=str(e))
             raise StorageDeleteError(
                 f"Failed to delete files: {_get_error_message(e)}",
                 cause=e,
@@ -416,7 +416,7 @@ class R2StorageService:
         except ClientError as e:
             if _get_error_code(e) in ("NoSuchKey", "404"):
                 return False
-            logger.error("r2.exists_check_failed", key=storage_key, error=str(e))
+            logger.exception("r2.exists_check_failed", key=storage_key, error=str(e))
             raise StorageConnectionError(
                 f"Failed to check file existence: {e}",
                 cause=e,
@@ -465,7 +465,7 @@ class R2StorageService:
                 return files
 
         except ClientError as e:
-            logger.error("r2.list_failed", user_id=str(user_id), error=str(e))
+            logger.exception("r2.list_failed", user_id=str(user_id), error=str(e))
             return []
 
     def _parse_storage_key(

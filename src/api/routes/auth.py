@@ -125,7 +125,6 @@ class AuthController(Controller):
                 settings=settings,
                 product_config=product_config,
             )
-            return response
 
         except EmailAlreadyExistsError as e:
             return Response(
@@ -136,6 +135,9 @@ class AuthController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
+
+        else:
+            return response
 
     @post("/verify-email")
     async def verify_email(
@@ -271,7 +273,6 @@ class AuthController(Controller):
                 settings=settings,
                 product_config=product_config,
             )
-            return response
 
         except InvalidCredentialsError:
             return Response(
@@ -292,6 +293,9 @@ class AuthController(Controller):
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
+
+        else:
+            return response
 
     @post("/refresh")
     async def refresh_tokens(
@@ -340,7 +344,6 @@ class AuthController(Controller):
                 settings=settings,
                 product_config=product_config,
             )
-            return response
 
         except InvalidRefreshTokenError:
             return Response(
@@ -371,6 +374,9 @@ class AuthController(Controller):
                 ),
                 status_code=HTTP_401_UNAUTHORIZED,
             )
+
+        else:
+            return response
 
     @post("/logout")
     async def logout(

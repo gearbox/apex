@@ -175,20 +175,17 @@ async def _run_generator(
         for item in subscribe_items:
             yield item
 
-    try:
-        async for item in mock_subscribe(user_id, heartbeat_interval=heartbeat_interval):
-            if item is None:
-                results.append({"comment": "keepalive"})
-            else:
-                results.append(
-                    {
-                        "event": item.event_type.value,
-                        "id": item.event_id,
-                        "data": bytes(item.payload).decode(),
-                    }
-                )
-    except asyncio.CancelledError:
-        raise
+    async for item in mock_subscribe(user_id, heartbeat_interval=heartbeat_interval):
+        if item is None:
+            results.append({"comment": "keepalive"})
+        else:
+            results.append(
+                {
+                    "event": item.event_type.value,
+                    "id": item.event_id,
+                    "data": bytes(item.payload).decode(),
+                }
+            )
 
     return results
 

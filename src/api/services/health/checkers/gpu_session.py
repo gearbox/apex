@@ -241,7 +241,6 @@ class GpuSessionReconciler:
                 f"{base_url}{_COMFYUI_PROBE_PATH}",
                 timeout=_PROBE_TIMEOUT_SECONDS,
             )
-            return resp.status_code == 200
         except Exception as exc:
             logger.debug(
                 "health.gpu_session.probe_failed",
@@ -251,6 +250,8 @@ class GpuSessionReconciler:
                 error_type=type(exc).__name__,
             )
             return False
+        else:
+            return resp.status_code == 200
 
     async def _update_last_reachable_batch(
         self,

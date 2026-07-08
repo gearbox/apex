@@ -221,7 +221,7 @@ class UnifiedGenerationController(Controller):
 
         except GenerationError as exc:
             await _mark_failed(idempotency_service, record_id, session)
-            logger.error("generation.failed", error=str(exc))
+            logger.exception("generation.failed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
                     error="generation_failed",

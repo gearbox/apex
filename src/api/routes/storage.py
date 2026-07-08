@@ -185,7 +185,7 @@ class StorageController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
         except UserContentError as e:
-            logger.error("storage.upload_failed", error=str(e))
+            logger.exception("storage.upload_failed", error=str(e))
             return Response(
                 content=ErrorEnvelope(
                     error="upload_failed",

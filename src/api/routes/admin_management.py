@@ -94,13 +94,14 @@ class AdminManagementController(Controller):
                 session=session,
             )
             await session.commit()
-            return {"message": f"Role '{data.role.value}' granted to user {user_id}"}
         except SelfModificationError as exc:
             raise PermissionDeniedException(detail=str(exc)) from exc
         except InvalidRoleTransitionError as exc:
             raise ValidationException(detail=str(exc)) from exc
         except AdminManagementError as exc:
             raise NotFoundException(detail=str(exc)) from exc
+        else:
+            return {"message": f"Role '{data.role.value}' granted to user {user_id}"}
 
     @post("/roles/{user_id:uuid}/revoke")
     async def revoke_role(
@@ -121,7 +122,6 @@ class AdminManagementController(Controller):
                 session=session,
             )
             await session.commit()
-            return {"message": f"Admin role revoked from user {user_id}"}
         except SelfModificationError as exc:
             raise PermissionDeniedException(detail=str(exc)) from exc
         except LastSuperadminError as exc:
@@ -130,6 +130,8 @@ class AdminManagementController(Controller):
             raise ValidationException(detail=str(exc)) from exc
         except AdminManagementError as exc:
             raise NotFoundException(detail=str(exc)) from exc
+        else:
+            return {"message": f"Admin role revoked from user {user_id}"}
 
     @post("/permissions/{user_id:uuid}/grant")
     async def grant_permission(
@@ -152,11 +154,12 @@ class AdminManagementController(Controller):
                 session=session,
             )
             await session.commit()
-            return {"message": f"Permission '{data.permission.value}' granted to user {user_id}"}
         except InvalidRoleTransitionError as exc:
             raise ValidationException(detail=str(exc)) from exc
         except AdminManagementError as exc:
             raise NotFoundException(detail=str(exc)) from exc
+        else:
+            return {"message": f"Permission '{data.permission.value}' granted to user {user_id}"}
 
     @post("/permissions/{user_id:uuid}/revoke")
     async def revoke_permission(

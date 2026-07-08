@@ -427,7 +427,7 @@ class AishaGenerationProvider:
                 allowed_prefix=self._tunnel_hostname_allowed_prefix,
             )
         except InvalidTunnelHostnameError as e:
-            logger.error(
+            logger.exception(
                 "aisha.tunnel_hostname.allowlist_violation",
                 job_id=str(job_id),
                 gpu_session_id=str(gpu_session.id),

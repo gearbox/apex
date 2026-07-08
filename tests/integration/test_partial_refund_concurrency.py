@@ -139,9 +139,10 @@ async def test_partial_refund_concurrent_serializes_via_row_lock(
                         product_id="vex",
                         user_id=user.id,
                     )
-                    return "committed"
                 except RefundNotEligibleError as exc:
                     return f"rejected: {exc}"
+                else:
+                    return "committed"
 
         # Run concurrently. The row lock serializes them: one wins, one fails
         # the cumulative invariant check.
@@ -208,9 +209,10 @@ async def test_partial_refund_compatible_concurrent_amounts_both_succeed(
                         product_id="vex",
                         user_id=user.id,
                     )
-                    return "committed"
                 except RefundNotEligibleError as exc:
                     return f"rejected: {exc}"
+                else:
+                    return "committed"
 
         results = await asyncio.gather(
             attempt_refund(200),

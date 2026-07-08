@@ -321,7 +321,7 @@ class GpuSessionService:
             offers = await self._vastai.search_offers(hardware)
         except NoCapacityError:
             await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
-            logger.error(
+            logger.exception(
                 "gpu_session.start.failed",
                 user_id=str(user_id),
                 model_type=model_type.value,
@@ -369,7 +369,7 @@ class GpuSessionService:
             )
         except Exception as exc:
             await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
-            logger.error(
+            logger.exception(
                 "gpu_session.start.failed",
                 user_id=str(user_id),
                 model_type=model_type.value,
@@ -885,7 +885,6 @@ class GpuSessionService:
                         instance_id=instance_id,
                         attempt=attempt,
                     )
-                return True
             except Exception as exc:
                 if attempt == attempts:
                     logger.exception(
@@ -907,6 +906,8 @@ class GpuSessionService:
                 )
                 await asyncio.sleep(backoff_seconds)
                 backoff_seconds = min(backoff_seconds * 2, 5.0)
+            else:
+                return True
         return False  # unreachable, satisfies mypy
 
     async def _mark_instance_destroyed(self, session_id: UUID) -> None:
@@ -1237,7 +1238,6 @@ class GpuSessionService:
                     billable_tokens=billable_tokens,
                     billable_minutes=billable_minutes,
                 )
-                return  # success — billing_finalized_at stamped inside
             except Exception as exc:
                 last_exc = exc
                 if attempt == 0:
@@ -1251,6 +1251,8 @@ class GpuSessionService:
                     # Anything that doesn't recover in 1s is a bug or persistent
                     # issue; the reconciler is the right recovery channel.
                     await asyncio.sleep(1.0)
+            else:
+                return  # success — billing_finalized_at stamped inside
 
         # Both attempts failed. Leave billing_finalized_at NULL for the
         # reconciler to pick up. Log at ERROR level for alerting.

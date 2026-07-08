@@ -85,7 +85,7 @@ class CloudflareTunnelClient:
         try:
             result = msgspec.json.decode(resp.content, type=CreateTunnelResult)
         except msgspec.DecodeError as exc:
-            logger.error(
+            logger.exception(
                 "cloudflare.tunnel.create_decode_error",
                 error=str(exc),
                 status=resp.status_code,
@@ -198,7 +198,7 @@ class CloudflareTunnelClient:
         try:
             result = msgspec.json.decode(resp.content, type=CreateDNSResult)
         except msgspec.DecodeError as exc:
-            logger.error(
+            logger.exception(
                 "cloudflare.dns.create_decode_error",
                 error=str(exc),
                 status=resp.status_code,
@@ -316,7 +316,7 @@ class CloudflareTunnelClient:
         try:
             result = msgspec.json.decode(resp.content, type=TunnelListResult)
         except msgspec.DecodeError as exc:
-            logger.error(
+            logger.exception(
                 "cloudflare.tunnel.list_decode_error",
                 error=str(exc),
                 status=resp.status_code,

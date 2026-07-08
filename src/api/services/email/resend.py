@@ -97,7 +97,7 @@ class ResendEmailService(EmailService):
                 resend_id=result.get("id"),
             )
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "email.send_failed",
                 to=message.to,
                 subject=message.subject,

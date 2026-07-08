@@ -619,7 +619,7 @@ class TestStartSession:
         # Find the gpu_session.start.failed call and verify error_class matches
         failed_calls = [
             call
-            for call in mock_logger.error.call_args_list
+            for call in mock_logger.exception.call_args_list
             if call.args and call.args[0] == "gpu_session.start.failed"
         ]
         assert len(failed_calls) == 1

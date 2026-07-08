@@ -190,7 +190,7 @@ class AishaJobPoller(PeriodicWorker):
                 allowed_prefix=self._allowed_tunnel_prefix,
             )
         except InvalidTunnelHostnameError as exc:
-            logger.error(
+            logger.exception(
                 "aisha_job_poller.invalid_tunnel_hostname",
                 job_id=str(job.id),
                 hostname=hostname,
