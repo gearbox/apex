@@ -774,25 +774,24 @@ class BundleIndexService:
                     continue
                 if filtered is None:
                     continue
-                member = filtered
 
                 # --- Cap #3: per-member declared size ---
-                if member.size > self._max_member_size_bytes:
+                if filtered.size > self._max_member_size_bytes:
                     raise RuntimeError(
-                        f"tarball member {member.name!r} declares size "
-                        f"{member.size} > limit {self._max_member_size_bytes}"
+                        f"tarball member {filtered.name!r} declares size "
+                        f"{filtered.size} > limit {self._max_member_size_bytes}"
                     )
 
                 # --- Cap #4: total declared uncompressed size ---
-                if extracted_total_bytes + member.size > self._max_uncompressed_bytes:
+                if extracted_total_bytes + filtered.size > self._max_uncompressed_bytes:
                     raise RuntimeError(
                         f"tarball total uncompressed size exceeds limit "
                         f"({self._max_uncompressed_bytes}); aborted at "
-                        f"{extracted_total_bytes + member.size} bytes"
+                        f"{extracted_total_bytes + filtered.size} bytes"
                     )
 
                 # --- Cap #5: actual extracted bytes per file (lying-size defense) ---
-                actual_bytes = self._extract_member_capped(tf, member, staging)
+                actual_bytes = self._extract_member_capped(tf, filtered, staging)
 
                 extracted_total_bytes += actual_bytes
                 extracted_count += 1

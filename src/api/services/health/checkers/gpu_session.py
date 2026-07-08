@@ -20,10 +20,9 @@ from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
     session_comfyui_base_url,
 )
+from src.api.services.health.base import ComponentHealth
 from src.core.enums import ComponentCategory, ComponentStatus, GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
-
-from ..base import ComponentHealth
 
 if TYPE_CHECKING:
     import httpx

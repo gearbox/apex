@@ -163,7 +163,7 @@ def _create_org_app(
         dependencies={
             "session": Provide(lambda: session, sync_to_thread=False),
             "organization_service": Provide(lambda: org_service, sync_to_thread=False),
-            "billing_service": Provide(lambda: MagicMock(), sync_to_thread=False),
+            "billing_service": Provide(lambda: MagicMock(), sync_to_thread=False),  # noqa: PLW0108
         },
         exception_handlers={
             OrganizationPermissionError: _org_permission_handler,

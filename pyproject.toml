@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.18.11"
+version = "0.18.12"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -94,6 +94,12 @@ select = [
     "G",    # logging-format
     "TRY",  # exception hygiene
     "T20",  # No stray print
+    "TID",  # Bans relative imports
+    "PLE",  # Pylint errors
+    "FA",   # flake8-future-annotations
+    "PGH",  # pygrep-hooks, bans blanket # type: ignore and # noqa
+    "PLW",
+    # "TC",   #flake8-type-checking, moves typing-only imports into TYPE_CHECKING
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
@@ -102,6 +108,13 @@ ignore = [
     "TRY003", # conflicts with explicit RuntimeError
 ]
 logger-objects = ["structlog.get_logger", "src.core.logging.get_logger"]  # so LOG/G see structlog
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = [
+    "sqlalchemy.orm.DeclarativeBase",
+    "msgspec.Struct",
+    "pydantic.BaseModel",
+    "pydantic_settings.BaseSettings",
+]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
     "S101",   # Ignore use of assert detected
@@ -113,6 +126,10 @@ logger-objects = ["structlog.get_logger", "src.core.logging.get_logger"]  # so L
 "src/cli/**/*.py" = ["T20"]   # Typer/Rich print legitimately
 "tools/**/*.py" = ["T20"]   # Typer/Rich print legitimately
 "tests/contract/*.py" = ["T20"]   # TODO: Review after implementing automation, now print legitimately
+"src/core/redis.py" = ["PLW0603"]   # module-level singleton pool, init/close by design
+"src/db/session.py" = ["PLW0603"]   # module-level singleton DatabaseManager, init/close by design
+"src/api/middleware/rate_limit.py" = ["PLW0603"]   # module-level singleton limiter storage, init by design
+"src/api/dependencies/common.py" = ["PLW0603"]   # module-level singleton service container, init/close by design
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
