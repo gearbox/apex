@@ -161,6 +161,7 @@ class JobSweepService:
             )
         except Exception:
             logger.exception(
-                f"{log_event}_error",
+                "%s_error",
+                log_event,
                 session_id=str(session_id),
             )

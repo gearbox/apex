@@ -858,7 +858,8 @@ class GpuSessionService:
             except Exception:
                 had_errors = True
                 logger.warning(
-                    f"{log_prefix}.teardown_tunnel_failed",
+                    "%s.teardown_tunnel_failed",
+                    log_prefix,
                     session_id=str(session_row.id),
                     tunnel_id=session_row.cf_tunnel_id,
                 )
@@ -878,7 +879,8 @@ class GpuSessionService:
                 await self._vastai.destroy_instance(instance_id)
                 if attempt > 1:
                     logger.info(
-                        f"{log_prefix}.teardown_instance_recovered",
+                        "%s.teardown_instance_recovered",
+                        log_prefix,
                         session_id=str(session_id),
                         instance_id=instance_id,
                         attempt=attempt,
@@ -887,14 +889,16 @@ class GpuSessionService:
             except Exception as exc:
                 if attempt == attempts:
                     logger.exception(
-                        f"{log_prefix}.teardown_instance_failed",
+                        "%s.teardown_instance_failed",
+                        log_prefix,
                         session_id=str(session_id),
                         instance_id=instance_id,
                         attempts=attempts,
                     )
                     return False
                 logger.info(
-                    f"{log_prefix}.teardown_instance_retry",
+                    "%s.teardown_instance_retry",
+                    log_prefix,
                     session_id=str(session_id),
                     instance_id=instance_id,
                     attempt=attempt,
