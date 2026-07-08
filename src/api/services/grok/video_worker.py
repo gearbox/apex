@@ -17,6 +17,7 @@ import structlog
 from sqlalchemy import select
 
 from src.api.schemas.events import EventType, JobProgressPayload
+from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.core.enums import GenerationType, JobStatus, VideoPollStatus
 from src.db.models import GenerationJob
@@ -150,7 +151,15 @@ class GrokVideoWorker(PeriodicWorker):
                 )
                 return
 
-        outcome = await self._job_service.poll_video_job_for_worker(session, job.id)
+        try:
+            outcome = await self._job_service.poll_video_job_for_worker(session, job.id)
+        except (GrokRateLimitError, GrokTimeoutError) as e:
+            logger.warning(
+                "grok.video_poll_transient",
+                job_id=str(job.id),
+                error=str(e),
+            )
+            return  # no transition, no progress emit; retried next tick (D2)
 
         if outcome.status == VideoPollStatus.STILL_RUNNING:
             if job.status == JobStatus.QUEUED:

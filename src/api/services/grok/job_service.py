@@ -23,6 +23,8 @@ from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
     GrokImageResult,
+    GrokRateLimitError,
+    GrokTimeoutError,
     GrokVideoJobStarted,
     GrokVideoResult,
 )
@@ -629,6 +631,11 @@ class GrokJobService:
         Raises:
             GrokJobNotFoundError: If job doesn't exist.
             GrokJobError: If job is not a video job or polling fails.
+
+        Note:
+            Transient xAI errors (rate limit, deadline exceeded) are not
+            raised here — they are reported as STILL_RUNNING (job returned
+            unchanged) so a status request never 500s on an xAI hiccup.
         """
         job_repo = JobRepository(session)
         job = await job_repo.get(job_id)
@@ -641,7 +648,11 @@ class GrokJobService:
             return job
 
         was_queued = job.status == JobStatus.QUEUED.value
-        outcome = await self._poll_video_result(session, job)
+        try:
+            outcome = await self._poll_video_result(session, job)
+        except (GrokRateLimitError, GrokTimeoutError) as e:
+            logger.warning("grok.video_poll_transient", job_id=str(job.id), error=str(e))
+            return job
 
         if outcome.status == VideoPollStatus.STILL_RUNNING:
             if was_queued:
@@ -690,6 +701,11 @@ class GrokJobService:
         Raises:
             GrokJobNotFoundError: If job doesn't exist.
             GrokJobError: If the job has no xAI request ID.
+            GrokRateLimitError: If xAI rate-limited this poll. Not handled
+                here by design — the caller (worker) decides how to react
+                (skip this tick, no transition; see D1/D2).
+            GrokTimeoutError: If this poll hit xAI's deadline. Same handling
+                as GrokRateLimitError.
         """
         job_repo = JobRepository(session)
         job = await job_repo.get(job_id)
@@ -736,6 +752,11 @@ class GrokJobService:
             logger.info("grok.video_job_completed", job_id=str(job.id))
             return VideoPollOutcome(status=VideoPollStatus.COMPLETED)
 
+        except (GrokRateLimitError, GrokTimeoutError):
+            # Transient: rate limits and deadline-exceeded must not fail the
+            # job. Re-raise; each entry point decides (worker: skip this
+            # tick; read-through: report STILL_RUNNING). See D1.
+            raise
         except GrokAPIError as e:
             logger.error("grok.video_job_poll_failed", job_id=str(job.id), error=str(e))
             return VideoPollOutcome(status=VideoPollStatus.FAILED, error_message=str(e))

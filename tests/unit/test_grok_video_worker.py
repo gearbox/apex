@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
 from src.api.services.grok.job_service import VideoPollOutcome
 from src.api.services.grok.video_worker import GrokVideoWorker
 from src.core.enums import GenerationType, JobStatus, VideoPollStatus
@@ -29,8 +30,7 @@ def _make_worker(**overrides: object) -> GrokVideoWorker:
         "billing_service": AsyncMock(),
         "settings": _make_settings(),
         "event_bus": None,
-    }
-    defaults.update(overrides)
+    } | overrides
     return GrokVideoWorker(**defaults)  # type: ignore[arg-type]
 
 
@@ -250,6 +250,93 @@ class TestRunOnceFanOut:
         await worker.run_once()
 
         worker._poll_one.assert_not_awaited()
+
+
+class TestTransientPollErrors:
+    """H1: rate-limit/timeout poll errors must be transient, not terminal (D1/D2)."""
+
+    async def test_rate_limit_error_skips_job_without_transition(self) -> None:
+        job = _make_job(status=JobStatus.RUNNING.value)
+        job_service = AsyncMock()
+        job_service.poll_video_job_for_worker.side_effect = GrokRateLimitError("rate limited")
+        worker = _make_worker(job_service=job_service)
+        patcher, mock_ts = _patched_transition_service()
+
+        with patcher:
+            await worker._poll_one(job, AsyncMock())
+
+        mock_ts.transition_to_failed.assert_not_awaited()
+        mock_ts.transition_to_running.assert_not_awaited()
+        mock_ts.transition_to_completed.assert_not_awaited()
+
+    async def test_timeout_error_skips_job_without_transition(self) -> None:
+        job = _make_job(status=JobStatus.RUNNING.value)
+        job_service = AsyncMock()
+        job_service.poll_video_job_for_worker.side_effect = GrokTimeoutError("deadline exceeded")
+        worker = _make_worker(job_service=job_service)
+        patcher, mock_ts = _patched_transition_service()
+
+        with patcher:
+            await worker._poll_one(job, AsyncMock())
+
+        mock_ts.transition_to_failed.assert_not_awaited()
+        mock_ts.transition_to_running.assert_not_awaited()
+        mock_ts.transition_to_completed.assert_not_awaited()
+
+    async def test_transient_error_does_not_refund(self) -> None:
+        job = _make_job(status=JobStatus.RUNNING.value)
+        job_service = AsyncMock()
+        job_service.poll_video_job_for_worker.side_effect = GrokRateLimitError("rate limited")
+        worker = _make_worker(job_service=job_service)
+        patcher, mock_ts = _patched_transition_service()
+
+        with patcher:
+            await worker._poll_one(job, AsyncMock())
+
+        for call in mock_ts.transition_to_failed.await_args_list:
+            assert call.kwargs.get("refund") is not True
+
+    async def test_terminal_api_error_still_fails_with_refund(self) -> None:
+        """Non-transient GrokAPIError surfaces as a FAILED outcome from the job
+        service (job_service maps it, worker doesn't see the exception) and is
+        still failed with a refund — unchanged behavior."""
+        job = _make_job(status=JobStatus.RUNNING.value)
+        job_service = AsyncMock()
+        job_service.poll_video_job_for_worker.return_value = VideoPollOutcome(
+            status=VideoPollStatus.FAILED, error_message="moderation rejected"
+        )
+        worker = _make_worker(job_service=job_service)
+        patcher, mock_ts = _patched_transition_service()
+
+        with patcher:
+            await worker._poll_one(job, AsyncMock())
+
+        mock_ts.transition_to_failed.assert_awaited_once_with(
+            job.id,
+            error_message="moderation rejected",
+            refund=True,
+            product_id="vex",
+        )
+
+    async def test_timeout_ceiling_precedes_poll(self) -> None:
+        """A job past max_poll_time is failed via the timeout branch without
+        ever invoking the poll — even if that poll would have raised a
+        transient error."""
+        job = _make_job(started_at=datetime.now(UTC) - timedelta(seconds=1000))
+        job_service = AsyncMock()
+        job_service.poll_video_job_for_worker.side_effect = GrokRateLimitError("rate limited")
+        worker = _make_worker(
+            job_service=job_service, settings=_make_settings(grok_video_max_poll_time=600)
+        )
+        patcher, mock_ts = _patched_transition_service()
+
+        with patcher:
+            await worker._poll_one(job, AsyncMock())
+
+        mock_ts.transition_to_failed.assert_awaited_once()
+        _, kwargs = mock_ts.transition_to_failed.call_args
+        assert kwargs["refund"] is True
+        job_service.poll_video_job_for_worker.assert_not_awaited()
 
 
 class TestManagerRemoved:
