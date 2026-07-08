@@ -26,6 +26,7 @@ Pub/Sub subscription, so it never buffers messages it can't drain.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -39,7 +40,7 @@ from src.core.redis import get_redis_client
 from src.workers.base import LeaderLease
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.push import PushService
 
@@ -63,7 +64,7 @@ class PushDispatcher:
         self,
         *,
         push_service: PushService,
-        session_factory: async_sessionmaker[AsyncSession],
+        session_factory: Callable[[], AsyncSession],
         redis_enabled: bool,
     ) -> None:
         self._push_service = push_service
@@ -165,7 +166,7 @@ class PushDispatcher:
             return
 
         try:
-            async with self._session_factory() as session:
+            async with self._session_factory() as session, session.begin():
                 if channel == _SYSTEM_CHANNEL:
                     await self._push_service.send_broadcast(notification, session=session)
                 else:

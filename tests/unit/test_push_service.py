@@ -61,6 +61,31 @@ class FakeSender:
             self._concurrent -= 1
 
 
+class TrackingRepo:
+    """Fake PushSubscriptionRepository that records concurrent prune calls."""
+
+    def __init__(self, subscriptions: list[MagicMock]) -> None:
+        self._subscriptions = subscriptions
+        self.deleted_ids: list[UUID] = []
+        self._concurrent_deletes = 0
+        self.max_concurrent_deletes = 0
+
+    async def list_by_user(self, _user_id: UUID) -> list[MagicMock]:
+        return self._subscriptions
+
+    async def delete_by_id(self, subscription_id: UUID) -> None:
+        self._concurrent_deletes += 1
+        self.max_concurrent_deletes = max(
+            self.max_concurrent_deletes,
+            self._concurrent_deletes,
+        )
+        try:
+            await asyncio.sleep(0.01)
+            self.deleted_ids.append(subscription_id)
+        finally:
+            self._concurrent_deletes -= 1
+
+
 # ---------------------------------------------------------------------------
 # send_to_user
 # ---------------------------------------------------------------------------
@@ -100,6 +125,21 @@ class TestSendToUser:
 
         # Both sends were attempted despite the pruning.
         assert len(sender.calls) == 2
+
+    async def test_prunes_expired_subscriptions_sequentially_after_concurrent_sends(self) -> None:
+        expired = [_make_subscription() for _ in range(4)]
+        sender = FakeSender()
+        sender._delay = 0.01
+        sender.expired_endpoints = {sub.endpoint for sub in expired}
+        service = PushService(sender=sender, broadcast_concurrency=4)
+        repo = TrackingRepo(expired)
+
+        with patch(_REPO_PATH, return_value=repo):
+            await service.send_to_user(uuid4(), _PAYLOAD, session=MagicMock())
+
+        assert sender.max_concurrent > 1
+        assert set(repo.deleted_ids) == {sub.id for sub in expired}
+        assert repo.max_concurrent_deletes == 1
 
     async def test_generic_send_error_does_not_prune_and_does_not_raise(self) -> None:
         failing = _make_subscription()

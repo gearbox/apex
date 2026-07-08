@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.uid import new_id
@@ -42,33 +43,40 @@ class PushSubscriptionRepository(BaseRepository[PushSubscription]):
         auth: str,
         user_agent: str | None,
     ) -> PushSubscription:
-        """Insert or update a subscription row keyed by endpoint.
+        """Atomically insert or update a subscription row keyed by endpoint.
 
         Reassigns ownership to ``user_id`` if the endpoint was previously
         registered under a different user (shared device / account switch).
         Updates ``last_seen_at`` on every call.
         """
-        existing = await self.get_by_endpoint(endpoint)
-        if existing is not None:
-            existing.user_id = user_id
-            existing.product_id = product_id
-            existing.p256dh = p256dh
-            existing.auth = auth
-            existing.user_agent = user_agent
-            existing.last_seen_at = datetime.now(UTC)
-            await self._session.flush()
-            return existing
-
-        subscription = PushSubscription(
-            id=new_id(),
-            user_id=user_id,
-            product_id=product_id,
-            endpoint=endpoint,
-            p256dh=p256dh,
-            auth=auth,
-            user_agent=user_agent,
+        now = datetime.now(UTC)
+        stmt = (
+            pg_insert(PushSubscription)
+            .values(
+                id=new_id(),
+                user_id=user_id,
+                product_id=product_id,
+                endpoint=endpoint,
+                p256dh=p256dh,
+                auth=auth,
+                user_agent=user_agent,
+            )
+            .on_conflict_do_update(
+                constraint="uq_push_subscriptions_endpoint",
+                set_={
+                    "user_id": user_id,
+                    "product_id": product_id,
+                    "p256dh": p256dh,
+                    "auth": auth,
+                    "user_agent": user_agent,
+                    "last_seen_at": now,
+                },
+            )
+            .returning(PushSubscription)
+            .execution_options(populate_existing=True)
         )
-        self._session.add(subscription)
+        result = await self._session.execute(stmt)
+        subscription = result.scalar_one()
         await self._session.flush()
         return subscription
 

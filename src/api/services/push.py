@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
@@ -181,7 +182,7 @@ class PushService:
 
     async def _send_to_many(
         self,
-        subscriptions: list[PushSubscription] | Any,
+        subscriptions: Sequence[PushSubscription] | Any,
         payload: PushNotificationPayload,
         *,
         session: AsyncSession,
@@ -189,27 +190,33 @@ class PushService:
         if not subscriptions:
             return
         semaphore = asyncio.Semaphore(self._broadcast_concurrency)
-        await asyncio.gather(
-            *(self._send_one_guarded(sub, payload, session, semaphore) for sub in subscriptions)
+        expired_ids = await asyncio.gather(
+            *(self._send_one_guarded(sub, payload, semaphore) for sub in subscriptions)
         )
+        repo = PushSubscriptionRepository(session)
+        for subscription_id in expired_ids:
+            if subscription_id is None:
+                continue
+            await repo.delete_by_id(subscription_id)
+            logger.info(
+                "push.subscription_expired_pruned",
+                subscription_id=str(subscription_id),
+            )
 
     async def _send_one_guarded(
         self,
         subscription: PushSubscription,
         payload: PushNotificationPayload,
-        session: AsyncSession,
         semaphore: asyncio.Semaphore,
-    ) -> None:
+    ) -> UUID | None:
         async with semaphore:
-            await self._send_one(subscription, payload, session=session)
+            return await self._send_one(subscription, payload)
 
     async def _send_one(
         self,
         subscription: PushSubscription,
         payload: PushNotificationPayload,
-        *,
-        session: AsyncSession,
-    ) -> None:
+    ) -> UUID | None:
         try:
             await self._sender.send(
                 endpoint=subscription.endpoint,
@@ -218,14 +225,10 @@ class PushService:
                 payload=msgspec.to_builtins(payload),
             )
         except PushSubscriptionExpiredError:
-            repo = PushSubscriptionRepository(session)
-            await repo.delete_by_id(subscription.id)
-            logger.info(
-                "push.subscription_expired_pruned",
-                subscription_id=str(subscription.id),
-            )
+            return subscription.id
         except PushSendError:
             logger.info(
                 "push.send_failed",
                 subscription_id=str(subscription.id),
             )
+        return None

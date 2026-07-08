@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from uuid import uuid4
 
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from src.db.models.push_subscription import PushSubscription
+from src.db.models.user import User
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 
 # ---------------------------------------------------------------------------
@@ -126,6 +133,94 @@ async def test_upsert_updates_last_seen_at_on_repeat_call(
 
     assert second.id == first.id
     assert second.last_seen_at >= first_last_seen
+
+
+async def test_upsert_waiting_on_uncommitted_duplicate_endpoint_updates_existing_row(
+    db_engine: AsyncEngine,
+) -> None:
+    """A concurrent registration blocked on the unique endpoint updates instead of 500ing."""
+    endpoint = f"https://push.example/concurrent-{uuid4()}"
+    user_a = User(
+        id=uuid4(),
+        email=f"push-a-{uuid4().hex[:8]}@example.com",
+        password_hash="hashed_password",
+        product_id="vex",
+        is_active=True,
+    )
+    user_b = User(
+        id=uuid4(),
+        email=f"push-b-{uuid4().hex[:8]}@example.com",
+        password_hash="hashed_password",
+        product_id="vex",
+        is_active=True,
+    )
+
+    async with AsyncSession(bind=db_engine, expire_on_commit=False) as setup_session:
+        setup_session.add_all([user_a, user_b])
+        await setup_session.commit()
+
+    first_session = AsyncSession(bind=db_engine, expire_on_commit=False)
+    first_tx = await first_session.begin()
+    second_task: asyncio.Task[PushSubscription] | None = None
+
+    try:
+        first_repo = PushSubscriptionRepository(first_session)
+        first = await first_repo.upsert(
+            user_id=user_a.id,
+            product_id="vex",
+            endpoint=endpoint,
+            p256dh="p1",
+            auth="a1",
+            user_agent="device-a",
+        )
+
+        async def second_registration() -> PushSubscription:
+            async with (
+                AsyncSession(bind=db_engine, expire_on_commit=False) as second_session,
+                second_session.begin(),
+            ):
+                second_repo = PushSubscriptionRepository(second_session)
+                return await second_repo.upsert(
+                    user_id=user_b.id,
+                    product_id="vex",
+                    endpoint=endpoint,
+                    p256dh="p2",
+                    auth="a2",
+                    user_agent="device-b",
+                )
+
+        second_task = asyncio.create_task(second_registration())
+        await asyncio.sleep(0.1)
+        await first_tx.commit()
+
+        second = await asyncio.wait_for(second_task, timeout=5)
+
+        assert second.id == first.id
+
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as verify_session:
+            result = await verify_session.execute(
+                select(PushSubscription).where(PushSubscription.endpoint == endpoint)
+            )
+            rows = result.scalars().all()
+
+        assert len(rows) == 1
+        assert rows[0].user_id == user_b.id
+        assert rows[0].p256dh == "p2"
+        assert rows[0].auth == "a2"
+    finally:
+        if second_task is not None and not second_task.done():
+            second_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await second_task
+        if first_tx.is_active:
+            await first_tx.rollback()
+        await first_session.close()
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as cleanup_session:
+            await cleanup_session.execute(
+                delete(PushSubscription).where(PushSubscription.endpoint == endpoint)
+            )
+            await cleanup_session.execute(delete(User).where(User.id.in_([user_a.id, user_b.id])))
+            await cleanup_session.commit()
 
 
 # ---------------------------------------------------------------------------
