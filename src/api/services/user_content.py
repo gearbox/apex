@@ -336,7 +336,7 @@ class UserContentService:
             return await self._storage.download(image.storage_key)
         except StorageNotFoundError as e:
             # DB record exists but R2 file missing - data inconsistency
-            logger.error(
+            logger.exception(
                 "r2.file_missing",
                 image_id=str(image_id),
                 storage_key=image.storage_key,
@@ -581,7 +581,7 @@ class UserContentService:
         try:
             return await self._storage.download(output.storage_key)
         except StorageNotFoundError as e:
-            logger.error(
+            logger.exception(
                 "r2.file_missing",
                 output_id=str(output_id),
                 storage_key=output.storage_key,

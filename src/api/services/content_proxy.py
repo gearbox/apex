@@ -184,7 +184,7 @@ class ContentProxyService:
             try:
                 await self._storage.delete(key)
             except Exception:
-                logger.error(
+                logger.exception(
                     "content.r2_delete_failed",
                     storage_key=key,
                     content_id=str(content_id),

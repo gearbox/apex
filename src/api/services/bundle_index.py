@@ -58,6 +58,10 @@ class BundleNotFoundError(Exception):
     """No bundle found for the requested model type or bundle spec."""
 
 
+class BundleDefinitionError(ValueError):
+    """A bundle.yaml file is present but semantically invalid."""
+
+
 @dataclass
 class _BundleIndexEntry:
     bundle_name: str
@@ -692,53 +696,10 @@ class BundleIndexService:
             shutil.rmtree(staging)
         staging.mkdir(parents=True, exist_ok=False)
 
-        extracted_count = 0
-        extracted_total_bytes = 0
-
         try:
-            with tarfile.open(tarball_path, mode="r|gz") as tf:
-                for member in tf:
-                    # --- Cap #2: member count ---
-                    if extracted_count >= self._max_member_count:
-                        raise RuntimeError(
-                            f"tarball member count exceeds limit "
-                            f"({self._max_member_count}); aborted"
-                        )
-
-                    # --- Path-traversal / symlink-escape filter ---
-                    try:
-                        filtered = tarfile.data_filter(member, str(staging))
-                    except tarfile.FilterError as exc:
-                        logger.warning(
-                            "bundle_index.tarball_member_rejected",
-                            member=member.name,
-                            reason=str(exc),
-                        )
-                        continue
-                    if filtered is None:
-                        continue
-                    member = filtered
-
-                    # --- Cap #3: per-member declared size ---
-                    if member.size > self._max_member_size_bytes:
-                        raise RuntimeError(
-                            f"tarball member {member.name!r} declares size "
-                            f"{member.size} > limit {self._max_member_size_bytes}"
-                        )
-
-                    # --- Cap #4: total declared uncompressed size ---
-                    if extracted_total_bytes + member.size > self._max_uncompressed_bytes:
-                        raise RuntimeError(
-                            f"tarball total uncompressed size exceeds limit "
-                            f"({self._max_uncompressed_bytes}); aborted at "
-                            f"{extracted_total_bytes + member.size} bytes"
-                        )
-
-                    # --- Cap #5: actual extracted bytes per file (lying-size defense) ---
-                    actual_bytes = self._extract_member_capped(tf, member, staging)
-
-                    extracted_total_bytes += actual_bytes
-                    extracted_count += 1
+            extracted_count, extracted_total_bytes = self._extract_tarball_members(
+                tarball_path, staging
+            )
         except Exception:
             # Clean up partial staging on any failure so next sync starts fresh.
             if staging.exists():
@@ -784,6 +745,56 @@ class BundleIndexService:
                 cb()
             except Exception:
                 logger.exception("bundle_index.on_resync_callback_failed")
+
+    def _extract_tarball_members(self, tarball_path: Path, staging: Path) -> tuple[int, int]:
+        """Extract tarball members after applying safety limits and filters."""
+        extracted_count = 0
+        extracted_total_bytes = 0
+
+        with tarfile.open(tarball_path, mode="r|gz") as tf:
+            for member in tf:
+                # --- Cap #2: member count ---
+                if extracted_count >= self._max_member_count:
+                    raise RuntimeError(
+                        f"tarball member count exceeds limit ({self._max_member_count}); aborted"
+                    )
+
+                # --- Path-traversal / symlink-escape filter ---
+                try:
+                    filtered = tarfile.data_filter(member, str(staging))
+                except tarfile.FilterError as exc:
+                    logger.warning(
+                        "bundle_index.tarball_member_rejected",
+                        member=member.name,
+                        reason=str(exc),
+                    )
+                    continue
+                if filtered is None:
+                    continue
+                member = filtered
+
+                # --- Cap #3: per-member declared size ---
+                if member.size > self._max_member_size_bytes:
+                    raise RuntimeError(
+                        f"tarball member {member.name!r} declares size "
+                        f"{member.size} > limit {self._max_member_size_bytes}"
+                    )
+
+                # --- Cap #4: total declared uncompressed size ---
+                if extracted_total_bytes + member.size > self._max_uncompressed_bytes:
+                    raise RuntimeError(
+                        f"tarball total uncompressed size exceeds limit "
+                        f"({self._max_uncompressed_bytes}); aborted at "
+                        f"{extracted_total_bytes + member.size} bytes"
+                    )
+
+                # --- Cap #5: actual extracted bytes per file (lying-size defense) ---
+                actual_bytes = self._extract_member_capped(tf, member, staging)
+
+                extracted_total_bytes += actual_bytes
+                extracted_count += 1
+
+        return extracted_count, extracted_total_bytes
 
     def _extract_member_capped(
         self,
@@ -977,15 +988,15 @@ class BundleIndexService:
             data = yaml.safe_load(fh)
 
         if not isinstance(data, dict):
-            raise ValueError(
+            raise BundleDefinitionError(
                 f"{bundle_yaml}: expected a YAML mapping at top level, got {type(data).__name__}"
             )
 
         hw = data.get("hardware")
         if hw is None:
-            raise ValueError(f"{bundle_yaml}: missing 'hardware' section")
+            raise BundleDefinitionError(f"{bundle_yaml}: missing 'hardware' section")
         if not isinstance(hw, dict):
-            raise ValueError(
+            raise BundleDefinitionError(
                 f"{bundle_yaml}: 'hardware' must be a mapping, got {type(hw).__name__}"
             )
 
@@ -998,11 +1009,13 @@ class BundleIndexService:
             so we can distinguish them.
             """
             if field not in hw:
-                raise ValueError(f"{bundle_yaml}: missing required field 'hardware.{field}'")
+                raise BundleDefinitionError(
+                    f"{bundle_yaml}: missing required field 'hardware.{field}'"
+                )
             value = hw[field]
             # bool is a subclass of int — reject it explicitly
             if isinstance(value, bool):
-                raise ValueError(
+                raise BundleDefinitionError(
                     f"{bundle_yaml}: 'hardware.{field}' must be an integer, got bool {value!r}"
                 )
             if isinstance(value, int):
@@ -1011,34 +1024,36 @@ class BundleIndexService:
                 try:
                     return int(value)  # accepts "42", rejects "42.0" / "1e3"
                 except ValueError as exc:
-                    raise ValueError(
+                    raise BundleDefinitionError(
                         f"{bundle_yaml}: 'hardware.{field}' must be an integer, got {value!r} (str)"
                     ) from exc
-            raise ValueError(
+            raise BundleDefinitionError(
                 f"{bundle_yaml}: 'hardware.{field}' must be an integer, "
                 f"got {value!r} ({type(value).__name__})"
             )
 
         if "cuda_min_version" not in hw:
-            raise ValueError(f"{bundle_yaml}: missing required field 'hardware.cuda_min_version'")
+            raise BundleDefinitionError(
+                f"{bundle_yaml}: missing required field 'hardware.cuda_min_version'"
+            )
         cuda_min = str(hw["cuda_min_version"])
         try:
             float(cuda_min)
         except ValueError as exc:
-            raise ValueError(
+            raise BundleDefinitionError(
                 f"{bundle_yaml}: 'hardware.cuda_min_version' must be a numeric string "
                 f"(e.g. '12.1'), got {cuda_min!r}"
             ) from exc
 
         gpu_whitelist_raw = hw.get("gpu_whitelist", [])
         if not isinstance(gpu_whitelist_raw, list):
-            raise ValueError(
+            raise BundleDefinitionError(
                 f"{bundle_yaml}: 'hardware.gpu_whitelist' must be a list, got "
                 f"{type(gpu_whitelist_raw).__name__}"
             )
         for idx, entry in enumerate(gpu_whitelist_raw):
             if not isinstance(entry, str):
-                raise ValueError(
+                raise BundleDefinitionError(
                     f"{bundle_yaml}: 'hardware.gpu_whitelist[{idx}]' must be a string, "
                     f"got {entry!r} ({type(entry).__name__})"
                 )
@@ -1050,12 +1065,14 @@ class BundleIndexService:
         template_hash_id = hw.get("template_hash_id")
         if template_hash_id is not None:
             if not isinstance(template_hash_id, str):
-                raise ValueError(
+                raise BundleDefinitionError(
                     f"{bundle_yaml}: 'hardware.template_hash_id' must be a string, got "
                     f"{type(template_hash_id).__name__}"
                 )
             if not template_hash_id.strip():
-                raise ValueError(f"{bundle_yaml}: 'hardware.template_hash_id' must be non-empty")
+                raise BundleDefinitionError(
+                    f"{bundle_yaml}: 'hardware.template_hash_id' must be non-empty"
+                )
 
         hardware = HardwareRequirements(
             gpu_whitelist=tuple(gpu_whitelist_raw),
@@ -1081,12 +1098,12 @@ class BundleIndexService:
         if marker is None:
             return None
         if not isinstance(marker, dict):
-            raise ValueError(
+            raise BundleDefinitionError(
                 f"{bundle_yaml}: 'readiness_marker' must be a mapping, got {type(marker).__name__}"
             )
         node_class = marker.get("node_class")
         if not isinstance(node_class, str) or not node_class.strip():
-            raise ValueError(
+            raise BundleDefinitionError(
                 f"{bundle_yaml}: 'readiness_marker.node_class' must be a non-empty string"
             )
         return ReadinessMarker(node_class=node_class)

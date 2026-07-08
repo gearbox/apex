@@ -90,10 +90,11 @@ class ComfyUIClient:
         """
         try:
             response = await self.client.get("/system_stats")
-            return response.status_code == 200
         except httpx.RequestError as e:
             logger.warning("comfyui.health_check_failed", error=str(e))
             return False
+        else:
+            return response.status_code == 200
 
     async def queue_prompt(self, workflow: dict[str, Any]) -> dict[str, Any]:
         """Submit a workflow prompt to ComfyUI queue.
@@ -128,11 +129,11 @@ class ComfyUIClient:
 
             result: dict[str, Any] = response.json()
             logger.debug("comfyui.prompt_queued", prompt_id=result.get("prompt_id"))
-            return result
-
         except httpx.RequestError as e:
-            logger.error("comfyui.connection_error", error=str(e))
+            logger.exception("comfyui.connection_error", error=str(e))
             raise ComfyUIConnectionError(f"Failed to connect to ComfyUI: {e}") from e
+        else:
+            return result
 
     async def get_history(self, prompt_id: str) -> dict[str, Any]:
         """Get execution history for a prompt.
@@ -147,10 +148,11 @@ class ComfyUIClient:
             response = await self.client.get(f"/history/{prompt_id}")
 
             data: dict[str, Any] = response.json() if response.status_code == 200 else {}
-            return data
         except httpx.RequestError as e:
             logger.warning("comfyui.get_history_failed", prompt_id=prompt_id, error=str(e))
             return {}
+        else:
+            return data
 
     async def get_queue(self) -> dict[str, Any]:
         """Get current ComfyUI queue status.
@@ -163,9 +165,10 @@ class ComfyUIClient:
             if response.status_code == 200:
                 queue_data: dict[str, Any] = response.json()
                 return queue_data
-            return {"queue_running": [], "queue_pending": []}
         except httpx.RequestError as e:
             logger.warning("comfyui.get_queue_failed", error=str(e))
+            return {"queue_running": [], "queue_pending": []}
+        else:
             return {"queue_running": [], "queue_pending": []}
 
     async def upload_image(
@@ -205,11 +208,11 @@ class ComfyUIClient:
 
             upload_result: dict[str, Any] = response.json()
             logger.debug("comfyui.image_uploaded", name=upload_result.get("name"))
-            return upload_result
-
         except httpx.RequestError as e:
-            logger.error("comfyui.image_upload_failed", error=str(e))
+            logger.exception("comfyui.image_upload_failed", error=str(e))
             raise ComfyUIConnectionError(f"Failed to upload image: {e}") from e
+        else:
+            return upload_result
 
     def get_image_url(
         self,
@@ -263,9 +266,8 @@ class ComfyUIClient:
                     f"Failed to get image: {response.text}",
                     status_code=response.status_code,
                 )
-
-            return response.content
-
         except httpx.RequestError as e:
-            logger.error("comfyui.get_image_failed", error=str(e))
+            logger.exception("comfyui.get_image_failed", error=str(e))
             raise ComfyUIConnectionError(f"Failed to get image: {e}") from e
+        else:
+            return response.content

@@ -88,11 +88,12 @@ class LeaderLease:
                 self._ttl_seconds,
             )
             self._held = bool(renewed)
-            return self._held
         except Exception:
             logger.warning("worker.lease.error", key=self._key)
             self._held = True
             return True
+        else:
+            return self._held
 
     async def release(self) -> None:
         """Best-effort compare-and-delete release. Never raises."""

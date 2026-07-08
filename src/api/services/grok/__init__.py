@@ -456,42 +456,9 @@ class GrokClient:
             from xai_sdk.proto.v6 import video_pb2 as _video_pb2
 
             response: _video_pb2.GetDeferredVideoResponse = await self.client.video.get(request_id)
-
-            match response.status:
-                case deferred_pb2.DeferredStatus.DONE:
-                    if not response.HasField("response"):
-                        raise GrokAPIError("Deferred request completed but no response returned")
-                    video_url = response.response.video.url
-                    if not video_url:
-                        # respect_moderation=True means the content passed review.
-                        # When False the video was flagged and the URL is withheld.
-                        if not response.response.video.respect_moderation:
-                            raise GrokModerationError(
-                                "Video flagged by moderation; URL not available"
-                            )
-                        raise GrokAPIError("Video URL missing from completed response")
-                    return GrokVideoResult(url=video_url)
-
-                case deferred_pb2.DeferredStatus.PENDING:
-                    return None  # Still processing
-
-                case deferred_pb2.DeferredStatus.FAILED:
-                    error_msg = "Video generation failed"
-                    if response.HasField("response") and response.response.HasField("error"):
-                        error = response.response.error
-                        error_msg = f"Video generation failed: [{error.code}] {error.message}"
-                    raise GrokAPIError(error_msg)
-
-                case deferred_pb2.DeferredStatus.EXPIRED:
-                    raise GrokAPIError("Deferred video request expired before completion")
-
-                case _:
-                    logger.warning(
-                        "grok.unknown_deferred_status",
-                        request_id=request_id,
-                        status=response.status,
-                    )
-                    return None  # Treat unknown as pending
+            return self._parse_deferred_video_result(
+                response, deferred_pb2.DeferredStatus, request_id=request_id
+            )
 
         except Exception as e:
             # Let all Grok-domain exceptions propagate untouched.
@@ -499,6 +466,44 @@ class GrokClient:
             if isinstance(e, GrokClientError):
                 raise
             raise self._convert_exception(e) from e
+
+    @staticmethod
+    def _parse_deferred_video_result(
+        response: Any, deferred_status: Any, *, request_id: str
+    ) -> GrokVideoResult | None:
+        match response.status:
+            case deferred_status.DONE:
+                if not response.HasField("response"):
+                    raise GrokAPIError("Deferred request completed but no response returned")
+                video_url = response.response.video.url
+                if not video_url:
+                    # respect_moderation=True means the content passed review.
+                    # When False the video was flagged and the URL is withheld.
+                    if not response.response.video.respect_moderation:
+                        raise GrokModerationError("Video flagged by moderation; URL not available")
+                    raise GrokAPIError("Video URL missing from completed response")
+                return GrokVideoResult(url=video_url)
+
+            case deferred_status.PENDING:
+                return None  # Still processing
+
+            case deferred_status.FAILED:
+                error_msg = "Video generation failed"
+                if response.HasField("response") and response.response.HasField("error"):
+                    error = response.response.error
+                    error_msg = f"Video generation failed: [{error.code}] {error.message}"
+                raise GrokAPIError(error_msg)
+
+            case deferred_status.EXPIRED:
+                raise GrokAPIError("Deferred video request expired before completion")
+
+            case _:
+                logger.warning(
+                    "grok.unknown_deferred_status",
+                    request_id=request_id,
+                    status=response.status,
+                )
+                return None  # Treat unknown as pending
 
     # -------------------------------------------------------------------------
     # Helper Methods

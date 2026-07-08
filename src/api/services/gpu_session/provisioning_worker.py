@@ -107,6 +107,12 @@ def _classify_terminal_state(instance: VastAIInstance) -> str | None:
     return None
 
 
+def _require_cf_tunnel_id(session: GpuSession) -> str:
+    if session.cf_tunnel_id is None:
+        raise ValueError("session has no cf_tunnel_id")
+    return session.cf_tunnel_id
+
+
 class GpuProvisioningWorker(PeriodicWorker):
     """Advances non-terminal GPU sessions toward their terminal states.
 
@@ -236,7 +242,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         try:
             instance = await self._vastai.get_instance(session.vastai_instance_id)
         except InstanceNotFoundError:
-            logger.error(
+            logger.exception(
                 "gpu_session.provision.instance_vanished",
                 session_id=str(session.id),
                 instance_id=session.vastai_instance_id,
@@ -677,9 +683,7 @@ class GpuProvisioningWorker(PeriodicWorker):
 
         # Re-fetch the tunnel token from CF (not stored on the session row)
         try:
-            if session.cf_tunnel_id is None:
-                raise ValueError("session has no cf_tunnel_id")
-            tunnel_token = await self._cf.get_tunnel_token(session.cf_tunnel_id)
+            tunnel_token = await self._cf.get_tunnel_token(_require_cf_tunnel_id(session))
         except Exception:
             logger.exception(
                 "gpu_session.provision.retry_get_token_failed",

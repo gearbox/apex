@@ -76,6 +76,14 @@ class GrokJobNotFoundError(GrokJobError):
     """Raised when a job is not found."""
 
 
+def _require_job_after_status_update(
+    job: GenerationJob | None, job_id: UUID, action: str
+) -> GenerationJob:
+    if job is None:
+        raise GrokJobError(f"Job {job_id} disappeared after {action}")
+    return job
+
+
 class GrokJobService:
     """Service for managing Grok generation jobs.
 
@@ -292,16 +300,14 @@ class GrokJobService:
             )
 
             logger.info("grok.image_job_completed", job_id=str(job_id), output_count=len(results))
-            if job is None:
-                raise GrokJobError(f"Job {job_id} disappeared after completion")
             return ProviderSubmitResult(
-                job=job,
+                job=_require_job_after_status_update(job, job_id, "completion"),
                 balance_after=reserve_result.txn.balance_after,
                 balance_event=reserve_result.event,
             )
 
         except GrokAPIError as e:
-            logger.error("grok.api_error", job_id=str(job_id), error=str(e))
+            logger.exception("grok.api_error", job_id=str(job_id), error=str(e))
             job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
@@ -544,16 +550,14 @@ class GrokJobService:
             logger.info(
                 "grok.video_job_started", job_id=str(job_id), xai_request_id=started.request_id
             )
-            if job is None:
-                raise GrokJobError(f"Job {job_id} disappeared after start")
             return ProviderSubmitResult(
-                job=job,
+                job=_require_job_after_status_update(job, job_id, "start"),
                 balance_after=reserve_result.txn.balance_after,
                 balance_event=reserve_result.event,
             )
 
         except GrokAPIError as e:
-            logger.error("grok.video_job_start_failed", job_id=str(job_id), error=str(e))
+            logger.exception("grok.video_job_start_failed", job_id=str(job_id), error=str(e))
             job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
@@ -758,7 +762,7 @@ class GrokJobService:
             # tick; read-through: report STILL_RUNNING). See D1.
             raise
         except GrokAPIError as e:
-            logger.error("grok.video_job_poll_failed", job_id=str(job.id), error=str(e))
+            logger.exception("grok.video_job_poll_failed", job_id=str(job.id), error=str(e))
             return VideoPollOutcome(status=VideoPollStatus.FAILED, error_message=str(e))
 
     async def _store_video_result(

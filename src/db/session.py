@@ -109,9 +109,10 @@ class DatabaseManager:
         try:
             async with self._engine.connect() as conn:
                 await conn.execute(select(1))
-            return True
         except Exception:
             return False
+        else:
+            return True
 
     async def close(self) -> None:
         """Close the database engine and all connections.

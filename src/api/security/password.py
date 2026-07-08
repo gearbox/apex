@@ -89,9 +89,10 @@ class PasswordService:
         """
         try:
             self._hasher.verify(hash, password)
-            return True
         except (VerifyMismatchError, InvalidHashError):
             return False
+        else:
+            return True
 
     async def averify(self, hash: str, password: str) -> bool:
         """Verify a password against a hash off the event loop.
