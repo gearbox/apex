@@ -112,9 +112,9 @@ test-all:
 	docker compose -f docker-compose.test.yml down -v
 
 lint:
-	docker compose exec api ruff check src/
-	docker compose exec api ruff format --check src/
-	uv run mypy src/ --ignore-missing-imports --strict
+	uv run ruff check src tests
+	uv run ruff format --check src
+	uv run mypy --strict src
 	uv run pyright
 
 format:
