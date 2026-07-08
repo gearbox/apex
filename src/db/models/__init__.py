@@ -14,6 +14,7 @@ from .generation_model import GenerationModel
 from .gpu_session import GpuSession
 from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
+from .push_subscription import PushSubscription
 from .storage import GenerationJob, GenerationOutput, UserImage
 from .user import RefreshToken, User
 
@@ -31,6 +32,7 @@ __all__ = [
     "OrganizationMember",
     "Payment",
     "PricingRule",
+    "PushSubscription",
     "RefreshToken",
     "TokenAccount",
     "TokenTransaction",

@@ -40,6 +40,7 @@ from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.organization import OrganizationService
 from src.api.services.payment import PaymentService
 from src.api.services.pricing import PricingService
+from src.api.services.push import PushService, PywebpushSender
 from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.api.services.unified_jobs import UnifiedJobService
@@ -53,6 +54,7 @@ from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.base import PeriodicWorker
+from src.workers.push_dispatcher import PushDispatcher
 from src.workers.token_cleanup import TokenCleanupWorker
 
 logger = structlog.get_logger(__name__)
@@ -99,6 +101,9 @@ class ServiceContainer:
     bundle_index: BundleIndexService | None = None
     # Callback receiver — initialized whenever the DB is available (not GPU-stack-gated)
     provisioning_callback_service: ProvisioningCallbackService | None = None
+    # Web Push (optional — requires VAPID keys + Redis)
+    push_service: PushService | None = None
+    push_dispatcher: PushDispatcher | None = None
 
 
 _services = ServiceContainer()
@@ -390,6 +395,17 @@ def get_provisioning_callback_service() -> ProvisioningCallbackService:
 
         raise ServiceUnavailableException(detail="Provisioning callback service not available")
     return _services.provisioning_callback_service
+
+
+def get_push_service() -> PushService:
+    """Provide PushService singleton (503 if push is not configured)."""
+    if _services.push_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(
+            detail="Push notifications not available (VAPID keys/Redis not configured)"
+        )
+    return _services.push_service
 
 
 def get_content_proxy(
@@ -775,6 +791,35 @@ async def init_services(settings: Settings) -> JWTService:
         await _services.token_cleanup_worker.start()
         logger.info("token_cleanup_worker.started")
 
+    # Initialize Web Push (requires VAPID keys + Redis — see Settings.push_enabled)
+    if settings.push_enabled:
+        if settings.vapid_private_key is None or settings.vapid_subject is None:
+            raise RuntimeError(
+                "settings.push_enabled is True but vapid_private_key/vapid_subject is None"
+            )
+        _services.push_service = PushService(
+            sender=PywebpushSender(
+                private_key=settings.vapid_private_key,
+                subject=settings.vapid_subject,
+            ),
+            broadcast_concurrency=settings.push_broadcast_concurrency,
+        )
+        logger.info("push_service.initialized")
+
+        if workers_enabled:
+            _services.push_dispatcher = PushDispatcher(
+                push_service=_services.push_service,
+                session_factory=_services.db_manager.session_factory,
+                redis_enabled=redis_enabled,
+            )
+            await _services.push_dispatcher.start()
+            logger.info("push_dispatcher.started")
+    else:
+        logger.warning(
+            "push.not_configured",
+            hint="Set VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY/VAPID_SUBJECT and REDIS_URL to enable Web Push",
+        )
+
     # Initialize health check registry and service
     from src.api.services.health.checkers.cloud_provider import GrokChecker
     from src.api.services.health.checkers.gpu_session import GpuSessionReconciler
@@ -929,6 +974,9 @@ async def shutdown_services() -> None:
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
 
+    if _services.push_dispatcher is not None:
+        await _services.push_dispatcher.stop()
+
     if _services.health_snapshot_worker is not None:
         await _services.health_snapshot_worker.stop()
 
@@ -1009,4 +1057,6 @@ dependencies = {
     "provisioning_callback_service": Provide(
         get_provisioning_callback_service, sync_to_thread=False
     ),
+    # Web Push
+    "push_service": Provide(get_push_service, sync_to_thread=False),
 }

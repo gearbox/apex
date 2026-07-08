@@ -40,6 +40,7 @@ from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.providers import ProvidersController
+from src.api.routes.push import PushController
 from src.api.routes.sse import SSEController
 from src.api.routes.storage import StorageController
 from src.api.routes.unified_generation import UnifiedGenerationController
@@ -378,6 +379,8 @@ def create_app() -> Litestar:
             GalleryController,
             # Content proxy
             ContentProxyController,
+            # Web Push
+            PushController,
         ],
         exception_handlers={
             HTTPException: http_exception_handler,

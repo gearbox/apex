@@ -31,6 +31,7 @@ from src.db.repositories.billing import BillingRepository
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
+from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
 
@@ -171,6 +172,12 @@ async def auth_token_repo(db_session: AsyncSession) -> AuthTokenRepository:
 async def generation_model_repo(db_session: AsyncSession) -> GenerationModelRepository:
     """GenerationModelRepository bound to the test session."""
     return GenerationModelRepository(db_session)
+
+
+@pytest_asyncio.fixture
+async def push_subscription_repo(db_session: AsyncSession) -> PushSubscriptionRepository:
+    """PushSubscriptionRepository bound to the test session."""
+    return PushSubscriptionRepository(db_session)
 
 
 # ---------------------------------------------------------------------------

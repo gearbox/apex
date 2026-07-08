@@ -5,6 +5,7 @@ from .billing import BillingRepository
 from .gpu_session import GpuSessionRepository
 from .job import JobRepository
 from .output import OutputRepository
+from .push_subscription import PushSubscriptionRepository
 from .user import UserRepository
 from .user_image import UserImageRepository
 
@@ -14,6 +15,7 @@ __all__ = [
     "GpuSessionRepository",
     "JobRepository",
     "OutputRepository",
+    "PushSubscriptionRepository",
     "UserImageRepository",
     "UserRepository",
 ]
