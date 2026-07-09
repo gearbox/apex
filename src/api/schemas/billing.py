@@ -45,6 +45,7 @@ class PricingRuleResponse(msgspec.Struct, kw_only=True):
     generation_type: str
     model: str | None
     token_cost: int
+    input_token_cost: int
     is_active: bool
     effective_from: datetime
     effective_until: datetime | None
@@ -154,6 +155,7 @@ class CreatePricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     generation_type: str
     model: str | None = None
     token_cost: int
+    input_token_cost: Annotated[int, msgspec.Meta(ge=0)] = 0
     notes: str | None = None
 
 
@@ -161,6 +163,7 @@ class PatchPricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_onl
     """Request to update a pricing rule."""
 
     token_cost: int | None = None
+    input_token_cost: int | None = None
     is_active: bool | None = None
-    effective_until: datetime | None = None
+    effective_until: datetime | None | msgspec.UnsetType = msgspec.UNSET
     notes: str | None = None

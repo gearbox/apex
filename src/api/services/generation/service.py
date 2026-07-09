@@ -172,10 +172,12 @@ class GenerationService:
 
         # 7. Billing pre-flight
         account = await self._billing.resolve_account_for_user(user_id, session=session)
-        token_cost = await self._pricing.get_price(
+        token_cost = await self._pricing.quote(
             provider_key.value,
             request.generation_type.value,
             request.model.value,
+            n=request.n,
+            input_image_count=self._input_image_count(request),
             session=session,
         )
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)
@@ -341,3 +343,11 @@ class GenerationService:
             raise ValueError(
                 f"generation_type '{request.generation_type.value}' requires input_video_url"
             )
+
+    @staticmethod
+    def _input_image_count(request: UnifiedGenerationRequest) -> int:
+        if request.source_images is not None:
+            return len(request.source_images)
+        if request.input_image_id is not None or request.source_output_id is not None:
+            return 1
+        return 0

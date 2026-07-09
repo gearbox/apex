@@ -197,7 +197,7 @@ async def test_provider_raising_after_job_and_debit_write_rolls_back_fully(
 
     provider = _WriteThenFailProvider(gpu_session_id=gpu_session.id)
     pricing = AsyncMock()
-    pricing.get_price = AsyncMock(return_value=50)
+    pricing.quote = AsyncMock(return_value=50)
     billing = BillingService()
 
     service = GenerationService(

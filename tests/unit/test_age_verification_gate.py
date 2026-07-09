@@ -83,7 +83,7 @@ def _make_billing_mock() -> AsyncMock:
 
 def _make_generation_service(provider: Provider = Provider.AISHA) -> GenerationService:
     pricing = AsyncMock()
-    pricing.get_price = AsyncMock(return_value=50)
+    pricing.quote = AsyncMock(return_value=50)
     return GenerationService(
         providers={provider: _make_mock_provider()},  # type: ignore[dict-item]
         billing_service=_make_billing_mock(),

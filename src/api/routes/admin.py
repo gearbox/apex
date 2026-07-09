@@ -472,6 +472,7 @@ class AdminController(Controller):
                 generation_type=r.generation_type,
                 model=r.model,
                 token_cost=r.token_cost,
+                input_token_cost=r.input_token_cost,
                 is_active=r.is_active,
                 effective_from=r.effective_from,
                 effective_until=r.effective_until,
@@ -496,12 +497,14 @@ class AdminController(Controller):
             generation_type=str(data.generation_type),
             model=str(data.model),
             token_cost=data.token_cost,
+            input_token_cost=data.input_token_cost,
         )
         rule = await pricing_service.create_rule(
             provider=data.provider,
             generation_type=data.generation_type,
             model=data.model,
             token_cost=data.token_cost,
+            input_token_cost=data.input_token_cost,
             notes=data.notes,
             admin_id=admin_user.id,
             session=session,
@@ -514,6 +517,7 @@ class AdminController(Controller):
                 generation_type=rule.generation_type,
                 model=rule.model,
                 token_cost=rule.token_cost,
+                input_token_cost=rule.input_token_cost,
                 is_active=rule.is_active,
                 effective_from=rule.effective_from,
                 effective_until=rule.effective_until,
@@ -535,14 +539,25 @@ class AdminController(Controller):
         logger.info(
             "admin.updating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id)
         )
-        rule = await pricing_service.update_rule(
-            rule_id,
-            token_cost=data.token_cost,
-            is_active=data.is_active,
-            effective_until=data.effective_until,
-            notes=data.notes,
-            session=session,
-        )
+        if data.effective_until is msgspec.UNSET:
+            rule = await pricing_service.update_rule(
+                rule_id,
+                token_cost=data.token_cost,
+                input_token_cost=data.input_token_cost,
+                is_active=data.is_active,
+                notes=data.notes,
+                session=session,
+            )
+        else:
+            rule = await pricing_service.update_rule(
+                rule_id,
+                token_cost=data.token_cost,
+                input_token_cost=data.input_token_cost,
+                is_active=data.is_active,
+                effective_until=data.effective_until,
+                notes=data.notes,
+                session=session,
+            )
         await session.commit()
         return PricingRuleResponse(
             id=rule.id,
@@ -550,6 +565,7 @@ class AdminController(Controller):
             generation_type=rule.generation_type,
             model=rule.model,
             token_cost=rule.token_cost,
+            input_token_cost=rule.input_token_cost,
             is_active=rule.is_active,
             effective_from=rule.effective_from,
             effective_until=rule.effective_until,

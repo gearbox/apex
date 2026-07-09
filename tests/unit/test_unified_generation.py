@@ -357,7 +357,7 @@ def _make_service(
     billing.get_balance = AsyncMock(return_value=1000)
 
     pricing = AsyncMock()
-    pricing.get_price = AsyncMock(return_value=50)
+    pricing.quote = AsyncMock(return_value=50)
 
     if providers is None:
         providers = {Provider.GROK: _make_mock_provider()}
@@ -423,6 +423,49 @@ class TestGenerationServiceValidation:
 
         with pytest.raises(ValueError, match="mutually exclusive"):
             service._validate_inputs(request)
+
+    def test_input_image_count_t2i(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+
+        assert GenerationService._input_image_count(request) == 0
+
+    def test_input_image_count_input_image_id(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            input_image_id=uuid4(),
+        )
+
+        assert GenerationService._input_image_count(request) == 1
+
+    def test_input_image_count_source_output_id(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_output_id=uuid4(),
+        )
+
+        assert GenerationService._input_image_count(request) == 1
+
+    def test_input_image_count_source_images(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_images=[
+                SourceImageReference(input_image_id=uuid4()),
+                SourceImageReference(input_image_id=uuid4()),
+                SourceImageReference(input_image_id=uuid4()),
+            ],
+        )
+
+        assert GenerationService._input_image_count(request) == 3
 
 
 def _make_enabled_model_mock() -> MagicMock:
@@ -501,7 +544,7 @@ class TestGenerationServiceGenerate:
         billing.refund = AsyncMock()
 
         pricing = AsyncMock()
-        pricing.get_price = AsyncMock(return_value=50)
+        pricing.quote = AsyncMock(return_value=50)
 
         session = AsyncMock()
 
@@ -562,7 +605,7 @@ class TestGenerationServiceGenerate:
         billing.refund = AsyncMock()
 
         pricing = AsyncMock()
-        pricing.get_price = AsyncMock(return_value=50)
+        pricing.quote = AsyncMock(return_value=50)
 
         service = GenerationService(
             providers={Provider.GROK: mock_provider},
@@ -619,7 +662,7 @@ class TestGenerationServiceGenerate:
         billing.refund = AsyncMock(return_value=MagicMock(event=None))
 
         pricing = AsyncMock()
-        pricing.get_price = AsyncMock(return_value=50)
+        pricing.quote = AsyncMock(return_value=50)
 
         session = AsyncMock()
         # First commit() (right after submit succeeds) fails; the recovery
@@ -680,7 +723,7 @@ class TestGenerationServiceGenerate:
         billing.refund = AsyncMock()
 
         pricing = AsyncMock()
-        pricing.get_price = AsyncMock(return_value=50)
+        pricing.quote = AsyncMock(return_value=50)
 
         event_bus = AsyncMock()
         event_bus.publish_balance = AsyncMock()
@@ -743,7 +786,7 @@ class TestGenerationServiceGenerate:
         billing.assert_sufficient_balance = AsyncMock()
 
         pricing = AsyncMock()
-        pricing.get_price = AsyncMock(return_value=50)
+        pricing.quote = AsyncMock(return_value=50)
 
         service = GenerationService(
             providers={Provider.GROK: mock_provider},
@@ -770,6 +813,55 @@ class TestGenerationServiceGenerate:
 
         assert response.balance_remaining == 725
         billing.get_balance.assert_not_called()
+
+    async def test_generate_quotes_with_output_count_and_input_count(self) -> None:
+        account = MagicMock(id=uuid4())
+        mock_provider = _make_mock_provider()
+        billing = AsyncMock()
+        billing.resolve_account_for_user = AsyncMock(return_value=account)
+        billing.assert_sufficient_balance = AsyncMock()
+        pricing = AsyncMock()
+        pricing.quote = AsyncMock(return_value=123)
+        session = AsyncMock()
+
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=billing,
+            pricing_service=pricing,
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+        )
+
+        request = UnifiedGenerationRequest(
+            prompt="use uploads",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            n=2,
+            source_images=[
+                SourceImageReference(input_image_id=uuid4()),
+                SourceImageReference(input_image_id=uuid4()),
+                SourceImageReference(input_image_id=uuid4()),
+            ],
+        )
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch("src.db.repositories.output.OutputRepository") as output_repo_cls,
+        ):
+            response = await service.generate(
+                request,
+                user_id=uuid4(),
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        output_repo_cls.assert_not_called()
+        assert pricing.quote.await_args.kwargs["n"] == 2
+        assert pricing.quote.await_args.kwargs["input_image_count"] == 3
+        billing.assert_sufficient_balance.assert_awaited_once_with(account.id, 123, session=session)
+        assert mock_provider.submit.await_args.kwargs["token_cost"] == 123
+        assert response.tokens_charged == 123
 
     async def test_source_images_lineage_uses_first_output_reference(self) -> None:
         first_input_id = uuid4()
@@ -902,7 +994,7 @@ class TestGenerationServiceRateLimit:
         mock_billing.assert_sufficient_balance = AsyncMock()
         mock_billing.get_balance = AsyncMock(return_value=1000)
         mock_pricing = AsyncMock()
-        mock_pricing.get_price = AsyncMock(return_value=50)
+        mock_pricing.quote = AsyncMock(return_value=50)
 
         service = GenerationService(
             providers=mock_providers,

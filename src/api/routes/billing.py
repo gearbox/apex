@@ -166,6 +166,7 @@ class BillingController(Controller):
                 generation_type=r.generation_type,
                 model=r.model,
                 token_cost=r.token_cost,
+                input_token_cost=r.input_token_cost,
                 is_active=r.is_active,
                 effective_from=r.effective_from,
                 effective_until=r.effective_until,

@@ -9,7 +9,11 @@ import structlog
 
 from src.api.services.billing_errors import PriceNotFoundError
 from src.core.uid import new_id
-from src.db.repositories.billing import BillingRepository
+from src.db.repositories.billing import (
+    UNSET_EFFECTIVE_UNTIL,
+    BillingRepository,
+    EffectiveUntilUpdate,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,6 +27,22 @@ logger = structlog.get_logger(__name__)
 
 class PricingService:
     """Service for pricing catalog operations."""
+
+    async def _get_rule(
+        self,
+        provider: str,
+        generation_type: str,
+        model: str | None,
+        *,
+        session: AsyncSession,
+    ) -> PricingRule:
+        repo = BillingRepository(session)
+        rule = await repo.get_active_price(provider, generation_type, model)
+        if rule is None:
+            raise PriceNotFoundError(
+                f"No active pricing rule for {provider}/{generation_type}/{model}"
+            )
+        return rule
 
     async def get_price(
         self,
@@ -40,13 +60,27 @@ class PricingService:
         Raises:
             PriceNotFoundError: If no active rule found.
         """
-        repo = BillingRepository(session)
-        rule = await repo.get_active_price(provider, generation_type, model)
-        if rule is None:
-            raise PriceNotFoundError(
-                f"No active pricing rule for {provider}/{generation_type}/{model}"
-            )
+        rule = await self._get_rule(provider, generation_type, model, session=session)
         return rule.token_cost
+
+    async def quote(
+        self,
+        provider: str,
+        generation_type: str,
+        model: str | None,
+        *,
+        n: int,
+        input_image_count: int,
+        session: AsyncSession,
+    ) -> int:
+        """Total token cost for a generation: (token_cost + input_token_cost * k) * n."""
+        if n < 1:
+            raise ValueError("n must be >= 1")
+        if input_image_count < 0:
+            raise ValueError("input_image_count must be >= 0")
+
+        rule = await self._get_rule(provider, generation_type, model, session=session)
+        return (rule.token_cost + rule.input_token_cost * input_image_count) * n
 
     async def list_catalog(
         self,
@@ -64,6 +98,7 @@ class PricingService:
         generation_type: str,
         model: str | None,
         token_cost: int,
+        input_token_cost: int = 0,
         notes: str | None,
         admin_id: UUID,
         session: AsyncSession,
@@ -75,6 +110,7 @@ class PricingService:
             generation_type=generation_type,
             model=model,
             token_cost=token_cost,
+            input_token_cost=input_token_cost,
             notes=notes,
             created_by=admin_id,
         )
@@ -98,22 +134,21 @@ class PricingService:
         rule_id: UUID,
         *,
         token_cost: int | None = None,
+        input_token_cost: int | None = None,
         is_active: bool | None = None,
-        effective_until: object = None,  # datetime | None
+        effective_until: EffectiveUntilUpdate = UNSET_EFFECTIVE_UNTIL,
         notes: str | None = None,
         session: AsyncSession,
     ) -> PricingRule:
         repo = BillingRepository(session)
-        rule = await repo.get_pricing_rule(rule_id)
+        rule = await repo.update_pricing_rule(
+            rule_id,
+            token_cost=token_cost,
+            input_token_cost=input_token_cost,
+            is_active=is_active,
+            effective_until=effective_until,
+            notes=notes,
+        )
         if rule is None:
             raise PriceNotFoundError(f"Pricing rule {rule_id} not found")
-        if token_cost is not None:
-            rule.token_cost = token_cost
-        if is_active is not None:
-            rule.is_active = is_active
-        if effective_until is not None:
-            rule.effective_until = effective_until  # type: ignore[assignment]
-        if notes is not None:
-            rule.notes = notes
-        await session.flush()
         return rule

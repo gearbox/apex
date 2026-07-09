@@ -300,6 +300,13 @@ class PricingRule(Base):
     generation_type: Mapped[str] = mapped_column(String(20), nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     token_cost: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_token_cost: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    """Token cost per input image, charged per output sample (total: (token_cost + input_token_cost*k)*n)."""
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

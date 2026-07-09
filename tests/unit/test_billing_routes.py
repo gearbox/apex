@@ -4,6 +4,7 @@ interaction (C5 note)."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -57,6 +58,33 @@ class TestGetTopupOptions:
             (100, 5),
             (250, 10),
         ]
+
+
+class TestGetPricing:
+    async def test_pricing_response_includes_input_token_cost(self) -> None:
+        rule = MagicMock()
+        rule.id = uuid4()
+        rule.provider = "grok"
+        rule.generation_type = "i2i"
+        rule.model = "grok-imagine-image"
+        rule.token_cost = 20
+        rule.input_token_cost = 3
+        rule.is_active = True
+        rule.effective_from = datetime.now(UTC)
+        rule.effective_until = None
+        rule.notes = None
+
+        pricing_service = AsyncMock()
+        pricing_service.list_catalog = AsyncMock(return_value=[rule])
+
+        result = await BillingController.get_pricing.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            session=AsyncMock(),
+            pricing_service=pricing_service,
+        )
+
+        assert result[0].token_cost == 20
+        assert result[0].input_token_cost == 3
 
 
 class TestIdempotencyKeyAmountConflict:
