@@ -47,7 +47,7 @@ from src.api.services.idempotency import IdempotencyReplayResult, IdempotencySer
 from src.api.services.pricing import PricingService
 from src.core.enums import UserRole
 from src.db.models import User
-from src.db.repositories.billing import BillingRepository
+from src.db.repositories.billing import UNSET_OPTIONAL_UPDATE, BillingRepository
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 
@@ -539,25 +539,19 @@ class AdminController(Controller):
         logger.info(
             "admin.updating_pricing_rule", admin_id=str(admin_user.id), rule_id=str(rule_id)
         )
-        if data.effective_until is msgspec.UNSET:
-            rule = await pricing_service.update_rule(
-                rule_id,
-                token_cost=data.token_cost,
-                input_token_cost=data.input_token_cost,
-                is_active=data.is_active,
-                notes=data.notes,
-                session=session,
-            )
-        else:
-            rule = await pricing_service.update_rule(
-                rule_id,
-                token_cost=data.token_cost,
-                input_token_cost=data.input_token_cost,
-                is_active=data.is_active,
-                effective_until=data.effective_until,
-                notes=data.notes,
-                session=session,
-            )
+        effective_until = (
+            UNSET_OPTIONAL_UPDATE if data.effective_until is msgspec.UNSET else data.effective_until
+        )
+        notes = UNSET_OPTIONAL_UPDATE if data.notes is msgspec.UNSET else data.notes
+        rule = await pricing_service.update_rule(
+            rule_id,
+            token_cost=data.token_cost,
+            input_token_cost=data.input_token_cost,
+            is_active=data.is_active,
+            effective_until=effective_until,
+            notes=notes,
+            session=session,
+        )
         await session.commit()
         return PricingRuleResponse(
             id=rule.id,

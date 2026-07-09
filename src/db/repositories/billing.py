@@ -24,14 +24,14 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class _UnsetEffectiveUntil:
-    """Sentinel for omitted nullable effective_until updates."""
+class _UnsetOptionalUpdate:
+    """Sentinel for omitted nullable field updates."""
 
     __slots__ = ()
 
 
-UNSET_EFFECTIVE_UNTIL = _UnsetEffectiveUntil()
-type EffectiveUntilUpdate = datetime | None | _UnsetEffectiveUntil
+UNSET_OPTIONAL_UPDATE = _UnsetOptionalUpdate()
+type OptionalUpdate[T] = T | None | _UnsetOptionalUpdate
 
 
 class BillingRepository:
@@ -365,8 +365,8 @@ class BillingRepository:
         token_cost: int | None = None,
         input_token_cost: int | None = None,
         is_active: bool | None = None,
-        effective_until: EffectiveUntilUpdate = UNSET_EFFECTIVE_UNTIL,
-        notes: str | None = None,
+        effective_until: OptionalUpdate[datetime] = UNSET_OPTIONAL_UPDATE,
+        notes: OptionalUpdate[str] = UNSET_OPTIONAL_UPDATE,
     ) -> PricingRule | None:
         rule = await self.get_pricing_rule(rule_id)
         if rule is None:
@@ -377,9 +377,9 @@ class BillingRepository:
             rule.input_token_cost = input_token_cost
         if is_active is not None:
             rule.is_active = is_active
-        if not isinstance(effective_until, _UnsetEffectiveUntil):
+        if not isinstance(effective_until, _UnsetOptionalUpdate):
             rule.effective_until = effective_until
-        if notes is not None:
+        if not isinstance(notes, _UnsetOptionalUpdate):
             rule.notes = notes
         await self._session.flush()
         return rule

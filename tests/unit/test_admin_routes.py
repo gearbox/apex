@@ -16,6 +16,7 @@ from src.api.schemas.billing import (
 )
 from src.core.enums import TransactionType
 from src.db.models.billing import TokenTransaction
+from src.db.repositories.billing import UNSET_OPTIONAL_UPDATE
 
 pytestmark = pytest.mark.unit
 
@@ -150,7 +151,8 @@ class TestAdminPricingRoutes:
         assert update_kwargs["token_cost"] is None
         assert update_kwargs["input_token_cost"] == 3
         assert update_kwargs["is_active"] is None
-        assert "effective_until" not in update_kwargs
+        assert update_kwargs["effective_until"] is UNSET_OPTIONAL_UPDATE
+        assert update_kwargs["notes"] is UNSET_OPTIONAL_UPDATE
 
     async def test_patch_pricing_rule_can_clear_effective_until(self) -> None:
         rule = _make_pricing_rule(input_token_cost=0)
@@ -169,3 +171,21 @@ class TestAdminPricingRoutes:
 
         assert response.effective_until is None
         assert pricing_service.update_rule.await_args.kwargs["effective_until"] is None
+
+    async def test_patch_pricing_rule_can_clear_notes(self) -> None:
+        rule = _make_pricing_rule(input_token_cost=0)
+        rule.notes = None
+        pricing_service = AsyncMock()
+        pricing_service.update_rule = AsyncMock(return_value=rule)
+
+        response = await AdminController.update_pricing_rule.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            admin_user=MagicMock(id=uuid4()),
+            rule_id=rule.id,
+            data=PatchPricingRuleRequest(notes=None),
+            session=AsyncMock(),
+            pricing_service=pricing_service,
+        )
+
+        assert response.notes is None
+        assert pricing_service.update_rule.await_args.kwargs["notes"] is None

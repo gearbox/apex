@@ -1476,17 +1476,23 @@ Response: PricingRuleResponse[]
 #### `POST /v1/admin/pricing`
 
 ```
-Request:  { provider: string, generation_type: string, model?: string, token_cost: int, input_token_cost?: int, notes?: string }
+Request:  { provider: string, generation_type: string, model?: string | null, token_cost: int, input_token_cost?: int, notes?: string | null }
 Response: PricingRuleResponse
 Status:   201 Created
 ```
 
+`token_cost` is the per-output cost. `input_token_cost` defaults to `0` and is charged per
+input image per output sample.
+
 #### `PATCH /v1/admin/pricing/{rule_id}`
 
 ```
-Request:  { token_cost?: int, input_token_cost?: int, is_active?: bool, effective_until?: datetime, notes?: string }
+Request:  { token_cost?: int, input_token_cost?: int, is_active?: bool, effective_until?: datetime | null, notes?: string | null }
 Response: PricingRuleResponse
 ```
+
+Patch fields are optional. Omitted nullable fields are left unchanged; explicit `null` clears
+`effective_until` or `notes`.
 
 #### `DELETE /v1/admin/pricing/{rule_id}`
 

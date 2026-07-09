@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -10,9 +11,9 @@ import structlog
 from src.api.services.billing_errors import PriceNotFoundError
 from src.core.uid import new_id
 from src.db.repositories.billing import (
-    UNSET_EFFECTIVE_UNTIL,
+    UNSET_OPTIONAL_UPDATE,
     BillingRepository,
-    EffectiveUntilUpdate,
+    OptionalUpdate,
 )
 
 if TYPE_CHECKING:
@@ -136,8 +137,8 @@ class PricingService:
         token_cost: int | None = None,
         input_token_cost: int | None = None,
         is_active: bool | None = None,
-        effective_until: EffectiveUntilUpdate = UNSET_EFFECTIVE_UNTIL,
-        notes: str | None = None,
+        effective_until: OptionalUpdate[datetime] = UNSET_OPTIONAL_UPDATE,
+        notes: OptionalUpdate[str] = UNSET_OPTIONAL_UPDATE,
         session: AsyncSession,
     ) -> PricingRule:
         repo = BillingRepository(session)

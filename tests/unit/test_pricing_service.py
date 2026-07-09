@@ -9,7 +9,7 @@ import pytest
 
 from src.api.services.billing_errors import PriceNotFoundError
 from src.api.services.pricing import PricingService
-from src.db.repositories.billing import UNSET_EFFECTIVE_UNTIL
+from src.db.repositories.billing import UNSET_OPTIONAL_UPDATE
 
 pytestmark = pytest.mark.unit
 
@@ -38,8 +38,8 @@ def _make_repo(**kwargs: object) -> AsyncMock:
         if rule is None:
             return None
         for field, value in fields.items():
-            if field == "effective_until":
-                if value is not UNSET_EFFECTIVE_UNTIL:
+            if field in {"effective_until", "notes"}:
+                if value is not UNSET_OPTIONAL_UPDATE:
                     setattr(rule, field, value)
                 continue
             if value is not None:
@@ -344,6 +344,19 @@ class TestUpdateRule:
             await svc.update_rule(rule.id, notes="new note", session=session)
 
         assert rule.notes == "new note"
+
+    async def test_clears_notes_when_explicit_none(self) -> None:
+        rule = _make_rule(notes="old note")
+        repo = _make_repo(rule=rule)
+        session = AsyncMock()
+        session.flush = AsyncMock()
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            svc = PricingService()
+            await svc.update_rule(rule.id, notes=None, session=session)
+
+        assert rule.notes is None
 
     async def test_raises_when_rule_not_found(self) -> None:
         repo = _make_repo(rule=None)
