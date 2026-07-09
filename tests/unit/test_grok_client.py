@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
+    GrokInvalidRequestError,
     GrokModerationError,
     GrokVideoResult,
 )
+from src.api.services.grok.enums import ResponseImageFormat
+from src.core.enums import AspectRatio, ModelType
 
 
 class _DeferredStatus:
@@ -31,6 +37,13 @@ class _Video:
 class _Error:
     code: str
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ImageResponse:
+    url: str = ""
+    b64_json: str = ""
+    revised_prompt: str = ""
 
 
 class _DeferredPayload:
@@ -125,3 +138,128 @@ class TestParseDeferredVideoResult:
         )
 
         assert result is None
+
+
+class TestImageEditing:
+    @staticmethod
+    def _client_with_image(image: object) -> GrokClient:
+        client = GrokClient.__new__(GrokClient)
+        client._client = cast("Any", SimpleNamespace(image=image))
+        return client
+
+    async def test_edit_image_single_output_uses_sample_batch_with_source_image(
+        self,
+    ) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[
+                    _ImageResponse(
+                        url="https://example.test/edited.png",
+                        revised_prompt="revised prompt",
+                    )
+                ]
+            )
+        )
+        client = self._client_with_image(image)
+
+        results = await client.edit_image(
+            "make it cinematic",
+            "https://example.test/input.png",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            n=1,
+            aspect_ratio=AspectRatio.RATIO_16_9,
+            image_format=ResponseImageFormat.URL,
+        )
+
+        assert len(results) == 1
+        assert results[0].url == "https://example.test/edited.png"
+        image.sample_batch.assert_awaited_once_with(
+            model="grok-imagine-image",
+            prompt="make it cinematic",
+            n=1,
+            image_url="https://example.test/input.png",
+            image_urls=None,
+            aspect_ratio="16:9",
+            image_format="url",
+        )
+
+    async def test_edit_image_multiple_outputs_sends_source_image_and_n(
+        self,
+    ) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[
+                    _ImageResponse(url="https://example.test/edited-1.png"),
+                    _ImageResponse(url="https://example.test/edited-2.png"),
+                ]
+            )
+        )
+        client = self._client_with_image(image)
+
+        results = await client.edit_image(
+            "make two options",
+            "https://example.test/input.png",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            n=2,
+            aspect_ratio=AspectRatio.RATIO_9_16,
+            image_format=ResponseImageFormat.URL,
+        )
+
+        assert [result.url for result in results] == [
+            "https://example.test/edited-1.png",
+            "https://example.test/edited-2.png",
+        ]
+        image.sample_batch.assert_awaited_once_with(
+            model="grok-imagine-image",
+            prompt="make two options",
+            n=2,
+            image_url="https://example.test/input.png",
+            image_urls=None,
+            aspect_ratio="9:16",
+            image_format="url",
+        )
+
+    async def test_edit_image_supports_image_urls_without_image_url(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[_ImageResponse(url="https://example.test/edited.png")]
+            )
+        )
+        client = self._client_with_image(image)
+
+        await client.edit_image(
+            "combine these references",
+            image_urls=[
+                "https://example.test/source-1.png",
+                "https://example.test/source-2.png",
+            ],
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            n=1,
+            image_format=ResponseImageFormat.URL,
+        )
+
+        image.sample_batch.assert_awaited_once_with(
+            model="grok-imagine-image",
+            prompt="combine these references",
+            n=1,
+            image_url=None,
+            image_urls=[
+                "https://example.test/source-1.png",
+                "https://example.test/source-2.png",
+            ],
+            aspect_ratio="1:1",
+            image_format="url",
+        )
+
+    async def test_edit_image_rejects_image_url_with_image_urls(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock())
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokInvalidRequestError, match="Only one of image_url or image_urls"):
+            await client.edit_image(
+                "conflicting inputs",
+                "https://example.test/source.png",
+                image_urls=["https://example.test/source-2.png"],
+            )
+
+        image.sample_batch.assert_not_awaited()

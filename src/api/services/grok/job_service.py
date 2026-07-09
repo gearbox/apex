@@ -10,6 +10,7 @@ Handles the full lifecycle of Grok generation jobs:
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -151,6 +152,7 @@ class GrokJobService:
         name: str | None = None,
         negative_prompt: str | None = None,
         input_image_url: str | None = None,
+        input_image_urls: Sequence[str] | None = None,
         input_image_id: UUID | None = None,
         billing_service: BillingService,
         account_id: UUID,
@@ -180,7 +182,8 @@ class GrokJobService:
             aspect_ratio: Image aspect ratio.
             name: Job name (auto-generated if not provided).
             negative_prompt: Negative prompt (stored but not used by Grok).
-            input_image_url: Source image URL for I2I.
+            input_image_url: Input image URL for I2I.
+            input_image_urls: Input image URLs for Grok multi-reference I2I.
             input_image_id: Database ID of input image.
             billing_service: Service to handle token deductions.
             account_id: Pre-resolved token account ID for the user.
@@ -255,15 +258,19 @@ class GrokJobService:
             await session.flush()
 
             # Call Grok API
-            if generation_type == GenerationType.I2I and input_image_url:
-                # Image editing
-                result = await self._grok.edit_image(
+            if generation_type == GenerationType.I2I and (
+                input_image_url is not None or input_image_urls is not None
+            ):
+                # Image input references are resolved to provider-readable URLs upstream.
+                results = await self._grok.edit_image(
                     prompt=prompt,
                     image_url=input_image_url,
+                    image_urls=input_image_urls,
                     model=model,
+                    n=n,
+                    aspect_ratio=aspect_ratio,
                     image_format=ResponseImageFormat.URL,
                 )
-                results = [result]
             else:
                 # Text-to-image
                 results = await self._grok.generate_image(

@@ -123,7 +123,11 @@ class AishaGenerationProvider:
     def validate(self, request: UnifiedGenerationRequest) -> None:
         """Aisha-specific validation beyond what the enum provides."""
         if request.model == ModelType.AISHA_VIDEO:
-            raise ValueError("Aisha video generation is not yet available via the unified endpoint")
+            raise NotImplementedError(
+                "Aisha video generation is not yet available via the unified endpoint"
+            )
+        if request.source_images is not None:
+            raise NotImplementedError("Aisha does not support source_images inputs yet")
 
     async def refresh_job(
         self,
@@ -278,6 +282,7 @@ class AishaGenerationProvider:
         source_output_id: UUID | None = None,
     ) -> ProviderSubmitResult:
         """Resolve GPU session, build per-request ComfyUI client, queue workflow."""
+        self.validate(request)
         job_id = new_id()
 
         # 1. Resolve active GPU session for this model

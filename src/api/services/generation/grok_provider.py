@@ -15,7 +15,7 @@ from src.core.enums import GenerationType, JobStatus
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.schemas.unified_generation import UnifiedGenerationRequest
+    from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
     from src.api.services.billing import BillingService
     from src.db.models.storage import GenerationJob
 
@@ -132,6 +132,48 @@ class GrokGenerationProvider:
         )
         return url_result.presigned_url
 
+    async def _resolve_input_reference_url(
+        self,
+        image_ref: SourceImageReference,
+        session: AsyncSession,
+    ) -> str:
+        """Resolve one API image reference to a provider-readable URL."""
+        if image_ref.source_output_id is not None:
+            from src.db.repositories.output import OutputRepository
+
+            output = await OutputRepository(session).get(image_ref.source_output_id)
+            if output is None:
+                raise ValueError(f"Source output {image_ref.source_output_id} not found")
+            url_result = await self._r2.get_presigned_url(output.storage_key, expires_in=3600)
+            return url_result.presigned_url
+
+        if image_ref.input_image_id is None:
+            raise RuntimeError("image reference has no input_image_id or source_output_id")
+
+        from src.db.repositories.user_image import UserImageRepository
+
+        input_image = await UserImageRepository(session).get(image_ref.input_image_id)
+        if input_image is None:
+            raise ValueError(f"Input image {image_ref.input_image_id} not found")
+        url_result = await self._r2.get_presigned_url(
+            input_image.storage_key,
+            expires_in=3600,
+        )
+        return url_result.presigned_url
+
+    async def _resolve_input_urls(
+        self,
+        request: UnifiedGenerationRequest,
+        session: AsyncSession,
+    ) -> list[str] | None:
+        """Resolve multi-reference image inputs to provider-readable URLs."""
+        if request.source_images is None:
+            return None
+        return [
+            await self._resolve_input_reference_url(image_ref, session)
+            for image_ref in request.source_images
+        ]
+
     async def _submit_image(
         self,
         request: UnifiedGenerationRequest,
@@ -147,6 +189,7 @@ class GrokGenerationProvider:
     ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.create_image_job."""
         input_image_url = await self._resolve_input_url(request, session)
+        input_image_urls = await self._resolve_input_urls(request, session)
 
         return await self._grok.create_image_job(
             session=session,
@@ -159,6 +202,7 @@ class GrokGenerationProvider:
             name=request.name,
             negative_prompt=request.negative_prompt,
             input_image_url=input_image_url,
+            input_image_urls=input_image_urls,
             input_image_id=request.input_image_id,
             billing_service=billing_service,
             account_id=account_id,

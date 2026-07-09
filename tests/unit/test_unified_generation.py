@@ -9,7 +9,7 @@ from uuid import uuid4
 import msgspec
 import pytest
 
-from src.api.schemas.unified_generation import UnifiedGenerationRequest
+from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
 from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
@@ -56,6 +56,69 @@ class TestUnifiedGenerationRequestSchema:
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
         assert req.input_image_id is None
+
+    def test_source_images_accepts_storage_references(self) -> None:
+        input_image_id = uuid4()
+        source_output_id = uuid4()
+        req = UnifiedGenerationRequest(
+            prompt="Edit these",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_images=[
+                SourceImageReference(input_image_id=input_image_id),
+                SourceImageReference(source_output_id=source_output_id),
+            ],
+        )
+
+        assert req.source_images is not None
+        assert req.source_images[0].input_image_id == input_image_id
+        assert req.source_images[1].source_output_id == source_output_id
+
+    def test_source_images_allows_duplicate_references(self) -> None:
+        input_image_id = uuid4()
+        req = UnifiedGenerationRequest(
+            prompt="Edit duplicates",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_images=[
+                SourceImageReference(input_image_id=input_image_id),
+                SourceImageReference(input_image_id=input_image_id),
+            ],
+        )
+
+        assert req.source_images is not None
+        assert [item.input_image_id for item in req.source_images] == [
+            input_image_id,
+            input_image_id,
+        ]
+
+    def test_source_images_storage_references_decode_from_json(self) -> None:
+        input_image_id = uuid4()
+        source_output_id = uuid4()
+        payload = (
+            b'{"prompt":"Edit these","generation_type":"i2i",'
+            b'"model":"grok-imagine-image","source_images":['
+            + f'{{"input_image_id":"{input_image_id}"}}'.encode()
+            + b","
+            + f'{{"source_output_id":"{source_output_id}"}}'.encode()
+            + b"]}"
+        )
+
+        req = msgspec.json.decode(payload, type=UnifiedGenerationRequest)
+
+        assert req.source_images is not None
+        assert req.source_images[0].input_image_id == input_image_id
+        assert req.source_images[1].source_output_id == source_output_id
+
+    def test_source_images_reference_requires_exactly_one_source(self) -> None:
+        image_id = uuid4()
+        output_id = uuid4()
+
+        with pytest.raises(ValueError, match="exactly one"):
+            SourceImageReference(input_image_id=image_id, source_output_id=output_id)
+
+        with pytest.raises(ValueError, match="exactly one"):
+            SourceImageReference()
 
     def test_video_fields(self) -> None:
         req = UnifiedGenerationRequest(
@@ -313,6 +376,30 @@ class TestGenerationServiceValidation:
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
         service._validate_inputs(request)  # Should not raise
+
+    def test_validate_i2i_accepts_source_images_references(self) -> None:
+        service = _make_service()
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_images=[SourceImageReference(input_image_id=uuid4())],
+        )
+
+        service._validate_inputs(request)
+
+    def test_validate_source_images_mutually_exclusive_with_scalar_inputs(self) -> None:
+        service = _make_service()
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            input_image_id=uuid4(),
+            source_images=[SourceImageReference(source_output_id=uuid4())],
+        )
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            service._validate_inputs(request)
 
 
 def _make_enabled_model_mock() -> MagicMock:

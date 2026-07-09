@@ -27,6 +27,29 @@ StepsOpt = Annotated[int, msgspec.Meta(ge=1, le=150)]  # raise from le=20; bundl
 Denoise = Annotated[float, msgspec.Meta(ge=0.0, le=1.0)]
 
 
+class SourceImageReference(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Backend-owned image input reference.
+
+    The API accepts storage IDs only. Providers resolve these IDs to the
+    concrete URLs/bytes they need internally.
+    """
+
+    input_image_id: UUID | None = None
+    """ID of a previously uploaded image."""
+
+    source_output_id: UUID | None = None
+    """ID of a generated output to use as input."""
+
+    def __post_init__(self) -> None:
+        if (self.input_image_id is None) == (self.source_output_id is None):
+            raise ValueError(
+                "Each source_images item must provide exactly one of input_image_id or source_output_id"
+            )
+
+
+SourceImageReferences = Annotated[list[SourceImageReference], msgspec.Meta(min_length=1)]
+
+
 class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Provider-agnostic generation request.
 
@@ -46,11 +69,16 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     # --- Optional fields (applicability depends on generation_type) ---
 
     input_image_id: UUID | None = None
-    """Required for i2i, i2v, flf2v. ID of a previously uploaded image (via POST /v1/storage/upload)."""
+    """Required for i2i, i2v, flf2v unless another supported source field is set.
+    ID of a previously uploaded image (via POST /v1/storage/upload)."""
 
     source_output_id: UUID | None = None
     """ID of a GenerationOutput to use as input (remix).
-    Mutually exclusive with input_image_id."""
+    Mutually exclusive with input_image_id and source_images."""
+
+    source_images: SourceImageReferences | None = None
+    """Additional image input references for multi-reference I2I.
+    Mutually exclusive with input_image_id and source_output_id."""
 
     input_video_url: str | None = None
     """Required for v2v. Publicly-accessible URL of the source video."""

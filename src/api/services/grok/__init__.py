@@ -252,14 +252,6 @@ class GrokClient:
             )
 
         try:
-            if n == 1:
-                response: ImageResponse = await self.client.image.sample(
-                    model=model.value,
-                    prompt=prompt,
-                    aspect_ratio=aspect_ratio.value,
-                    image_format=image_format.value,
-                )
-                return [self._parse_image_response(response, image_format)]
             responses: Sequence[ImageResponse] = await self.client.image.sample_batch(
                 model=model.value,
                 prompt=prompt,
@@ -275,22 +267,29 @@ class GrokClient:
     async def edit_image(
         self,
         prompt: str,
-        image_url: str,
+        image_url: str | None = None,
         *,
         model: ModelType = ModelType.GROK_IMAGINE_IMAGE,
+        n: int = 1,
+        image_urls: Sequence[str] | None = None,
+        aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1,
         image_format: ResponseImageFormat = ResponseImageFormat.URL,
-    ) -> GrokImageResult:
-        """Edit an existing image with a text prompt.
+    ) -> list[GrokImageResult]:
+        """Generate one or more edited output variants from image input.
 
         Args:
             prompt: Text description of the edit to perform.
             image_url: URL or base64 data URL of the source image.
                 For base64: "data:image/jpeg;base64,..."
             model: Model to use (must be grok-imagine-image).
+            n: Number of edited output variants to generate (1-10).
+            image_urls: Optional list of source image URLs/base64 values for
+                multi-reference editing. Cannot be combined with image_url.
+            aspect_ratio: Aspect ratio for the generated image.
             image_format: Output format - "url" or "base64".
 
         Returns:
-            GrokImageResult with the edited image.
+            List of GrokImageResult with edited output variants.
 
         Raises:
             GrokAPIError: If API request fails.
@@ -302,17 +301,39 @@ class GrokClient:
                 f"Use {ModelType.GROK_IMAGINE_IMAGE.value}."
             )
 
+        self._validate_edit_image_inputs(image_url=image_url, image_urls=image_urls)
+
         try:
-            response: ImageResponse = await self.client.image.sample(
+            responses: Sequence[ImageResponse] = await self.client.image.sample_batch(
                 model=model.value,
                 prompt=prompt,
+                n=n,
                 image_url=image_url,
+                image_urls=image_urls,
+                aspect_ratio=aspect_ratio.value,
                 image_format=image_format.value,
             )
-            return self._parse_image_response(response, image_format)
+            return [self._parse_image_response(r, image_format) for r in responses]
 
         except Exception as e:
             raise self._convert_exception(e) from e
+
+    @staticmethod
+    def _validate_edit_image_inputs(
+        *,
+        image_url: str | None,
+        image_urls: Sequence[str] | None,
+    ) -> None:
+        if image_url is not None and image_urls is not None:
+            raise GrokInvalidRequestError(
+                "Only one of image_url or image_urls can be set for image editing."
+            )
+        if image_url is None and image_urls is None:
+            raise GrokInvalidRequestError(
+                "One of image_url or image_urls must be set for image editing."
+            )
+        if image_urls is not None and len(image_urls) == 0:
+            raise GrokInvalidRequestError("image_urls must contain at least one image.")
 
     # -------------------------------------------------------------------------
     # Video Generation

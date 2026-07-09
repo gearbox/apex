@@ -318,6 +318,10 @@ Request: {
   input_image_id?: UUID,          // required for i2i / i2v / flf2v if source_output_id not set
   source_output_id?: UUID,        // alternative to input_image_id — use an existing generation output as input
                                   // mutually exclusive with input_image_id
+  source_images?: Array<{         // Grok I2I multi-reference inputs; backend resolves refs to provider URLs
+    input_image_id?: UUID,        // exactly one of input_image_id or source_output_id per item
+    source_output_id?: UUID
+  }>,                             // mutually exclusive with top-level input_image_id/source_output_id
   input_video_url?: string,       // required for v2v (public URL)
   negative_prompt?: string (≤2048 chars),  // applied by Aisha; stored but ignored by Grok
   aspect_ratio?: AspectRatio (default "1:1"),
@@ -345,10 +349,11 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from gallery" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
+          source_images is storage-reference based; clients send upload/output IDs, not public URLs.
           Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
           Aisha (ComfyUI) models require an active GPU session — start one via
           POST /v1/sessions before submitting an Aisha generation, otherwise 409 no_active_gpu_session is returned.

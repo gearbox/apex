@@ -219,6 +219,18 @@ class UnifiedGenerationController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
+        except NotImplementedError as exc:
+            await _mark_failed(idempotency_service, record_id, session)
+            logger.info("generation.not_implemented", error=str(exc))
+            return Response(
+                content=ErrorEnvelope(
+                    error="not_implemented",
+                    message=str(exc),
+                    status_code=HTTP_400_BAD_REQUEST,
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
         except GenerationError as exc:
             await _mark_failed(idempotency_service, record_id, session)
             logger.exception("generation.failed", error=str(exc))

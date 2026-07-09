@@ -14,7 +14,7 @@ from src.api.services.billing import BillingService
 from src.api.services.generation.base import GenerationProvider
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.pricing import PricingService
-from src.core.enums import JobStatus, Provider
+from src.core.enums import GenerationType, JobStatus, Provider
 from src.core.product import ProductConfig
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
@@ -305,13 +305,20 @@ class GenerationService:
     @staticmethod
     def _validate_inputs(request: UnifiedGenerationRequest) -> None:
         """Cross-cutting validation: generation_type vs required inputs."""
-        if request.input_image_id is not None and request.source_output_id is not None:
-            raise ValueError("input_image_id and source_output_id are mutually exclusive")
-        if request.generation_type.requires_image_input and (
-            request.input_image_id is None and request.source_output_id is None
-        ):
+        image_input_sources = [
+            request.input_image_id is not None,
+            request.source_output_id is not None,
+            request.source_images is not None,
+        ]
+        if sum(image_input_sources) > 1:
             raise ValueError(
-                f"generation_type '{request.generation_type.value}' requires input_image_id or source_output_id"
+                "input_image_id, source_output_id, and source_images are mutually exclusive"
+            )
+        if request.source_images is not None and request.generation_type != GenerationType.I2I:
+            raise ValueError("source_images is only supported for i2i generation")
+        if request.generation_type.requires_image_input and not any(image_input_sources):
+            raise ValueError(
+                f"generation_type '{request.generation_type.value}' requires input_image_id, source_output_id, or source_images"
             )
         if request.generation_type.requires_video_input and request.input_video_url is None:
             raise ValueError(

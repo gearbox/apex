@@ -182,6 +182,29 @@ class TestRouteHandlerReturns400:
         assert response.status_code == 400
         idempotency.fail.assert_awaited_once()
 
+    async def test_not_implemented_from_provider_returns_400(self) -> None:
+        svc, idempotency, session = _make_route_handler_mocks(
+            generate_side_effect=NotImplementedError(
+                "Aisha does not support source_images inputs yet"
+            )
+        )
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+        )
+
+        response = await self._call_handler(
+            request,
+            generation_service=svc,
+            idempotency_service=idempotency,
+            session=session,
+        )
+
+        assert response.status_code == 400
+        assert response.content.error == "not_implemented"
+        idempotency.fail.assert_awaited_once()
+
     async def test_unhandled_exception_is_not_swallowed_as_400(self) -> None:
         """Non-ValueError/GenerationError exceptions must not silently return 400."""
         svc, idempotency, session = _make_route_handler_mocks(
