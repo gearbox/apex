@@ -10,6 +10,7 @@ Handles the full lifecycle of Grok generation jobs:
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -84,6 +85,14 @@ def _require_job_after_status_update(
     return job
 
 
+def _require_i2i_input_url(
+    input_image_url: str | None,
+    input_image_urls: Sequence[str] | None,
+) -> None:
+    if input_image_url is None and input_image_urls is None:
+        raise ValueError("I2I generation requires a resolved input image URL")
+
+
 class GrokJobService:
     """Service for managing Grok generation jobs.
 
@@ -151,6 +160,7 @@ class GrokJobService:
         name: str | None = None,
         negative_prompt: str | None = None,
         input_image_url: str | None = None,
+        input_image_urls: Sequence[str] | None = None,
         input_image_id: UUID | None = None,
         billing_service: BillingService,
         account_id: UUID,
@@ -180,7 +190,8 @@ class GrokJobService:
             aspect_ratio: Image aspect ratio.
             name: Job name (auto-generated if not provided).
             negative_prompt: Negative prompt (stored but not used by Grok).
-            input_image_url: Source image URL for I2I.
+            input_image_url: Input image URL for I2I.
+            input_image_urls: Input image URLs for Grok multi-reference I2I.
             input_image_id: Database ID of input image.
             billing_service: Service to handle token deductions.
             account_id: Pre-resolved token account ID for the user.
@@ -255,15 +266,18 @@ class GrokJobService:
             await session.flush()
 
             # Call Grok API
-            if generation_type == GenerationType.I2I and input_image_url:
-                # Image editing
-                result = await self._grok.edit_image(
+            if generation_type == GenerationType.I2I:
+                _require_i2i_input_url(input_image_url, input_image_urls)
+                # Image input references are resolved to provider-readable URLs upstream.
+                results = await self._grok.edit_image(
                     prompt=prompt,
                     image_url=input_image_url,
+                    image_urls=input_image_urls,
                     model=model,
+                    n=n,
+                    aspect_ratio=aspect_ratio,
                     image_format=ResponseImageFormat.URL,
                 )
-                results = [result]
             else:
                 # Text-to-image
                 results = await self._grok.generate_image(
@@ -358,6 +372,8 @@ class GrokJobService:
                     "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
                 )
 
+            if isinstance(e, ValueError):
+                raise
             raise GrokJobError(f"Unexpected error: {e}") from e
 
     async def _store_image_result(

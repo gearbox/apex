@@ -18,9 +18,9 @@ from uuid import UUID, uuid4
 import pytest
 from PIL import Image
 
-from src.api.schemas.unified_generation import UnifiedGenerationRequest
+from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
-from src.api.services.generation.service import ProviderResponseError
+from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.core.enums import (
     AspectRatio,
@@ -80,6 +80,39 @@ def _make_default_gen_config() -> BundleGenerationConfig:
             allowed_schedulers=frozenset(),
         ),
     )
+
+
+class TestAishaProviderValidation:
+    def test_aisha_video_is_not_implemented(self) -> None:
+        provider = AishaGenerationProvider(
+            workflow_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            bundle_index=MagicMock(),
+        )
+        request = UnifiedGenerationRequest(
+            prompt="make a video",
+            generation_type=GenerationType.T2V,
+            model=ModelType.AISHA_VIDEO,
+        )
+
+        with pytest.raises(FeatureNotSupportedError, match="Aisha video"):
+            provider.validate(request)
+
+    def test_source_images_inputs_are_not_implemented(self) -> None:
+        provider = AishaGenerationProvider(
+            workflow_service=MagicMock(),
+            gpu_session_service=MagicMock(),
+            bundle_index=MagicMock(),
+        )
+        request = UnifiedGenerationRequest(
+            prompt="edit multiple references",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            source_images=[SourceImageReference(input_image_id=uuid4())],
+        )
+
+        with pytest.raises(FeatureNotSupportedError, match="source_images"):
+            provider.validate(request)
 
 
 def _make_bundle_index_mock() -> MagicMock:

@@ -14,7 +14,7 @@ from src.api.services.billing import BillingService
 from src.api.services.generation.base import GenerationProvider
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.pricing import PricingService
-from src.core.enums import JobStatus, Provider
+from src.core.enums import GenerationType, JobStatus, Provider
 from src.core.product import ProductConfig
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
@@ -29,6 +29,14 @@ logger = structlog.get_logger(__name__)
 
 class GenerationError(Exception):
     """Base error for generation failures."""
+
+
+class FeatureNotSupportedError(GenerationError):
+    """Raised when a provider does not (yet) support a requested capability.
+
+    Maps to HTTP 400 with error code "not_implemented". The message propagates
+    to API responses — keep it provider-framed and user-safe.
+    """
 
 
 class ProviderUnavailableError(GenerationError):
@@ -178,15 +186,24 @@ class GenerationService:
         # Resolve lineage: if source_output_id is provided, look up the source job
         source_job_id: UUID | None = None
         resolved_source_output_id: UUID | None = request.source_output_id
-        if request.source_output_id is not None:
+        lineage_output_id: UUID | None = request.source_output_id
+        if lineage_output_id is None and request.source_images is not None:
+            lineage_output_id = next(
+                (
+                    image_ref.source_output_id
+                    for image_ref in request.source_images
+                    if image_ref.source_output_id is not None
+                ),
+                None,
+            )
+        if lineage_output_id is not None:
             from src.db.repositories.output import OutputRepository
 
-            source_output = await OutputRepository(session).get(
-                request.source_output_id, user_id=user_id
-            )
+            source_output = await OutputRepository(session).get(lineage_output_id, user_id=user_id)
             if source_output is None:
                 raise ValueError("Source output not found")
             source_job_id = source_output.job_id
+            resolved_source_output_id = lineage_output_id
 
         job: GenerationJob | None = None
         reserve_event: BalanceEvent | None = None
@@ -305,13 +322,20 @@ class GenerationService:
     @staticmethod
     def _validate_inputs(request: UnifiedGenerationRequest) -> None:
         """Cross-cutting validation: generation_type vs required inputs."""
-        if request.input_image_id is not None and request.source_output_id is not None:
-            raise ValueError("input_image_id and source_output_id are mutually exclusive")
-        if request.generation_type.requires_image_input and (
-            request.input_image_id is None and request.source_output_id is None
-        ):
+        image_input_sources = [
+            request.input_image_id is not None,
+            request.source_output_id is not None,
+            request.source_images is not None,
+        ]
+        if sum(image_input_sources) > 1:
             raise ValueError(
-                f"generation_type '{request.generation_type.value}' requires input_image_id or source_output_id"
+                "input_image_id, source_output_id, and source_images are mutually exclusive"
+            )
+        if request.source_images is not None and request.generation_type != GenerationType.I2I:
+            raise ValueError("source_images is only supported for i2i generation")
+        if request.generation_type.requires_image_input and not any(image_input_sources):
+            raise ValueError(
+                f"generation_type '{request.generation_type.value}' requires input_image_id, source_output_id, or source_images"
             )
         if request.generation_type.requires_video_input and request.input_video_url is None:
             raise ValueError(

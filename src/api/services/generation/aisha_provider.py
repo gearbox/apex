@@ -13,7 +13,7 @@ from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationReques
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.generation.base import ProviderSubmitResult
-from src.api.services.generation.service import ProviderResponseError
+from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
 from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
     validate_tunnel_hostname,
@@ -123,7 +123,11 @@ class AishaGenerationProvider:
     def validate(self, request: UnifiedGenerationRequest) -> None:
         """Aisha-specific validation beyond what the enum provides."""
         if request.model == ModelType.AISHA_VIDEO:
-            raise ValueError("Aisha video generation is not yet available via the unified endpoint")
+            raise FeatureNotSupportedError(
+                "Aisha video generation is not yet available via the unified endpoint"
+            )
+        if request.source_images is not None:
+            raise FeatureNotSupportedError("Aisha does not support source_images inputs yet")
 
     async def refresh_job(
         self,

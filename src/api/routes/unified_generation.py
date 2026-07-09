@@ -29,6 +29,7 @@ from src.api.security import auth_guard
 from src.api.services.generation.rate_limiter import RateLimitExceededError
 from src.api.services.generation.service import (
     AgeVerificationRequiredError,
+    FeatureNotSupportedError,
     GenerationError,
     GenerationService,
     ModelDisabledError,
@@ -213,6 +214,18 @@ class UnifiedGenerationController(Controller):
             return Response(
                 content=ErrorEnvelope(
                     error="validation_error",
+                    message=str(exc),
+                    status_code=HTTP_400_BAD_REQUEST,
+                ),
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        except FeatureNotSupportedError as exc:
+            await _mark_failed(idempotency_service, record_id, session)
+            logger.info("generation.not_implemented", error=str(exc))
+            return Response(
+                content=ErrorEnvelope(
+                    error="not_implemented",
                     message=str(exc),
                     status_code=HTTP_400_BAD_REQUEST,
                 ),
