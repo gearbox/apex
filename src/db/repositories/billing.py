@@ -24,6 +24,16 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
+class _UnsetOptionalUpdate:
+    """Sentinel for omitted nullable field updates."""
+
+    __slots__ = ()
+
+
+UNSET_OPTIONAL_UPDATE = _UnsetOptionalUpdate()
+type OptionalUpdate[T] = T | None | _UnsetOptionalUpdate
+
+
 class BillingRepository:
     """Repository for billing and token account operations."""
 
@@ -330,6 +340,7 @@ class BillingRepository:
         generation_type: str,
         model: str | None,
         token_cost: int,
+        input_token_cost: int = 0,
         notes: str | None,
         created_by: UUID,
     ) -> PricingRule:
@@ -339,10 +350,37 @@ class BillingRepository:
             generation_type=generation_type,
             model=model,
             token_cost=token_cost,
+            input_token_cost=input_token_cost,
             notes=notes,
             created_by=created_by,
         )
         self._session.add(rule)
+        await self._session.flush()
+        return rule
+
+    async def update_pricing_rule(
+        self,
+        rule_id: UUID,
+        *,
+        token_cost: int | None = None,
+        input_token_cost: int | None = None,
+        is_active: bool | None = None,
+        effective_until: OptionalUpdate[datetime] = UNSET_OPTIONAL_UPDATE,
+        notes: OptionalUpdate[str] = UNSET_OPTIONAL_UPDATE,
+    ) -> PricingRule | None:
+        rule = await self.get_pricing_rule(rule_id)
+        if rule is None:
+            return None
+        if token_cost is not None:
+            rule.token_cost = token_cost
+        if input_token_cost is not None:
+            rule.input_token_cost = input_token_cost
+        if is_active is not None:
+            rule.is_active = is_active
+        if not isinstance(effective_until, _UnsetOptionalUpdate):
+            rule.effective_until = effective_until
+        if not isinstance(notes, _UnsetOptionalUpdate):
+            rule.notes = notes
         await self._session.flush()
         return rule
 

@@ -62,7 +62,7 @@ class TestSupportsImageSizingFlag:
         billing.get_balance = AsyncMock(return_value=1000)
 
         pricing = AsyncMock()
-        pricing.get_price = AsyncMock(return_value=50)
+        pricing.quote = AsyncMock(return_value=50)
 
         service = GenerationService(
             providers={Provider.GROK: provider},
@@ -124,7 +124,7 @@ class TestSupportsImageSizingFlag:
         billing.get_balance = AsyncMock(return_value=1000)
 
         pricing = AsyncMock()
-        pricing.get_price = AsyncMock(return_value=50)
+        pricing.quote = AsyncMock(return_value=50)
 
         service = GenerationService(
             providers={Provider.AISHA: provider},

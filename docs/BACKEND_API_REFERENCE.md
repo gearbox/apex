@@ -356,6 +356,9 @@ Note:     source_output_id enables "remix from gallery" — the backend resolves
           source_images is storage-reference based (1–4 items); clients send upload/output IDs, not public URLs.
           If source_images contains output references and no top-level source_output_id is set,
           lineage is recorded from the first output-typed item in list order.
+          Tokens charged scale as (token_cost + input_token_cost × k) × n, where k is the
+          input-image count: 0 for text-to-image, 1 for input_image_id/source_output_id, or
+          source_images.length for multi-reference image inputs.
           Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
           Aisha (ComfyUI) models require an active GPU session — start one via
           POST /v1/sessions before submitting an Aisha generation, otherwise 409 no_active_gpu_session is returned.
@@ -1146,13 +1149,19 @@ PricingRuleResponse: {
   provider: string,
   generation_type: string,
   model: string | null,
-  token_cost: int,
+  token_cost: int,               // per-output token cost
+  input_token_cost: int,         // per input image, charged per output sample
   is_active: bool,
   effective_from: datetime,
   effective_until: datetime | null,
   notes: string | null
 }
 ```
+
+Total generation charge is `(token_cost + input_token_cost × k) × n`, where `n` is the
+requested output count and `k` is the input-image count: `0` for T2I, `1` when
+`input_image_id` or `source_output_id` is set, or `source_images.length` when
+`source_images` is set.
 
 #### `GET /v1/billing/topup/options`
 
@@ -1467,17 +1476,23 @@ Response: PricingRuleResponse[]
 #### `POST /v1/admin/pricing`
 
 ```
-Request:  { provider: string, generation_type: string, model?: string, token_cost: int, notes?: string }
+Request:  { provider: string, generation_type: string, model?: string | null, token_cost: int, input_token_cost?: int, notes?: string | null }
 Response: PricingRuleResponse
 Status:   201 Created
 ```
 
+`token_cost` is the per-output cost. `input_token_cost` defaults to `0` and is charged per
+input image per output sample.
+
 #### `PATCH /v1/admin/pricing/{rule_id}`
 
 ```
-Request:  { token_cost?: int, is_active?: bool, effective_until?: datetime, notes?: string }
+Request:  { token_cost?: int, input_token_cost?: int, is_active?: bool, effective_until?: datetime | null, notes?: string | null }
 Response: PricingRuleResponse
 ```
+
+Patch fields are optional. Omitted nullable fields are left unchanged; explicit `null` clears
+`effective_until` or `notes`.
 
 #### `DELETE /v1/admin/pricing/{rule_id}`
 

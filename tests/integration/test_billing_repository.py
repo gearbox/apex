@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.services.pricing import PricingService
 from src.core.enums import AccountType, TransactionType
 from src.db.repositories.billing import BillingRepository
 
@@ -610,6 +611,63 @@ async def test_get_active_price_exact_match(billing_repo: BillingRepository, mak
     rule = await billing_repo.get_active_price("grok", "t2i", "grok-imagine-image")
     assert rule is not None
     assert rule.token_cost == 75
+
+
+async def test_input_token_cost_persists_and_drives_quote(
+    db_session: AsyncSession,
+    billing_repo: BillingRepository,
+    make_user,
+) -> None:
+    """input_token_cost round-trips through DB lookup and PricingService.quote."""
+    admin = await make_user(email=f"admininputcost-{uuid4().hex[:6]}@example.com")
+    provider = f"integration-provider-{uuid4().hex[:8]}"
+    model = f"integration-model-{uuid4().hex[:8]}"
+    rule = await billing_repo.create_pricing_rule(
+        id=uuid4(),
+        provider=provider,
+        generation_type="i2i",
+        model=model,
+        token_cost=20,
+        input_token_cost=3,
+        notes="I2I cost",
+        created_by=admin.id,
+    )
+
+    found = await billing_repo.get_pricing_rule(rule.id)
+    assert found is not None
+    assert found.input_token_cost == 3
+
+    active = await billing_repo.get_active_price(provider, "i2i", model)
+    assert active is not None
+    assert active.input_token_cost == 3
+
+    pricing = PricingService()
+    assert (
+        await pricing.quote(
+            provider,
+            "i2i",
+            model,
+            n=2,
+            input_image_count=4,
+            session=db_session,
+        )
+        == 64
+    )
+
+    updated = await billing_repo.update_pricing_rule(rule.id, input_token_cost=5)
+    assert updated is not None
+    assert updated.input_token_cost == 5
+    assert (
+        await pricing.quote(
+            provider,
+            "i2i",
+            model,
+            n=2,
+            input_image_count=4,
+            session=db_session,
+        )
+        == 80
+    )
 
 
 async def test_get_active_price_not_found_returns_none(

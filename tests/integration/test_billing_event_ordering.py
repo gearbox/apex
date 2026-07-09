@@ -262,7 +262,7 @@ async def test_no_balance_event_on_rollback(db_engine: AsyncEngine) -> None:
 
     provider = _WriteThenFailProvider(gpu_session_id=gpu_session.id)
     pricing = AsyncMock()
-    pricing.get_price = AsyncMock(return_value=50)
+    pricing.quote = AsyncMock(return_value=50)
     billing = BillingService()
     spy_bus = _SpyEventBus()
 
@@ -318,7 +318,7 @@ async def test_balance_event_after_commit(db_engine: AsyncEngine) -> None:
 
     provider = _WriteAndSucceedProvider(gpu_session_id=gpu_session.id)
     pricing = AsyncMock()
-    pricing.get_price = AsyncMock(return_value=50)
+    pricing.quote = AsyncMock(return_value=50)
     billing = BillingService()
     spy_bus = _SpyEventBus()
 
