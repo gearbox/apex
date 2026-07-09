@@ -51,7 +51,7 @@ class BaseRepository[ModelT: Base]:
             Model instance or ``None``.
         """
         if user_id is None:
-            return cast(ModelT | None, await self._session.get(self._model, pk))
+            return cast("ModelT | None", await self._session.get(self._model, pk))
 
         result = await self._session.execute(
             select(self._model).where(

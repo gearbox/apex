@@ -247,7 +247,7 @@ class UserRepository:
             Number of tokens revoked.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(RefreshToken.user_id == user_id)
@@ -346,7 +346,7 @@ class UserRepository:
             True if revoked, False if not found.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(RefreshToken.id == token_id)
@@ -367,7 +367,7 @@ class UserRepository:
             Number of tokens revoked.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(
@@ -391,7 +391,7 @@ class UserRepository:
             Number of tokens revoked.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(
@@ -413,7 +413,7 @@ class UserRepository:
         """
         now = datetime.now(UTC)
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(delete(RefreshToken).where(RefreshToken.expires_at < now)),
         )
         return result.rowcount or 0

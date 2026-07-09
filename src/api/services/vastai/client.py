@@ -114,7 +114,7 @@ class VastAIClient:
             kwargs: dict[str, Any] = {"headers": self._auth_headers()}
             if json_body is not None:
                 kwargs["json"] = json_body
-            resp = cast(httpx.Response, await getattr(self._client, method)(url, **kwargs))
+            resp = cast("httpx.Response", await getattr(self._client, method)(url, **kwargs))
 
             if resp.status_code != 429:
                 return resp

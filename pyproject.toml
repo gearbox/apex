@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.22.0"
+version = "0.22.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -104,7 +104,6 @@ select = [
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
-    "B008",   # do not perform function calls in argument defaults
     "ISC001", # conflicts with the formatter
     "TRY003", # conflicts with explicit RuntimeError
 ]

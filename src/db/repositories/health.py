@@ -82,6 +82,6 @@ class HealthSnapshotRepository:
         """
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         stmt = delete(HealthSnapshot).where(HealthSnapshot.checked_at < cutoff)
-        result = cast(CursorResult[Any], await self._session.execute(stmt))
+        result = cast("CursorResult[Any]", await self._session.execute(stmt))
         await self._session.flush()
         return int(result.rowcount)

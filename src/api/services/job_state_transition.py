@@ -109,7 +109,7 @@ class JobStateTransitionService:
         }
 
         result = cast(
-            CursorResult[Any],
+            "CursorResult[Any]",
             await self._session.execute(
                 sa_update(GenerationJob)
                 .where(
@@ -152,7 +152,7 @@ class JobStateTransitionService:
             return job
 
         result = cast(
-            CursorResult[Any],
+            "CursorResult[Any]",
             await self._session.execute(
                 sa_update(GenerationJob)
                 .where(
@@ -231,7 +231,7 @@ class JobStateTransitionService:
             return job, False
 
         result = cast(
-            CursorResult[Any],
+            "CursorResult[Any]",
             await self._session.execute(
                 sa_update(GenerationJob)
                 .where(

@@ -73,7 +73,7 @@ async def test_create_image_job_i2i_preserves_requested_output_count() -> None:
         ),
         refund=AsyncMock(),
     )
-    service = GrokJobService(cast(GrokClient, grok), MagicMock())
+    service = GrokJobService(cast("GrokClient", grok), MagicMock())
     store_image_result = AsyncMock()
 
     with (
@@ -130,7 +130,7 @@ async def test_create_image_job_i2i_without_resolved_input_url_fails_and_refunds
         ),
         refund=AsyncMock(),
     )
-    service = GrokJobService(cast(GrokClient, grok), MagicMock())
+    service = GrokJobService(cast("GrokClient", grok), MagicMock())
     store_image_result = AsyncMock()
 
     with (

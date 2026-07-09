@@ -27,7 +27,7 @@ def _make_scope(
     client: tuple[str, int] | None = ("127.0.0.1", 12345),
 ) -> Scope:
     return cast(
-        Scope,
+        "Scope",
         {
             "type": "http",
             "method": method,
@@ -127,7 +127,7 @@ class TestRequestLoggingMiddleware:
     @pytest.mark.anyio
     async def test_non_http_scope_passes_through_without_logging(self) -> None:
         mw, app_mock = self._build_middleware()
-        scope = cast(Scope, {"type": "websocket", "path": "/ws"})
+        scope = cast("Scope", {"type": "websocket", "path": "/ws"})
 
         with capture_logs() as cap:
             await mw(scope, _noop_receive, _noop_send)
