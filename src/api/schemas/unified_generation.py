@@ -47,7 +47,9 @@ class SourceImageReference(msgspec.Struct, forbid_unknown_fields=True, kw_only=T
             )
 
 
-SourceImageReferences = Annotated[list[SourceImageReference], msgspec.Meta(min_length=1)]
+SourceImageReferences = Annotated[
+    list[SourceImageReference], msgspec.Meta(min_length=1, max_length=4)
+]
 
 
 class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
@@ -77,8 +79,9 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     Mutually exclusive with input_image_id and source_images."""
 
     source_images: SourceImageReferences | None = None
-    """Additional image input references for multi-reference I2I.
-    Mutually exclusive with input_image_id and source_output_id."""
+    """Additional image input references for multi-reference I2I (1-4 items).
+    Mutually exclusive with input_image_id and source_output_id. Lineage is recorded
+    from the first item with source_output_id when no top-level source_output_id is set."""
 
     input_video_url: str | None = None
     """Required for v2v. Publicly-accessible URL of the source video."""

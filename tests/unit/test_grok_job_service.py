@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from src.api.services.grok import GrokClient, GrokImageResult
 from src.api.services.grok.enums import ResponseImageFormat
 from src.api.services.grok.job_service import GrokJobService
@@ -110,3 +112,56 @@ async def test_create_image_job_i2i_preserves_requested_output_count() -> None:
     assert store_image_result.await_count == 2
     assert result.job.status == JobStatus.COMPLETED
     assert result.balance_after == 75
+
+
+async def test_create_image_job_i2i_without_resolved_input_url_fails_and_refunds() -> None:
+    job_repo = _FakeJobRepository()
+    session = SimpleNamespace(flush=AsyncMock())
+    grok = SimpleNamespace(
+        edit_image=AsyncMock(),
+        generate_image=AsyncMock(),
+    )
+    billing_service = SimpleNamespace(
+        check_and_reserve=AsyncMock(
+            return_value=SimpleNamespace(
+                txn=SimpleNamespace(id=uuid4(), balance_after=75),
+                event=None,
+            )
+        ),
+        refund=AsyncMock(),
+    )
+    service = GrokJobService(cast(GrokClient, grok), MagicMock())
+    store_image_result = AsyncMock()
+
+    with (
+        patch("src.api.services.grok.job_service.JobRepository", return_value=job_repo),
+        patch(
+            "src.api.services.grok.job_service.OutputRepository",
+            return_value=SimpleNamespace(),
+        ),
+        patch.object(service, "_store_image_result", store_image_result),
+        pytest.raises(ValueError, match="requires a resolved input image URL"),
+    ):
+        await service.create_image_job(
+            cast("AsyncSession", session),
+            user_id=uuid4(),
+            prompt="missing input",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            generation_type=GenerationType.I2I,
+            n=1,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            billing_service=cast("BillingService", billing_service),
+            account_id=uuid4(),
+            token_cost=25,
+            product_id="grok-image",
+        )
+
+    grok.edit_image.assert_not_awaited()
+    grok.generate_image.assert_not_awaited()
+    store_image_result.assert_not_awaited()
+    assert job_repo.job is not None
+    assert job_repo.job.status == JobStatus.FAILED
+    assert job_repo.job.error_message == "I2I generation requires a resolved input image URL"
+    billing_service.refund.assert_awaited_once()
+    assert billing_service.refund.await_args.args[0] == job_repo.job.id
+    assert billing_service.refund.await_args.kwargs["product_id"] == "grok-image"

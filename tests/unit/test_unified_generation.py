@@ -110,6 +110,29 @@ class TestUnifiedGenerationRequestSchema:
         assert req.source_images[0].input_image_id == input_image_id
         assert req.source_images[1].source_output_id == source_output_id
 
+    def test_source_images_rejects_more_than_four_references(self) -> None:
+        refs = ",".join(f'{{"input_image_id":"{uuid4()}"}}' for _ in range(5))
+        payload = (
+            b'{"prompt":"Edit these","generation_type":"i2i",'
+            b'"model":"grok-imagine-image","source_images":[' + refs.encode() + b"]}"
+        )
+
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(payload, type=UnifiedGenerationRequest)
+
+    def test_source_images_reference_rejects_both_sources_on_decode(self) -> None:
+        image_id = uuid4()
+        output_id = uuid4()
+        payload = (
+            b'{"prompt":"Edit these","generation_type":"i2i",'
+            b'"model":"grok-imagine-image","source_images":['
+            + (f'{{"input_image_id":"{image_id}","source_output_id":"{output_id}"}}').encode()
+            + b"]}"
+        )
+
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(payload, type=UnifiedGenerationRequest)
+
     def test_source_images_reference_requires_exactly_one_source(self) -> None:
         image_id = uuid4()
         output_id = uuid4()
@@ -747,6 +770,113 @@ class TestGenerationServiceGenerate:
 
         assert response.balance_remaining == 725
         billing.get_balance.assert_not_called()
+
+    async def test_source_images_lineage_uses_first_output_reference(self) -> None:
+        first_input_id = uuid4()
+        first_output_id = uuid4()
+        second_output_id = uuid4()
+        source_job_id = uuid4()
+        user_id = uuid4()
+        source_output = MagicMock()
+        source_output.job_id = source_job_id
+        output_repo = MagicMock()
+        output_repo.get = AsyncMock(return_value=source_output)
+        mock_provider = _make_mock_provider()
+        service = _make_service(providers={Provider.GROK: mock_provider})
+        session = AsyncMock()
+        request = UnifiedGenerationRequest(
+            prompt="use several references",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_images=[
+                SourceImageReference(input_image_id=first_input_id),
+                SourceImageReference(source_output_id=first_output_id),
+                SourceImageReference(source_output_id=second_output_id),
+            ],
+        )
+
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch("src.db.repositories.output.OutputRepository", return_value=output_repo),
+        ):
+            await service.generate(
+                request,
+                user_id=user_id,
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        output_repo.get.assert_awaited_once_with(first_output_id, user_id=user_id)
+        submit_kwargs = mock_provider.submit.await_args.kwargs
+        assert submit_kwargs["source_job_id"] == source_job_id
+        assert submit_kwargs["source_output_id"] == first_output_id
+
+    async def test_source_images_all_input_references_have_no_lineage(self) -> None:
+        mock_provider = _make_mock_provider()
+        service = _make_service(providers={Provider.GROK: mock_provider})
+        request = UnifiedGenerationRequest(
+            prompt="use uploads",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_images=[
+                SourceImageReference(input_image_id=uuid4()),
+                SourceImageReference(input_image_id=uuid4()),
+            ],
+        )
+
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch("src.db.repositories.output.OutputRepository") as output_repo_cls,
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        output_repo_cls.assert_not_called()
+        submit_kwargs = mock_provider.submit.await_args.kwargs
+        assert submit_kwargs["source_job_id"] is None
+        assert submit_kwargs["source_output_id"] is None
+
+    async def test_source_images_output_reference_not_owned_raises_value_error(self) -> None:
+        source_output_id = uuid4()
+        user_id = uuid4()
+        output_repo = MagicMock()
+        output_repo.get = AsyncMock(return_value=None)
+        mock_provider = _make_mock_provider()
+        service = _make_service(providers={Provider.GROK: mock_provider})
+        request = UnifiedGenerationRequest(
+            prompt="use output",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_images=[SourceImageReference(source_output_id=source_output_id)],
+        )
+
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch("src.db.repositories.output.OutputRepository", return_value=output_repo),
+            pytest.raises(ValueError, match="Source output not found"),
+        ):
+            await service.generate(
+                request,
+                user_id=user_id,
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        output_repo.get.assert_awaited_once_with(source_output_id, user_id=user_id)
+        mock_provider.submit.assert_not_awaited()
 
 
 class TestGenerationServiceRateLimit:

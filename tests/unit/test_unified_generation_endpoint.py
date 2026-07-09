@@ -15,7 +15,11 @@ import pytest
 
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
-from src.api.services.generation.service import GenerationError, GenerationService
+from src.api.services.generation.service import (
+    FeatureNotSupportedError,
+    GenerationError,
+    GenerationService,
+)
 from src.core.enums import (
     GenerationType,
     ModelType,
@@ -182,9 +186,9 @@ class TestRouteHandlerReturns400:
         assert response.status_code == 400
         idempotency.fail.assert_awaited_once()
 
-    async def test_not_implemented_from_provider_returns_400(self) -> None:
+    async def test_feature_not_supported_from_provider_returns_400(self) -> None:
         svc, idempotency, session = _make_route_handler_mocks(
-            generate_side_effect=NotImplementedError(
+            generate_side_effect=FeatureNotSupportedError(
                 "Aisha does not support source_images inputs yet"
             )
         )
@@ -203,6 +207,26 @@ class TestRouteHandlerReturns400:
 
         assert response.status_code == 400
         assert response.content.error == "not_implemented"
+        idempotency.fail.assert_awaited_once()
+
+    async def test_bare_not_implemented_error_is_not_swallowed_as_400(self) -> None:
+        svc, idempotency, session = _make_route_handler_mocks(
+            generate_side_effect=NotImplementedError("abstract method stub")
+        )
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+        )
+
+        with pytest.raises(NotImplementedError, match="abstract method stub"):
+            await self._call_handler(
+                request,
+                generation_service=svc,
+                idempotency_service=idempotency,
+                session=session,
+            )
+
         idempotency.fail.assert_awaited_once()
 
     async def test_unhandled_exception_is_not_swallowed_as_400(self) -> None:

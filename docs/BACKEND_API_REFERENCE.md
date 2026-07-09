@@ -318,7 +318,7 @@ Request: {
   input_image_id?: UUID,          // required for i2i / i2v / flf2v if source_output_id not set
   source_output_id?: UUID,        // alternative to input_image_id — use an existing generation output as input
                                   // mutually exclusive with input_image_id
-  source_images?: Array<{         // Grok I2I multi-reference inputs; backend resolves refs to provider URLs
+  source_images?: Array<{         // Grok I2I multi-reference inputs (1–4 items); backend resolves refs to provider URLs
     input_image_id?: UUID,        // exactly one of input_image_id or source_output_id per item
     source_output_id?: UUID
   }>,                             // mutually exclusive with top-level input_image_id/source_output_id
@@ -353,7 +353,9 @@ Errors:   400 (model_disabled | validation_error | generation_failed | not_imple
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from gallery" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
-          source_images is storage-reference based; clients send upload/output IDs, not public URLs.
+          source_images is storage-reference based (1–4 items); clients send upload/output IDs, not public URLs.
+          If source_images contains output references and no top-level source_output_id is set,
+          lineage is recorded from the first output-typed item in list order.
           Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
           Aisha (ComfyUI) models require an active GPU session — start one via
           POST /v1/sessions before submitting an Aisha generation, otherwise 409 no_active_gpu_session is returned.

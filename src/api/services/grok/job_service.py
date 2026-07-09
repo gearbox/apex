@@ -85,6 +85,14 @@ def _require_job_after_status_update(
     return job
 
 
+def _require_i2i_input_url(
+    input_image_url: str | None,
+    input_image_urls: Sequence[str] | None,
+) -> None:
+    if input_image_url is None and input_image_urls is None:
+        raise ValueError("I2I generation requires a resolved input image URL")
+
+
 class GrokJobService:
     """Service for managing Grok generation jobs.
 
@@ -258,9 +266,8 @@ class GrokJobService:
             await session.flush()
 
             # Call Grok API
-            if generation_type == GenerationType.I2I and (
-                input_image_url is not None or input_image_urls is not None
-            ):
+            if generation_type == GenerationType.I2I:
+                _require_i2i_input_url(input_image_url, input_image_urls)
                 # Image input references are resolved to provider-readable URLs upstream.
                 results = await self._grok.edit_image(
                     prompt=prompt,
@@ -365,6 +372,8 @@ class GrokJobService:
                     "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
                 )
 
+            if isinstance(e, ValueError):
+                raise
             raise GrokJobError(f"Unexpected error: {e}") from e
 
     async def _store_image_result(

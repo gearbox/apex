@@ -112,8 +112,8 @@ test-all:
 	docker compose -f docker-compose.test.yml down -v
 
 lint:
-	uv run ruff check src tests
-	uv run ruff format --check src
+	uv run ruff check
+	uv run ruff format --check
 	uv run mypy --strict src
 	uv run pyright
 

@@ -31,6 +31,14 @@ class GenerationError(Exception):
     """Base error for generation failures."""
 
 
+class FeatureNotSupportedError(GenerationError):
+    """Raised when a provider does not (yet) support a requested capability.
+
+    Maps to HTTP 400 with error code "not_implemented". The message propagates
+    to API responses — keep it provider-framed and user-safe.
+    """
+
+
 class ProviderUnavailableError(GenerationError):
     """Raised when the resolved provider is not configured."""
 
@@ -178,15 +186,24 @@ class GenerationService:
         # Resolve lineage: if source_output_id is provided, look up the source job
         source_job_id: UUID | None = None
         resolved_source_output_id: UUID | None = request.source_output_id
-        if request.source_output_id is not None:
+        lineage_output_id: UUID | None = request.source_output_id
+        if lineage_output_id is None and request.source_images is not None:
+            lineage_output_id = next(
+                (
+                    image_ref.source_output_id
+                    for image_ref in request.source_images
+                    if image_ref.source_output_id is not None
+                ),
+                None,
+            )
+        if lineage_output_id is not None:
             from src.db.repositories.output import OutputRepository
 
-            source_output = await OutputRepository(session).get(
-                request.source_output_id, user_id=user_id
-            )
+            source_output = await OutputRepository(session).get(lineage_output_id, user_id=user_id)
             if source_output is None:
                 raise ValueError("Source output not found")
             source_job_id = source_output.job_id
+            resolved_source_output_id = lineage_output_id
 
         job: GenerationJob | None = None
         reserve_event: BalanceEvent | None = None
