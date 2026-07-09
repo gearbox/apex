@@ -858,6 +858,10 @@ class Settings(BaseSettings):
         default="",
         description="NowPayments IPN HMAC secret (legacy). Prefer per-product keys.",
     )
+    nowpayments_api_base: str = Field(
+        default="https://api.nowpayments.io",
+        description="NowPayments API base URL; override to use the sandbox.",
+    )
 
     # Per-product NowPayments keys (vex.pics only — crypto payments for consumers)
     nowpayments_api_key_vex: str | None = Field(

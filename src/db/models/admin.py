@@ -61,10 +61,10 @@ class AdminAuditLog(Base):
         nullable=False,
     )
     # Who was affected
-    target_user_id: Mapped[UUID] = mapped_column(
+    target_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id"),
-        nullable=False,
+        nullable=True,
     )
     product_id: Mapped[str] = mapped_column(String(32), nullable=False)
     action: Mapped[str] = mapped_column(

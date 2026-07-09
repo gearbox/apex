@@ -32,6 +32,7 @@ from src.api.routes.admin import AdminController
 from src.api.routes.admin_management import AdminManagementController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
+from src.api.routes.billing_public import BillingPublicController
 from src.api.routes.content import ContentProxyController
 from src.api.routes.gallery import GalleryController
 from src.api.routes.gpu_session import GpuSessionController
@@ -39,6 +40,7 @@ from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.organization import OrganizationController
+from src.api.routes.payment_provider_admin import PaymentProviderAdminController
 from src.api.routes.providers import ProvidersController
 from src.api.routes.push import PushController
 from src.api.routes.sse import SSEController
@@ -53,6 +55,7 @@ from src.api.services.billing_errors import (
     ModerationError,
     OrganizationBalanceError,
     OrganizationPermissionError,
+    PaymentProviderDisabledError,
     PaymentVerificationError,
     PriceNotFoundError,
     RefundNotEligibleError,
@@ -193,6 +196,22 @@ def payment_verification_handler(
 ) -> Response[Any]:
     _log_handler_event("payment.verification_failed", request, HTTP_400_BAD_REQUEST)
     return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
+
+
+def payment_provider_disabled_handler(
+    request: Request[Any, Any, Any],
+    exc: PaymentProviderDisabledError,
+) -> Response[Any]:
+    _log_handler_event(
+        "payment.provider_disabled",
+        request,
+        HTTP_409_CONFLICT,
+        provider=exc.provider.value,
+    )
+    return Response(
+        content={"code": "payment_provider_disabled", "provider": exc.provider.value},
+        status_code=HTTP_409_CONFLICT,
+    )
 
 
 def organization_permission_handler(
@@ -357,12 +376,14 @@ def create_app() -> Litestar:
             UserController,
             # Billing & payments
             BillingController,
+            BillingPublicController,
             BillingWebhookController,
             # Organizations
             OrganizationController,
             # Admin
             AdminController,
             AdminManagementController,
+            PaymentProviderAdminController,
             # Generation (unified)
             UnifiedGenerationController,  # POST /v1/generate
             ProvidersController,  # GET /v1/providers
@@ -391,6 +412,7 @@ def create_app() -> Litestar:
             PriceNotFoundError: price_not_found_handler,
             ModerationError: moderation_error_handler,
             PaymentVerificationError: payment_verification_handler,
+            PaymentProviderDisabledError: payment_provider_disabled_handler,
             OrganizationPermissionError: organization_permission_handler,
             OrganizationBalanceError: organization_balance_handler,
             IdempotencyConflictError: idempotency_conflict_handler,

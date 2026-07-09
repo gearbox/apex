@@ -53,6 +53,13 @@ class GrantPermissionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only
     permission: AdminPermission
 
 
+class PaymentProviderPatchRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Partial runtime update for a product payment provider."""
+
+    is_enabled: bool | None = None
+    display_order: int | None = None
+
+
 # --- Admin Management Response Structs ---
 
 
@@ -74,7 +81,7 @@ class AuditLogEntry(msgspec.Struct, kw_only=True):
 
     id: UUID
     actor_id: UUID
-    target_user_id: UUID
+    target_user_id: UUID | None
     action: str
     detail: str
     source: str

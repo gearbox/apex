@@ -19,6 +19,7 @@ EXPECTED_METADATA_TABLES = frozenset(
         "organizations",
         "password_reset_tokens",
         "payments",
+        "payment_provider_state",
         "pricing_catalog",
         "push_subscriptions",
         "refresh_tokens",

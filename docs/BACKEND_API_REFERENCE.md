@@ -1,6 +1,6 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-02 — Critical-fixes audit (no request/response schema changes; no `types.ts` regen needed). Idempotency (top of doc): a key stuck `processing` for longer than `IDEMPOTENCY_PROCESSING_STALE_SECONDS` (default 120s) is now reclaimed by the next retry instead of returning `409 idempotency_conflict` for the full 24h TTL — retry logic that gives up on repeated 409s no longer needs to wait a day. `POST /v1/billing/topup/stripe` (§11): `checkout_url`'s success/cancel redirects now correctly point at the requesting product's own frontend domain (`vex.pics` / `synthara.app`); previously fell through to a placeholder `https://app.example.com`. `POST /v1/generate` (§4): internal (non-domain) failures now always return a fixed generic `generation_failed` message — never backend-specific exception text — the error **code** and status are unchanged._
+> _Last updated: 2026-07-10 — Added the payment gateway protocol and per-product runtime provider registry. Checkout clients must discover enabled providers through public `GET /v1/billing/providers`; superadmins manage capability members through `GET/PATCH /v1/admin/payments/providers`. Disabling a provider blocks new charges with a stable `409` body but never blocks webhook settlement. Provider changes are appended to the admin audit log with a nullable `target_user_id`._
 >
 > _Prior (2026-06-30): MediaObject contract tightening (§5b): `ImageVariant.width`/`height` are now required non-null integers (serializer skips and logs any legacy dimensionless variant row rather than emitting null). `MediaObject.variants` is now required (was optional with a default) — OpenAPI marks it in `required`. Content cookie `Domain` is now omitted (host-only) in dev mode so the `apex_content` cookie is stored correctly over `http://localhost`; production posture unchanged (`Domain=<product>`, `Secure`). Frontend must re-run `gen:api` to pick up the updated types, then drop `?? []` on `variants` and `.filter(v => v.width)` guards. Prior (2026-06-29): Cursor pagination on audit log (§14): `GET /v1/admin/manage/audit` now returns `CursorPage<AuditLogEntry>` instead of a bare array. Pass `cursor=next_cursor` for subsequent pages. Frontend must regenerate types and switch to cursor-scroll. Prior (2026-06-27): Unified Image Variants (§6, §8, §10): `MediaObject` replaces all per-output presigned URL fields across the Jobs, Storage, and Gallery APIs. Jobs API no longer presigns URLs — all content URLs are stable content-proxy paths. Gallery cover logic now always uses the job's own primary output (no longer sources input images). Upload thumbnails (sm=150px, md=512px WEBP) generated automatically on upload._
 >
@@ -9,7 +9,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-06-18 — `master` @ `4ffc1c7f18954f1520a0333f38d5965f84b55708`
+> **Last synced:** 2026-07-10 — `master` @ `4d4105c75f6069bf646c1fb3e30e731af9c14dd8`
 >
 > _2026-07-08: **Breaking change** — replaced fixed token packages with tiered free-amount top-up (§11). `POST /v1/billing/topup/{stripe,nowpayments}` now take `{ amount_usd: int }` instead of `{ package_id: string }`; `GET /v1/billing/packages` is removed, replaced by `GET /v1/billing/topup/options`. Frontend must regenerate types (`gen:api`) and update the top-up UI to a preset-amounts + free-input flow (separate prompt)._
 >
@@ -1208,6 +1208,7 @@ Response: { checkout_url: string, session_id: string, payment_id: UUID }
 Status:   201 Created
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Errors:   409 idempotency_conflict
+          409 { "code": "payment_provider_disabled", "provider": "stripe" }
           400 if amount_usd is outside the configured min/max top-up bounds
               (see GET /v1/billing/topup/options)
 Note:     Redirect user to checkout_url for Stripe Checkout. The amount charged
@@ -1225,6 +1226,7 @@ Response: { invoice_url: string, payment_id: UUID }
 Status:   201 Created
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Errors:   409 idempotency_conflict
+          409 { "code": "payment_provider_disabled", "provider": "nowpayments" }
           400 if amount_usd is outside the configured min/max top-up bounds
 Note:     Same discount-on-price semantics as the Stripe path. NowPayments IPN
           under/overpayments are credited proportionally to actually_paid/amount_usd
@@ -1233,16 +1235,22 @@ Note:     Same discount-on-price semantics as the Stripe path. NowPayments IPN
 
 ### Billing — Public (no auth)
 
-> **Correction (was inaccurate):** there are currently **no unauthenticated billing endpoints**.
-> The unmounted `PublicBillingController` (previously described here) has been deleted along with
-> `TOKEN_PACKAGES` — it duplicated the authenticated packages endpoint and was never wired into
-> the app.
->
-> `GET /v1/billing/topup/options` and `GET /v1/billing/pricing` live on the authenticated
-> `BillingController` (whole controller is behind `auth_guard`) and require
-> `Authorization: Bearer <access_token>`. Their responses are exactly the authenticated shapes
-> documented at the top of this section (`TopUpOptionsResponse` and `PricingRuleResponse[]`).
-> If a genuinely public pricing surface is needed, it must be mounted first.
+#### `GET /v1/billing/providers`
+
+```
+Auth:     none
+Response: Array<{
+  provider: "stripe" | "nowpayments",
+  display_order: int
+}>
+```
+
+Returns the ordered effective provider set for the product resolved from the request host/header.
+Effective means the provider is present in the product's static capability set and is not disabled
+by a runtime override. An absent override row means enabled. Disabled providers are omitted.
+Checkout UIs should render this list rather than hardcoding provider availability.
+
+`GET /v1/billing/topup/options` and `GET /v1/billing/pricing` remain authenticated.
 
 ### Billing — Webhooks (no auth)
 
@@ -1251,6 +1259,7 @@ Note:     Same discount-on-price semantics as the Stripe path. NowPayments IPN
 ```
 Request:  Stripe webhook payload (raw body + Stripe-Signature header)
 Note:     Internal endpoint for Stripe payment events
+          Webhook settlement remains active when Stripe is runtime-disabled.
 ```
 
 #### `POST /v1/billing/webhooks/nowpayments`
@@ -1258,7 +1267,11 @@ Note:     Internal endpoint for Stripe payment events
 ```
 Request:  NowPayments webhook payload (raw body + x-nowpayments-sig header)
 Note:     Internal endpoint for NowPayments events
+          Webhook settlement remains active when NowPayments is runtime-disabled.
 ```
+
+`NOWPAYMENTS_API_BASE` defaults to `https://api.nowpayments.io` and may be pointed at the
+NowPayments sandbox without a code change.
 
 ---
 
@@ -1581,8 +1594,8 @@ AdminRoleResponse: {
 AuditLogEntry: {
   id: UUID,
   actor_id: UUID,
-  target_user_id: UUID,
-  action: string,   // "role.grant" | "role.revoke" | "permission.grant" | "permission.revoke"
+  target_user_id: UUID | null,
+  action: string,   // role.*, permission.*, or payment_provider.enable/disable/reorder
   detail: string,   // human-readable, e.g. "Role changed from 'user' to 'admin'"
   source: string,   // "api" | "cli"
   created_at: datetime
@@ -1652,6 +1665,39 @@ Note:     Entries are returned newest-first. Optionally filter to a specific tar
           AuditLogEntry[] response: the body is now wrapped in the standard CursorPage
           envelope (items / limit / has_more / next_cursor). Regenerate OpenAPI types
           and update the admin audit-log table in apex-frontend (gen:api → cursor scroll).
+```
+
+### Payment Provider Registry
+
+All endpoints under `/v1/admin/payments/providers` require the **SUPERADMIN** role and are scoped
+to the product resolved for the request.
+
+```typescript
+ProviderInfo: {
+  provider: "stripe" | "nowpayments",
+  is_enabled: boolean,            // effective runtime state
+  display_order: number,
+  credentials_configured: boolean // warning signal only; does not gate listing
+}
+```
+
+#### `GET /v1/admin/payments/providers/`
+
+```
+Response: ProviderInfo[]
+Note:     Includes every provider in the product's static capability set, including disabled
+          providers, ordered by display_order then provider name.
+```
+
+#### `PATCH /v1/admin/payments/providers/{provider}`
+
+```
+Request:  { is_enabled?: boolean | null, display_order?: int | null }
+Response: ProviderInfo
+Errors:   400 when neither field is supplied
+          404 when provider is unknown or outside the product's static capability set
+Note:     Writes payment_provider.enable, payment_provider.disable, or
+          payment_provider.reorder to the append-only audit log with target_user_id=null.
 ```
 
 ---
@@ -2183,7 +2229,7 @@ Values: `"owner"`, `"admin"`, `"member"`
 
 ### PaymentStatus
 
-Values: `"pending"`, `"completed"`, `"failed"`, `"refunded"`
+Values: `"pending"`, `"partially_paid"`, `"completed"`, `"failed"`, `"refunded"`
 
 ### SupportedLocale
 
@@ -2213,7 +2259,7 @@ Used in `GalleryLineage.source_type` to indicate whether the input came from a d
 
 ## 18. Error Response Format
 
-All non-2xx responses use a single unified envelope:
+Non-2xx responses normally use a single unified envelope:
 
 ```typescript
 interface ApiError {
@@ -2252,6 +2298,13 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 
 // 422
 { "error": "moderation", "message": "Content moderated by grok (policy: nsfw)", "status_code": 422, "detail": { "provider": "grok", "policy": "nsfw" } }
+```
+
+Provider disablement is the one deliberately compact compatibility response used by both top-up
+routes:
+
+```json
+{ "code": "payment_provider_disabled", "provider": "stripe" }
 ```
 
 **Frontend usage:**

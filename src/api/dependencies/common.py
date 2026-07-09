@@ -39,7 +39,10 @@ from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSn
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.organization import OrganizationService
-from src.api.services.payment import PaymentService
+from src.api.services.payment_provider_state import PaymentProviderStateService
+from src.api.services.payments import GatewayRegistry, PaymentService
+from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
+from src.api.services.payments.stripe_gateway import StripeGateway
 from src.api.services.pricing import PricingService
 from src.api.services.push import PushService, PywebpushSender
 from src.api.services.sse_ticket import SSETicketService
@@ -83,6 +86,8 @@ class ServiceContainer:
     jwt_service: JWTService | None = None
     password_service: PasswordService | None = None
     billing_service: BillingService | None = None
+    payment_provider_state_service: PaymentProviderStateService | None = None
+    payment_service: PaymentService | None = None
     grok_job_service: GrokJobService | None = None
     grok_video_worker: GrokVideoWorker | None = None
     email_service: EmailService | None = None
@@ -363,10 +368,21 @@ def get_organization_service() -> OrganizationService:
 
 def get_payment_service() -> PaymentService:
     """Provide PaymentService singleton."""
-    return PaymentService(
-        billing_service=get_billing_service(),
-        settings=get_settings(),
-    )
+    if _services.payment_service is None:
+        raise RuntimeError("PaymentService not initialized")
+    return _services.payment_service
+
+
+def get_payment_provider_state_service() -> PaymentProviderStateService:
+    """Provide the runtime payment provider state service singleton."""
+    if _services.payment_provider_state_service is None:
+        raise RuntimeError("PaymentProviderStateService not initialized")
+    return _services.payment_provider_state_service
+
+
+def build_gateway_registry(settings: Settings) -> GatewayRegistry:
+    """Build the default complete payment gateway registry."""
+    return GatewayRegistry([StripeGateway(settings), NowPaymentsGateway(settings)])
 
 
 # -----------------------------------------------------------------------------
@@ -526,6 +542,15 @@ async def init_services(settings: Settings) -> JWTService:
     # EventBus.publish_balance), so one instance safely serves every caller.
     _services.billing_service = BillingService()
     logger.info("billing_service.initialized")
+
+    _services.payment_provider_state_service = PaymentProviderStateService(settings)
+    _services.payment_service = PaymentService(
+        billing_service=_services.billing_service,
+        settings=settings,
+        registry=build_gateway_registry(settings),
+        provider_state_service=_services.payment_provider_state_service,
+    )
+    logger.info("payment_service.initialized")
 
     # Initialize rate limiter
     init_rate_limiter(settings)
@@ -1032,6 +1057,9 @@ dependencies = {
     "pricing_service": Provide(get_pricing_service, sync_to_thread=False),
     "organization_service": Provide(get_organization_service, sync_to_thread=False),
     "payment_service": Provide(get_payment_service, sync_to_thread=False),
+    "payment_provider_state_service": Provide(
+        get_payment_provider_state_service, sync_to_thread=False
+    ),
     # Email services
     "email_verification_service": Provide(get_email_verification_service, sync_to_thread=False),
     # Unified job service

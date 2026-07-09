@@ -15,7 +15,6 @@ from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
-    HTTP_403_FORBIDDEN,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,10 +35,14 @@ from src.api.schemas.billing import (
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
-from src.api.services.billing_errors import OrganizationPermissionError, TopUpAmountError
+from src.api.services.billing_errors import (
+    OrganizationPermissionError,
+    PaymentProviderDisabledError,
+    TopUpAmountError,
+)
 from src.api.services.event_bus import EventBus
 from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
-from src.api.services.payment import PaymentService
+from src.api.services.payments import PaymentService, WebhookEnvelope
 from src.api.services.pricing import PricingService
 from src.core.config import Settings
 from src.core.product import PaymentProvider, ProductConfig
@@ -262,17 +265,6 @@ class BillingController(Controller):
         ],
     ) -> Response[StripeCheckoutResponse]:
         """Create a Stripe checkout session for token purchase (idempotent via Idempotency-Key)."""
-        if not product_config.supports_payment_provider(PaymentProvider.STRIPE):
-            logger.warning(
-                "payment.provider_not_supported",
-                provider="stripe",
-                product=product_id,
-            )
-            raise HTTPException(
-                status_code=HTTP_403_FORBIDDEN,
-                detail="Payment provider not available for this product",
-            )
-
         request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
 
         check_result = await idempotency_service.check(
@@ -294,7 +286,8 @@ class BillingController(Controller):
             account = await billing_service.resolve_account_for_user(
                 current_user_id, session=session
             )
-            result = await payment_service.create_stripe_checkout(
+            result = await payment_service.create_charge(
+                PaymentProvider.STRIPE,
                 account.id,
                 data.amount_usd,
                 current_user_id,
@@ -302,8 +295,8 @@ class BillingController(Controller):
                 product_config=product_config,
             )
             response = StripeCheckoutResponse(
-                checkout_url=result.checkout_url,
-                session_id=result.session_id,
+                checkout_url=result.redirect_url,
+                session_id=result.external_id,
                 payment_id=result.payment_id,
             )
             response_body = msgspec.to_builtins(response)
@@ -320,6 +313,9 @@ class BillingController(Controller):
         except TopUpAmountError as exc:
             await idempotency_service.fail(record_id, session=session)
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except PaymentProviderDisabledError:
+            await idempotency_service.fail(record_id, session=session)
+            raise
         except Exception:
             await idempotency_service.fail(record_id, session=session)
             raise
@@ -345,17 +341,6 @@ class BillingController(Controller):
         ],
     ) -> Response[NowPaymentsInvoiceResponse]:
         """Create a NowPayments invoice for token purchase (idempotent via Idempotency-Key)."""
-        if not product_config.supports_payment_provider(PaymentProvider.NOWPAYMENTS):
-            logger.warning(
-                "payment.provider_not_supported",
-                provider="nowpayments",
-                product=product_id,
-            )
-            raise HTTPException(
-                status_code=HTTP_403_FORBIDDEN,
-                detail="Payment provider not available for this product",
-            )
-
         request_hash = IdempotencyService.hash_request(msgspec.json.encode(data))
 
         check_result = await idempotency_service.check(
@@ -377,16 +362,17 @@ class BillingController(Controller):
             account = await billing_service.resolve_account_for_user(
                 current_user_id, session=session
             )
-            result = await payment_service.create_nowpayments_invoice(
+            result = await payment_service.create_charge(
+                PaymentProvider.NOWPAYMENTS,
                 account.id,
                 data.amount_usd,
-                data.pay_currency,
                 current_user_id,
                 session=session,
-                product_id=product_id,
+                product_config=product_config,
+                extra={"pay_currency": data.pay_currency},
             )
             response = NowPaymentsInvoiceResponse(
-                invoice_url=result.invoice_url,
+                invoice_url=result.redirect_url,
                 payment_id=result.payment_id,
             )
             response_body = msgspec.to_builtins(response)
@@ -403,6 +389,9 @@ class BillingController(Controller):
         except TopUpAmountError as exc:
             await idempotency_service.fail(record_id, session=session)
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except PaymentProviderDisabledError:
+            await idempotency_service.fail(record_id, session=session)
+            raise
         except Exception:
             await idempotency_service.fail(record_id, session=session)
             raise
@@ -431,8 +420,15 @@ class BillingWebhookController(Controller):
         """
         payload = await request.body()
         signature = request.headers.get("stripe-signature", "")
-        balance_event = await payment_service.handle_stripe_webhook(
-            payload, signature, session=session, product_id=product_id
+        # Runtime disablement never gates webhooks: in-flight funds must settle.
+        balance_event = await payment_service.handle_webhook(
+            PaymentProvider.STRIPE,
+            WebhookEnvelope(
+                raw_body=payload,
+                headers={"stripe-signature": signature},
+                product_id=product_id,
+            ),
+            session=session,
         )
         await session.commit()
         await event_bus.publish_balance(balance_event)
@@ -455,8 +451,15 @@ class BillingWebhookController(Controller):
         """
         raw = await request.body()
         hmac_sig = request.headers.get("x-nowpayments-sig", "")
-        balance_event = await payment_service.handle_nowpayments_webhook(
-            raw, hmac_sig, session=session, product_id=product_id
+        # Runtime disablement never gates webhooks: in-flight funds must settle.
+        balance_event = await payment_service.handle_webhook(
+            PaymentProvider.NOWPAYMENTS,
+            WebhookEnvelope(
+                raw_body=raw,
+                headers={"x-nowpayments-sig": hmac_sig},
+                product_id=product_id,
+            ),
+            session=session,
         )
         await session.commit()
         await event_bus.publish_balance(balance_event)
