@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -19,10 +20,12 @@ from litestar.testing import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.routes.organization import OrganizationController
-from src.api.security.jwt import JWTService
 from src.api.services.billing_errors import OrganizationBalanceError, OrganizationPermissionError
 from src.api.services.organization import OrganizationService
 from src.core.enums import OrgRole, TransactionType, UserRole
+
+if TYPE_CHECKING:
+    from src.api.security.jwt import JWTService
 
 
 class _FakeAsyncSession(AsyncSession):

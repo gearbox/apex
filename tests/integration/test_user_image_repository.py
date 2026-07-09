@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.db.repositories.user_image import UserImageRepository
+if TYPE_CHECKING:
+    from src.db.repositories.user_image import UserImageRepository
 
 
 async def test_create_user_image(user_image_repo: UserImageRepository, make_user) -> None:

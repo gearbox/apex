@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from sqlalchemy import or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import datetime
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 PROVISIONING_STATUSES = frozenset(
     {GpuSessionStatus.pending, GpuSessionStatus.provisioning, GpuSessionStatus.resuming}

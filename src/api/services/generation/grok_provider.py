@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
-from uuid import UUID
 
 import structlog
 
 from src.api.schemas.unified_generation import SourceImageReference
-from src.api.services.generation.base import ProviderSubmitResult
-from src.api.services.grok.job_service import GrokJobService
-from src.api.services.storage import R2StorageService
 from src.core.enums import GenerationType, JobStatus
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.schemas.unified_generation import UnifiedGenerationRequest
     from src.api.services.billing import BillingService
+    from src.api.services.generation.base import ProviderSubmitResult
+    from src.api.services.grok.job_service import GrokJobService
+    from src.api.services.storage import R2StorageService
     from src.db.models.storage import GenerationJob
 
 logger = structlog.get_logger(__name__)

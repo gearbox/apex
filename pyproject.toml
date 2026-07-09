@@ -100,7 +100,7 @@ select = [
     "FA",   # flake8-future-annotations
     "PGH",  # pygrep-hooks, bans blanket # type: ignore and # noqa
     "PLW",
-    # "TC",   #flake8-type-checking, moves typing-only imports into TYPE_CHECKING
+    "TC",   #flake8-type-checking, moves typing-only imports into TYPE_CHECKING
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
@@ -109,6 +109,14 @@ ignore = [
 ]
 logger-objects = ["structlog.get_logger", "src.core.logging.get_logger"]  # so LOG/G see structlog
 [tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-decorators = [
+    "litestar.get",
+    "litestar.post",
+    "litestar.put",
+    "litestar.patch",
+    "litestar.delete",
+    "litestar.route",
+]
 runtime-evaluated-base-classes = [
     "sqlalchemy.orm.DeclarativeBase",
     "msgspec.Struct",
@@ -130,6 +138,7 @@ runtime-evaluated-base-classes = [
 "src/db/session.py" = ["PLW0603"]   # module-level singleton DatabaseManager, init/close by design
 "src/api/middleware/rate_limit.py" = ["PLW0603"]   # module-level singleton limiter storage, init by design
 "src/api/dependencies/common.py" = ["PLW0603"]   # module-level singleton service container, init/close by design
+"src/db/models/*.py" = ["TC003"]   # SQLAlchemy declarative annotations are runtime-sensitive
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

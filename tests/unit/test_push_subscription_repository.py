@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.repositories.push_subscription import PushSubscriptionRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class FakeResult:

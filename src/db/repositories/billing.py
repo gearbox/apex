@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from sqlalchemy import func, literal, or_, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from src.core.enums import AccountType, TransactionType
@@ -22,6 +20,9 @@ from src.db.models.billing import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class _UnsetOptionalUpdate:

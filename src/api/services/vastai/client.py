@@ -5,11 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-import httpx
 import msgspec
 import structlog
-
-from src.core.bundle_config import HardwareRequirements
 
 from .exceptions import (
     InstanceNotFoundError,
@@ -28,6 +25,9 @@ from .schemas import (
 )
 
 if TYPE_CHECKING:
+    import httpx
+
+    from src.core.bundle_config import HardwareRequirements
     from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)

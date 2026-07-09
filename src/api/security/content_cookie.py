@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from litestar.datastructures import Cookie
 
 from src.core.config import get_settings
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from src.api.security.jwt import JWTService
     from src.core.config import Settings
     from src.core.product import ProductConfig

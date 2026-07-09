@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
-from src.core.enums import ModelType, Product
+if TYPE_CHECKING:
+    from src.core.enums import ModelType, Product
 
 
 class AgeGatePolicy(StrEnum):

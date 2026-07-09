@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from src.db.repositories.user import UserRepository
-from tests.integration.conftest import UserFactory
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.db.repositories.user import UserRepository
+    from tests.integration.conftest import UserFactory
 
 
 async def test_new_user_has_default_locale(

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import literal, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.base import Base
 
@@ -13,6 +12,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
     from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class BaseRepository[ModelT: Base]:

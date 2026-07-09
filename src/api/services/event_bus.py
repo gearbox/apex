@@ -8,14 +8,11 @@ To migrate to WebSockets later:
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import msgspec
 import structlog
-from redis.asyncio.client import PubSub
 
 from src.api.schemas.events import (
     BalanceUpdatedPayload,
@@ -26,6 +23,11 @@ from src.core.redis import get_redis_client
 from src.core.uid import new_id
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from uuid import UUID
+
+    from redis.asyncio.client import PubSub
+
     from src.api.services.billing import BalanceEvent
 
 logger = structlog.get_logger(__name__)

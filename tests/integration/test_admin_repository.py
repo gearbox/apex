@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.admin import AdminAuditLog
 from src.db.repositories.admin import AdminRepository
-from tests.integration.conftest import UserFactory
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from tests.integration.conftest import UserFactory
 
 
 async def _insert_audit_log(

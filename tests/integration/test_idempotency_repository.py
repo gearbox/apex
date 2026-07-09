@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.idempotency import IdempotencyKey
 from src.db.repositories.idempotency import IdempotencyRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @pytest.fixture

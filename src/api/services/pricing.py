@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -18,6 +16,8 @@ from src.db.repositories.billing import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import datetime
+    from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 

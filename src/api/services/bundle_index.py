@@ -8,7 +8,6 @@ import os
 import shutil
 import tarfile
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -33,6 +32,8 @@ from src.core.generation_config import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from src.core.config import Settings
 
 logger = structlog.get_logger()

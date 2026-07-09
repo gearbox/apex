@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import GenerationType, OutputMediaType
 from src.db.models.storage import GenerationJob, GenerationOutput
-from src.db.models.user import User
 from src.db.repositories.gallery import GalleryRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.models.user import User
 
 OutputFactory = Callable[..., Coroutine[Any, Any, GenerationOutput]]
 

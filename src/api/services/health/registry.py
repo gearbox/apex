@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import structlog
 
 from src.core.enums import ComponentCategory, ComponentStatus
 
 from .base import ComponentHealth, HealthChecker
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = structlog.get_logger()
 

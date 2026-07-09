@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,6 +22,9 @@ from src.api.services.workflow_service import (
     WorkflowValidationError,
 )
 from tests.unit.conftest import _MINIMAL_GUI_WORKFLOW, make_bundle_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestLoadWorkflowFromBundle:

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import structlog
 from litestar.middleware.base import AbstractMiddleware
-from litestar.types import Receive, Scope, Send
 
 from src.core.config import get_settings
 from src.core.product_registry import resolve_product_by_domain, resolve_product_by_slug
+
+if TYPE_CHECKING:
+    from litestar.types import Receive, Scope, Send
 
 logger = structlog.get_logger()
 

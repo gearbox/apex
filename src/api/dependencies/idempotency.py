@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from litestar.connection import ASGIConnection
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from litestar.connection import ASGIConnection
 
 
 def get_idempotency_key(connection: ASGIConnection) -> str:  # type: ignore[type-arg]

@@ -7,7 +7,7 @@ authenticated callers additionally receive user_context and per-model session_st
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -41,6 +41,9 @@ from src.core.resolution import TIER_MEGAPIXELS
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.db.repositories.user import UserRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
 
@@ -119,7 +122,7 @@ class ProvidersController(Controller):
     """Provider and model discovery (v2)."""
 
     path = "/v1/providers"
-    tags: Sequence[str] | None = ["Providers"]
+    tags: Sequence[str] | None = ("Providers",)
     guards = [optional_auth_guard]  # noqa: RUF012
     dependencies = {"current_user_id": Provide(get_optional_user_id)}  # noqa: RUF012
 

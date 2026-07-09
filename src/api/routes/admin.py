@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import msgspec
@@ -50,6 +49,9 @@ from src.db.models import User
 from src.db.repositories.billing import UNSET_OPTIONAL_UPDATE, BillingRepository
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
 
@@ -108,7 +110,7 @@ class AdminController(Controller):
     """Admin endpoints for billing management."""
 
     path = "/v1/admin"
-    tags: Sequence[str] | None = ["Admin"]
+    tags: Sequence[str] | None = ("Admin",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "admin_user": Provide(get_current_admin_user),

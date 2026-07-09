@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
@@ -23,6 +22,7 @@ from pywebpush import WebPushException, webpush
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import structlog
 from litestar.enums import ScopeType
 from litestar.middleware import AbstractMiddleware
-from litestar.types import Receive, Scope, Send
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from src.core.uid import new_id
+
+if TYPE_CHECKING:
+    from litestar.types import Receive, Scope, Send
 
 logger = structlog.get_logger(__name__)
 

@@ -6,17 +6,19 @@ context from request state (set by auth_guard).
 
 from __future__ import annotations
 
-from collections.abc import Collection
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from litestar import Request
+from litestar import Request  # noqa: TC002
 from litestar.exceptions import NotAuthorizedException
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 
 from src.core.enums import AdminPermission, UserRole
-from src.db.models import User
+from src.db.models import User  # noqa: TC001
 from src.db.repositories import UserRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 
 async def _get_current_active_user(

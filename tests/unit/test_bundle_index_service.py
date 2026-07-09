@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import io
 import tarfile as tarfile_module
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import httpx
@@ -20,6 +19,9 @@ from src.api.services.bundle_index import (
 )
 from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
 from src.core.config import Settings
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 

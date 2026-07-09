@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -38,6 +37,8 @@ from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.db.models import GenerationOutput, UserImage

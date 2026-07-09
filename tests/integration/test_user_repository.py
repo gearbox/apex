@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import SubscriptionTier, UserRole
 from src.db.models.user import RefreshToken, User
-from src.db.repositories.user import UserRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.repositories.user import UserRepository
 
 # ---------------------------------------------------------------------------
 # create_user

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +11,9 @@ import yaml
 from src.api.services.bundle_index import BundleIndexService
 from src.core.enums import Resolution, Sampler, Scheduler
 from src.core.generation_config import BundleConfigError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _TEST_CAPS: dict[str, Any] = {
     "default_comfyui_port": 18188,

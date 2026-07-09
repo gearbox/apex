@@ -26,7 +26,6 @@ Pub/Sub subscription, so it never buffers messages it can't drain.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -40,6 +39,8 @@ from src.core.redis import get_redis_client
 from src.workers.base import LeaderLease
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.push import PushService

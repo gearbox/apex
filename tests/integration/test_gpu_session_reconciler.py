@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import GpuSessionStatus
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 UserFactory = Callable[..., Coroutine[Any, Any, User]]
 

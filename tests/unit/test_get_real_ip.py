@@ -8,13 +8,15 @@ leftmost X-Forwarded-For entry (the client-supplied one) never wins.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from litestar import Request
 from litestar.testing import RequestFactory
 
 from src.api.middleware.rate_limit import get_real_ip
 from src.core.config import Settings
+
+if TYPE_CHECKING:
+    from litestar import Request
 
 _factory = RequestFactory()
 

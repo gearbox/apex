@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, cast
-from uuid import UUID
 
 import structlog
 from sqlalchemy import CursorResult, delete, literal, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.admin import AdminAuditLog, AdminPermissionGrant
 

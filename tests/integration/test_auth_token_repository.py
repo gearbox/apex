@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
-from src.db.repositories.auth_tokens import AuthTokenRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.repositories.auth_tokens import AuthTokenRepository
 
 # ---------------------------------------------------------------------------
 # create_verification_token

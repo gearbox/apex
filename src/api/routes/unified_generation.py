@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 import msgspec
@@ -40,6 +39,9 @@ from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.core.product import ProductConfig
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -62,7 +64,7 @@ class UnifiedGenerationController(Controller):
     """Single endpoint for all generation types and providers."""
 
     path = "/v1/generate"
-    tags: Sequence[str] | None = ["Generation"]
+    tags: Sequence[str] | None = ("Generation",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "current_user_id": Provide(get_current_user_id),

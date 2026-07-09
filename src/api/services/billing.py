@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 import structlog
 
@@ -23,6 +20,10 @@ from src.db.repositories.billing import BillingRepository
 from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.db.models.billing import TokenAccount, TokenTransaction

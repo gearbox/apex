@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.pricing import PricingService
 from src.core.enums import AccountType, TransactionType
-from src.db.repositories.billing import BillingRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.repositories.billing import BillingRepository
 
 # ---------------------------------------------------------------------------
 # get_account

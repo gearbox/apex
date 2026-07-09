@@ -11,7 +11,7 @@ Endpoints:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -31,6 +31,9 @@ from src.api.security import auth_guard
 from src.api.services.unified_jobs import UnifiedJobService
 from src.core.enums import GenerationType, JobStatus, Provider
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -42,7 +45,7 @@ class UnifiedJobController(Controller):
     """
 
     path = "/v1/jobs"
-    tags: Sequence[str] | None = ["Jobs"]
+    tags: Sequence[str] | None = ("Jobs",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 

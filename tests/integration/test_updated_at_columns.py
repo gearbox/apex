@@ -7,13 +7,15 @@ datetime.now(UTC) was evaluated once at module-import time.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from src.db.models.generation_model import GenerationModel
-from src.db.models.user import User
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.models.user import User
 
 
 async def test_user_updated_at_changes_on_update(

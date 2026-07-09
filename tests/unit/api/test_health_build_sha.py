@@ -7,12 +7,15 @@ rather than the old container still serving traffic.
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from typing import TYPE_CHECKING
 
 import pytest
 from litestar.testing import AsyncTestClient
 
 from src.core.config import get_settings
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 pytestmark = pytest.mark.unit
 

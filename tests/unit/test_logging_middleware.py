@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Generator
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 import structlog
-from litestar.types import Scope
 from structlog.contextvars import clear_contextvars, merge_contextvars
 from structlog.testing import capture_logs
 
 from src.api.middleware.logging import RequestLoggingMiddleware
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from litestar.types import Scope
 
 # ---------------------------------------------------------------------------
 # Helpers

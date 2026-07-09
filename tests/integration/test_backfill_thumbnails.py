@@ -8,19 +8,21 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 from PIL import Image
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.storage import StorageNotFoundError, StorageType, UploadResult
 from src.cli.backfill_thumbnails import _Only, run_backfill
 from src.core.thumbnails import THUMBNAIL_SPECS
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.models.user import User
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -17,6 +16,7 @@ from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 

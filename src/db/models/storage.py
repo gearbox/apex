@@ -217,7 +217,12 @@ class GenerationJob(Base):
 
     source_output_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("generation_outputs.id", ondelete="SET NULL"),
+        ForeignKey(
+            "generation_outputs.id",
+            name="fk_generation_jobs_source_output",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
         nullable=True,
     )
 

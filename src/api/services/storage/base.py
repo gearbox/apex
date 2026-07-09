@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
-from uuid import UUID
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from src.core.enums import MediaFormat
 
     from .schemas import DownloadResult, StorageType, StoredFile, UploadResult

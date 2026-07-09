@@ -11,7 +11,7 @@ Endpoints:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -34,6 +34,9 @@ from src.api.services.storage.r2 import (
     R2StorageService,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
+
 logger = structlog.get_logger(__name__)
 
 # Types the proxy serves inline. Derived, not mirrored:
@@ -50,7 +53,7 @@ class ContentProxyController(Controller):
     """Auth-gated streaming proxy for R2 content."""
 
     path = "/v1/content"
-    tags: Sequence[str] | None = ["Content"]
+    tags: Sequence[str] | None = ("Content",)
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     @get("/outputs/{output_id:uuid}", guards=[content_auth_guard])

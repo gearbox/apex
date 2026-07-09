@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
 from src.db.repositories.gpu_session import GpuSessionRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---------------------------------------------------------------------------
 # Type aliases

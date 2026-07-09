@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import Any
-from uuid import UUID
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.uid import new_id
 from src.db.repositories.idempotency import IdempotencyRepository
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 

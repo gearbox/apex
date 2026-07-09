@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -13,6 +13,9 @@ import pytest
 
 from src.api.schemas.events import EventEnvelope, EventType, JobStatusPayload, SSETicketResponse
 from src.api.services.sse_ticket import SSETicketService
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
 
 
 @pytest.fixture

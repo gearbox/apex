@@ -8,10 +8,12 @@ docs stay in sync.
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
+from typing import TYPE_CHECKING
 
 from src.core.config import Settings
+
+if TYPE_CHECKING:
+    import pytest
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
 _ENV_STAGING_EXAMPLE = _REPO_ROOT / ".env.staging.example"

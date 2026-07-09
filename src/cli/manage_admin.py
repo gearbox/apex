@@ -17,14 +17,13 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 import structlog
 import typer
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.admin_management import AdminManagementService, LastSuperadminError
 from src.core.config import Settings
@@ -34,6 +33,11 @@ from src.db.models import User
 from src.db.repositories.admin import AdminRepository
 from src.db.repositories.user import UserRepository
 from src.db.session import DatabaseManager
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 console = Console()

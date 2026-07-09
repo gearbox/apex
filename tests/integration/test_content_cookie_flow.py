@@ -16,7 +16,7 @@ AuthService (no DB required). Guard tests build a minimal Litestar app.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -29,13 +29,15 @@ from litestar.status_codes import (
     HTTP_401_UNAUTHORIZED,
 )
 from litestar.testing import TestClient
-from litestar.types import Receive, Scope, Send
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.security import auth_guard, content_auth_guard
 from src.api.security.content_cookie import build_content_cookie, clear_content_cookie
 from src.api.security.jwt import JWTConfig, JWTService
 from src.core.config import Settings
+
+if TYPE_CHECKING:
+    from litestar.types import Receive, Scope, Send
 
 # ---------------------------------------------------------------------------
 # Constants

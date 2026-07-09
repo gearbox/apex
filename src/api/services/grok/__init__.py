@@ -13,23 +13,25 @@ from __future__ import annotations
 
 import base64
 import contextlib
-from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from src.core.config import Settings
 from src.core.enums import AspectRatio, ModelType, VideoResolution
 
 from .enums import ResponseImageFormat
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
     from xai_sdk import AsyncClient as XAIAsyncClient
     from xai_sdk.aio.image import ImageResponse
     from xai_sdk.aio.video import VideoResponse
     from xai_sdk.proto.v6.deferred_pb2 import StartDeferredResponse
+
+    from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
 

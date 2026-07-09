@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -32,6 +31,8 @@ from .schemas import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from types_aiobotocore_s3.client import S3Client
 
 logger = structlog.get_logger(__name__)

@@ -6,13 +6,16 @@ Interval and batch behaviour configured via Settings.
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import structlog
 
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.user import UserRepository
-from src.db.session import DatabaseManager
 from src.workers.base import PeriodicWorker
+
+if TYPE_CHECKING:
+    from src.db.session import DatabaseManager
 
 logger = structlog.get_logger(__name__)
 

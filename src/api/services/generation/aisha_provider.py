@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
-from uuid import UUID
 
 import structlog
 
@@ -25,10 +24,7 @@ from src.api.services.image_normalization import (
     ensure_comfyui_input,
     sniff_format,
 )
-from src.api.services.storage import R2StorageService
-from src.api.services.workflow_service import WorkflowService
 from src.core.enums import JobStatus, ModelType, Provider, Sampler, Scheduler
-from src.core.generation_config import BundleGenerationConfig
 from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
@@ -73,11 +69,16 @@ def _sanitize_filename(name: str | None) -> str:
 
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.schemas.unified_generation import UnifiedGenerationRequest
     from src.api.services.billing import BillingService
     from src.api.services.gpu_session.service import GpuSessionService
+    from src.api.services.storage import R2StorageService
+    from src.api.services.workflow_service import WorkflowService
+    from src.core.generation_config import BundleGenerationConfig
     from src.db.models.storage import GenerationJob
 
 logger = structlog.get_logger(__name__)

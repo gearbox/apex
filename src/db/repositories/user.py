@@ -4,16 +4,17 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
-from uuid import UUID
 
 from sqlalchemy import CursorResult, case, delete, func, literal, select, tuple_, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import JobStatus, SubscriptionTier, UserRole
 from src.db.models import GenerationJob, GenerationOutput, RefreshToken, User, UserImage
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class UserRepository:

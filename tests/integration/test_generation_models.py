@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from src.db.models.generation_model import GenerationModel
-from src.db.repositories.generation_model import GenerationModelRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.repositories.generation_model import GenerationModelRepository
 
 # ---------------------------------------------------------------------------
 # list_all

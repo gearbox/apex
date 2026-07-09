@@ -27,7 +27,6 @@ import msgspec
 import structlog
 
 from src.api.services.vastai.exceptions import InstanceNotFoundError
-from src.api.services.vastai.schemas import VastAIInstance
 from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.workers.base import PeriodicWorker
@@ -45,6 +44,7 @@ if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
     from src.api.services.jobs.sweep import JobSweepService
     from src.api.services.vastai.client import VastAIClient
+    from src.api.services.vastai.schemas import VastAIInstance
     from src.core.config import Settings
     from src.db.models.gpu_session import GpuSession
 

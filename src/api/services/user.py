@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -12,14 +11,16 @@ from src.api.schemas.user import (
     UserProfileResponse,
     UserStatsResponse,
 )
-from src.api.security import PasswordService
 from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
-from src.db.repositories import UserRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
+    from src.api.security import PasswordService
     from src.api.services.storage import R2StorageService
     from src.core.product import ProductConfig
     from src.db.models import User
+    from src.db.repositories import UserRepository
 
 logger = structlog.get_logger(__name__)
 

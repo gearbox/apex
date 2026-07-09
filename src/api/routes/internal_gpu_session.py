@@ -11,9 +11,8 @@ callback_token_hash on the session row (constant-time compare).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import datetime
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import msgspec
@@ -25,6 +24,9 @@ from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_401_UN
 from src.api.responses import error_response as _error
 from src.api.schemas.gpu_session import DownloadProgressBody
 from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
 
@@ -45,7 +47,7 @@ class InternalGpuSessionController(Controller):
     """Internal endpoints for GPU node callbacks — no JWT auth guard."""
 
     path = "/v1/internal/gpu-sessions"
-    tags: Sequence[str] | None = ["Internal"]
+    tags: Sequence[str] | None = ("Internal",)
     # No guards: node bearer auth is validated in the handler.
 
     @post("/{session_id:uuid}/provisioning", status_code=HTTP_200_OK)

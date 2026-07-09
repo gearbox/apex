@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -12,6 +11,8 @@ import structlog
 from src.api.schemas.generation import GenerationRequest, GenerationType
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from src.api.services.bundle_index import BundleIndexService
 
 logger = structlog.get_logger(__name__)

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from typing import TYPE_CHECKING
 
 import pytest
 from litestar.status_codes import HTTP_200_OK, HTTP_404_NOT_FOUND
 from litestar.testing import AsyncTestClient
 
 from src.core.config import get_settings
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 pytestmark = pytest.mark.unit
 

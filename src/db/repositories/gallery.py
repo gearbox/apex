@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import literal, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.enums import GenerationType, JobStatus, OutputMediaType
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 

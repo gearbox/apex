@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.uid import new_id
 from src.db.models.push_subscription import PushSubscription
@@ -16,6 +15,8 @@ from src.db.repositories.base import BaseRepository
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class PushSubscriptionRepository(BaseRepository[PushSubscription]):

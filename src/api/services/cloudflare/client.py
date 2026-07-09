@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+from typing import TYPE_CHECKING
 
-import httpx
 import msgspec
 import structlog
 
@@ -23,6 +23,9 @@ from .schemas import (
     TunnelListResult,
     TunnelTokenResult,
 )
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = structlog.get_logger(__name__)
 
