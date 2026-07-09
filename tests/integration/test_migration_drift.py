@@ -2,32 +2,25 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 from typing import TYPE_CHECKING
 
+from alembic.config import Config
+
+from alembic import command
+
 if TYPE_CHECKING:
+    import pytest
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 def test_alembic_autogenerate_has_no_model_drift(
     test_database_url: str,
     db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fail when current SQLAlchemy metadata no longer matches migrated schema."""
     assert db_engine is not None  # ensures session-scoped Alembic upgrade has run
-    env = {**os.environ, "DATABASE_URL": test_database_url, "DEBUG": "false"}
+    monkeypatch.setenv("DATABASE_URL", test_database_url)
+    monkeypatch.setenv("DEBUG", "false")
 
-    result = subprocess.run(
-        ["alembic", "check"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, (
-        "Alembic autogenerate detected model/schema drift.\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
-    )
+    command.check(Config("alembic.ini"))
