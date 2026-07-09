@@ -12,13 +12,17 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.uid import new_id
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 # Token lifetimes
 _VERIFICATION_EXPIRE_HOURS = 24

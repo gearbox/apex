@@ -14,13 +14,16 @@ Create Date: 2026-03-15
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 revision: str = "002"
 down_revision: str | None = "001"

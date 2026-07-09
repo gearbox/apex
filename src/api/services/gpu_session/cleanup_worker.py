@@ -16,20 +16,21 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
-from src.api.services.cloudflare.schemas import TunnelListEntry
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIRateLimitError
 from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.cloudflare.client import CloudflareTunnelClient
+    from src.api.services.cloudflare.schemas import TunnelListEntry
     from src.api.services.vastai.client import VastAIClient
     from src.core.config import Settings
     from src.db.models.gpu_session import GpuSession

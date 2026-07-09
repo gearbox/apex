@@ -7,7 +7,7 @@ DELETE /v1/push/subscriptions      — unregister a subscription (idempotent)
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from litestar import Controller, Response, delete, get, post
@@ -27,6 +27,9 @@ from src.api.security import auth_guard
 from src.api.services.push import PushService
 from src.core.config import get_settings
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 
 def _push_disabled_response() -> Response[ErrorEnvelope]:
     return Response(
@@ -43,7 +46,7 @@ class PushController(Controller):
     """Web Push subscription management."""
 
     path = "/v1/push"
-    tags: Sequence[str] | None = ["Push"]
+    tags: Sequence[str] | None = ("Push",)
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 
     @get("/vapid-public-key", guards=[auth_guard])

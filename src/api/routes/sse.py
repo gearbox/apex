@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import msgspec
@@ -21,6 +21,9 @@ from src.api.services.event_bus import EventBus
 from src.api.services.sse_ticket import SSETicketService
 from src.core.config import get_settings
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Sequence
+
 logger = structlog.get_logger(__name__)
 
 _encoder = msgspec.json.Encoder()
@@ -30,7 +33,7 @@ class SSEController(Controller):
     """Server-Sent Events endpoints."""
 
     path = "/v1/events"
-    tags: Sequence[str] | None = ["Events"]
+    tags: Sequence[str] | None = ("Events",)
 
     @post(
         "/sse-ticket",

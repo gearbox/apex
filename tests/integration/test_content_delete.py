@@ -7,12 +7,14 @@ behaviour directly against a real PostgreSQL database (no R2 involved).
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from sqlalchemy.ext.asyncio import AsyncSession
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.repositories.output import OutputRepository
-from src.db.repositories.user_image import UserImageRepository
+    from src.db.repositories.output import OutputRepository
+    from src.db.repositories.user_image import UserImageRepository
 
 
 class TestDeleteContentIntegration:

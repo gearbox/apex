@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Generator
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 import structlog
-from litestar.types import Scope
 from structlog.contextvars import clear_contextvars, merge_contextvars
 from structlog.testing import capture_logs
 
 from src.api.middleware.logging import RequestLoggingMiddleware
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from litestar.types import Scope
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,7 +30,7 @@ def _make_scope(
     client: tuple[str, int] | None = ("127.0.0.1", 12345),
 ) -> Scope:
     return cast(
-        Scope,
+        "Scope",
         {
             "type": "http",
             "method": method,
@@ -127,7 +130,7 @@ class TestRequestLoggingMiddleware:
     @pytest.mark.anyio
     async def test_non_http_scope_passes_through_without_logging(self) -> None:
         mw, app_mock = self._build_middleware()
-        scope = cast(Scope, {"type": "websocket", "path": "/ws"})
+        scope = cast("Scope", {"type": "websocket", "path": "/ws"})
 
         with capture_logs() as cap:
             await mw(scope, _noop_receive, _noop_send)

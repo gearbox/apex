@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import datetime
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import AdminPermission, UserRole
 from src.core.uid import new_id
 from src.db.models.admin import AdminAuditLog, AdminPermissionGrant
-from src.db.models.user import User
 from src.db.repositories.admin import AdminRepository
 from src.db.repositories.user import UserRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.models.user import User
 
 logger = structlog.get_logger(__name__)
 

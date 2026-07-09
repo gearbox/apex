@@ -26,7 +26,7 @@ test_partial_refund_concurrency.py.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -36,7 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.services.billing import BillingService
-from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
     GenerationError,
@@ -51,6 +50,9 @@ from src.db.models.gpu_session import GpuSession
 from src.db.models.storage import GenerationJob
 from src.db.models.user import User
 from src.db.repositories.job import JobRepository
+
+if TYPE_CHECKING:
+    from src.api.services.generation.base import ProviderSubmitResult
 
 pytestmark = pytest.mark.asyncio
 

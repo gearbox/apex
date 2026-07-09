@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.db.models.gpu_session import GpuSession
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.workers.base import PeriodicWorker
 
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
 
     from src.api.services.gpu_session.service import GpuSessionService
     from src.core.config import Settings
+    from src.db.models.gpu_session import GpuSession
 
 logger = structlog.get_logger(__name__)
 

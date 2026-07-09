@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import msgspec
@@ -55,6 +54,9 @@ from src.core.config import Settings
 from src.core.product import ProductConfig
 from src.db.repositories.user import UserRepository
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -84,7 +86,7 @@ class AuthController(Controller):
     """Authentication endpoints."""
 
     path = "/v1/auth"
-    tags: Sequence[str] | None = ["Authentication"]
+    tags: Sequence[str] | None = ("Authentication",)
 
     @post("/register", status_code=HTTP_201_CREATED)
     async def register(

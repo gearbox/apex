@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -16,14 +15,16 @@ from src.api.security import (
     hash_token,
 )
 from src.core.uid import new_id
-from src.db.repositories import UserRepository
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.email_verification import EmailVerificationService
     from src.db.models import User
+    from src.db.repositories import UserRepository
 
 logger = structlog.get_logger(__name__)
 

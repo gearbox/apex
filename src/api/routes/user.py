@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import structlog
@@ -36,6 +35,9 @@ from src.api.services.user import (
 )
 from src.core.product import ProductConfig
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -61,7 +63,7 @@ class UserController(Controller):
     """User profile management endpoints."""
 
     path = "/v1/users"
-    tags: Sequence[str] | None = ["Users"]
+    tags: Sequence[str] | None = ("Users",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 

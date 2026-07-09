@@ -20,12 +20,10 @@ from __future__ import annotations
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from uuid import UUID
 
 import structlog
 from sqlalchemy import CursorResult, func
 from sqlalchemy import update as sa_update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.events import EventType, JobStatusPayload
 from src.core.enums import JobStatus
@@ -34,6 +32,10 @@ from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from src.api.services.billing import BillingService
     from src.api.services.event_bus import EventBus
 
@@ -109,7 +111,7 @@ class JobStateTransitionService:
         }
 
         result = cast(
-            CursorResult[Any],
+            "CursorResult[Any]",
             await self._session.execute(
                 sa_update(GenerationJob)
                 .where(
@@ -152,7 +154,7 @@ class JobStateTransitionService:
             return job
 
         result = cast(
-            CursorResult[Any],
+            "CursorResult[Any]",
             await self._session.execute(
                 sa_update(GenerationJob)
                 .where(
@@ -231,7 +233,7 @@ class JobStateTransitionService:
             return job, False
 
         result = cast(
-            CursorResult[Any],
+            "CursorResult[Any]",
             await self._session.execute(
                 sa_update(GenerationJob)
                 .where(

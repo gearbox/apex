@@ -3,25 +3,26 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobCreatedResponse
-from src.api.schemas.unified_generation import UnifiedGenerationRequest
-from src.api.services.billing import BillingService
-from src.api.services.generation.base import GenerationProvider
-from src.api.services.generation.rate_limiter import ModelRateLimiter
-from src.api.services.pricing import PricingService
 from src.core.enums import GenerationType, JobStatus, Provider
-from src.core.product import ProductConfig
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
-    from src.api.services.billing import BalanceEvent
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.api.schemas.unified_generation import UnifiedGenerationRequest
+    from src.api.services.billing import BalanceEvent, BillingService
     from src.api.services.event_bus import EventBus
+    from src.api.services.generation.base import GenerationProvider
+    from src.api.services.generation.rate_limiter import ModelRateLimiter
+    from src.api.services.pricing import PricingService
+    from src.core.product import ProductConfig
     from src.db.models.storage import GenerationJob
 
 logger = structlog.get_logger(__name__)

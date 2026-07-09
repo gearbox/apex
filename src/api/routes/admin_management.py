@@ -5,7 +5,7 @@ All endpoints require SUPERADMIN role (via get_current_superadmin_user).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -32,6 +32,9 @@ from src.api.services.admin_management import (
 )
 from src.db.models import User
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -39,7 +42,7 @@ class AdminManagementController(Controller):
     """Superadmin-only endpoints for managing admin roles and permissions."""
 
     path = "/v1/admin/manage"
-    tags: Sequence[str] | None = ["Admin Management"]
+    tags: Sequence[str] | None = ("Admin Management",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "superadmin": Provide(get_current_superadmin_user),

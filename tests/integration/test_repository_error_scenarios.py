@@ -11,21 +11,25 @@ These tests cover:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.billing import TokenAccount, TokenTransaction
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.models.user import User
-from src.db.repositories.billing import BillingRepository
-from src.db.repositories.job import JobRepository
-from src.db.repositories.output import OutputRepository
-from src.db.repositories.user import UserRepository
-from src.db.repositories.user_image import UserImageRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.repositories.billing import BillingRepository
+    from src.db.repositories.job import JobRepository
+    from src.db.repositories.output import OutputRepository
+    from src.db.repositories.user import UserRepository
+    from src.db.repositories.user_image import UserImageRepository
 
 # ---------------------------------------------------------------------------
 # FK constraint: GenerationOutput with non-existent job_id

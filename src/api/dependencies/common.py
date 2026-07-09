@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator  # noqa: TC003
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
-from litestar import Request
+from litestar import Request  # noqa: TC002
 from litestar.di import Provide
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 
 from src.api.middleware.rate_limit import init_rate_limiter
 from src.api.security import JWTConfig, JWTService, PasswordService
@@ -49,13 +50,16 @@ from src.api.services.user_content import UserContentService
 from src.api.services.workflow_service import WorkflowService
 from src.core.config import Settings, get_settings
 from src.core.enums import WorkerMode
-from src.core.product import ProductConfig
+from src.core.product import ProductConfig  # noqa: TC001
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
-from src.workers.base import PeriodicWorker
 from src.workers.push_dispatcher import PushDispatcher
 from src.workers.token_cleanup import TokenCleanupWorker
+
+if TYPE_CHECKING:
+    from src.api.services.generation.base import GenerationProvider
+    from src.workers.base import PeriodicWorker
 
 logger = structlog.get_logger(__name__)
 
@@ -731,7 +735,6 @@ async def init_services(settings: Settings) -> JWTService:
 
     # Initialize unified generation service
     from src.api.services.generation.aisha_provider import AishaGenerationProvider
-    from src.api.services.generation.base import GenerationProvider
     from src.api.services.generation.grok_provider import GrokGenerationProvider
     from src.core.enums import Provider
 

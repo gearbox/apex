@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import src.db.session as session_module
 from src.db.session import DatabaseManager, close_db, get_db_manager, init_db
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 pytestmark = pytest.mark.unit
 
@@ -46,7 +50,6 @@ class TestDatabaseManagerProperties:
 
 class TestHealthCheck:
     async def test_returns_true_on_success(self) -> None:
-        from collections.abc import AsyncIterator
         from contextlib import asynccontextmanager
 
         mock_conn = AsyncMock()

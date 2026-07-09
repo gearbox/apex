@@ -7,8 +7,7 @@ Endpoints:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 import structlog
@@ -26,6 +25,9 @@ from src.api.security import auth_guard
 from src.api.services.gallery import GalleryService
 from src.core.enums import GenerationType, OutputMediaType
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -33,7 +35,7 @@ class GalleryController(Controller):
     """Gallery grid and detail endpoints."""
 
     path = "/v1/gallery"
-    tags: Sequence[str] | None = ["Gallery"]
+    tags: Sequence[str] | None = ("Gallery",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 

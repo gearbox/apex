@@ -24,7 +24,6 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 from sqlalchemy import select
@@ -40,6 +39,8 @@ from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.billing import BillingService, SettleUsageResult

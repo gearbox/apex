@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import ModelType
 from src.db.models.generation_model import GenerationModel
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from src.core.product import ProductConfig
 
 __all__ = ["GenerationModelRepository"]

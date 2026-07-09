@@ -8,11 +8,12 @@ so the UI summary box and the actual charge can never disagree.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.core.config import Settings
 
 

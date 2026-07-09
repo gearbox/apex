@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
@@ -47,6 +46,8 @@ from src.core.product import PaymentProvider, ProductConfig
 from src.core.topup_pricing import topup_tiers_for
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.db.models.billing import TokenTransaction
 
 logger = structlog.get_logger(__name__)
@@ -72,7 +73,7 @@ class BillingController(Controller):
     """Billing endpoints — balance, transactions, pricing, top-up."""
 
     path = "/v1/billing"
-    tags: Sequence[str] | None = ["Billing"]
+    tags: Sequence[str] | None = ("Billing",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "current_user_id": Provide(get_current_user_id),
@@ -411,7 +412,7 @@ class BillingWebhookController(Controller):
     """Webhook endpoints — no auth guard, signature verified in handler."""
 
     path = "/v1/billing/webhooks"
-    tags: Sequence[str] | None = ["Billing Webhooks"]
+    tags: Sequence[str] | None = ("Billing Webhooks",)
 
     @post("/stripe")
     async def stripe_webhook(

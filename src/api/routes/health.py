@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from litestar import Controller, Response, get
 from litestar.di import Provide
@@ -28,6 +27,9 @@ from src.core.config import get_settings
 from src.db.models import User
 from src.db.repositories.health import HealthSnapshotRepository
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 
 class HealthController(Controller):
     """Public health probes — no auth required.
@@ -37,7 +39,7 @@ class HealthController(Controller):
     """
 
     path = "/health"
-    tags: Sequence[str] | None = ["health"]
+    tags: Sequence[str] | None = ("health",)
 
     @get("/live")
     async def liveness(self) -> LivenessResponse:
@@ -71,7 +73,7 @@ class AdminHealthController(Controller):
     """Admin-only detailed health — requires authentication + admin role."""
 
     path = "/v1/admin/health"
-    tags: Sequence[str] | None = ["admin", "health"]
+    tags: Sequence[str] | None = ("admin", "health")
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "admin_user": Provide(get_current_admin_user),

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.repositories.output import OutputRepository
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.repositories.output import OutputRepository
 
 
 async def test_create_output(output_repo: OutputRepository, make_user, make_job) -> None:

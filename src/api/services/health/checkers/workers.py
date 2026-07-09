@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -10,6 +9,8 @@ from src.api.services.health.base import ComponentHealth
 from src.core.enums import ComponentCategory, ComponentStatus
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.workers.base import PeriodicWorker
 
 # Staleness threshold floor — protects short-interval workers (e.g. the 1s

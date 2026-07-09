@@ -1,6 +1,7 @@
 """Database models module."""
 
 from .admin import AdminAuditLog, AdminPermissionGrant
+from .auth_tokens import EmailVerificationToken, PasswordResetToken
 from .base import Base
 from .billing import (
     Organization,
@@ -22,6 +23,7 @@ __all__ = [
     "AdminAuditLog",
     "AdminPermissionGrant",
     "Base",
+    "EmailVerificationToken",
     "GenerationJob",
     "GenerationModel",
     "GenerationOutput",
@@ -30,6 +32,7 @@ __all__ = [
     "IdempotencyKey",
     "Organization",
     "OrganizationMember",
+    "PasswordResetToken",
     "Payment",
     "PricingRule",
     "PushSubscription",

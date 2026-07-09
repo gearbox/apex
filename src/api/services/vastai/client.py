@@ -5,11 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-import httpx
 import msgspec
 import structlog
-
-from src.core.bundle_config import HardwareRequirements
 
 from .exceptions import (
     InstanceNotFoundError,
@@ -28,6 +25,9 @@ from .schemas import (
 )
 
 if TYPE_CHECKING:
+    import httpx
+
+    from src.core.bundle_config import HardwareRequirements
     from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
@@ -114,7 +114,7 @@ class VastAIClient:
             kwargs: dict[str, Any] = {"headers": self._auth_headers()}
             if json_body is not None:
                 kwargs["json"] = json_body
-            resp = cast(httpx.Response, await getattr(self._client, method)(url, **kwargs))
+            resp = cast("httpx.Response", await getattr(self._client, method)(url, **kwargs))
 
             if resp.status_code != 429:
                 return resp

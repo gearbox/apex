@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import enum
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Annotated
 
 import structlog
@@ -19,7 +18,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import literal, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.storage import (
@@ -38,7 +36,10 @@ from src.db.repositories.user_image import UserImageRepository
 from src.db.session import DatabaseManager
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 console = Console()

@@ -6,14 +6,13 @@ and managing user storage.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 import structlog
 from litestar import Controller, Response, get, post
-from litestar.datastructures import UploadFile
+from litestar.datastructures import UploadFile  # noqa: TC002
 from litestar.di import Provide
 from litestar.enums import RequestEncodingType
 from litestar.params import Body, Parameter
@@ -44,6 +43,9 @@ from src.api.services.user_content import (
     UserContentTooLargeError,
     UserContentValidationError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
 
@@ -82,7 +84,7 @@ class StorageController(Controller):
     """
 
     path = "/v1/storage"
-    tags: Sequence[str] | None = ["Storage"]
+    tags: Sequence[str] | None = ("Storage",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 

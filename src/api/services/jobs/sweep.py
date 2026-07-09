@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -12,6 +11,8 @@ from src.api.services.job_state_transition import JobStateTransitionService
 from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.billing import BillingService

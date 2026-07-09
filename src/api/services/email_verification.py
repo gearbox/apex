@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.api.services.email import EmailService
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.user import UserRepository
 
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.services.email import EmailService
     from src.db.models.user import User
 
 logger = structlog.get_logger(__name__)

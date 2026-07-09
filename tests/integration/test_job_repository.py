@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
-from src.db.repositories.job import JobRepository
+
+if TYPE_CHECKING:
+    from src.db.repositories.job import JobRepository
 
 
 async def test_create_job(job_repo: JobRepository, make_user) -> None:

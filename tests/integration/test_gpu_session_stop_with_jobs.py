@@ -18,10 +18,10 @@ Coverage targets:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.billing import BillingService
 from src.api.services.job_state_transition import JobStateTransitionService
@@ -31,6 +31,9 @@ from src.db.models.gpu_session import GpuSession
 from src.db.models.storage import GenerationJob
 from src.db.models.user import User
 from src.db.repositories.job import JobRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.asyncio
 

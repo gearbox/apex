@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 from sqlalchemy import select, update
@@ -25,6 +24,8 @@ from src.core.enums import ComponentCategory, ComponentStatus, GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     import httpx
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

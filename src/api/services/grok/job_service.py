@@ -10,15 +10,12 @@ Handles the full lifecycle of Grok generation jobs:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import httpx
 import structlog
 
-from src.api.services.billing import BillingService
 from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.grok import (
     GrokAPIError,
@@ -49,8 +46,12 @@ from src.db.repositories.output import OutputRepository
 from .enums import ResponseImageFormat
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.services.billing import BillingService
     from src.db.models import GenerationJob
 
 logger = structlog.get_logger(__name__)

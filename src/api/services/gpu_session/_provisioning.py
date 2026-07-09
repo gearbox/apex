@@ -7,7 +7,6 @@ offer-walk + create_instance loop.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import structlog
@@ -15,6 +14,8 @@ import structlog
 from src.api.services.vastai.exceptions import OfferTakenError, VastAIError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.api.services.vastai.client import VastAIClient
     from src.api.services.vastai.schemas import VastAIOffer
 

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, cast
-from uuid import UUID
 
 import structlog
 from sqlalchemy import CursorResult, delete, literal, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.admin import AdminAuditLog, AdminPermissionGrant
 
@@ -35,7 +36,7 @@ class AdminRepository:
     async def revoke_permission(self, user_id: UUID, permission: str, product_id: str) -> bool:
         """Delete a permission grant. Returns True if a row was deleted."""
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 delete(AdminPermissionGrant).where(
                     AdminPermissionGrant.user_id == user_id,
@@ -105,7 +106,7 @@ class AdminRepository:
     async def delete_all_permissions(self, user_id: UUID, product_id: str) -> int:
         """Delete all permissions for a user in a product. Returns count deleted."""
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 delete(AdminPermissionGrant).where(
                     AdminPermissionGrant.user_id == user_id,

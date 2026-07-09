@@ -9,7 +9,7 @@ network round-trips and must not block the event loop.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from limits import parse
@@ -19,10 +19,12 @@ from litestar import Request, Response
 from litestar.enums import ScopeType
 from litestar.middleware import MiddlewareProtocol
 from litestar.status_codes import HTTP_429_TOO_MANY_REQUESTS
-from litestar.types import ASGIApp, Receive, Scope, Send
 
 from src.api.schemas.errors import ErrorEnvelope
 from src.core.config import Settings, get_settings
+
+if TYPE_CHECKING:
+    from litestar.types import ASGIApp, Receive, Scope, Send
 
 logger = structlog.get_logger(__name__)
 

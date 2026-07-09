@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
-from uuid import UUID
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.idempotency import IdempotencyKey
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 

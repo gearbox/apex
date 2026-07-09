@@ -4,16 +4,17 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
-from uuid import UUID
 
 from sqlalchemy import CursorResult, case, delete, func, literal, select, tuple_, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.enums import JobStatus, SubscriptionTier, UserRole
 from src.db.models import GenerationJob, GenerationOutput, RefreshToken, User, UserImage
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class UserRepository:
@@ -247,7 +248,7 @@ class UserRepository:
             Number of tokens revoked.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(RefreshToken.user_id == user_id)
@@ -346,7 +347,7 @@ class UserRepository:
             True if revoked, False if not found.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(RefreshToken.id == token_id)
@@ -367,7 +368,7 @@ class UserRepository:
             Number of tokens revoked.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(
@@ -391,7 +392,7 @@ class UserRepository:
             Number of tokens revoked.
         """
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(
@@ -413,7 +414,7 @@ class UserRepository:
         """
         now = datetime.now(UTC)
         result = cast(
-            CursorResult[tuple[()]],
+            "CursorResult[tuple[()]]",
             await self._session.execute(delete(RefreshToken).where(RefreshToken.expires_at < now)),
         )
         return result.rowcount or 0

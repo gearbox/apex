@@ -19,16 +19,20 @@ Kept deliberately narrow and DB-facing: no mocks of billing or repo internals.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.services.billing import BillingService, RefundNotEligibleError
 from src.db.models.billing import TokenTransaction
-from src.db.repositories.billing import BillingRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.repositories.billing import BillingRepository
 
 pytestmark = pytest.mark.asyncio
 

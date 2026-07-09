@@ -7,7 +7,7 @@ only assembles the DTO.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -15,6 +15,9 @@ from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
 from src.core.enums import OutputMediaType
 from src.core.thumbnails import label_for_max_edge
 from src.db.models.storage import GenerationOutput, UserImage
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
 

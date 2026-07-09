@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -20,6 +19,8 @@ from src.core.enums import GalleryBadge, GallerySourceType, GenerationType, Outp
 from src.db.repositories.gallery import CoverData, GalleryRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.db.models.storage import GenerationJob, GenerationOutput

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from src.core.enums import ComponentCategory, ComponentStatus
+if TYPE_CHECKING:
+    from src.core.enums import ComponentCategory, ComponentStatus
 
 
 @dataclass(frozen=True, kw_only=True)

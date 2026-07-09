@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
-from litestar.connection import ASGIConnection
 from litestar.exceptions import NotAuthorizedException
-from litestar.handlers import BaseRouteHandler
 
 from src.core.config import get_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from litestar.connection import ASGIConnection
+    from litestar.handlers import BaseRouteHandler
+
     from src.api.security.jwt import JWTService, TokenPayload
     from src.db.models import User
 

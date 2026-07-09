@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, literal, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models.storage import GenerationOutput
 from src.db.repositories.base import BaseRepository
@@ -15,6 +14,8 @@ from src.db.repositories.base import BaseRepository
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class OutputRepository(BaseRepository[GenerationOutput]):

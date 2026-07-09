@@ -11,10 +11,10 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.core.enums import SubscriptionTier, SupportedLocale, UserRole
-from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 from src.db.models.base import Base
 
 if TYPE_CHECKING:
+    from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
     from src.db.models.billing import TokenAccount
     from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 

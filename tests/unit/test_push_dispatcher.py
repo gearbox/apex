@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import msgspec
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.events import (
     EventEnvelope,
@@ -19,6 +17,11 @@ from src.api.schemas.events import (
 )
 from src.core.enums import NotificationLevel
 from src.workers.push_dispatcher import PushDispatcher
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 _encoder = msgspec.json.Encoder()
 

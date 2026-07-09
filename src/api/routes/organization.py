@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
@@ -31,6 +30,9 @@ from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.organization import OrganizationService
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -38,7 +40,7 @@ class OrganizationController(Controller):
     """Organization management endpoints."""
 
     path = "/v1/organizations"
-    tags: Sequence[str] | None = ["Organizations"]
+    tags: Sequence[str] | None = ("Organizations",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
 

@@ -9,7 +9,6 @@ instead of streaming bytes, with zero schema changes needed.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -17,6 +16,8 @@ from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.storage.r2 import R2StorageService

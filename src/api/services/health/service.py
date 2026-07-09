@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from src.core.enums import ComponentCategory, ComponentStatus
 
-from .base import ComponentHealth
-from .registry import HealthCheckRegistry
+if TYPE_CHECKING:
+    from .base import ComponentHealth
+    from .registry import HealthCheckRegistry
 
 logger = structlog.get_logger()
 

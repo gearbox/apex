@@ -5,23 +5,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import msgspec
 import structlog
 from sqlalchemy.exc import IntegrityError
 
-from src.api.services.bundle_index import BundleIndexService
-from src.api.services.cloudflare.client import CloudflareTunnelClient
-from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError
-from src.api.services.vastai.schemas import VastAIOffer
 from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus, ModelType
 from src.core.uid import new_id
-from src.db.models.gpu_session import GpuSession
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.db.repositories.job import JobRepository
@@ -38,12 +31,20 @@ from .exceptions import (
 from .schemas import StopConfirmation
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.billing import BalanceEvent, BillingService
+    from src.api.services.bundle_index import BundleIndexService
+    from src.api.services.cloudflare.client import CloudflareTunnelClient
     from src.api.services.event_bus import EventBus
     from src.api.services.jobs.sweep import JobSweepService
+    from src.api.services.vastai.client import VastAIClient
+    from src.api.services.vastai.schemas import VastAIOffer
     from src.core.config import Settings
+    from src.db.models.gpu_session import GpuSession
 
 logger = structlog.get_logger(__name__)
 

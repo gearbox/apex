@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
@@ -17,6 +16,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
     from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class JobRepository(BaseRepository[GenerationJob]):

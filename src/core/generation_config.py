@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from src.core.enums import Resolution, Sampler, Scheduler
+if TYPE_CHECKING:
+    from src.core.enums import Resolution, Sampler, Scheduler
 
 
 class BundleConfigError(Exception):

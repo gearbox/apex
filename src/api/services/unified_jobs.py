@@ -10,21 +10,26 @@ Aisha job status is updated by AishaJobPoller (background worker).
 from __future__ import annotations
 
 from collections import defaultdict
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import inspect
 from sqlalchemy.exc import NoInspectionAvailable
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
-from src.api.services.generation.base import GenerationProvider
 from src.api.services.media import build_output_media
 from src.core.enums import GenerationType, JobStatus, Provider
-from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.api.services.generation.base import GenerationProvider
+    from src.db.models.storage import GenerationJob, GenerationOutput
 
 logger = structlog.get_logger(__name__)
 

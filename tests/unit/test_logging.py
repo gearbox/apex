@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Generator
+from typing import TYPE_CHECKING
 
 import pytest
 import structlog
@@ -12,6 +12,9 @@ from structlog.testing import capture_logs
 
 from src.core.config import Settings
 from src.core.logging import configure_logging, get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 _DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
 

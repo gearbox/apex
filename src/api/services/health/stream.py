@@ -7,17 +7,18 @@ Redis Pub/Sub mode (production) and direct polling fallback (no Redis).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
 
 from src.api.services.health import HEALTH_STREAM_CHANNEL
-from src.api.services.health.service import HealthService
 from src.core.redis import get_redis_client
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
+    from src.api.services.health.service import HealthService
     from src.core.config import Settings
 
 logger = structlog.get_logger()

@@ -14,16 +14,17 @@ import hashlib
 import hmac
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
-from src.api.schemas.gpu_session import DownloadProgressBody
 from src.db.repositories.gpu_session import PROVISIONING_STATUSES, GpuSessionRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from src.api.schemas.gpu_session import DownloadProgressBody
     from src.db.models.gpu_session import GpuSession
 
 logger = structlog.get_logger(__name__)

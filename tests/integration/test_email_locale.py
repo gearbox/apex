@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from src.api.services.email.base import EmailMessage
+from typing import TYPE_CHECKING
+
 from src.api.services.email.log import LogEmailService
+
+if TYPE_CHECKING:
+    from src.api.services.email.base import EmailMessage
 
 
 async def test_verification_email_uses_locale_and_app_name() -> None:

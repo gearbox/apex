@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import structlog
@@ -49,6 +48,9 @@ from src.core.config import Settings
 from src.core.enums import GpuSessionStatus, UserRole
 from src.db.repositories.job import JobRepository
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = structlog.get_logger(__name__)
 
 
@@ -56,7 +58,7 @@ class GpuSessionController(Controller):
     """GPU session lifecycle endpoints."""
 
     path = "/v1/sessions"
-    tags: Sequence[str] | None = ["GPU Sessions"]
+    tags: Sequence[str] | None = ("GPU Sessions",)
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "current_user_id": Provide(get_current_user_id),

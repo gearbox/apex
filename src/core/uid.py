@@ -15,9 +15,12 @@ UUIDv7 properties vs UUIDv4:
 
 from __future__ import annotations
 
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 from uuid6 import uuid7
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 
 def new_id() -> UUID:

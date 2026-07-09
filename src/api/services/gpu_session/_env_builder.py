@@ -10,9 +10,10 @@ SECURITY: the returned dict contains tokens — never log it.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from src.core.config import Settings
 
 

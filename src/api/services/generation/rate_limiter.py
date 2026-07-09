@@ -7,14 +7,17 @@ Uses the same `limits` library backend as the HTTP rate limit middleware.
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import structlog
 from limits import parse
 from limits.aio.strategies import MovingWindowRateLimiter
 
 from src.api.middleware.rate_limit import get_rate_limiter_storage
-from src.core.enums import ModelType
 from src.core.model_registry import get_model_meta
+
+if TYPE_CHECKING:
+    from src.core.enums import ModelType
 
 logger = structlog.get_logger(__name__)
 

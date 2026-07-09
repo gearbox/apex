@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from sqlalchemy import delete, select
-from sqlalchemy.engine import CursorResult
 
 from src.db.models.health import HealthSnapshot
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
@@ -82,6 +82,6 @@ class HealthSnapshotRepository:
         """
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         stmt = delete(HealthSnapshot).where(HealthSnapshot.checked_at < cutoff)
-        result = cast(CursorResult[Any], await self._session.execute(stmt))
+        result = cast("CursorResult[Any]", await self._session.execute(stmt))
         await self._session.flush()
         return int(result.rowcount)
