@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import msgspec
 import pytest
 from litestar.exceptions import HTTPException, NotFoundException
 
@@ -14,6 +15,24 @@ from src.core.product import PaymentProvider
 from src.core.product_registry import VEX_CONFIG
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("display_order", [-1, 1001])
+def test_display_order_out_of_bounds_rejected(display_order: int) -> None:
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.json.decode(
+            f'{{"display_order": {display_order}}}'.encode(),
+            type=PaymentProviderPatchRequest,
+        )
+
+
+@pytest.mark.parametrize("display_order", [0, 1000])
+def test_display_order_boundary_values_accepted(display_order: int) -> None:
+    decoded = msgspec.json.decode(
+        f'{{"display_order": {display_order}}}'.encode(),
+        type=PaymentProviderPatchRequest,
+    )
+    assert decoded.display_order == display_order
 
 
 async def test_empty_patch_returns_400() -> None:

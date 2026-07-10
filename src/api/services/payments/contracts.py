@@ -60,12 +60,16 @@ class PaymentLookup(msgspec.Struct, frozen=True, kw_only=True):
 class WebhookOutcome(msgspec.Struct, frozen=True, kw_only=True):
     """Verified and normalized provider webhook outcome.
 
-    ``amount_paid`` is the provider-reported settled amount when proportional
-    crediting is required. It keeps that policy provider-neutral while
-    preserving the live NowPayments partial/under/overpayment behavior.
+    ``amount_paid`` and ``amount_due`` are the settled amount and the
+    expected amount, both denominated in the same provider-defined unit
+    system (e.g. NowPayments' pay currency) — never mixed with fiat
+    ``payment.amount_usd``. Set together when proportional crediting is
+    required; left ``None`` (Stripe path) for a plain full credit on
+    ``COMPLETED``.
     """
 
     lookup: PaymentLookup
     status: PaymentStatus | None
     metadata_patch: dict[str, Any] = {}
     amount_paid: Decimal | None = None
+    amount_due: Decimal | None = None

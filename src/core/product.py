@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from src.core.enums import ModelType, Product
+# Runtime import required: PEP 563 field annotations on ProductConfig are resolved
+# by Litestar DI and msgspec at runtime.
+from src.core.enums import ModelType, Product  # noqa: TC001
 
 
 class AgeGatePolicy(StrEnum):

@@ -26,6 +26,16 @@ def _service() -> PaymentProviderStateService:
     )
 
 
+def test_credential_checks_cover_every_payment_provider() -> None:
+    """Mirrors the gateway registry completeness test: a future PaymentProvider
+    member without a `checks` entry must fail loud (KeyError) rather than
+    silently report `credentials_configured=False` forever."""
+    service = _service()
+    for provider in PaymentProvider:
+        # Should not raise KeyError for any known provider member.
+        service._credentials_configured("vex", provider)
+
+
 async def test_absent_rows_enable_full_capability() -> None:
     repository = AsyncMock()
     repository.get_states = AsyncMock(return_value=[])

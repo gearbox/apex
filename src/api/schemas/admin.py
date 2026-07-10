@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 from uuid import UUID
 
 import msgspec
@@ -57,7 +58,7 @@ class PaymentProviderPatchRequest(msgspec.Struct, forbid_unknown_fields=True, kw
     """Partial runtime update for a product payment provider."""
 
     is_enabled: bool | None = None
-    display_order: int | None = None
+    display_order: Annotated[int, msgspec.Meta(ge=0, le=1000)] | None = None
 
 
 # --- Admin Management Response Structs ---

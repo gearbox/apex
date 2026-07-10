@@ -142,14 +142,23 @@ class NowPaymentsGateway:
             )
 
         amount_paid: Decimal | None = None
+        amount_due: Decimal | None = None
         if status in {PaymentStatus.COMPLETED, PaymentStatus.PARTIALLY_PAID}:
-            paid_raw = parsed.get("actually_paid") or parsed.get("price_amount") or "0"
+            paid_raw = parsed.get("actually_paid")
+            due_raw = parsed.get("pay_amount")
+            if paid_raw is None or due_raw is None:
+                raise PaymentVerificationError(
+                    "NowPayments IPN missing actually_paid/pay_amount for settled status"
+                )
             try:
                 amount_paid = Decimal(str(paid_raw))
+                amount_due = Decimal(str(due_raw))
             except InvalidOperation as exc:
                 raise PaymentVerificationError(
-                    "NowPayments IPN actually_paid is malformed"
+                    "NowPayments IPN actually_paid/pay_amount is malformed"
                 ) from exc
+            if amount_due <= 0:
+                raise PaymentVerificationError("NowPayments IPN pay_amount must be positive")
 
         metadata: dict[str, Any] = {
             "ipn_payment_id": str(parsed.get("payment_id", "")),
@@ -157,10 +166,12 @@ class NowPaymentsGateway:
         }
         if amount_paid is not None:
             metadata["ipn_actually_paid"] = str(amount_paid)
+            metadata["ipn_pay_amount"] = str(amount_due)
 
         return WebhookOutcome(
             lookup=PaymentLookup(by="payment_id", value=str(internal_payment_id)),
             status=status,
             metadata_patch=metadata,
             amount_paid=amount_paid,
+            amount_due=amount_due,
         )

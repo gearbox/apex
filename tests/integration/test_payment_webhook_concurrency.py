@@ -211,9 +211,12 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
 
     # order_id matches what NowPaymentsGateway.create_charge actually produces: a
     # JSON-encoded dict *string* embedded as a field value (NowPayments
-    # echoes it back verbatim). price_amount is a raw JSON number with the
-    # exact lexeme "10.00" — the classic case that breaks byte-equality if
-    # the HMAC is verified against a re-serialized float (10.00 -> 10.0).
+    # echoes it back verbatim). actually_paid/pay_amount are raw JSON numbers
+    # with the exact lexeme "10.00" — the classic case that breaks
+    # byte-equality if the HMAC is verified against a re-serialized float
+    # (10.00 -> 10.0). Both fields are required for a "finished" IPN under
+    # the fail-loud settlement contract (P1-1) — ratio 10.00/10.00 = 1.0,
+    # in tolerance, full 500 tokens credited.
     order_id_json_string = json.dumps(
         {
             "account_id": str(account.id),
@@ -224,7 +227,7 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
     raw_payload = (
         '{"payment_status":"finished","payment_id":"5077125060",'
         f"{json.dumps('order_id')}:{json.dumps(order_id_json_string)},"
-        '"price_amount":10.00}'
+        '"actually_paid":10.00,"pay_amount":10.00}'
     ).encode()
 
     parsed = json.loads(raw_payload, parse_float=str, parse_int=str)
@@ -306,11 +309,15 @@ async def test_concurrent_partial_ipns_never_overcredit(db_engine: AsyncEngine) 
             "payment_id": str(payment.id),
         }
     )
-    # ratio = 4.00 / 10.00 = 0.4 → target = floor(1000 * 0.4) = 400.
+    # ratio = actually_paid / pay_amount = 4.00 / 10.00 = 0.4 → target =
+    # floor(1000 * 0.4) = 400. Both fields required under the fail-loud
+    # settlement contract (P1-1) — pay_amount matches the payment's
+    # amount_usd here only coincidentally; the ratio no longer reads
+    # amount_usd at all.
     raw_payload = (
         '{"payment_status":"partially_paid","payment_id":"5077125061",'
         f"{json.dumps('order_id')}:{json.dumps(order_id_json_string)},"
-        '"actually_paid":4.00}'
+        '"actually_paid":4.00,"pay_amount":10.00}'
     ).encode()
 
     parsed = json.loads(raw_payload, parse_float=str, parse_int=str)

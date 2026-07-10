@@ -56,7 +56,7 @@ class PaymentProviderStateService:
         }
         try:
             return all(bool(resolve(product_id)) for resolve in checks[provider])
-        except (KeyError, RuntimeError):
+        except RuntimeError:
             return False
 
     async def _provider_infos(

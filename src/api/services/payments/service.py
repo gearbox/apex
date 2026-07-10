@@ -186,21 +186,27 @@ class PaymentService:
         if payment.product_id != envelope.product_id:
             raise PaymentVerificationError("Payment webhook product mismatch")
 
-        payment.status = outcome.status.value
+        # Do not let a late/out-of-order intermediate IPN (e.g. waiting/confirming)
+        # regress a payment that has already been marked partially paid.
+        if (
+            payment.status != PaymentStatus.PARTIALLY_PAID.value
+            or outcome.status is not PaymentStatus.PENDING
+        ):
+            payment.status = outcome.status.value
         if outcome.status is PaymentStatus.COMPLETED:
             payment.completed_at = datetime.now(UTC)
 
-        metadata_patch: dict[str, Any] = dict(outcome.metadata_patch)
         event: BalanceEvent | None = None
         credit_ratio: Decimal | None = None
         credit_delta = 0
+        metadata_patch: dict[str, Any] = dict(outcome.metadata_patch)
         if outcome.amount_paid is not None:
-            if payment.amount_usd <= 0:
+            if outcome.amount_due is None or outcome.amount_due <= 0:
                 raise PaymentVerificationError(
-                    "Payment has non-positive amount_usd; refusing to divide"
+                    "Webhook amount_paid provided without a valid amount_due"
                 )
             expected_usd = Decimal(str(payment.amount_usd))
-            ratio = outcome.amount_paid / expected_usd
+            ratio = outcome.amount_paid / outcome.amount_due
             in_tolerance = (
                 outcome.status is PaymentStatus.COMPLETED
                 and _FULL_PAYMENT_TOLERANCE_LOW <= ratio <= _FULL_PAYMENT_TOLERANCE_HIGH
@@ -208,18 +214,17 @@ class PaymentService:
             effective_ratio = Decimal(1) if in_tolerance else ratio
             target, credit_delta = await self._credit_delta(payment, effective_ratio, repo=repo)
             credit_ratio = effective_ratio
-            metadata_patch.update(
-                {
-                    "expected_usd": str(expected_usd),
-                    "ratio": str(ratio),
-                    "tokens_credited_total": target,
-                }
-            )
+            metadata_patch |= {
+                "expected_usd": str(expected_usd),
+                "amount_due": str(outcome.amount_due),
+                "ratio": str(ratio),
+                "tokens_credited_total": target,
+            }
             self._log_proportional_settlement(
                 payment=payment,
                 status=outcome.status,
                 amount_paid=outcome.amount_paid,
-                expected_usd=expected_usd,
+                amount_due=outcome.amount_due,
                 ratio=ratio,
                 delta=credit_delta,
                 in_tolerance=in_tolerance,
@@ -255,14 +260,14 @@ class PaymentService:
         payment: Payment,
         status: PaymentStatus,
         amount_paid: Decimal,
-        expected_usd: Decimal,
+        amount_due: Decimal,
         ratio: Decimal,
         delta: int,
         in_tolerance: bool,
     ) -> None:
         fields = {
             "payment_id": str(payment.id),
-            "expected_usd": str(expected_usd),
+            "amount_due": str(amount_due),
             "actually_paid": str(amount_paid),
             "ratio": str(ratio),
             "tokens_credited": delta,
