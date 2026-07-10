@@ -91,7 +91,7 @@ def _log_handler_event(
     status_code: int,
     level: str = "warning",
     exc_info: BaseException | None = None,
-    **extra: Any,
+    **extra: object,  # These are structlog kwargs
 ) -> None:
     """Emit a structured log event with the consistent field set for all exception handlers.
 

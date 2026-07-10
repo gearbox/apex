@@ -182,7 +182,7 @@ class PushService:
 
     async def _send_to_many(
         self,
-        subscriptions: Sequence[PushSubscription] | Any,
+        subscriptions: Sequence[PushSubscription],
         payload: PushNotificationPayload,
         *,
         session: AsyncSession,

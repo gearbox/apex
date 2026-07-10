@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.23.0"
+version = "0.23.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -97,10 +97,12 @@ select = [
     "T20",  # No stray print
     "TID",  # Bans relative imports
     "PLE",  # Pylint errors
+    "PLW",  # Pylint warnings
     "FA",   # flake8-future-annotations
     "PGH",  # pygrep-hooks, bans blanket # type: ignore and # noqa
-    "PLW",
     "TC",   #flake8-type-checking, moves typing-only imports into TYPE_CHECKING
+    "FLY",  # F-string formatting style
+    "ANN",  # Type annotations
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
@@ -130,6 +132,10 @@ runtime-evaluated-base-classes = [
     "S106",   # Ignore possible hardcoded password assigned to argument within the tests directory
     "S107",   # Ignore possible hardcoded password assigned to function default within the tests directory
     "S607",   # Ignore starting a process with a partial executable path
+    "ANN001", # Missing type annotation for function argument
+    "ANN201", # Missing return type annotation for public function
+    "ANN202", # Missing return type annotation for private function
+    "ANN401", # Dynamically typed expressions (typing.Any) are disallowed
 ]
 "src/cli/**/*.py" = ["T20"]   # Typer/Rich print legitimately
 "tools/**/*.py" = ["T20"]   # Typer/Rich print legitimately

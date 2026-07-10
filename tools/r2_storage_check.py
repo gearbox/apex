@@ -4,7 +4,7 @@ from src.api.dependencies.common import get_settings
 from src.api.services.storage.r2 import R2StorageService, R2StorageSettings
 
 
-async def main():
+async def main() -> None:
     s = get_settings()
     r2 = R2StorageService(
         settings=R2StorageSettings(

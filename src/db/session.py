@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
@@ -142,19 +142,35 @@ def get_db_manager() -> DatabaseManager:
 
 def init_db(
     database_url: str,
-    **kwargs: Any,
+    *,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+    pool_timeout: int = 30,
+    pool_recycle: int = 1800,
+    echo: bool = False,
 ) -> DatabaseManager:
     """Initialize the global database manager.
 
     Args:
         database_url: PostgreSQL connection URL.
-        **kwargs: Additional arguments for DatabaseManager.
+        pool_size: Number of connections to maintain in pool.
+        max_overflow: Maximum overflow connections above pool_size.
+        pool_timeout: Seconds to wait for available connection.
+        pool_recycle: Seconds before recycling connections.
+        echo: Whether to echo SQL statements (debug logging).
 
     Returns:
         Initialized DatabaseManager.
     """
     global _db_manager
-    _db_manager = DatabaseManager(database_url, **kwargs)
+    _db_manager = DatabaseManager(
+        database_url,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+        echo=echo,
+    )
     return _db_manager
 
 

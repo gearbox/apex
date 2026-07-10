@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import text
@@ -11,6 +11,7 @@ from src.api.services.health.base import ComponentHealth
 from src.core.enums import ComponentCategory, ComponentStatus
 
 if TYPE_CHECKING:
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.storage import R2StorageService
@@ -55,13 +56,13 @@ class RedisChecker:
     category = ComponentCategory.infrastructure
     product_id = None
 
-    def __init__(self, redis: Any) -> None:
+    def __init__(self, redis: Redis) -> None:
         self._redis = redis
 
     async def check(self) -> ComponentHealth:
         try:
             result = await self._redis.ping()
-            if result is True or result == b"PONG":
+            if result:
                 return ComponentHealth(
                     name=self.name,
                     category=self.category,

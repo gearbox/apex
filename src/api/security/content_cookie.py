@@ -12,6 +12,8 @@ from src.core.config import get_settings
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from litestar import Response
+
     from src.api.security.jwt import JWTService
     from src.core.config import Settings
     from src.core.product import ProductConfig
@@ -83,7 +85,7 @@ def clear_content_cookie(*, domain: str | None, secure: bool) -> Cookie:
 
 
 def attach_content_cookie(
-    response: Any,
+    response: Response[Any],
     *,
     user_id: UUID,
     product_id: str,

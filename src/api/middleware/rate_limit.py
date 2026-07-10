@@ -24,7 +24,7 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.core.config import Settings, get_settings
 
 if TYPE_CHECKING:
-    from litestar.types import ASGIApp, Receive, Scope, Send
+    from litestar.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = structlog.get_logger(__name__)
 
@@ -223,7 +223,7 @@ class RateLimitMiddleware(MiddlewareProtocol):
             (b"x-ratelimit-reset", str(reset_time).encode()),
         ]
 
-        async def send_with_headers(message: Any) -> None:
+        async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 message = {
                     **message,
