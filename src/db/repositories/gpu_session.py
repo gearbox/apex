@@ -472,7 +472,7 @@ class GpuSessionRepository:
         self,
         session_id: UUID,
         status: GpuSessionStatus | str,
-        **extra_fields: Any,
+        **extra_fields: object,
     ) -> None:
         """Update session status and any additional fields atomically.
 

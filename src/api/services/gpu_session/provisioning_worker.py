@@ -776,12 +776,14 @@ class GpuProvisioningWorker(PeriodicWorker):
         *,
         new_status: GpuSessionStatus,
         log_event: str,
-        **extra_fields: Any,
+        **extra_fields: object,
     ) -> None:
         """Re-load under SELECT FOR UPDATE, validate status, then write new_status."""
         previous_status = str(session.status)
         # Pop error_message so it reaches the SSE event as well as the DB row.
         error_message = extra_fields.get("error_message")
+        if error_message is not None and not isinstance(error_message, str):
+            raise TypeError("error_message must be a str")
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             current = await repo.get_by_id(session.id, for_update=True)

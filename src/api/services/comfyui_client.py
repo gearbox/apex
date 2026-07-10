@@ -1,5 +1,6 @@
 """ComfyUI HTTP client service for API communication."""
 
+from types import TracebackType
 from typing import Any
 
 import httpx
@@ -55,7 +56,12 @@ class ComfyUIClient:
         await self.connect()
         return self
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         """Async context manager exit."""
         await self.close()
 

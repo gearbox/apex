@@ -492,7 +492,13 @@ class GrokClient:
 
     @staticmethod
     def _parse_deferred_video_result(
-        response: Any, deferred_status: Any, *, request_id: str
+        # Duck-typed against the protobuf deferred-video response/enum wrapper;
+        # both are structurally accessed (status/.HasField()/.DONE etc.) and
+        # tests substitute lightweight fakes, so no concrete type fits both.
+        response: Any,  # noqa: ANN401
+        deferred_status: Any,  # noqa: ANN401
+        *,
+        request_id: str,
     ) -> GrokVideoResult | None:
         match response.status:
             case deferred_status.DONE:
