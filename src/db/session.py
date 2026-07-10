@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -14,8 +15,6 @@ from sqlalchemy.ext.asyncio import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
-
-    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class DatabaseManager:
