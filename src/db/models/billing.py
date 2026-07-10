@@ -429,3 +429,37 @@ class Payment(Base):
             f"<Payment {self.id} provider={self.payment_provider} "
             f"status={self.status} usd={self.amount_usd}>"
         )
+
+
+class PaymentProviderState(Base):
+    """Per-product runtime state for a statically supported payment provider."""
+
+    __tablename__ = "payment_provider_state"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    display_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    updated_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (UniqueConstraint("product_id", "provider", name="uq_payment_provider_state"),)

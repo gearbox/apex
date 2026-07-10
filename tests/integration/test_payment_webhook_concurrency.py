@@ -31,8 +31,12 @@ from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.services.billing import BillingService
-from src.api.services.payment import PaymentService
+from src.api.services.payment_provider_state import PaymentProviderStateService
+from src.api.services.payments import GatewayRegistry, PaymentService, WebhookEnvelope
+from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
+from src.api.services.payments.stripe_gateway import StripeGateway
 from src.core.config import Settings
+from src.core.product import PaymentProvider
 from src.core.uid import new_id
 from src.db.models.billing import Payment, TokenAccount, TokenTransaction
 from src.db.models.user import User
@@ -46,6 +50,15 @@ def _make_settings() -> Settings:
         stripe_secret_key_vex="sk_test_vex",
         stripe_webhook_secret_vex="whsec_test_vex",
         nowpayments_ipn_secret_vex="ipn_secret_vex",
+    )
+
+
+def _make_service(settings: Settings) -> PaymentService:
+    return PaymentService(
+        billing_service=BillingService(),
+        settings=settings,
+        registry=GatewayRegistry([StripeGateway(settings), NowPaymentsGateway(settings)]),
+        provider_state_service=PaymentProviderStateService(settings),
     )
 
 
@@ -127,10 +140,16 @@ async def test_concurrent_stripe_webhook_deliveries_credit_exactly_once(
                 AsyncSession(bind=db_engine, expire_on_commit=False) as session,
                 session.begin(),
             ):
-                service = PaymentService(billing_service=BillingService(), settings=settings)
+                service = _make_service(settings)
                 with patch("stripe.Webhook.construct_event", return_value=fake_event):
-                    await service.handle_stripe_webhook(
-                        b"{}", "sig_ignored", session=session, product_id="vex"
+                    await service.handle_webhook(
+                        PaymentProvider.STRIPE,
+                        WebhookEnvelope(
+                            raw_body=b"{}",
+                            headers={"stripe-signature": "sig_ignored"},
+                            product_id="vex",
+                        ),
+                        session=session,
                     )
                 await session.commit()
                 return "delivered"
@@ -190,11 +209,14 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
     settings = _make_settings()
     ipn_secret = settings.nowpayments_ipn_secret_for("vex")
 
-    # order_id matches what create_nowpayments_invoice actually produces: a
+    # order_id matches what NowPaymentsGateway.create_charge actually produces: a
     # JSON-encoded dict *string* embedded as a field value (NowPayments
-    # echoes it back verbatim). price_amount is a raw JSON number with the
-    # exact lexeme "10.00" — the classic case that breaks byte-equality if
-    # the HMAC is verified against a re-serialized float (10.00 -> 10.0).
+    # echoes it back verbatim). actually_paid/pay_amount are raw JSON numbers
+    # with the exact lexeme "10.00" — the classic case that breaks
+    # byte-equality if the HMAC is verified against a re-serialized float
+    # (10.00 -> 10.0). Both fields are required for a "finished" IPN under
+    # the fail-loud settlement contract (P1-1) — ratio 10.00/10.00 = 1.0,
+    # in tolerance, full 500 tokens credited.
     order_id_json_string = json.dumps(
         {
             "account_id": str(account.id),
@@ -205,7 +227,7 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
     raw_payload = (
         '{"payment_status":"finished","payment_id":"5077125060",'
         f"{json.dumps('order_id')}:{json.dumps(order_id_json_string)},"
-        '"price_amount":10.00}'
+        '"actually_paid":10.00,"pay_amount":10.00}'
     ).encode()
 
     parsed = json.loads(raw_payload, parse_float=str, parse_int=str)
@@ -219,9 +241,15 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
                 AsyncSession(bind=db_engine, expire_on_commit=False) as session,
                 session.begin(),
             ):
-                service = PaymentService(billing_service=BillingService(), settings=settings)
-                await service.handle_nowpayments_webhook(
-                    raw_payload, signature, session=session, product_id="vex"
+                service = _make_service(settings)
+                await service.handle_webhook(
+                    PaymentProvider.NOWPAYMENTS,
+                    WebhookEnvelope(
+                        raw_body=raw_payload,
+                        headers={"x-nowpayments-sig": signature},
+                        product_id="vex",
+                    ),
+                    session=session,
                 )
                 await session.commit()
                 return "delivered"
@@ -281,11 +309,15 @@ async def test_concurrent_partial_ipns_never_overcredit(db_engine: AsyncEngine) 
             "payment_id": str(payment.id),
         }
     )
-    # ratio = 4.00 / 10.00 = 0.4 → target = floor(1000 * 0.4) = 400.
+    # ratio = actually_paid / pay_amount = 4.00 / 10.00 = 0.4 → target =
+    # floor(1000 * 0.4) = 400. Both fields required under the fail-loud
+    # settlement contract (P1-1) — pay_amount matches the payment's
+    # amount_usd here only coincidentally; the ratio no longer reads
+    # amount_usd at all.
     raw_payload = (
         '{"payment_status":"partially_paid","payment_id":"5077125061",'
         f"{json.dumps('order_id')}:{json.dumps(order_id_json_string)},"
-        '"actually_paid":4.00}'
+        '"actually_paid":4.00,"pay_amount":10.00}'
     ).encode()
 
     parsed = json.loads(raw_payload, parse_float=str, parse_int=str)
@@ -299,9 +331,15 @@ async def test_concurrent_partial_ipns_never_overcredit(db_engine: AsyncEngine) 
                 AsyncSession(bind=db_engine, expire_on_commit=False) as session,
                 session.begin(),
             ):
-                service = PaymentService(billing_service=BillingService(), settings=settings)
-                await service.handle_nowpayments_webhook(
-                    raw_payload, signature, session=session, product_id="vex"
+                service = _make_service(settings)
+                await service.handle_webhook(
+                    PaymentProvider.NOWPAYMENTS,
+                    WebhookEnvelope(
+                        raw_body=raw_payload,
+                        headers={"x-nowpayments-sig": signature},
+                        product_id="vex",
+                    ),
+                    session=session,
                 )
                 await session.commit()
                 return "delivered"

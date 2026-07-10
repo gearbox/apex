@@ -1,5 +1,12 @@
 """Billing and payment error types."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.product import PaymentProvider
+
 
 class BillingError(Exception):
     """Base billing error."""
@@ -41,6 +48,30 @@ class ModerationError(Exception):
 
 class PaymentVerificationError(Exception):
     """Webhook signature verification failed. → HTTP 400"""
+
+
+class UnsupportedProviderError(BillingError):
+    """No gateway implementation is registered for a provider."""
+
+    def __init__(self, provider: PaymentProvider) -> None:
+        self.provider = provider
+        super().__init__(f"Unsupported payment provider: {provider.value}")
+
+
+class UnknownProviderError(BillingError):
+    """Provider is outside a product's statically configured capability set."""
+
+    def __init__(self, provider: PaymentProvider) -> None:
+        self.provider = provider
+        super().__init__(f"Payment provider not available for this product: {provider.value}")
+
+
+class PaymentProviderDisabledError(BillingError):
+    """Provider is supported by a product but disabled at runtime. → HTTP 409"""
+
+    def __init__(self, provider: PaymentProvider) -> None:
+        self.provider = provider
+        super().__init__(f"Payment provider is disabled: {provider.value}")
 
 
 class TopUpAmountError(ValueError):

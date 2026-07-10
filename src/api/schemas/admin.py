@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 from uuid import UUID
 
 import msgspec
@@ -53,6 +54,13 @@ class GrantPermissionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only
     permission: AdminPermission
 
 
+class PaymentProviderPatchRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Partial runtime update for a product payment provider."""
+
+    is_enabled: bool | None = None
+    display_order: Annotated[int, msgspec.Meta(ge=0, le=1000)] | None = None
+
+
 # --- Admin Management Response Structs ---
 
 
@@ -74,7 +82,7 @@ class AuditLogEntry(msgspec.Struct, kw_only=True):
 
     id: UUID
     actor_id: UUID
-    target_user_id: UUID
+    target_user_id: UUID | None
     action: str
     detail: str
     source: str
