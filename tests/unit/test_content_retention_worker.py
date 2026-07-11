@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
+
+import pytest
 
 from src.workers.content_retention import ContentRetentionWorker
 
@@ -36,18 +38,16 @@ async def test_worker_run_once_calls_sweep() -> None:
     service.sweep.assert_awaited_once()
 
 
-async def test_worker_loop_survives_service_exception() -> None:
+async def test_worker_run_once_propagates_service_exception() -> None:
+    """run_once must not swallow failures — PeriodicWorker._run_loop only
+    advances _last_tick_at when run_once returns without raising, so a
+    persistently failing sweep must be visible to WorkerHeartbeatChecker."""
     service = AsyncMock()
     service.sweep = AsyncMock(side_effect=RuntimeError("boom"))
     worker = _make_worker(service=service)
 
-    with patch("src.workers.content_retention.logger") as logger_mock:
-        await worker.run_once()  # must not raise
-
-        logger_mock.exception.assert_called_once()
-        args, kwargs = logger_mock.exception.call_args
-        assert args[0] == "content_retention.error"
-        assert kwargs["error"] == "boom"
+    with pytest.raises(RuntimeError, match="boom"):
+        await worker.run_once()
 
 
 async def test_worker_uses_no_leader_lease() -> None:

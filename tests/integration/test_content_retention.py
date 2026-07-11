@@ -9,25 +9,38 @@ invisible to the sweeper's own sessions.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.services.content_retention import ContentRetentionService
+from src.api.services.storage.r2 import R2StorageService, R2StorageSettings
 from src.core.enums import GenerationType, JobStatus
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.models.user import User
 from src.db.repositories.gallery import GalleryRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 
 class FakeR2Storage:
-    """Records delete_many calls instead of touching real R2."""
+    """Records delete_many calls instead of touching real R2.
+
+    Used by every integration test here except the end-to-end one below,
+    which routes through a real ``R2StorageService`` (patched only at the
+    boto client boundary) to exercise the actual ``delete_many`` batching /
+    response-parsing logic. The other tests assert DB/cascade behaviour and
+    which keys are passed — routing them through the real client would add
+    nothing beyond what the one real-`delete_many` test already proves.
+    """
 
     def __init__(self) -> None:
         self.deleted_keys: list[str] = []
@@ -35,6 +48,36 @@ class FakeR2Storage:
     async def delete_many(self, storage_keys: list[str]) -> int:
         self.deleted_keys.extend(storage_keys)
         return len(storage_keys)
+
+
+@pytest.fixture
+def recording_r2() -> Generator[tuple[R2StorageService, list[str]]]:
+    """Real R2StorageService running its true delete_many logic against a
+    mock S3 client that records every deleted key. No moto, no live server."""
+    deleted: list[str] = []
+    mock_client = AsyncMock()
+
+    async def _delete_objects(*, Bucket: str, Delete: dict) -> dict:  # noqa: ARG001
+        keys = [o["Key"] for o in Delete["Objects"]]
+        deleted.extend(keys)
+        return {"Deleted": [{"Key": k} for k in keys]}
+
+    mock_client.delete_objects = AsyncMock(side_effect=_delete_objects)
+
+    settings = R2StorageSettings(
+        account_id="test",
+        access_key_id="test",
+        secret_access_key="test",
+        bucket_name="apex-user-content",
+    )
+    storage = R2StorageService(settings)
+
+    @asynccontextmanager
+    async def _fake_get_client():
+        yield mock_client
+
+    with patch.object(storage, "_get_client", _fake_get_client):
+        yield storage, deleted
 
 
 @pytest.fixture
@@ -186,9 +229,12 @@ async def _create_upload(
 async def test_end_to_end_sweep_removes_rows_thumbnails_and_r2_objects(
     retention_session_factory: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
+    recording_r2: tuple[R2StorageService, list[str]],
 ) -> None:
     """A full sweep deletes expired output + upload rows, cascades to their
-    thumbnails, and best-effort deletes every collected R2 key."""
+    thumbnails, and best-effort deletes every collected R2 key — driven
+    through the real R2StorageService.delete_many (batching + Deleted-count
+    parsing), not FakeR2Storage."""
     user = await _create_user(retention_session_factory)
     job = await _create_job(retention_session_factory, user=user)
     output, output_thumb = await _create_output(
@@ -200,25 +246,28 @@ async def test_end_to_end_sweep_removes_rows_thumbnails_and_r2_objects(
     assert output_thumb is not None
     assert upload_thumb is not None
 
-    storage = FakeR2Storage()
+    storage, deleted_keys = recording_r2
     service = ContentRetentionService(
         session_factory=retention_session_factory,
-        storage=storage,  # type: ignore[arg-type]
+        storage=storage,
         batch_size=500,
         max_batches_per_run=20,
     )
 
     result = await service.sweep()
 
-    assert result.outputs_deleted == 1
-    assert result.uploads_deleted == 1
-    assert result.r2_delete_failed is False
-    assert set(storage.deleted_keys) == {
+    expected_keys = {
         output.storage_key,
         output_thumb.storage_key,
         upload.storage_key,
         upload_thumb.storage_key,
     }
+
+    assert result.outputs_deleted == 1
+    assert result.uploads_deleted == 1
+    assert result.r2_delete_failed is False
+    assert result.r2_keys_deleted == len(expected_keys)
+    assert set(deleted_keys) == expected_keys
 
     assert await db_session.get(GenerationOutput, output.id) is None
     assert await db_session.get(GenerationOutput, output_thumb.id) is None

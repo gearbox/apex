@@ -42,29 +42,30 @@ class TokenCleanupWorker(PeriodicWorker):
         self._db_manager = db_manager
 
     async def run_once(self) -> None:
-        """Execute a single token cleanup run."""
+        """Execute a single token cleanup run.
+
+        Intentionally does not catch exceptions: the PeriodicWorker base loop
+        logs `worker.tick_error` and leaves `_last_tick_at` unadvanced on
+        failure, so a persistently failing cleanup goes stale and
+        WorkerHeartbeatChecker reports it unhealthy instead of swallowing DB
+        failures behind a green heartbeat.
+        """
         start_time = time.perf_counter()
-        refresh_count = 0
-        email_count = 0
-        password_count = 0
 
-        try:
-            async with self._db_manager.session() as session:
-                user_repo = UserRepository(session)
-                token_repo = AuthTokenRepository(session)
+        async with self._db_manager.session() as session:
+            user_repo = UserRepository(session)
+            token_repo = AuthTokenRepository(session)
 
-                # All cleanups happen within the single transaction provided by the session context manager
-                refresh_count = await user_repo.cleanup_expired_tokens()
-                email_count = await token_repo.cleanup_expired_email_verification_tokens()
-                password_count = await token_repo.cleanup_expired_password_reset_tokens()
+            # All cleanups happen within the single transaction provided by the session context manager
+            refresh_count = await user_repo.cleanup_expired_tokens()
+            email_count = await token_repo.cleanup_expired_email_verification_tokens()
+            password_count = await token_repo.cleanup_expired_password_reset_tokens()
 
-            duration_ms = int((time.perf_counter() - start_time) * 1000)
-            logger.info(
-                "token_cleanup",
-                refresh=refresh_count,
-                email_verification=email_count,
-                password_reset=password_count,
-                duration_ms=duration_ms,
-            )
-        except Exception as e:
-            logger.exception("token_cleanup_worker.error", error=str(e))
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.info(
+            "token_cleanup",
+            refresh=refresh_count,
+            email_verification=email_count,
+            password_reset=password_count,
+            duration_ms=duration_ms,
+        )

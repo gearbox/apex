@@ -4,14 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import structlog
-
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
     from src.api.services.content_retention import ContentRetentionService
-
-logger = structlog.get_logger(__name__)
 
 
 class ContentRetentionWorker(PeriodicWorker):
@@ -34,8 +30,15 @@ class ContentRetentionWorker(PeriodicWorker):
         self._service = service
 
     async def run_once(self) -> None:
-        """Execute a single content retention sweep."""
-        try:
-            await self._service.sweep()
-        except Exception as e:
-            logger.exception("content_retention.error", error=str(e))
+        """Execute a single content retention sweep.
+
+        Intentionally does not catch exceptions: the PeriodicWorker base loop
+        logs `worker.tick_error` and, critically, leaves `_last_tick_at`
+        unadvanced on failure, so a persistently failing sweep goes stale and
+        WorkerHeartbeatChecker reports it unhealthy. Swallowing here would keep
+        the heartbeat green while expired content silently re-accumulates.
+        R2-side failures are already downgraded to a flag inside
+        ContentRetentionService.sweep(), so anything propagating here is a
+        DB-level failure that should surface.
+        """
+        await self._service.sweep()

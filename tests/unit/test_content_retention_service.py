@@ -54,6 +54,17 @@ def _make_auto_session_factory(rowcount: int = 1) -> MagicMock:
     return MagicMock(side_effect=_factory)
 
 
+def _make_default_storage() -> AsyncMock:
+    """Default storage mock: delete_many succeeds, confirming every key attempted."""
+
+    async def _delete_many(keys: list[str]) -> int:
+        return len(keys)
+
+    storage = AsyncMock()
+    storage.delete_many = AsyncMock(side_effect=_delete_many)
+    return storage
+
+
 def _make_service(
     *,
     batch_size: int = 500,
@@ -63,7 +74,7 @@ def _make_service(
 ) -> ContentRetentionService:
     return ContentRetentionService(
         session_factory=session_factory or _make_auto_session_factory(),
-        storage=storage or AsyncMock(),
+        storage=storage or _make_default_storage(),
         batch_size=batch_size,
         max_batches_per_run=max_batches_per_run,
     )
@@ -118,6 +129,7 @@ async def test_sweep_deletes_expired_outputs_and_collects_r2_keys() -> None:
     uploads_session = _make_session()
 
     storage = AsyncMock()
+    storage.delete_many = AsyncMock(return_value=2)
     factory = _make_session_factory([session, uploads_session])
 
     with _patch_repos(
@@ -189,6 +201,7 @@ async def test_sweep_deletes_expired_uploads_with_derivatives() -> None:
     factory = _make_session_factory([outputs_session, uploads_session])
 
     storage = AsyncMock()
+    storage.delete_many = AsyncMock(return_value=2)
 
     with _patch_repos(
         upload_expired=[parent],
@@ -223,6 +236,7 @@ async def test_sweep_r2_failure_does_not_raise() -> None:
         result = await service.sweep()  # must not raise
 
     assert result.outputs_deleted == 1
+    assert result.r2_keys_deleted == 0
     assert result.r2_delete_failed is True
     session.commit.assert_awaited_once()
 

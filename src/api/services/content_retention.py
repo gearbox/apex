@@ -152,9 +152,10 @@ class ContentRetentionService:
 
             rows_deleted += batch_rows_deleted
             jobs_soft_deleted += batch_jobs_soft_deleted
-            r2_keys_deleted += len(keys)
 
-            if await self._delete_r2_keys(keys):
+            deleted, failed = await self._delete_r2_keys(keys)
+            r2_keys_deleted += deleted
+            if failed:
                 r2_delete_failed = True
 
             logger.info(
@@ -205,9 +206,10 @@ class ContentRetentionService:
                 await session.commit()
 
             rows_deleted += batch_rows_deleted
-            r2_keys_deleted += len(keys)
 
-            if await self._delete_r2_keys(keys):
+            deleted, failed = await self._delete_r2_keys(keys)
+            r2_keys_deleted += deleted
+            if failed:
                 r2_delete_failed = True
 
             logger.info(
@@ -229,24 +231,24 @@ class ContentRetentionService:
             batches=batches,
         )
 
-    async def _delete_r2_keys(self, keys: list[str]) -> bool:
+    async def _delete_r2_keys(self, keys: list[str]) -> tuple[int, bool]:
         """Best-effort R2 cleanup after the DB rows are already committed gone.
 
-        Never raises — a storage-side failure must not undo or block the
-        already-committed DB deletion (D3). Orphaned R2 objects are the
-        accepted worst case.
-
-        Returns:
-            True if the delete failed (caller sets r2_delete_failed).
+        Returns (deleted_count, failed). Never raises (D3): a storage-side
+        failure must not undo the committed DB deletion. Note the ordering
+        consequence — once the DB rows are gone, the sweeper can never revisit
+        these keys, so a transient R2 outage permanently orphans this batch's
+        objects. That is the accepted D3 trade-off; an R2 bucket lifecycle rule
+        remains a deferred defense-in-depth for such orphans.
         """
         if not keys:
-            return False
+            return 0, False
         try:
-            await self._storage.delete_many(keys)
+            deleted = await self._storage.delete_many(keys)
         except StorageDeleteError:
             logger.warning("content_retention.r2_delete_failed", key_count=len(keys))
-            return True
+            return 0, True
         except Exception:
             logger.exception("content_retention.r2_delete_failed", key_count=len(keys))
-            return True
-        return False
+            return 0, True
+        return deleted, False

@@ -123,7 +123,10 @@ async def test_worker_runs_cleanup_on_interval() -> None:
         )
 
 
-async def test_worker_continues_on_exception() -> None:
+async def test_worker_run_once_propagates_db_exception() -> None:
+    """run_once must not swallow failures — PeriodicWorker._run_loop only
+    advances _last_tick_at when run_once returns without raising, so a
+    persistently failing cleanup must be visible to WorkerHeartbeatChecker."""
     db_manager_mock = MagicMock(spec=DatabaseManager)
 
     class AsyncContextManagerMock:
@@ -137,18 +140,10 @@ async def test_worker_continues_on_exception() -> None:
 
     worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
 
-    with (
-        patch("src.workers.token_cleanup.UserRepository") as user_repo_cls,
-        patch("src.workers.token_cleanup.logger") as logger_mock,
-    ):
+    with patch("src.workers.token_cleanup.UserRepository") as user_repo_cls:
         user_repo_mock = AsyncMock()
         user_repo_mock.cleanup_expired_tokens.side_effect = Exception("Database failure")
         user_repo_cls.return_value = user_repo_mock
 
-        # Call it once, it should catch the exception and log it instead of raising
-        await worker.run_once()
-
-        logger_mock.exception.assert_called_once()
-        args, kwargs = logger_mock.exception.call_args
-        assert args[0] == "token_cleanup_worker.error"
-        assert kwargs["error"] == "Database failure"
+        with pytest.raises(Exception, match="Database failure"):
+            await worker.run_once()
