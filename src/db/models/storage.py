@@ -124,6 +124,7 @@ class UserImage(Base):
     __table_args__ = (
         Index("ix_user_images_user_created", "user_id", "created_at"),
         Index("ix_user_images_parent_image_id", "parent_image_id"),
+        Index("ix_user_images_cleanup", "expires_at"),
     )
 
     def __repr__(self) -> str:

@@ -805,6 +805,28 @@ class Settings(BaseSettings):
         le=90,
         description="Days to retain user content before cleanup",
     )
+    content_cleanup_enabled: bool = Field(
+        default=True,
+        description="Enable the periodic content retention sweeper.",
+    )
+    content_cleanup_interval_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description="Seconds between content retention sweep runs.",
+    )
+    content_cleanup_batch_size: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        description="Max expired rows fetched per sweep batch (per content type).",
+    )
+    content_cleanup_max_batches_per_run: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description="Upper bound on batches drained in a single sweep run (backlog control).",
+    )
     max_upload_size_mb: int = Field(
         default=20,
         ge=1,
@@ -1269,10 +1291,9 @@ class Settings(BaseSettings):
             "vex": self.stripe_secret_key_vex,
             "synthara": self.stripe_secret_key_synthara,
         }.get(product_id)
-        key = per_product or self.stripe_secret_key
-        if not key:
-            raise RuntimeError(f"No Stripe secret key configured for product '{product_id}'")
-        return key
+        if key := per_product or self.stripe_secret_key:
+            return key
+        raise RuntimeError(f"No Stripe secret key configured for product '{product_id}'")
 
     def stripe_webhook_secret_for(self, product_id: str) -> str:
         """Resolve the Stripe webhook signing secret for a product.
@@ -1284,10 +1305,9 @@ class Settings(BaseSettings):
             "vex": self.stripe_webhook_secret_vex,
             "synthara": self.stripe_webhook_secret_synthara,
         }.get(product_id)
-        secret = per_product or self.stripe_webhook_secret
-        if not secret:
-            raise RuntimeError(f"No Stripe webhook secret configured for product '{product_id}'")
-        return secret
+        if secret := per_product or self.stripe_webhook_secret:
+            return secret
+        raise RuntimeError(f"No Stripe webhook secret configured for product '{product_id}'")
 
     def nowpayments_api_key_for(self, product_id: str) -> str:
         """Resolve the NowPayments API key for a product (vex.pics only today).
@@ -1296,10 +1316,9 @@ class Settings(BaseSettings):
             RuntimeError: Neither a per-product nor a legacy key is configured.
         """
         per_product = {"vex": self.nowpayments_api_key_vex}.get(product_id)
-        key = per_product or self.nowpayments_api_key
-        if not key:
-            raise RuntimeError(f"No NowPayments API key configured for product '{product_id}'")
-        return key
+        if key := per_product or self.nowpayments_api_key:
+            return key
+        raise RuntimeError(f"No NowPayments API key configured for product '{product_id}'")
 
     def nowpayments_ipn_secret_for(self, product_id: str) -> str:
         """Resolve the NowPayments IPN HMAC secret for a product.
@@ -1308,10 +1327,9 @@ class Settings(BaseSettings):
             RuntimeError: Neither a per-product nor a legacy secret is configured.
         """
         per_product = {"vex": self.nowpayments_ipn_secret_vex}.get(product_id)
-        secret = per_product or self.nowpayments_ipn_secret
-        if not secret:
-            raise RuntimeError(f"No NowPayments IPN secret configured for product '{product_id}'")
-        return secret
+        if secret := per_product or self.nowpayments_ipn_secret:
+            return secret
+        raise RuntimeError(f"No NowPayments IPN secret configured for product '{product_id}'")
 
     @property
     def email_configured(self) -> bool:
