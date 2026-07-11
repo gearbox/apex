@@ -1,6 +1,8 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-10 — Added the payment gateway protocol and per-product runtime provider registry. Checkout clients must discover enabled providers through public `GET /v1/billing/providers`; superadmins manage capability members through `GET/PATCH /v1/admin/payments/providers`. Disabling a provider blocks new charges with a stable `409` body but never blocks webhook settlement. Provider changes are appended to the admin audit log with a nullable `target_user_id`._
+> _Last updated: 2026-07-12 — Gallery items now expose `expires_at` (§10): `GalleryGridItem.expires_at` (sourced from the cover output) and `GalleryOutputItem.expires_at` (per-output), matching the existing `ImageListItem`/`OutputListItem` contract in Storage (§8). Frontend can now render a "Delete in N days/hours/minutes" badge directly from the gallery grid/detail responses without a separate Storage lookup. Also: content retention is now actively enforced by a periodic sweeper — see the new retention note in §8. Frontend must regenerate types (`gen:api`)._
+>
+> _Prior (2026-07-10): Added the payment gateway protocol and per-product runtime provider registry. Checkout clients must discover enabled providers through public `GET /v1/billing/providers`; superadmins manage capability members through `GET/PATCH /v1/admin/payments/providers`. Disabling a provider blocks new charges with a stable `409` body but never blocks webhook settlement. Provider changes are appended to the admin audit log with a nullable `target_user_id`._
 >
 > _Prior (2026-06-30): MediaObject contract tightening (§5b): `ImageVariant.width`/`height` are now required non-null integers (serializer skips and logs any legacy dimensionless variant row rather than emitting null). `MediaObject.variants` is now required (was optional with a default) — OpenAPI marks it in `required`. Content cookie `Domain` is now omitted (host-only) in dev mode so the `apex_content` cookie is stored correctly over `http://localhost`; production posture unchanged (`Domain=<product>`, `Secure`). Frontend must re-run `gen:api` to pick up the updated types, then drop `?? []` on `variants` and `.filter(v => v.width)` guards. Prior (2026-06-29): Cursor pagination on audit log (§14): `GET /v1/admin/manage/audit` now returns `CursorPage<AuditLogEntry>` instead of a bare array. Pass `cursor=next_cursor` for subsequent pages. Frontend must regenerate types and switch to cursor-scroll. Prior (2026-06-27): Unified Image Variants (§6, §8, §10): `MediaObject` replaces all per-output presigned URL fields across the Jobs, Storage, and Gallery APIs. Jobs API no longer presigns URLs — all content URLs are stable content-proxy paths. Gallery cover logic now always uses the job's own primary output (no longer sources input images). Upload thumbnails (sm=150px, md=512px WEBP) generated automatically on upload._
 >
@@ -9,7 +11,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-07-10 — `master` @ `4d4105c75f6069bf646c1fb3e30e731af9c14dd8`
+> **Last synced:** 2026-07-12 — `master` @ `d9121e90e51a79eaa1a69ad78091b6571e2bc7b2` (+ pending gallery `expires_at` change)
 >
 > _2026-07-08: **Breaking change** — replaced fixed token packages with tiered free-amount top-up (§11). `POST /v1/billing/topup/{stripe,nowpayments}` now take `{ amount_usd: int }` instead of `{ package_id: string }`; `GET /v1/billing/packages` is removed, replaced by `GET /v1/billing/topup/options`. Frontend must regenerate types (`gen:api`) and update the top-up UI to a preset-amounts + free-input flow (separate prompt)._
 >
@@ -846,6 +848,14 @@ Errors:   401 unauthorized (missing / empty / invalid Bearer token),
 
 ## 8. Storage *(authenticated)*
 
+> **Retention:** every upload and output row carries `expires_at`, set at creation to `now +
+> RETENTION_DAYS` (default 7 days). A periodic background sweeper (`ContentRetentionWorker`)
+> deletes expired rows and their R2 objects on a fixed interval. Once swept: the item drops out
+> of Storage/Gallery list responses, and `GET /v1/content/...` (§9) for that ID returns `404`.
+> `expires_at` is a plain timestamp (not a countdown) so the frontend can derive and tick a
+> "Delete in N days/hours/minutes" badge client-side — see `ImageListItem`/`OutputListItem`
+> below and `GalleryGridItem`/`GalleryOutputItem` (§10).
+
 ### Uploads
 
 #### `POST /v1/storage/upload`
@@ -1049,6 +1059,10 @@ interface GalleryGridItem {
   aspect_ratio: string | null; // e.g. "16:9"
   prompt_snippet: string;   // first 100 chars of the prompt
   created_at: string;       // ISO datetime
+  expires_at: string;       // ISO datetime — sourced from the cover output; all outputs in a
+                            // group share the same retention window. Drive a "Delete in N
+                            // days/hours/minutes" badge from this client-side (server sends a
+                            // timestamp, not a countdown, so it survives caching and ticks live).
 }
 
 interface GalleryGroupDetail {
@@ -1078,6 +1092,7 @@ interface GalleryOutputItem {
   id: string;               // UUID
   output_index: number;     // 0-based
   created_at: string;
+  expires_at: string;       // ISO datetime — this output's own retention deletion timestamp
   media: MediaObject;       // original asset + sm/md WEBP variants
 }
 
@@ -1096,6 +1111,12 @@ interface GalleryLineage {
 > `GalleryGroupDetail.input_image_url` → `input_media: MediaObject | null`.
 > `GalleryOutputItem` drops `url`, `thumbnail_url`, `content_type`, `media_type`, `format`,
 > `size_bytes` — all in `media: MediaObject`.
+
+> **New field (2026-07-12, additive):** `expires_at` on `GalleryGridItem` and
+> `GalleryOutputItem` — brings the gallery contract to parity with `ImageListItem`/
+> `OutputListItem` (§8), which have exposed `expires_at` all along. `DELETE
+> /v1/content/{content_id}` (§9) already supported uploads before this change — no new
+> delete endpoint was added for the uploads-delete UI; reuse the existing one.
 
 ### Gallery Badge Logic
 

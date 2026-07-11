@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -71,6 +71,7 @@ def _make_output_row(
     row.height = height
     row.size_bytes = size_bytes
     row.thumbnail_max_edge = thumbnail_max_edge
+    row.expires_at = datetime.now(UTC) + timedelta(days=7)
     return row
 
 
@@ -218,6 +219,17 @@ class TestBuildOutputItem:
 
         assert item.output_index == 3
 
+    def test_build_output_item_propagates_expires_at(self) -> None:
+        svc = _make_service()
+        output = _make_output_row(content_type="image/png")
+        output.is_thumbnail = False
+        output.output_index = 0
+        output.created_at = datetime.now(UTC)
+
+        item = svc._build_output_item(output, [])
+
+        assert item.expires_at == output.expires_at
+
 
 class TestListGallery:
     async def test_returns_empty_page_when_no_jobs(self) -> None:
@@ -301,6 +313,25 @@ class TestListGallery:
         assert cover.original.url == f"/v1/content/outputs/{primary_output.id}"
         assert len(cover.variants) == 1
         assert cover.variants[0].label == "md"
+
+    async def test_grid_item_expires_at_from_cover_output(self) -> None:
+        """Grid item's expires_at comes from the cover output, not recomputed."""
+        mock_session = AsyncMock()
+        svc = GalleryService(session=mock_session)
+        mock_repo = AsyncMock()
+        job = _make_job(generation_type="t2i")
+
+        primary_output = _make_output_row(content_type="image/png")
+        cover_data = CoverData(primary_output=primary_output, output_count=1)
+
+        mock_repo.list_gallery_jobs.return_value = [job]
+        mock_repo.batch_cover_data.return_value = {job.id: cover_data}
+
+        with patch("src.api.services.gallery.GalleryRepository", return_value=mock_repo):
+            page = await svc.list_gallery(uuid4(), "vex", session=mock_session, limit=20)
+
+        assert len(page.items) == 1
+        assert page.items[0].expires_at == primary_output.expires_at
 
 
 class TestGetGalleryDetail:
