@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import msgspec
+import pytest
 
 from src.api.schemas.gallery import (
     GalleryGridItem,
@@ -79,6 +80,7 @@ class TestGalleryGridItem:
             "generation_type": GenerationType.T2I,
             "prompt_snippet": "a cat",
             "created_at": _now(),
+            "expires_at": _now(),
         } | overrides
         return GalleryGridItem(**defaults)  # type: ignore[arg-type]
 
@@ -140,6 +142,21 @@ class TestGalleryGridItem:
         assert len(decoded.cover.variants) == 2
         assert decoded.cover.variants[0].label == "sm"
 
+    def test_grid_item_expires_at_required(self) -> None:
+        item = self._make()
+        payload = msgspec.json.decode(msgspec.json.encode(item), type=dict)
+        del payload["expires_at"]
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(msgspec.json.encode(payload), type=GalleryGridItem)
+
+    def test_grid_item_expires_at_roundtrip(self) -> None:
+        expires = _now()
+        item = self._make(expires_at=expires)
+        decoded = msgspec.json.decode(msgspec.json.encode(item), type=GalleryGridItem)
+        assert decoded.expires_at == expires
+        data = msgspec.json.decode(msgspec.json.encode(item), type=dict)
+        assert "T" in data["expires_at"]
+
 
 class TestGalleryOutputItem:
     def _make(self, **overrides: object) -> GalleryOutputItem:
@@ -147,6 +164,7 @@ class TestGalleryOutputItem:
             "id": uuid4(),
             "output_index": 0,
             "created_at": _now(),
+            "expires_at": _now(),
             "media": _make_media(),
         } | overrides
         return GalleryOutputItem(**defaults)  # type: ignore[arg-type]
@@ -167,6 +185,14 @@ class TestGalleryOutputItem:
     def test_output_index_preserved(self) -> None:
         item = self._make(output_index=5)
         assert item.output_index == 5
+
+    def test_output_item_expires_at_roundtrip(self) -> None:
+        expires = _now()
+        item = self._make(expires_at=expires)
+        decoded = msgspec.json.decode(msgspec.json.encode(item), type=GalleryOutputItem)
+        assert decoded.expires_at == expires
+        data = msgspec.json.decode(msgspec.json.encode(item), type=dict)
+        assert "T" in data["expires_at"]
 
 
 class TestGalleryLineage:
@@ -200,6 +226,7 @@ class TestGalleryGroupDetail:
             id=uuid4(),
             output_index=0,
             created_at=_now(),
+            expires_at=_now(),
             media=_make_media(),
         )
 

@@ -45,6 +45,11 @@ class GalleryGridItem(msgspec.Struct, kw_only=True):
 
     created_at: datetime
 
+    expires_at: datetime
+    """UTC timestamp when this generation group's content is deleted by
+    retention cleanup. Sourced from the cover output. Frontend derives
+    the "Delete in N days/hours/minutes" badge from this."""
+
 
 class GalleryOutputItem(msgspec.Struct, kw_only=True):
     """Single output within a gallery group detail view."""
@@ -54,6 +59,9 @@ class GalleryOutputItem(msgspec.Struct, kw_only=True):
     output_index: int
 
     created_at: datetime
+
+    expires_at: datetime
+    """UTC timestamp when this output is deleted by retention cleanup."""
 
     media: MediaObject
     """Full media envelope: original asset + preview variants (sm/md WEBP).

@@ -109,6 +109,7 @@ class GalleryService:
                     aspect_ratio=job.aspect_ratio,
                     prompt_snippet=self._prompt_snippet(job.prompt),
                     created_at=job.created_at,
+                    expires_at=cover_data.primary_output.expires_at,
                 )
             )
 
@@ -240,5 +241,6 @@ class GalleryService:
             id=output.id,
             output_index=output.output_index,
             created_at=output.created_at,
+            expires_at=output.expires_at,
             media=build_output_media(output, derivatives),
         )

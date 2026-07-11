@@ -42,6 +42,7 @@ def _make_output(
     out.height = height
     out.size_bytes = size_bytes
     out.created_at = __import__("datetime").datetime.now(__import__("datetime").UTC)
+    out.expires_at = out.created_at + __import__("datetime").timedelta(days=7)
     return out
 
 
