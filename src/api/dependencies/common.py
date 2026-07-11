@@ -19,6 +19,7 @@ from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.content_proxy import ContentProxyService
+from src.api.services.content_retention import ContentRetentionService
 from src.api.services.email import EmailService, LogEmailService, ResendEmailService
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
@@ -62,6 +63,7 @@ from src.core.product import ProductConfig  # noqa: TC001
 from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
+from src.workers.content_retention import ContentRetentionWorker
 from src.workers.push_dispatcher import PushDispatcher
 from src.workers.token_cleanup import TokenCleanupWorker
 
@@ -99,6 +101,7 @@ class ServiceContainer:
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
     token_cleanup_worker: TokenCleanupWorker | None = None
+    content_retention_worker: ContentRetentionWorker | None = None
     generation_service: GenerationService | None = None
     event_bus: EventBus | None = None
     sse_ticket_service: SSETicketService | None = None
@@ -575,6 +578,22 @@ async def init_services(settings: Settings) -> JWTService:
     else:
         logger.warning("r2.not_configured")
 
+    # Initialize and start the content retention sweeper (requires the DB +
+    # R2 initialized just above).
+    if workers_enabled and settings.content_cleanup_enabled and _services.r2_storage is not None:
+        retention_service = ContentRetentionService(
+            session_factory=_services.db_manager.session_factory,
+            storage=_services.r2_storage,
+            batch_size=settings.content_cleanup_batch_size,
+            max_batches_per_run=settings.content_cleanup_max_batches_per_run,
+        )
+        _services.content_retention_worker = ContentRetentionWorker(
+            service=retention_service,
+            interval=settings.content_cleanup_interval_seconds,
+        )
+        await _services.content_retention_worker.start()
+        logger.info("content_retention_worker.started")
+
     # Initialize Grok provider (if configured)
     if settings.grok_configured and _services.r2_storage is not None:
         grok_client = GrokClient(settings)
@@ -964,6 +983,7 @@ async def init_services(settings: Settings) -> JWTService:
         w
         for w in (
             _services.token_cleanup_worker,
+            _services.content_retention_worker,
             _services.aisha_job_poller,
             _services.gpu_provisioning_worker,
             _services.orphaned_tunnel_cleanup_worker,
@@ -1015,6 +1035,9 @@ async def shutdown_services() -> None:
     # cleanup (rollback + session.close) can still return connections cleanly.
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
+
+    if _services.content_retention_worker is not None:
+        await _services.content_retention_worker.stop()
 
     if _services.push_dispatcher is not None:
         await _services.push_dispatcher.stop()
