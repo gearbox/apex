@@ -24,6 +24,7 @@ from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.gpu_session import (
     GpuSessionService,
     InvalidSessionStateError,
+    NullNodeCooldownStore,
     SessionAlreadyExistsError,
     SessionDurations,
     StopConfirmation,
@@ -151,6 +152,7 @@ def _make_settings(
     settings.provisioning_offer_walk_depth = offer_walk_depth
     settings.provisioning_recreation_attempts = recreation_attempts
     settings.vastai_destroy_retry_attempts = destroy_retry_attempts
+    settings.vastai_offer_search_limit = 20
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
@@ -192,6 +194,7 @@ def _make_service(
         "mock_session": mock_session,
         "settings": _make_settings(),
         "billing_service": _make_billing_mock(),
+        "cooldown_store": NullNodeCooldownStore(),
         "account_id": uuid4(),
         "event_bus": None,
         "job_sweep_service": None,
@@ -203,6 +206,7 @@ def _make_service(
         session_factory=mocks["session_factory"],
         settings=mocks["settings"],
         billing_service=mocks["billing_service"],
+        cooldown_store=mocks["cooldown_store"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
     )
@@ -250,7 +254,9 @@ class TestStartSession:
         mocks["bundle_index"].resolve_bundle.assert_called_once_with("aisha-image")
         mock_repo.get_non_terminal_for_model.assert_called_once_with(user_id, "vex", "aisha-image")
         mocks["cf_client"].create_session_tunnel.assert_called_once()
-        mocks["vastai_client"].search_offers.assert_called_once_with(bundle.hardware)
+        mocks["vastai_client"].search_offers.assert_called_once_with(
+            bundle.hardware, limit=mocks["settings"].vastai_offer_search_limit
+        )
         mocks["vastai_client"].create_instance.assert_called_once_with(
             offer.id,
             image="vastai/comfy:v0.15.1-cuda-12.9-py312",
@@ -259,6 +265,74 @@ class TestStartSession:
             onstart_cmd=ANY,
         )
         mock_repo.create.assert_called_once()
+
+    async def test_start_session_persists_vastai_machine_id(self) -> None:
+        service, mocks = _make_service()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle.return_value = bundle
+        offer = _make_offer(offer_id=1001)
+        offer = VastAIOffer(
+            id=offer.id,
+            gpu_name=offer.gpu_name,
+            dph_total=offer.dph_total,
+            num_gpus=offer.num_gpus,
+            machine_id=555111,
+        )
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [offer]
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+            )
+
+        create_kwargs = mock_repo.create.call_args.kwargs
+        assert create_kwargs["vastai_machine_id"] == 555111
+
+    async def test_start_session_passes_cooldown_store_to_provisioning(self) -> None:
+        """A cooldown store that cools the cheapest offer's machine must cause the
+        second-cheapest offer to be selected instead."""
+        cheap_offer = VastAIOffer(id=1, gpu_name="RTX_4090", dph_total=0.3, machine_id=111)
+        pricier_offer = VastAIOffer(id=2, gpu_name="RTX_4090", dph_total=0.5, machine_id=222)
+        cooldown_store = AsyncMock()
+        cooldown_store.cooled_machine_ids.return_value = {111}
+
+        service, mocks = _make_service(cooldown_store=cooldown_store)
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle.return_value = bundle
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [cheap_offer, pricier_offer]
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_non_terminal_for_model.return_value = None
+            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+            )
+
+        mocks["vastai_client"].create_instance.assert_called_once_with(
+            pricier_offer.id,
+            image="vastai/comfy:v0.15.1-cuda-12.9-py312",
+            disk_gb=bundle.hardware.min_disk_gb,
+            env=ANY,
+            onstart_cmd=ANY,
+        )
 
     async def test_bundle_override_takes_precedence(self) -> None:
         service, mocks = _make_service()

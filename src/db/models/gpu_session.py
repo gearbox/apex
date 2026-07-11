@@ -16,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -48,7 +49,7 @@ class GpuSession(Base):
 
     Key columns for provisioning:
     - bundle_name / bundle_version / model_type: what was deployed
-    - vastai_offer_id / vastai_gpu_name: Vast.ai node selected
+    - vastai_offer_id / vastai_gpu_name / vastai_machine_id: Vast.ai node selected
     - provision_attempt: retry counter
     - cf_tunnel_id / cf_dns_record_id / tunnel_hostname: routing
     """
@@ -140,6 +141,11 @@ class GpuSession(Base):
     vastai_gpu_name: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
+    )
+    vastai_machine_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="Vast.ai physical machine id of the selected offer; used for the broken-node cooldown list",
     )
 
     # Provisioning tracking

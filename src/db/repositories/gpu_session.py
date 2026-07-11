@@ -45,6 +45,7 @@ class GpuSessionRepository:
         vastai_offer_id: int | None = None,
         vastai_cost_per_hour_micros: int | None = None,
         vastai_gpu_name: str | None = None,
+        vastai_machine_id: int | None = None,
         callback_token_hash: str | None = None,
         account_id: UUID | None = None,
         readiness_marker_node_class: str | None = None,
@@ -66,6 +67,7 @@ class GpuSessionRepository:
             vastai_offer_id: Vast.ai offer ID selected.
             vastai_cost_per_hour_micros: Hourly cost in microdollars.
             vastai_gpu_name: GPU model name from Vast.ai.
+            vastai_machine_id: Vast.ai physical machine id of the selected offer.
             callback_token_hash: SHA-256 hex digest of the callback bearer token.
             account_id: Billing account ID for charging; may be None if not yet determined.
 
@@ -87,6 +89,7 @@ class GpuSessionRepository:
             vastai_offer_id=vastai_offer_id,
             vastai_cost_per_hour_micros=vastai_cost_per_hour_micros,
             vastai_gpu_name=vastai_gpu_name,
+            vastai_machine_id=vastai_machine_id,
             callback_token_hash=callback_token_hash,
             account_id=account_id,
             readiness_marker_node_class=readiness_marker_node_class,
@@ -282,6 +285,7 @@ class GpuSessionRepository:
         vastai_cost_per_hour_micros: int,
         vastai_gpu_name: str,
         provisioning_started_at: datetime,
+        vastai_machine_id: int | None = None,
     ) -> None:
         """Swap instance info on a session after a retry; status unchanged (stays 'pending').
 
@@ -292,6 +296,7 @@ class GpuSessionRepository:
             vastai_cost_per_hour_micros: New hourly cost.
             vastai_gpu_name: New GPU model name.
             provisioning_started_at: Reset timestamp (restarts the timeout window).
+            vastai_machine_id: New Vast.ai physical machine id.
         """
         await self._session.execute(
             update(GpuSession)
@@ -301,6 +306,7 @@ class GpuSessionRepository:
                 vastai_offer_id=vastai_offer_id,
                 vastai_cost_per_hour_micros=vastai_cost_per_hour_micros,
                 vastai_gpu_name=vastai_gpu_name,
+                vastai_machine_id=vastai_machine_id,
                 provisioning_started_at=provisioning_started_at,
             )
         )

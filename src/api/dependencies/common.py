@@ -27,6 +27,11 @@ from src.api.services.generation.service import GenerationService
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
 from src.api.services.gpu_session.credit_guard import SessionCreditGuard
+from src.api.services.gpu_session.node_cooldown import (
+    NodeCooldownStore,
+    NullNodeCooldownStore,
+    RedisNodeCooldownStore,
+)
 from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
 from src.api.services.gpu_session.service import GpuSessionService
@@ -704,6 +709,13 @@ async def init_services(settings: Settings) -> JWTService:
             billing_service=get_billing_service(),
         )
 
+        if settings.redis_url:
+            from src.core.redis import get_redis_client
+
+            cooldown_store: NodeCooldownStore = RedisNodeCooldownStore(get_redis_client(), settings)
+        else:
+            cooldown_store = NullNodeCooldownStore()
+
         _services.gpu_session_service = GpuSessionService(
             vastai_client=vastai_client,
             cf_client=cf_client,
@@ -711,6 +723,7 @@ async def init_services(settings: Settings) -> JWTService:
             session_factory=_services.db_manager.session_factory,
             settings=settings,
             billing_service=billing_service_for_worker,
+            cooldown_store=cooldown_store,
             event_bus=_services.event_bus,
             job_sweep_service=job_sweep_service,
         )
@@ -723,6 +736,7 @@ async def init_services(settings: Settings) -> JWTService:
                 bundle_index=_services.bundle_index,
                 http_client=_services.gpu_session_http_client,
                 settings=settings,
+                cooldown_store=cooldown_store,
                 billing_service=billing_service_for_worker,
                 event_bus=_services.event_bus,
                 job_sweep_service=job_sweep_service,

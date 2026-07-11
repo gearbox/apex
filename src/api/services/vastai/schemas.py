@@ -20,6 +20,7 @@ class VastAIOffer(msgspec.Struct, forbid_unknown_fields=False):
     gpu_name: str
     dph_total: float
     num_gpus: int | None = None  # not read downstream; kept for diagnostics
+    machine_id: int | None = None  # stable physical-machine identity; None if Vast.ai omits it
 
     @property
     def dph_total_micros(self) -> int:

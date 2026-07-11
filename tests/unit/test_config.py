@@ -54,6 +54,16 @@ class TestPricingTiersValidRejected:
             )
 
 
+class TestNodeCooldownThresholds:
+    def test_node_cooldown_base_gt_max_rejected(self) -> None:
+        with pytest.raises(ValueError, match="node_cooldown_base_minutes must be <="):
+            Settings(
+                jwt_secret_key=_JWT_SECRET,
+                node_cooldown_base_minutes=400,
+                node_cooldown_max_minutes=360,
+            )
+
+
 class TestPricingTiersValidAccepted:
     def test_default_tiers_accepted(self) -> None:
         settings = Settings(jwt_secret_key=_JWT_SECRET)
