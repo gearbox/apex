@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from src.api.services.bundle_index import BundleIndexService
     from src.api.services.cloudflare.client import CloudflareTunnelClient
     from src.api.services.event_bus import EventBus
+    from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.jobs.sweep import JobSweepService
     from src.api.services.vastai.client import VastAIClient
     from src.api.services.vastai.schemas import VastAIOffer
@@ -184,6 +185,7 @@ class GpuSessionService:
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
         billing_service: BillingService,
+        cooldown_store: NodeCooldownStore,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
     ) -> None:
@@ -193,6 +195,7 @@ class GpuSessionService:
         self._session_factory = session_factory
         self._settings = settings
         self._billing_service = billing_service
+        self._cooldown = cooldown_store
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
 
@@ -319,7 +322,9 @@ class GpuSessionService:
 
         # Step 5: search Vast.ai offers
         try:
-            offers = await self._vastai.search_offers(hardware)
+            offers = await self._vastai.search_offers(
+                hardware, limit=self._settings.vastai_offer_search_limit
+            )
         except NoCapacityError:
             await self._delete_tunnel_best_effort(tunnel_id, dns_record_id)
             logger.exception(
@@ -398,6 +403,7 @@ class GpuSessionService:
                     vastai_offer_id=selected_offer.id,
                     vastai_cost_per_hour_micros=selected_offer.dph_total_micros,
                     vastai_gpu_name=selected_offer.gpu_name,
+                    vastai_machine_id=selected_offer.machine_id,
                     callback_token_hash=callback_token_hash,
                     account_id=account_id,
                     readiness_marker_node_class=(
@@ -1443,6 +1449,7 @@ class GpuSessionService:
             disk_gb=disk_gb,
             env=env,
             template_hash_id=template_hash_id,
+            cooldown_store=self._cooldown,
             onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
             offer_walk_depth=self._settings.provisioning_offer_walk_depth,
         )

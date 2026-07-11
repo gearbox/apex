@@ -289,6 +289,41 @@ class Settings(BaseSettings):
             "after the user has given up."
         ),
     )
+    vastai_offer_search_limit: int = Field(
+        default=20,
+        ge=5,
+        le=50,
+        description=(
+            "How many offers to fetch from Vast.ai search. Larger than "
+            "provisioning_offer_walk_depth so cooldown filtering cannot starve "
+            "the offer walk."
+        ),
+    )
+    node_cooldown_base_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=1440,
+        description=(
+            "Initial cooldown for a Vast.ai machine after a provisioning failure. "
+            "Doubles per repeated failure within the failure window, capped at "
+            "node_cooldown_max_minutes. Set equal to the max to get a fixed TTL."
+        ),
+    )
+    node_cooldown_max_minutes: int = Field(
+        default=360,
+        ge=1,
+        le=4320,
+        description="Upper bound for the escalating machine cooldown TTL.",
+    )
+    node_cooldown_failure_window_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description=(
+            "Sliding window for the per-machine failure counter that drives TTL "
+            "escalation. Each new failure refreshes the window."
+        ),
+    )
 
     # --- Orphaned Tunnel Cleanup Worker ---
     orphaned_tunnel_cleanup_interval_minutes: int = Field(
@@ -1081,6 +1116,21 @@ class Settings(BaseSettings):
             raise ValueError(
                 "asgi_workers > 1 requires REDIS_URL for worker leader election, "
                 "or set WORKER_MODE=api_only"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_node_cooldown_thresholds(self) -> "Settings":
+        """Assert the base cooldown never exceeds the cap.
+
+        Equal base/max is allowed and degrades the escalating TTL to a fixed one
+        (see node_cooldown_base_minutes description) — only base > max is rejected.
+        """
+        if self.node_cooldown_base_minutes > self.node_cooldown_max_minutes:
+            raise ValueError(
+                "node_cooldown_base_minutes must be <= node_cooldown_max_minutes "
+                f"(got base={self.node_cooldown_base_minutes}, "
+                f"max={self.node_cooldown_max_minutes})"
             )
         return self
 

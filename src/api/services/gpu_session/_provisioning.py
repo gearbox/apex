@@ -11,11 +11,13 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.services.gpu_session.node_cooldown import apply_cooldown_filter
 from src.api.services.vastai.exceptions import OfferTakenError, VastAIError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.vastai.client import VastAIClient
     from src.api.services.vastai.schemas import VastAIOffer
 
@@ -45,6 +47,7 @@ async def provision_vastai_instance(
     disk_gb: int,
     env: dict[str, str],
     template_hash_id: str | None,
+    cooldown_store: NodeCooldownStore,
     image: str = _VASTAI_IMAGE,
     onstart_cmd: str | None = None,
     offer_walk_depth: int,
@@ -64,6 +67,8 @@ async def provision_vastai_instance(
         env: Environment variables dict (SECURITY: never log this — contains tokens).
         template_hash_id: Vast.ai template hash. When set, image and onstart_cmd are
             omitted (template provides them). None uses the legacy image+onstart path.
+        cooldown_store: Broken-node cooldown store; offers on cooled machines are
+            filtered out before the offer walk (soft filter — see apply_cooldown_filter).
         image: Docker image to use (legacy path when template_hash_id is None).
         onstart_cmd: Shell command for the legacy path. Ignored when template_hash_id set.
         offer_walk_depth: Max number of offers to try within a single provisioning attempt.
@@ -77,6 +82,7 @@ async def provision_vastai_instance(
     if offer_walk_depth <= 0:
         raise VastAIError(f"offer_walk_depth must be >= 1, got {offer_walk_depth}")
 
+    offers = await apply_cooldown_filter(offers, cooldown_store)
     candidates = offers[:offer_walk_depth]
     last_exc: Exception | None = None
 

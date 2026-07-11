@@ -13,6 +13,7 @@ import httpx
 from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
+from src.api.services.gpu_session.node_cooldown import NodeCooldownStore, NullNodeCooldownStore
 from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PENDING_TIMEOUT,
     _REASON_PENDING_TIMEOUT_AFTER_ERRORS,
@@ -110,6 +111,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.gpu_resume_timeout_minutes = 5
     settings.provisioning_offer_walk_depth = 10
     settings.provisioning_recreation_attempts = 1
+    settings.vastai_offer_search_limit = 20
     settings.gpu_provision_worker_concurrency = 10
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "hf-tok"
@@ -152,6 +154,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "bundle_index": MagicMock(spec=BundleIndexService),
         "http_client": AsyncMock(spec=httpx.AsyncClient),
         "settings": _make_settings(),
+        "cooldown_store": NullNodeCooldownStore(),
         "billing_service": None,
         "event_bus": None,
         "job_sweep_service": None,
@@ -163,6 +166,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         bundle_index=mocks["bundle_index"],
         http_client=mocks["http_client"],
         settings=mocks["settings"],
+        cooldown_store=mocks["cooldown_store"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
@@ -483,6 +487,38 @@ class TestAdvanceProvisioning:
         mocks["cf_client"].delete_session_tunnel.assert_not_called()
         mocks["cf_client"].create_session_tunnel.assert_not_called()
 
+    async def test_retry_persists_machine_id_of_new_offer(self) -> None:
+        """The re-persist block after a retry must write the new offer's machine_id."""
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        offer = _make_offer(offer_id=42)
+        offer = VastAIOffer(
+            id=offer.id,
+            gpu_name=offer.gpu_name,
+            dph_total=offer.dph_total,
+            num_gpus=offer.num_gpus,
+            machine_id=777888,
+        )
+        mocks["vastai_client"].search_offers.return_value = [offer]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        update_kwargs = mock_repo.update_instance.call_args.kwargs
+        assert update_kwargs["vastai_machine_id"] == 777888
+
     async def test_retry_exhausted_marks_failed(self) -> None:
         # provisioning_recreation_attempts=2 → new_attempt=3 >= 2+1=3 → exhausted
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=2))
@@ -589,6 +625,103 @@ class TestAdvanceProvisioning:
         mock_repo.update_status.assert_called()
         failed_call = mock_repo.update_status.call_args_list[-1]
         assert failed_call[0][1] == GpuSessionStatus.failed
+
+
+# ---------------------------------------------------------------------------
+# TestNodeCooldownRecording
+# ---------------------------------------------------------------------------
+
+
+class TestNodeCooldownRecording:
+    async def test_retry_or_fail_records_cooldown_before_recreation(self) -> None:
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3),
+            cooldown_store=cooldown,
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="provisioning_stalled")
+
+        cooldown.record_failure.assert_awaited_once_with(555, reason="provisioning_stalled")
+
+    async def test_terminal_failure_still_records_cooldown(self) -> None:
+        """Even when attempts are exhausted (terminal → _mark_failed), the machine
+        is still cooled — the user's next manual session must avoid it."""
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(cooldown_store=cooldown)  # default recreation_attempts=1
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2  # exhausted
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="provisioning_timeout")
+
+        cooldown.record_failure.assert_awaited_once_with(555, reason="provisioning_timeout")
+
+    async def test_missing_machine_id_skips_cooldown_recording(self) -> None:
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(cooldown_store=cooldown)
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=None)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="test")
+
+        cooldown.record_failure.assert_not_awaited()
+
+    async def test_apex_side_failures_do_not_record_cooldown(self) -> None:
+        """A search failure mid-retry routes to _mark_failed via retry_search_failed,
+        but must not trigger a second record_failure call for that internal reason —
+        only the original top-level failure reason is ever recorded."""
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3),
+            cooldown_store=cooldown,
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.side_effect = RuntimeError("no capacity")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="node_reported_failure")
+
+        cooldown.record_failure.assert_awaited_once_with(555, reason="node_reported_failure")
+        mock_repo.update_status.assert_awaited_once()
+        assert mock_repo.update_status.await_args.args[1] == GpuSessionStatus.failed
 
 
 # ---------------------------------------------------------------------------
@@ -2026,6 +2159,7 @@ class TestProvisionVastaiInstance:
             disk_gb=100,
             env={},
             template_hash_id="abc123hash",
+            cooldown_store=NullNodeCooldownStore(),
             offer_walk_depth=3,
         )
 
@@ -2051,6 +2185,7 @@ class TestProvisionVastaiInstance:
             disk_gb=100,
             env={},
             template_hash_id=None,
+            cooldown_store=NullNodeCooldownStore(),
             image="vastai/comfy:v0.15.1-cuda-12.9-py312",
             onstart_cmd="bash /start.sh",
             offer_walk_depth=3,

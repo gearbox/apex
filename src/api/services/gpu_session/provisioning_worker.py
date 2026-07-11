@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from src.api.services.bundle_index import BundleIndexService
     from src.api.services.cloudflare.client import CloudflareTunnelClient
     from src.api.services.event_bus import EventBus
+    from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.jobs.sweep import JobSweepService
     from src.api.services.vastai.client import VastAIClient
     from src.api.services.vastai.schemas import VastAIInstance
@@ -136,6 +137,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         bundle_index: BundleIndexService,
         http_client: httpx.AsyncClient,
         settings: Settings,
+        cooldown_store: NodeCooldownStore,
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
@@ -153,6 +155,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         self._bundles = bundle_index
         self._http = http_client
         self._settings = settings
+        self._cooldown = cooldown_store
         self._billing_service = billing_service
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
@@ -621,6 +624,13 @@ class GpuProvisioningWorker(PeriodicWorker):
                     instance_id=session.vastai_instance_id,
                 )
 
+        # Cooldown the machine regardless of whether this failure is terminal —
+        # the user's next manual session must not land on the same broken node.
+        if session.vastai_machine_id is not None:
+            await self._cooldown.record_failure(session.vastai_machine_id, reason=reason)
+        else:
+            logger.debug("gpu_session.node_cooldown.no_machine_id", session_id=str(session.id))
+
         # Step 2: atomically increment attempt counter
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
@@ -672,7 +682,9 @@ class GpuProvisioningWorker(PeriodicWorker):
             return
 
         try:
-            offers = await self._vastai.search_offers(bundle.hardware)
+            offers = await self._vastai.search_offers(
+                bundle.hardware, limit=self._settings.vastai_offer_search_limit
+            )
         except Exception:
             logger.exception(
                 "gpu_session.provision.retry_search_failed",
@@ -725,6 +737,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 disk_gb=bundle.hardware.min_disk_gb,
                 env=env,
                 template_hash_id=bundle.hardware.template_hash_id,
+                cooldown_store=self._cooldown,
                 onstart_cmd=make_onstart_cmd(self._settings.aisha_branch),
                 offer_walk_depth=self._settings.provisioning_offer_walk_depth,
             )
@@ -755,6 +768,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 vastai_offer_id=selected_offer.id,
                 vastai_cost_per_hour_micros=selected_offer.dph_total_micros,
                 vastai_gpu_name=selected_offer.gpu_name,
+                vastai_machine_id=selected_offer.machine_id,
                 provisioning_started_at=now,
             )
             await repo.update_status(session.id, GpuSessionStatus.pending)
