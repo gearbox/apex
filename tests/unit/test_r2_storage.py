@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+from botocore.exceptions import ClientError
 
 from src.api.services.storage import (
     MediaFormat,
@@ -13,6 +14,7 @@ from src.api.services.storage import (
     StorageType,
     StorageValidationError,
 )
+from src.api.services.storage.exceptions import StorageUploadError
 
 
 @pytest.fixture
@@ -250,3 +252,44 @@ class TestSignKey:
             await r2_service.sign_key("any/key")
 
         mock_client.head_object.assert_not_awaited()
+
+
+class TestPutRaw:
+    """Tests for R2StorageService.put_raw (caller-chosen key, no validation)."""
+
+    async def test_put_raw_stores_bytes_at_exact_key(self, r2_service: R2StorageService) -> None:
+        mock_client = AsyncMock()
+
+        @asynccontextmanager
+        async def _fake_get_client():
+            yield mock_client
+
+        with patch.object(r2_service, "_get_client", _fake_get_client):
+            await r2_service.put_raw(
+                "frame-previews/u/j/000.webp", b"webpbytes", content_type="image/webp"
+            )
+
+        mock_client.put_object.assert_awaited_once_with(
+            Bucket=r2_service._settings.bucket_name,
+            Key="frame-previews/u/j/000.webp",
+            Body=b"webpbytes",
+            ContentType="image/webp",
+        )
+
+    async def test_put_raw_raises_storage_upload_error_on_client_error(
+        self, r2_service: R2StorageService
+    ) -> None:
+        mock_client = AsyncMock()
+        mock_client.put_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "500", "Message": "boom"}}, "PutObject")
+        )
+
+        @asynccontextmanager
+        async def _fake_get_client():
+            yield mock_client
+
+        with (
+            patch.object(r2_service, "_get_client", _fake_get_client),
+            pytest.raises(StorageUploadError),
+        ):
+            await r2_service.put_raw("some/key", b"data", content_type="image/webp")

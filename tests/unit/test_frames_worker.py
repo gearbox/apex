@@ -96,6 +96,7 @@ class TestWorkerClaimsAndCompletesPreview:
         sessions = [_make_session(), _make_session(), _make_session()]
         worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
         r2_storage.download = AsyncMock(return_value=b"fake video bytes")
+        r2_storage.put_raw = AsyncMock()
 
         job_repo = AsyncMock()
         job_repo.fail_stale_running = AsyncMock(return_value=0)
@@ -125,8 +126,6 @@ class TestWorkerClaimsAndCompletesPreview:
                 AsyncMock(return_value=b"webpbytes"),
             ),
         ):
-            r2_storage._get_client = MagicMock(return_value=_cm(AsyncMock()))
-            r2_storage._settings = MagicMock(bucket_name="test-bucket")
             await worker.run_once()
 
         job_repo.claim_next.assert_awaited_once()
@@ -136,6 +135,7 @@ class TestWorkerClaimsAndCompletesPreview:
         assert result["frames"][0]["timestamp_ms"] == 0
         assert result["frames"][1]["timestamp_ms"] == 5000
         assert all("key" in f for f in result["frames"])
+        assert r2_storage.put_raw.await_count == 2
 
     async def test_worker_noop_when_nothing_queued(self) -> None:
         sessions = [_make_session(), _make_session()]

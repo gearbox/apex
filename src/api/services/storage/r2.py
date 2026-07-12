@@ -259,6 +259,30 @@ class R2StorageService:
             logger.exception("r2.upload_unexpected_error", error=str(e))
             raise StorageUploadError(f"Upload failed: {e}", cause=e) from e
 
+    async def put_raw(self, key: str, data: bytes, *, content_type: str) -> None:
+        """Store bytes at a caller-chosen key.
+
+        Deliberately bypasses build_storage_key and upload validation — for
+        internal derived artifacts (preview frames, video posters) whose key
+        layout is owned by the caller. Not for user-supplied content: use
+        upload() for that.
+        """
+        try:
+            async with self._get_client() as client:
+                await client.put_object(
+                    Bucket=self._settings.bucket_name,
+                    Key=key,
+                    Body=data,
+                    ContentType=content_type,
+                )
+            logger.info("r2.put_raw_completed", key=key, bytes=len(data))
+        except ClientError as e:
+            logger.exception("r2.put_raw_failed", key=key, error=str(e))
+            raise StorageUploadError(
+                f"Failed to store object: {_get_error_message(e)}",
+                cause=e,
+            ) from e
+
     async def download(self, storage_key: str) -> bytes:
         """Download file content from R2."""
         try:

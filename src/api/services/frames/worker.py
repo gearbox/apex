@@ -190,7 +190,7 @@ class FrameExtractionWorker(PeriodicWorker):
                 timeout_seconds=self._ffmpeg_timeout,
             )
             key = f"{_PREVIEW_KEY_PREFIX}/{job.user_id}/{job.id}/{index:03d}.webp"
-            await self._put_object(key, webp_bytes, content_type="image/webp")
+            await self._storage.put_raw(key, webp_bytes, content_type="image/webp")
             frames_out.append({"index": index, "timestamp_ms": ts, "key": key})
 
         return {"frames": frames_out}
@@ -317,15 +317,3 @@ class FrameExtractionWorker(PeriodicWorker):
             logger.warning("frames.extract_thumbnail_generation_failed", image_id=str(db_image.id))
 
         return db_image.id
-
-    async def _put_object(self, key: str, data: bytes, *, content_type: str) -> None:
-        # Direct client access (bypassing R2StorageService.upload()'s
-        # build_storage_key) — mirrors GrokJobService's pattern for storing
-        # bytes at a caller-chosen key rather than the users/{uid}/... layout.
-        async with self._storage._get_client() as client:
-            await client.put_object(
-                Bucket=self._storage._settings.bucket_name,
-                Key=key,
-                Body=data,
-                ContentType=content_type,
-            )
