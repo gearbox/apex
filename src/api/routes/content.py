@@ -39,14 +39,16 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# Types the proxy serves inline. Derived, not mirrored:
-#   - stored images are exactly r2.ALLOWED_CONTENT_TYPES (upload normalization
-#     guarantees png/jpeg/webp — see services/image_normalization.py),
-#   - video outputs add mp4.
+# Types the proxy serves inline. Derived, not mirrored: exactly
+# r2.ALLOWED_CONTENT_TYPES (services/storage/schemas.py::ALLOWED_UPLOAD_CONTENT_TYPES) —
+# normalized image formats (upload normalization guarantees png/jpeg/webp — see
+# services/image_normalization.py) plus the raw video formats accepted for
+# user-uploaded and generated video content.
 # NOTE: routes/storage.py::ALLOWED_CONTENT_TYPES is a DIFFERENT, wider set
-# (the client-declared upload gate, incl. heic/heif/avif that are normalized
-# to PNG before storage). Do NOT unify with that one.
-_INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(_STORED_IMAGE_CONTENT_TYPES) | {"video/mp4"}
+# (services/storage/schemas.py::ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES — the
+# client-declared upload gate, incl. heic/heif/avif that are normalized to PNG
+# before storage). Do NOT unify with that one.
+_INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(_STORED_IMAGE_CONTENT_TYPES)
 
 
 class ContentProxyController(Controller):

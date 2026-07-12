@@ -258,6 +258,8 @@ class MediaFormat(StrEnum):
     WEBP = "webp"
     # Video formats
     MP4 = "mp4"
+    WEBM = "webm"
+    MOV = "mov"
 
     @classmethod
     def from_content_type(cls, content_type: str) -> MediaFormat:
@@ -267,6 +269,9 @@ class MediaFormat(StrEnum):
             "image/jpeg": cls.JPEG,
             "image/jpg": cls.JPEG,
             "image/webp": cls.WEBP,
+            "video/mp4": cls.MP4,
+            "video/webm": cls.WEBM,
+            "video/quicktime": cls.MOV,
         }
         fmt = mapping.get(content_type.lower())
         if fmt is None:
@@ -282,6 +287,9 @@ class MediaFormat(StrEnum):
             "jpeg": cls.JPEG,
             "jpg": cls.JPEG,
             "webp": cls.WEBP,
+            "mp4": cls.MP4,
+            "webm": cls.WEBM,
+            "mov": cls.MOV,
         }
         fmt = mapping.get(ext)
         if fmt is None:
@@ -296,6 +304,8 @@ class MediaFormat(StrEnum):
             self.JPEG: "image/jpeg",
             self.WEBP: "image/webp",
             self.MP4: "video/mp4",
+            self.WEBM: "video/webm",
+            self.MOV: "video/quicktime",
         }[self]
 
     @property
@@ -306,7 +316,23 @@ class MediaFormat(StrEnum):
     @property
     def is_video(self) -> bool:
         """Check if this is a video format."""
-        return self == MediaFormat.MP4
+        return self in (MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV)
+
+
+class FrameExtractionKind(StrEnum):
+    """Which phase of the video frame extraction flow a job performs."""
+
+    PREVIEW = "preview"
+    EXTRACT = "extract"
+
+
+class FrameExtractionStatus(StrEnum):
+    """Lifecycle status of a frame extraction job."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class OutputMediaType(StrEnum):

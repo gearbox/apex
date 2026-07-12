@@ -11,12 +11,17 @@ a route guard is misconfigured, the service layer will reject cross-user access.
 
 from __future__ import annotations
 
+import asyncio
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
+from src.api.services.frames.ffmpeg import FfprobeError
+from src.api.services.frames.ffmpeg import probe as ffmpeg_probe
 from src.api.services.image_normalization import (
     ImageNormalizationError,
     ImageTooLargeError,
@@ -32,6 +37,8 @@ from src.api.services.storage import (
     StorageType,
     StorageValidationError,
 )
+from src.api.services.storage.schemas import ALLOWED_VIDEO_CONTENT_TYPES
+from src.api.services.thumbnail import extract_video_thumbnail
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
@@ -41,6 +48,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.services.frames.ffmpeg import VideoProbe
     from src.db.models import GenerationOutput, UserImage
 
 logger = structlog.get_logger(__name__)
@@ -77,6 +85,8 @@ class UserContentService:
         product_id: str,
         retention_days: int = 7,
         max_input_megapixels: float = 100.0,
+        video_max_seconds: int = 300,
+        ffmpeg_timeout_seconds: float = 30.0,
     ) -> None:
         """Initialize user content service.
 
@@ -88,6 +98,10 @@ class UserContentService:
             max_input_megapixels: Pixel-count cap enforced before decode
                 (see ``image_normalization.py``); guards against
                 decompression-bomb uploads.
+            video_max_seconds: Upload-time ffprobe rejection cap for
+                uploaded video duration.
+            ffmpeg_timeout_seconds: Wall-clock timeout for the ffprobe
+                subprocess invoked on video upload.
         """
         self._storage = storage
         self._job_repo = JobRepository(session)
@@ -96,6 +110,8 @@ class UserContentService:
         self._product_id = product_id
         self._retention_days = retention_days
         self._max_input_megapixels = max_input_megapixels
+        self._video_max_seconds = video_max_seconds
+        self._ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
 
     # -------------------------------------------------------------------------
     # Upload operations
@@ -109,19 +125,25 @@ class UserContentService:
         filename: str,
         content_type: str,
     ) -> UploadedImage:
-        """Upload an image for use in generation.
+        """Upload an image or video for use in generation / frame extraction.
 
-        Uploads to R2 and creates database record atomically. The image bytes
-        are normalized before storage (see ``image_normalization``): format is
-        determined by sniffing the bytes, not the client-declared content type
-        or filename. As a result, the returned ``content_type``/``size_bytes``
-        reflect the *stored* normalized object, which may differ from what the
-        client originally sent (e.g. a mislabeled HEIC upload is stored as
-        PNG).
+        Despite the name, this also accepts uploaded videos (``content_type``
+        in ``ALLOWED_VIDEO_CONTENT_TYPES``) — routed to ``_upload_video``.
+        Video bytes are probed with ffprobe (never trust the client MIME) and
+        stored as-is, no normalization; a JPEG poster frame + WEBP thumbnail
+        derivatives are generated the same way image thumbnails are.
+
+        For images: uploads to R2 and creates database record atomically. The
+        image bytes are normalized before storage (see ``image_normalization``):
+        format is determined by sniffing the bytes, not the client-declared
+        content type or filename. As a result, the returned
+        ``content_type``/``size_bytes`` reflect the *stored* normalized
+        object, which may differ from what the client originally sent (e.g. a
+        mislabeled HEIC upload is stored as PNG).
 
         Args:
             user_id: Owner of the image.
-            data: Raw image bytes.
+            data: Raw image or video bytes.
             filename: Original filename.
             content_type: MIME type.
 
@@ -131,6 +153,14 @@ class UserContentService:
         Raises:
             UserContentValidationError: If validation fails.
         """
+        if content_type in ALLOWED_VIDEO_CONTENT_TYPES:
+            return await self._upload_video(
+                user_id=user_id,
+                data=data,
+                filename=filename,
+                content_type=content_type,
+            )
+
         try:
             normalized = await normalize_image(data, max_megapixels=self._max_input_megapixels)
         except ImageTooLargeError as e:
@@ -255,6 +285,146 @@ class UserContentService:
 
         except StorageValidationError as e:
             raise UserContentValidationError(str(e)) from e
+
+    async def _upload_video(
+        self,
+        *,
+        user_id: UUID,
+        data: bytes,
+        filename: str,
+        content_type: str,
+    ) -> UploadedImage:
+        """Upload a video for later frame extraction.
+
+        Unlike images, video bytes are stored as-is — no re-encoding. The
+        probe result (never the client-declared MIME) is authoritative:
+        probe failure is fatal (validation error), unlike the poster-frame
+        derivative below, which is best-effort.
+        """
+        probe = await self._probe_video_bytes(data)
+
+        max_duration_ms = self._video_max_seconds * 1000
+        if probe.duration_ms > max_duration_ms:
+            raise UserContentValidationError(
+                f"Video duration {probe.duration_ms / 1000:.1f}s exceeds "
+                f"maximum {self._video_max_seconds}s"
+            )
+
+        try:
+            result = await self._storage.upload(
+                user_id=user_id,
+                data=data,
+                filename=filename,
+                content_type=content_type,
+                storage_type=StorageType.UPLOAD,
+            )
+        except StorageValidationError as e:
+            raise UserContentValidationError(str(e)) from e
+
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(days=self._retention_days)
+        video_format = MediaFormat.from_content_type(content_type)
+
+        db_image = await self._image_repo.create(
+            id=result.id,
+            user_id=user_id,
+            storage_key=result.storage_key,
+            original_filename=filename,
+            content_type=content_type,
+            size_bytes=len(data),
+            format=video_format.value,
+            expires_at=expires_at,
+            product_id=self._product_id,
+            width=probe.width,
+            height=probe.height,
+            duration_ms=probe.duration_ms,
+        )
+
+        logger.info(
+            "user_content.video_uploaded",
+            image_id=str(result.id),
+            user_id=str(user_id),
+            filename=filename,
+            size_bytes=len(data),
+            duration_ms=probe.duration_ms,
+        )
+
+        created_derivatives: list[UserImage] = []
+        # Poster frame + sm/md WEBP thumbnails — non-fatal, mirrors the
+        # existing GrokJobService._store_video_result poster pipeline.
+        try:
+            poster = await extract_video_thumbnail(data)
+            if poster is not None:
+                thumbnails = await make_image_thumbnails(poster)
+                for generated in thumbnails:
+                    thumb_filename = f"thumb_{generated.spec.label}_{filename}"
+                    thumb_result = await self._storage.upload(
+                        user_id=user_id,
+                        data=generated.result.data,
+                        filename=thumb_filename,
+                        content_type=generated.result.content_type,
+                        storage_type=StorageType.UPLOAD,
+                    )
+                    thumb_db = await self._image_repo.create(
+                        id=thumb_result.id,
+                        user_id=user_id,
+                        storage_key=thumb_result.storage_key,
+                        original_filename=thumb_filename,
+                        content_type=generated.result.content_type,
+                        size_bytes=len(generated.result.data),
+                        format=generated.result.format,
+                        expires_at=expires_at,
+                        product_id=self._product_id,
+                        is_thumbnail=True,
+                        parent_image_id=db_image.id,
+                        thumbnail_max_edge=generated.spec.max_edge,
+                        width=generated.result.width,
+                        height=generated.result.height,
+                    )
+                    created_derivatives.append(thumb_db)
+            else:
+                logger.warning("user_content.video_poster_skipped", image_id=str(db_image.id))
+        except Exception:
+            logger.warning(
+                "user_content.thumbnail_generation_failed",
+                image_id=str(db_image.id),
+            )
+
+        media = build_upload_media(db_image, created_derivatives)
+
+        return UploadedImage(
+            id=db_image.id,
+            storage_key=db_image.storage_key,
+            filename=db_image.original_filename,
+            content_type=db_image.content_type,
+            size_bytes=db_image.size_bytes,
+            created_at=db_image.created_at,
+            expires_at=db_image.expires_at,
+            media=media,
+        )
+
+    async def _probe_video_bytes(self, data: bytes) -> VideoProbe:
+        """Write ``data`` to a temp file and ffprobe it.
+
+        Raises:
+            UserContentValidationError: If the bytes aren't a decodable video
+                with a video stream (probe failure is fatal — never trust the
+                client-declared content type).
+        """
+
+        def _write_temp() -> Path:
+            with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+                f.write(data)
+                return Path(f.name)
+
+        temp_path = await asyncio.to_thread(_write_temp)
+        try:
+            return await ffmpeg_probe(temp_path, timeout_seconds=self._ffmpeg_timeout_seconds)
+        except FfprobeError as e:
+            logger.warning("user_content.video_probe_failed", error=str(e))
+            raise UserContentValidationError("File is not a decodable video") from e
+        finally:
+            await asyncio.to_thread(temp_path.unlink, missing_ok=True)
 
     async def get_upload(self, image_id: UUID, *, user_id: UUID) -> UserImage | None:
         """Get upload metadata by ID.

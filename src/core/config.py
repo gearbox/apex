@@ -843,6 +843,50 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -------------------------------------------------------------------------
+    # Video frame extraction
+    # -------------------------------------------------------------------------
+    frame_extract_max_video_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=3600,
+        description="Upload-time ffprobe rejection cap for uploaded video duration.",
+    )
+    frame_extract_ffmpeg_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Wall-clock timeout for each ffmpeg/ffprobe subprocess invocation.",
+    )
+    frame_extract_poll_interval_seconds: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=60.0,
+        description="Seconds between FrameExtractionWorker queue polls.",
+    )
+    frame_preview_max_edge: int = Field(
+        default=512,
+        ge=64,
+        le=2048,
+        description="Longest-edge pixel cap for preview strip WEBP frames.",
+    )
+    frame_preview_url_ttl_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Presigned URL TTL for preview frames, generated per-read.",
+    )
+    frame_preview_retention_days: int = Field(
+        default=2,
+        ge=1,
+        le=30,
+        description=(
+            "Documented lifecycle-rule value for the 'frame-previews/' R2 prefix. "
+            "Informational only — enforcement is an R2 lifecycle rule configured "
+            "out-of-band, not this application."
+        ),
+    )
+
     # Email
     resend_api_key: str = Field(
         default="",

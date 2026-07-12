@@ -1,6 +1,8 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-12 — Gallery items now expose `expires_at` (§10): `GalleryGridItem.expires_at` (sourced from the cover output) and `GalleryOutputItem.expires_at` (per-output), matching the existing `ImageListItem`/`OutputListItem` contract in Storage (§8). Frontend can now render a "Delete in N days/hours/minutes" badge directly from the gallery grid/detail responses without a separate Storage lookup. Also: content retention is now actively enforced by a periodic sweeper — see the new retention note in §8. Frontend must regenerate types (`gen:api`)._
+> _Last updated: 2026-07-12 — Added **Video Frame Extraction** (new §9b): `POST /v1/frames/preview` and `POST /v1/frames/extract` run as free, non-billed background jobs (no `Idempotency-Key`) against either a `GenerationOutput` video or a user-uploaded video; poll `GET /v1/frames/jobs/{id}` until `completed`/`failed`. Preview frames are presigned R2 URLs generated fresh per poll (never cache beyond the current session — see §9b); extracted frames become ordinary uploads (standard `MediaObject`, stable `/v1/content/uploads/{id}` URLs) with new source-video lineage. Also: `POST /v1/storage/upload` (§8) now accepts video (`video/mp4`, `video/webm`, `video/quicktime`, ≤20MB, ffprobe-validated server-side — the declared `Content-Type` is never trusted); the Content Proxy (§9) inline-safe `Content-Type` allowlist grew to match. New enums `FrameExtractionKind`/`FrameExtractionStatus` (§17); `MediaFormat` gained `webm`/`mov`. Frontend must regenerate types (`gen:api`) — see `docs/contracts/video-frame-extraction.md` for the full contract._
+>
+> _Prior (2026-07-12): Gallery items now expose `expires_at` (§10): `GalleryGridItem.expires_at` (sourced from the cover output) and `GalleryOutputItem.expires_at` (per-output), matching the existing `ImageListItem`/`OutputListItem` contract in Storage (§8). Frontend can now render a "Delete in N days/hours/minutes" badge directly from the gallery grid/detail responses without a separate Storage lookup. Also: content retention is now actively enforced by a periodic sweeper — see the new retention note in §8. Frontend must regenerate types (`gen:api`)._
 >
 > _Prior (2026-07-10): Added the payment gateway protocol and per-product runtime provider registry. Checkout clients must discover enabled providers through public `GET /v1/billing/providers`; superadmins manage capability members through `GET/PATCH /v1/admin/payments/providers`. Disabling a provider blocks new charges with a stable `409` body but never blocks webhook settlement. Provider changes are appended to the admin audit log with a nullable `target_user_id`._
 >
@@ -11,7 +13,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-07-12 — `master` @ `d9121e90e51a79eaa1a69ad78091b6571e2bc7b2` (+ pending gallery `expires_at` change)
+> **Last synced:** 2026-07-12 — `master` @ `d9121e90e51a79eaa1a69ad78091b6571e2bc7b2` (+ pending gallery `expires_at` change, + pending video frame extraction change)
 >
 > _2026-07-08: **Breaking change** — replaced fixed token packages with tiered free-amount top-up (§11). `POST /v1/billing/topup/{stripe,nowpayments}` now take `{ amount_usd: int }` instead of `{ package_id: string }`; `GET /v1/billing/packages` is removed, replaced by `GET /v1/billing/topup/options`. Frontend must regenerate types (`gen:api`) and update the top-up UI to a preset-amounts + free-input flow (separate prompt)._
 >
@@ -861,7 +863,10 @@ Errors:   401 unauthorized (missing / empty / invalid Bearer token),
 #### `POST /v1/storage/upload`
 
 ```
-Request:  multipart/form-data, field "data" (max 20MB, PNG/JPEG/WebP)
+Request:  multipart/form-data, field "data" (max 20MB)
+          Images:  PNG, JPEG, WebP, HEIC/HEIF, AVIF — non-PNG/JPEG/WebP inputs
+                    are converted to PNG.
+          Videos:  MP4, WebM, QuickTime (.mov) — stored as-is, never re-encoded.
 Response: {
   id: UUID,
   filename: string,
@@ -870,9 +875,22 @@ Response: {
   media: MediaObject    // original + sm/md WEBP variants (generated synchronously)
 }
 Status:   201 Created
-Errors:   400 (invalid_file_type | file_too_large | empty_file)
-Note:     Returns image id used for I2I/I2V generation requests.
-          Thumbnail generation is non-fatal; variants may be empty on failure.
+Errors:   400 (invalid_file_type | file_too_large | empty_file | validation_error)
+Note:     Returns image id used for I2I/I2V generation requests, or (for
+          videos) as source_upload_id on POST /v1/frames/preview|extract (§9b).
+          Thumbnail/poster generation is non-fatal; variants may be empty on failure.
+
+          Videos are probed server-side (ffprobe) before acceptance — the
+          declared Content-Type is never trusted. A validation_error 400 is
+          returned if the bytes aren't a decodable video, or if duration
+          exceeds the server's configured maximum (default 300s):
+            { "error": "validation_error",
+              "message": "File is not a decodable video", "status_code": 400 }
+            { "error": "validation_error",
+              "message": "Video duration 620.0s exceeds maximum 300s", "status_code": 400 }
+
+          Video duration is not currently exposed on any response — poll a
+          preview job (§9b) to learn frame timestamps within the clip.
 ```
 
 #### `GET /v1/storage/uploads`
@@ -976,7 +994,7 @@ Provides stable, non-expiring authenticated URLs for user content. The server re
 ### Response Headers
 
 All successful responses include:
-- `Content-Type` — the stored R2 `ContentType` **only if it's on the inline-safe allowlist** (`image/png`, `image/jpeg`, `image/webp`, `video/mp4`); otherwise `application/octet-stream`
+- `Content-Type` — the stored R2 `ContentType` **only if it's on the inline-safe allowlist** (`image/png`, `image/jpeg`, `image/webp`, `video/mp4`, `video/webm`, `video/quicktime`); otherwise `application/octet-stream`
 - `Content-Length` — from R2 object metadata
 - `Cache-Control: private, max-age=10800, immutable` — 3-hour client cache (default; configurable via `CONTENT_URL_TTL`)
 - `ETag: "<content_id>"` — the output/upload UUID, for conditional requests
@@ -1013,6 +1031,84 @@ Errors:   404 not_found (content does not exist, not owned, or wrong product)
 Note:     Permanently deletes the file from R2 and removes the DB record.
           Checks generation_outputs first, then user_images.
           Lineage references (source_output_id, input_image_id) are SET NULL automatically.
+```
+
+---
+
+## 9b. Video Frame Extraction *(authenticated)*
+
+> Full contract: `docs/contracts/video-frame-extraction.md`.
+
+Takes any video — a `GenerationOutput` (Grok T2V/I2V) or a user-uploaded video (§8, `video/*` content type) — and either previews it as a low-res frame strip or extracts full-resolution frames at chosen timestamps. **Free** — no token charge, no `Idempotency-Key` header on any endpoint below. Both endpoints return `202` immediately with a `job_id`; the actual ffmpeg work runs on a background worker (`FrameExtractionWorker`) — poll `GET /v1/frames/jobs/{job_id}` until `status` is `completed` or `failed`.
+
+Exactly one of `source_output_id` / `source_upload_id` must be set on every request below (`400 invalid_source` otherwise); the resolved source must be owned by the caller, belong to the current product, and have a video content type (`400 not_a_video` / `404 not_found` otherwise).
+
+#### `POST /v1/frames/preview`
+
+```
+Request:  {
+  source_output_id?: UUID | null,   // exactly one of these two
+  source_upload_id?: UUID | null,
+  frame_count?: int                 // 2-60, default 12
+}
+Response: { job_id: UUID, status: "queued" }
+Status:   202 Accepted
+Errors:   400 invalid_source | not_a_video, 404 not_found
+```
+
+#### `POST /v1/frames/extract`
+
+```
+Request:  {
+  source_output_id?: UUID | null,
+  source_upload_id?: UUID | null,
+  timestamps_ms: int[]              // 1-50 entries, each >= 0
+}
+Response: { job_id: UUID, status: "queued" }
+Status:   202 Accepted
+Errors:   400 invalid_source | not_a_video, 404 not_found
+Note:     Whether each timestamp is within the video's actual duration is
+          checked once the worker probes the file (after the job starts
+          running) — an out-of-range timestamp fails the *job*
+          (status=failed, precise error), not the request.
+```
+
+#### `GET /v1/frames/jobs/{job_id}`
+
+```
+Response: {
+  job_id: UUID,
+  kind: "preview" | "extract",
+  status: "queued" | "running" | "completed" | "failed",
+  created_at: datetime,
+  started_at: datetime | null,
+  finished_at: datetime | null,
+  error: string | null,             // populated only when status=failed
+  source: { type: "output" | "upload", id: UUID },
+  preview?: {                       // present iff kind=preview AND status=completed
+    frames: [ { index: int, timestamp_ms: int, url: string } ],
+    expires_in_seconds: int
+  },
+  extracted?: {                     // present iff kind=extract AND status=completed
+    frames: [ { timestamp_ms: int, upload_id: UUID, media: MediaObject } ]
+  }
+}
+Errors:   404 not_found (job doesn't exist or isn't owned by the caller)
+Note:     preview.frames[].url is a presigned R2 URL generated FRESH on every
+          call — never persisted, never the same URL twice. expires_in_seconds
+          is that response's TTL (default 3600s); re-poll for fresh URLs
+          rather than caching. Preview frames live at a non-authenticated,
+          top-level R2 prefix that expires via an R2 lifecycle rule (default
+          2 days) — there is no /v1/content/... proxy indirection for them
+          (by design: stateless, no DB rows).
+
+          extracted.frames[].media is the same MediaObject as everything else
+          (§5b) — its urls are stable /v1/content/uploads/{id} proxy paths,
+          cacheable indefinitely, same as any other upload. Once an extract
+          job completes its frames are ordinary uploads: same download (§8),
+          same delete (DELETE /v1/content/{id}, §9), same retention/expiry.
+          Deleting the source video does NOT delete frames already extracted
+          from it.
 ```
 
 ---
@@ -2208,9 +2304,9 @@ ComfyUI scheduler names accepted on `POST /v1/generate` (`scheduler`, Aisha imag
 
 ### MediaFormat
 
-Values: `"png"`, `"jpeg"`, `"webp"` (images), `"mp4"` (video)
+Values: `"png"`, `"jpeg"`, `"webp"` (images), `"mp4"`, `"webm"`, `"mov"` (video)
 
-> Surfaced as the `format` field on job/gallery outputs. Generated image thumbnails are `webp`.
+> Surfaced as the `format` field on job/gallery outputs. Generated image thumbnails are `webp`. `"webm"`/`"mov"` apply only to user-uploaded videos (§8/§9b) — generated video outputs are always `"mp4"`.
 
 ### AccountType
 
@@ -2275,6 +2371,23 @@ Indicates the primary input type for a gallery item:
 Values: `"upload"`, `"generation"`
 
 Used in `GalleryLineage.source_type` to indicate whether the input came from a direct upload or a previous generation output.
+
+### FrameExtractionKind
+
+Values: `"preview"`, `"extract"`
+
+The `kind` field on a video frame extraction job (§9b) — which of the two flows a job performs.
+
+### FrameExtractionStatus
+
+| Value | Terminal? | Description |
+|-------|----------|-------------|
+| `queued` | No | Job created, awaiting the worker |
+| `running` | No | Worker has claimed the job and is running ffmpeg |
+| `completed` | Yes | Done — `preview`/`extracted` populated on `GET /v1/frames/jobs/{id}` |
+| `failed` | Yes | Error occurred — `error` populated with a human-readable message |
+
+**Polling strategy:** Poll `GET /v1/frames/jobs/{id}` (§9b) every ~1s while status is `queued` or `running`. Jobs are short-lived (typically low single-digit seconds) — no SSE variant exists for this.
 
 ---
 

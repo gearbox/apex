@@ -12,6 +12,7 @@ from .billing import (
     TokenAccount,
     TokenTransaction,
 )
+from .frame_extraction import FrameExtractionJob
 from .generation_model import GenerationModel
 from .gpu_session import GpuSession
 from .health import HealthSnapshot
@@ -25,6 +26,7 @@ __all__ = [
     "AdminPermissionGrant",
     "Base",
     "EmailVerificationToken",
+    "FrameExtractionJob",
     "GenerationJob",
     "GenerationModel",
     "GenerationOutput",

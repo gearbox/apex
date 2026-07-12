@@ -43,6 +43,10 @@ class UserImageRepository(BaseRepository[UserImage]):
         thumbnail_max_edge: int | None = None,
         width: int | None = None,
         height: int | None = None,
+        source_output_id: UUID | None = None,
+        source_upload_id: UUID | None = None,
+        source_timestamp_ms: int | None = None,
+        duration_ms: int | None = None,
     ) -> UserImage:
         """Create a new user upload record.
 
@@ -53,7 +57,7 @@ class UserImageRepository(BaseRepository[UserImage]):
             original_filename: Original uploaded filename.
             content_type: MIME type.
             size_bytes: File size.
-            format: Image format (png, jpeg, webp).
+            format: Image format (png, jpeg, webp) or video format.
             expires_at: When the upload should be cleaned up.
             product_id: Product this upload belongs to.
             is_thumbnail: Whether this is a derived thumbnail row.
@@ -61,6 +65,15 @@ class UserImageRepository(BaseRepository[UserImage]):
             thumbnail_max_edge: Size bucket (150=sm, 512=md). None on full rows.
             width: Pixel width.
             height: Pixel height.
+            source_output_id: Source generation output this frame was
+                extracted from (at most one of source_output_id /
+                source_upload_id may be set).
+            source_upload_id: Source uploaded video this frame was extracted
+                from.
+            source_timestamp_ms: Timestamp within the source video this frame
+                was extracted at.
+            duration_ms: Video duration (uploaded videos only; display only —
+                extraction math always re-probes the file).
 
         Returns:
             Created UserImage instance.
@@ -80,6 +93,10 @@ class UserImageRepository(BaseRepository[UserImage]):
             thumbnail_max_edge=thumbnail_max_edge,
             width=width,
             height=height,
+            source_output_id=source_output_id,
+            source_upload_id=source_upload_id,
+            source_timestamp_ms=source_timestamp_ms,
+            duration_ms=duration_ms,
         )
         self._session.add(upload)
         await self._session.flush()

@@ -34,6 +34,7 @@ from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.billing_public import BillingPublicController
 from src.api.routes.content import ContentProxyController
+from src.api.routes.frames import FramesController
 from src.api.routes.gallery import GalleryController
 from src.api.routes.gpu_session import GpuSessionController
 from src.api.routes.health import AdminHealthController, HealthController
@@ -392,6 +393,8 @@ def create_app() -> Litestar:
             InternalGpuSessionController,  # /v1/internal/gpu-sessions/*
             # Storage
             StorageController,
+            # Video frame extraction
+            FramesController,
             # Jobs (unified, cross-provider)
             UnifiedJobController,
             # Real-time events (SSE)

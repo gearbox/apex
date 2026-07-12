@@ -23,6 +23,7 @@ from .exceptions import (
     StorageValidationError,
 )
 from .schemas import (
+    ALLOWED_UPLOAD_CONTENT_TYPES,
     DownloadResult,
     MediaFormat,
     StorageType,
@@ -50,7 +51,8 @@ def _get_error_message(e: ClientError) -> str:
 
 # Constants
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
-ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
+# Re-exported for backward compatibility — routes/content.py imports this name.
+ALLOWED_CONTENT_TYPES = ALLOWED_UPLOAD_CONTENT_TYPES
 DEFAULT_RETENTION_DAYS = 7
 
 
