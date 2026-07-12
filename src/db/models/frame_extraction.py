@@ -55,18 +55,26 @@ class FrameExtractionJob(Base):
     # queued job cascades away with its source rather than failing at run time.
     source_output_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("generation_outputs.id", ondelete="CASCADE"),
+        ForeignKey(
+            "generation_outputs.id",
+            name="fk_frame_extraction_jobs_source_output_id",
+            ondelete="CASCADE",
+        ),
         nullable=True,
     )
     source_upload_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("user_images.id", ondelete="CASCADE"),
+        ForeignKey(
+            "user_images.id",
+            name="fk_frame_extraction_jobs_source_upload_id",
+            ondelete="CASCADE",
+        ),
         nullable=True,
     )
 
     # params is a JSONB column typed as dict[str, Any];
-    # when kind="preview", preview: {"frame_count": N};
-    # when kind="extract"extract: {"timestamps_ms": [...]}
+    # when kind="preview": {"frame_count": N};
+    # when kind="extract": {"timestamps_ms": [...]}
     params: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     # See docs/contracts/video-frame-extraction.md for the shape by kind/status.
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

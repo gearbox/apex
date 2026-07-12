@@ -104,7 +104,7 @@ class UserImage(Base):
         PG_UUID(as_uuid=True),
         ForeignKey(
             "generation_outputs.id",
-            name="fk_user_images_source_output",
+            name="fk_user_images_source_output_id",
             ondelete="SET NULL",
             use_alter=True,
         ),
@@ -112,7 +112,11 @@ class UserImage(Base):
     )
     source_upload_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("user_images.id", ondelete="SET NULL"),
+        ForeignKey(
+            "user_images.id",
+            name="fk_user_images_source_upload_id",
+            ondelete="SET NULL",
+        ),
         nullable=True,
     )
     source_timestamp_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

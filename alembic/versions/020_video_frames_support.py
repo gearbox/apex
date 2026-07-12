@@ -63,7 +63,7 @@ def upgrade() -> None:
     )
 
     op.create_foreign_key(
-        "fk_user_images_source_output",
+        "fk_user_images_source_output_id",
         "user_images",
         "generation_outputs",
         ["source_output_id"],
@@ -103,13 +103,21 @@ def upgrade() -> None:
         sa.Column(
             "source_output_id",
             PG_UUID(as_uuid=True),
-            sa.ForeignKey("generation_outputs.id", ondelete="CASCADE"),
+            sa.ForeignKey(
+                "generation_outputs.id",
+                name="fk_frame_extraction_jobs_source_output_id",
+                ondelete="CASCADE",
+            ),
             nullable=True,
         ),
         sa.Column(
             "source_upload_id",
             PG_UUID(as_uuid=True),
-            sa.ForeignKey("user_images.id", ondelete="CASCADE"),
+            sa.ForeignKey(
+                "user_images.id",
+                name="fk_frame_extraction_jobs_source_upload_id",
+                ondelete="CASCADE",
+            ),
             nullable=True,
         ),
         sa.Column("params", JSONB, nullable=False),
@@ -166,7 +174,7 @@ def downgrade() -> None:
         type_="foreignkey",
     )
     op.drop_constraint(
-        "fk_user_images_source_output",
+        "fk_user_images_source_output_id",
         "user_images",
         type_="foreignkey",
     )

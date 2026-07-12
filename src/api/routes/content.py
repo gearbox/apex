@@ -28,7 +28,7 @@ from src.api.security import auth_guard, content_auth_guard
 from src.api.services.content_proxy import ContentNotFoundError, ContentProxyService
 from src.api.services.storage.exceptions import StorageError
 from src.api.services.storage.r2 import (
-    ALLOWED_CONTENT_TYPES as _STORED_IMAGE_CONTENT_TYPES,
+    ALLOWED_CONTENT_TYPES as _STORED_CONTENT_TYPES,
 )
 from src.api.services.storage.r2 import (
     R2StorageService,
@@ -48,7 +48,7 @@ logger = structlog.get_logger(__name__)
 # (services/storage/schemas.py::ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES — the
 # client-declared upload gate, incl. heic/heif/avif that are normalized to PNG
 # before storage). Do NOT unify with that one.
-_INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(_STORED_IMAGE_CONTENT_TYPES)
+_INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(_STORED_CONTENT_TYPES)
 
 
 class ContentProxyController(Controller):
