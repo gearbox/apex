@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.core.constants import MAX_EXTRACT_TIMESTAMPS, MAX_PREVIEW_FRAME_COUNT
 from src.core.enums import WorkerMode
 from src.core.topup_pricing import build_tiers
 
@@ -843,6 +844,63 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -------------------------------------------------------------------------
+    # Video frame extraction
+    # -------------------------------------------------------------------------
+    frame_extract_max_video_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=3600,
+        description="Upload-time ffprobe rejection cap for uploaded video duration.",
+    )
+    frame_extract_ffmpeg_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Wall-clock timeout for each ffmpeg/ffprobe subprocess invocation.",
+    )
+    frame_extract_poll_interval_seconds: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=60.0,
+        description="Seconds between FrameExtractionWorker queue polls.",
+    )
+    frame_preview_max_edge: int = Field(
+        default=512,
+        ge=64,
+        le=2048,
+        description="Longest-edge pixel cap for preview strip WEBP frames.",
+    )
+    frame_preview_url_ttl_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Presigned URL TTL for preview frames, generated per-read.",
+    )
+    frame_preview_retention_days: int = Field(
+        default=2,
+        ge=1,
+        le=30,
+        description=(
+            "Documented lifecycle-rule value for the 'frame-previews/' R2 prefix. "
+            "Informational only — enforcement is an R2 lifecycle rule configured "
+            "out-of-band, not this application."
+        ),
+    )
+    frame_extract_stale_running_seconds: int = Field(
+        default=1800,
+        ge=300,
+        le=7200,
+        description=(
+            "A frame_extraction_jobs row stuck in 'running' longer than this is "
+            "assumed to be from a worker that died mid-execution and is failed by "
+            "the next sweep. Must be >= max(MAX_PREVIEW_FRAME_COUNT, "
+            "MAX_EXTRACT_TIMESTAMPS) * frame_extract_ffmpeg_timeout_seconds — a "
+            "legitimate job can run that long, and the sweep must never fire on a "
+            "live job. Enforced by a model validator."
+        ),
+    )
+
     # Email
     resend_api_key: str = Field(
         default="",
@@ -1153,6 +1211,31 @@ class Settings(BaseSettings):
                 "node_cooldown_base_minutes must be <= node_cooldown_max_minutes "
                 f"(got base={self.node_cooldown_base_minutes}, "
                 f"max={self.node_cooldown_max_minutes})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_frame_extract_stale_running_seconds(self) -> "Settings":
+        """Assert the stale-sweep threshold exceeds worst-case job runtime.
+
+        A legitimate frame extraction job can take up to
+        max(MAX_PREVIEW_FRAME_COUNT, MAX_EXTRACT_TIMESTAMPS) *
+        frame_extract_ffmpeg_timeout_seconds to finish. If the stale threshold is
+        lower than that, the sweep can mark a live, still-running job 'failed' —
+        a transiently wrong status served to polling clients. Fail loud at
+        startup rather than let this surface as flapping job statuses in prod.
+        """
+        worst_case_seconds = (
+            max(MAX_PREVIEW_FRAME_COUNT, MAX_EXTRACT_TIMESTAMPS)
+            * self.frame_extract_ffmpeg_timeout_seconds
+        )
+        if self.frame_extract_stale_running_seconds < worst_case_seconds:
+            raise ValueError(
+                "frame_extract_stale_running_seconds must be >= "
+                "max(MAX_PREVIEW_FRAME_COUNT, MAX_EXTRACT_TIMESTAMPS) * "
+                "frame_extract_ffmpeg_timeout_seconds "
+                f"(got stale={self.frame_extract_stale_running_seconds}, "
+                f"worst_case={worst_case_seconds})"
             )
         return self
 

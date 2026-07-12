@@ -36,6 +36,9 @@ from src.api.schemas.storage import (
 )
 from src.api.security import auth_guard
 from src.api.services.media import build_output_media, build_upload_media
+from src.api.services.storage.schemas import (
+    ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES,
+)
 from src.api.services.user_content import (
     UserContentError,
     UserContentNotFoundError,
@@ -53,14 +56,7 @@ logger = structlog.get_logger(__name__)
 # Constants
 # -----------------------------------------------------------------------------
 
-ALLOWED_CONTENT_TYPES = {
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/heic",
-    "image/heif",
-    "image/avif",
-}
+ALLOWED_CONTENT_TYPES = ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
 IMAGE_NOT_FOUND = "Image not found"
 OUTPUT_NOT_FOUND = "Output not found"
@@ -95,14 +91,19 @@ class StorageController(Controller):
         user_content: UserContentService,
         data: Annotated[UploadForm, Body(media_type=RequestEncodingType.MULTI_PART)],
     ) -> Response[UploadResponse | ErrorEnvelope]:
-        """Upload an image for use in generation.
+        """Upload an image or video for use in generation or frame extraction.
 
         Accepts PNG, JPEG, WebP, HEIC/HEIF, or AVIF images up to 20MB;
-        non-PNG/JPEG/WebP inputs are converted to PNG. Returns storage
-        details and expiration time.
+        non-PNG/JPEG/WebP inputs are converted to PNG. Also accepts MP4,
+        WebM, or QuickTime (.mov) videos up to 20MB — videos are probed
+        with ffprobe (rejected if undecodable, not a video, or over
+        ``frame_extract_max_video_seconds``) and stored as-is, with a JPEG
+        poster frame derivative. Returns storage details and expiration time.
 
-        The uploaded image can be referenced by ID in i2i generation requests.
-        Images are automatically deleted after the retention period.
+        Uploaded images can be referenced by ID in i2i generation requests;
+        uploaded videos can be referenced by ID in POST /v1/frames/preview
+        and /v1/frames/extract. Content is automatically deleted after the
+        retention period.
         """
         # Validate content type
         content_type = data.data.content_type or "application/octet-stream"

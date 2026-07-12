@@ -64,6 +64,30 @@ class TestNodeCooldownThresholds:
             )
 
 
+class TestFrameExtractStaleRunningThreshold:
+    def test_default_matches_worst_case_runtime(self) -> None:
+        settings = Settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.frame_extract_stale_running_seconds == 1800
+
+    def test_below_worst_case_rejected(self) -> None:
+        with pytest.raises(
+            ValueError, match="frame_extract_stale_running_seconds must be >="
+        ):
+            Settings(
+                jwt_secret_key=_JWT_SECRET,
+                frame_extract_stale_running_seconds=300,
+                frame_extract_ffmpeg_timeout_seconds=30,
+            )
+
+    def test_boundary_equal_to_worst_case_accepted(self) -> None:
+        settings = Settings(
+            jwt_secret_key=_JWT_SECRET,
+            frame_extract_stale_running_seconds=1800,
+            frame_extract_ffmpeg_timeout_seconds=30,
+        )
+        assert settings.frame_extract_stale_running_seconds == 1800
+
+
 class TestPricingTiersValidAccepted:
     def test_default_tiers_accepted(self) -> None:
         settings = Settings(jwt_secret_key=_JWT_SECRET)

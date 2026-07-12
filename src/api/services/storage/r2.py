@@ -23,6 +23,7 @@ from .exceptions import (
     StorageValidationError,
 )
 from .schemas import (
+    ALLOWED_UPLOAD_CONTENT_TYPES,
     DownloadResult,
     MediaFormat,
     StorageType,
@@ -50,7 +51,8 @@ def _get_error_message(e: ClientError) -> str:
 
 # Constants
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
-ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
+# Re-exported for backward compatibility — routes/content.py imports this name.
+ALLOWED_CONTENT_TYPES = ALLOWED_UPLOAD_CONTENT_TYPES
 DEFAULT_RETENTION_DAYS = 7
 
 
@@ -256,6 +258,30 @@ class R2StorageService:
         except Exception as e:
             logger.exception("r2.upload_unexpected_error", error=str(e))
             raise StorageUploadError(f"Upload failed: {e}", cause=e) from e
+
+    async def put_raw(self, key: str, data: bytes, *, content_type: str) -> None:
+        """Store bytes at a caller-chosen key.
+
+        Deliberately bypasses build_storage_key and upload validation — for
+        internal derived artifacts (preview frames, video posters) whose key
+        layout is owned by the caller. Not for user-supplied content: use
+        upload() for that.
+        """
+        try:
+            async with self._get_client() as client:
+                await client.put_object(
+                    Bucket=self._settings.bucket_name,
+                    Key=key,
+                    Body=data,
+                    ContentType=content_type,
+                )
+            logger.info("r2.put_raw_completed", key=key, bytes=len(data))
+        except ClientError as e:
+            logger.exception("r2.put_raw_failed", key=key, error=str(e))
+            raise StorageUploadError(
+                f"Failed to store object: {_get_error_message(e)}",
+                cause=e,
+            ) from e
 
     async def download(self, storage_key: str) -> bytes:
         """Download file content from R2."""

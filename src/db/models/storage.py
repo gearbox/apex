@@ -15,6 +15,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -91,6 +92,38 @@ class UserImage(Base):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # --- Video frame extraction lineage (migration 020) ---
+    # At most one of source_output_id / source_upload_id is set — enforced by
+    # ck_user_images_single_frame_source. ON DELETE SET NULL is deliberate:
+    # deleting the source video must not delete extracted frames; lineage
+    # degrades gracefully (source_timestamp_ms may remain set with both FKs
+    # null — the CHECK permits this by design). No ORM relationship() objects
+    # are declared for these — resolved via repo queries only (avoids FK
+    # ambiguity with parent_image_id, the existing self-referential thumbnail FK).
+    source_output_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "generation_outputs.id",
+            name="fk_user_images_source_output_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    source_upload_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "user_images.id",
+            name="fk_user_images_source_upload_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    source_timestamp_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Video duration for uploaded videos — display only; the worker always
+    # re-probes the file for extraction math (the file is the source of truth).
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -125,6 +158,12 @@ class UserImage(Base):
         Index("ix_user_images_user_created", "user_id", "created_at"),
         Index("ix_user_images_parent_image_id", "parent_image_id"),
         Index("ix_user_images_cleanup", "expires_at"),
+        Index("ix_user_images_source_output_id", "source_output_id"),
+        Index("ix_user_images_source_upload_id", "source_upload_id"),
+        CheckConstraint(
+            "NOT (source_output_id IS NOT NULL AND source_upload_id IS NOT NULL)",
+            name="ck_user_images_single_frame_source",
+        ),
     )
 
     def __repr__(self) -> str:

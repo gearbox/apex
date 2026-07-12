@@ -421,6 +421,7 @@ class GrokJobService:
         )
 
         # Upload directly using the storage key
+        # TODO: migrate to put_raw (see video-frame-extraction review F5)
         async with self._storage._get_client() as client:
             await client.put_object(
                 Bucket=self._storage._settings.bucket_name,
@@ -810,6 +811,7 @@ class GrokJobService:
         )
 
         # Upload directly using the storage key
+        # TODO: migrate to put_raw (see video-frame-extraction review F5)
         async with self._storage._get_client() as client:
             await client.put_object(
                 Bucket=self._storage._settings.bucket_name,
@@ -851,6 +853,7 @@ class GrokJobService:
                     job_id=job_id,
                 )
                 try:
+                    # TODO: migrate to put_raw (see video-frame-extraction review F5)
                     async with self._storage._get_client() as client:
                         await client.put_object(
                             Bucket=self._storage._settings.bucket_name,
