@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -57,7 +57,9 @@ def _make_job(**overrides: object) -> MagicMock:
     return job
 
 
-def _make_service(*, product_id: str = "vex") -> tuple[FrameExtractionService, AsyncMock]:
+def _make_service(
+    *, product_id: str = "vex", retention_days: int = 7
+) -> tuple[FrameExtractionService, AsyncMock]:
     storage = AsyncMock()
     session = AsyncMock()
     service = FrameExtractionService(
@@ -65,10 +67,12 @@ def _make_service(*, product_id: str = "vex") -> tuple[FrameExtractionService, A
         storage,
         product_id=product_id,
         preview_url_ttl_seconds=3600,
+        retention_days=retention_days,
     )
     service._job_repo = AsyncMock()
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
+    service._image_repo.touch_expiry = AsyncMock(return_value=True)
     return service, storage
 
 
@@ -107,6 +111,55 @@ class TestCreatePreviewJob:
         assert kwargs["params"] == {"frame_count": 12}
         assert kwargs["source_output_id"] == output.id
         assert kwargs["source_upload_id"] is None
+
+
+class TestTouchesSourceExpiry:
+    async def test_upload_source_expiry_extended_on_preview(self) -> None:
+        service, _storage = _make_service(retention_days=7)
+        upload = _make_upload()
+        service._image_repo.get = AsyncMock(return_value=upload)
+        service._job_repo.create = AsyncMock(return_value=_make_job(source_upload_id=upload.id))
+
+        await service.create_preview_job(
+            uuid4(),
+            source_output_id=None,
+            source_upload_id=upload.id,
+            frame_count=12,
+        )
+
+        service._image_repo.touch_expiry.assert_awaited_once()
+        kwargs = service._image_repo.touch_expiry.call_args.kwargs
+        assert kwargs["expires_at"] > datetime.now(UTC) + timedelta(days=6)
+
+    async def test_upload_source_expiry_extended_on_extract(self) -> None:
+        service, _storage = _make_service()
+        upload = _make_upload()
+        service._image_repo.get = AsyncMock(return_value=upload)
+        service._job_repo.create = AsyncMock(return_value=_make_job(source_upload_id=upload.id))
+
+        await service.create_extract_job(
+            uuid4(),
+            source_output_id=None,
+            source_upload_id=upload.id,
+            timestamps_ms=[0, 1000],
+        )
+
+        service._image_repo.touch_expiry.assert_awaited_once()
+
+    async def test_output_source_does_not_touch_upload_expiry(self) -> None:
+        service, _storage = _make_service()
+        output = _make_output()
+        service._output_repo.get = AsyncMock(return_value=output)
+        service._job_repo.create = AsyncMock(return_value=_make_job(source_output_id=output.id))
+
+        await service.create_preview_job(
+            uuid4(),
+            source_output_id=output.id,
+            source_upload_id=None,
+            frame_count=12,
+        )
+
+        service._image_repo.touch_expiry.assert_not_awaited()
 
 
 class TestCreateJobRequiresExactlyOneSource:

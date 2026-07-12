@@ -9,6 +9,7 @@ bounded (a duplicate job just wastes CPU).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -64,11 +65,13 @@ class FrameExtractionService:
         *,
         product_id: str,
         preview_url_ttl_seconds: int,
+        retention_days: int,
     ) -> None:
         self._session = session
         self._storage = r2_storage
         self._product_id = product_id
         self._preview_url_ttl_seconds = preview_url_ttl_seconds
+        self._retention_days = retention_days
         self._job_repo = FrameExtractionJobRepository(session)
         self._image_repo = UserImageRepository(session)
         self._output_repo = OutputRepository(session)
@@ -87,6 +90,8 @@ class FrameExtractionService:
             source_output_id=source_output_id,
             source_upload_id=source_upload_id,
         )
+        if source_kind == "upload":
+            await self._touch_source_expiry(user_id, source_id)
         job = await self._job_repo.create(
             id=new_id(),
             user_id=user_id,
@@ -118,6 +123,8 @@ class FrameExtractionService:
             source_output_id=source_output_id,
             source_upload_id=source_upload_id,
         )
+        if source_kind == "upload":
+            await self._touch_source_expiry(user_id, source_id)
         job = await self._job_repo.create(
             id=new_id(),
             user_id=user_id,
@@ -176,6 +183,24 @@ class FrameExtractionService:
             preview=preview,
             extracted=extracted,
         )
+
+    async def _touch_source_expiry(self, user_id: UUID, source_upload_id: UUID) -> None:
+        """Reset the source upload's retention window — using it as a frame
+        extraction source is "active use", same as i2i input (see
+        GenerationService.submit).
+        """
+        touched = await self._image_repo.touch_expiry(
+            source_upload_id,
+            user_id=user_id,
+            expires_at=datetime.now(UTC) + timedelta(days=self._retention_days),
+        )
+        if touched:
+            logger.info(
+                "frames.source_expiry_extended",
+                image_id=str(source_upload_id),
+                user_id=str(user_id),
+                retention_days=self._retention_days,
+            )
 
     async def _resolve_and_validate_source(
         self,

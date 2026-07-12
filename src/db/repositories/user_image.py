@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from sqlalchemy import func, literal, select, tuple_
+from sqlalchemy import CursorResult, and_, func, literal, or_, select, tuple_, update
 
 from src.db.models.storage import UserImage
 from src.db.repositories.base import BaseRepository
@@ -269,6 +269,48 @@ class UserImageRepository(BaseRepository[UserImage]):
             .limit(limit)
         )
         return result.scalars().all()
+
+    async def touch_expiry(
+        self,
+        image_id: UUID,
+        *,
+        user_id: UUID,
+        expires_at: datetime,
+    ) -> bool:
+        """Reset the retention window on a full upload and its thumbnails.
+
+        Ownership-scoped: only rows belonging to ``user_id`` are touched.
+        Matching a thumbnail row directly by ``image_id`` is rejected —
+        the sliding window applies to full uploads only; derivatives are
+        bumped via their ``parent_image_id`` link.
+
+        Args:
+            image_id: Full (non-thumbnail) upload ID.
+            user_id: Owner — rows of other users are never touched.
+            expires_at: New expiry timestamp (caller computes
+                ``now + retention_days``).
+
+        Returns:
+            True if the full upload row was updated; False if the image
+            does not exist, is not owned by ``user_id``, or is a
+            thumbnail row.
+        """
+        result = cast(
+            "CursorResult[tuple[()]]",
+            await self._session.execute(
+                update(UserImage)
+                .where(
+                    UserImage.user_id == user_id,
+                    or_(
+                        and_(UserImage.id == image_id, UserImage.is_thumbnail.is_(False)),
+                        UserImage.parent_image_id == image_id,
+                    ),
+                )
+                .values(expires_at=expires_at)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return (result.rowcount or 0) > 0
 
     async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
         """Count full uploads and sum their size for a user.

@@ -225,6 +225,7 @@ def get_frame_extraction_service(
         r2_storage=r2_storage,
         product_id=product_id,
         preview_url_ttl_seconds=settings.frame_preview_url_ttl_seconds,
+        retention_days=settings.retention_days,
     )
 
 
