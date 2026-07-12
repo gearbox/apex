@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -10,6 +11,7 @@ from src.api.schemas.jobs import JobCreatedResponse
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
+from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -87,12 +89,15 @@ class GenerationService:
         pricing_service: PricingService,
         rate_limiter: ModelRateLimiter,
         event_bus: EventBus | None = None,
+        *,
+        retention_days: int = 7,
     ) -> None:
         self._providers = providers
         self._billing = billing_service
         self._pricing = pricing_service
         self._rate_limiter = rate_limiter
         self._event_bus = event_bus
+        self._retention_days = retention_days
 
     @property
     def configured_providers(self) -> frozenset[Provider]:
@@ -207,6 +212,24 @@ class GenerationService:
                 raise ValueError("Source output not found")
             source_job_id = source_output.job_id
             resolved_source_output_id = lineage_output_id
+
+        # Sliding retention: using an upload as generation input resets its
+        # expiry window, so actively-used images are never swept mid-use.
+        # Rides in the submit transaction — rolled back if submit fails.
+        if request.input_image_id is not None:
+            touched = await UserImageRepository(session).touch_expiry(
+                request.input_image_id,
+                user_id=user_id,
+                expires_at=datetime.now(UTC) + timedelta(days=self._retention_days),
+            )
+            if not touched:
+                raise ValueError("Input image not found")
+            logger.info(
+                "generation.input_image_expiry_extended",
+                image_id=str(request.input_image_id),
+                user_id=str(user_id),
+                retention_days=self._retention_days,
+            )
 
         job: GenerationJob | None = None
         reserve_event: BalanceEvent | None = None
