@@ -26,6 +26,7 @@ from src.api.services.frames.service import (
     FrameSourceNotFoundError,
     FrameSourceNotVideoError,
 )
+from src.core.constants import MAX_EXTRACT_TIMESTAMPS, MAX_PREVIEW_FRAME_COUNT
 from src.core.enums import FrameExtractionKind, FrameExtractionStatus
 
 pytestmark = pytest.mark.unit
@@ -211,3 +212,24 @@ class TestGetJobHandler:
         assert response.status_code == 200
         assert response.content.extracted is not None
         assert response.content.extracted.frames[0].media.original.content_type == "image/png"
+
+
+class TestRequestCapsMatchCoreConstants:
+    """Guards the msgspec bounds against silent drift from the core constants.
+
+    frame_extract_stale_running_seconds' validator (src/core/config.py) assumes
+    these are the actual request caps — if the schema's bounds ever diverge
+    from src.core.constants without updating the validator's invariant, the
+    stale-sweep threshold could stop covering worst-case job runtime.
+    Mirrors tests/unit/test_frames_ffmpeg.py::TestFfmpegPathAssumption.
+    """
+
+    def test_frame_count_bound_matches_max_preview_frame_count(self) -> None:
+        info = msgspec.inspect.type_info(FramePreviewRequest)
+        frame_count = next(f for f in info.fields if f.name == "frame_count")
+        assert frame_count.type.le == MAX_PREVIEW_FRAME_COUNT
+
+    def test_timestamps_ms_bound_matches_max_extract_timestamps(self) -> None:
+        info = msgspec.inspect.type_info(FrameExtractRequest)
+        timestamps_ms = next(f for f in info.fields if f.name == "timestamps_ms")
+        assert timestamps_ms.type.max_length == MAX_EXTRACT_TIMESTAMPS

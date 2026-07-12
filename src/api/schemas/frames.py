@@ -9,6 +9,7 @@ from uuid import UUID
 import msgspec
 
 from src.api.schemas.media import MediaObject
+from src.core.constants import MAX_EXTRACT_TIMESTAMPS, MAX_PREVIEW_FRAME_COUNT
 
 # -----------------------------------------------------------------------------
 # Requests
@@ -20,7 +21,7 @@ class FramePreviewRequest(msgspec.Struct, kw_only=True, forbid_unknown_fields=Tr
 
     source_output_id: UUID | None = None
     source_upload_id: UUID | None = None
-    frame_count: Annotated[int, msgspec.Meta(ge=2, le=60)] = 12
+    frame_count: Annotated[int, msgspec.Meta(ge=2, le=MAX_PREVIEW_FRAME_COUNT)] = 12
 
 
 class FrameExtractRequest(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
@@ -30,7 +31,7 @@ class FrameExtractRequest(msgspec.Struct, kw_only=True, forbid_unknown_fields=Tr
     source_upload_id: UUID | None = None
     timestamps_ms: Annotated[
         list[Annotated[int, msgspec.Meta(ge=0)]],
-        msgspec.Meta(min_length=1, max_length=50),
+        msgspec.Meta(min_length=1, max_length=MAX_EXTRACT_TIMESTAMPS),
     ]
     """Each must be < the source video's duration — checked by the worker
     once it probes the file (see FrameExtractionWorker._run_extract); the

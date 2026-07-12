@@ -177,6 +177,16 @@ interface FrameJobResponse {
 }
 ```
 
+A job may transiently report `status: "failed"` and later `status:
+"completed"` — but only in the narrow worker-death-plus-recovery window: the
+stale-sweep worker fails any `frame_extraction_jobs` row stuck `running`
+longer than `frame_extract_stale_running_seconds` (default 1800s) on the
+assumption its worker died; if that worker was merely slow and finishes
+afterward, its unconditional completion flips the row back. This only ever
+goes `failed → completed`, never the reverse — the sweep's `WHERE status =
+'running'` guard prevents it from touching an already-completed job. Clients
+should treat `completed` as terminal-authoritative.
+
 ---
 
 ## 3. Polling model
