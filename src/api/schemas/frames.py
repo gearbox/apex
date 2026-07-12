@@ -32,6 +32,9 @@ class FrameExtractRequest(msgspec.Struct, kw_only=True, forbid_unknown_fields=Tr
         list[Annotated[int, msgspec.Meta(ge=0)]],
         msgspec.Meta(min_length=1, max_length=50),
     ]
+    """Each must be < the source video's duration — checked by the worker
+    once it probes the file (see FrameExtractionWorker._run_extract); the
+    upper bound is exclusive, matching the preview strip's timestamps."""
 
 
 # -----------------------------------------------------------------------------

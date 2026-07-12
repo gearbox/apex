@@ -203,21 +203,38 @@ class FrameExtractionWorker(PeriodicWorker):
         self, job: FrameExtractionJob, video_path: Path, duration_ms: int
     ) -> dict[str, object]:
         timestamps: list[int] = job.params["timestamps_ms"]
-        out_of_range = [ts for ts in timestamps if ts < 0 or ts > duration_ms]
-        if out_of_range:
-            raise ValueError(f"Timestamps out of range [0, {duration_ms}]ms: {out_of_range}")
+        if out_of_range := [ts for ts in timestamps if ts < 0 or ts >= duration_ms]:
+            raise ValueError(f"Timestamps out of range [0, {duration_ms})ms: {out_of_range}")
 
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
         frames_out: list[dict[str, object]] = []
+        uploaded_keys: list[str] = []
 
-        async with self._db_manager.session() as session:
-            image_repo = UserImageRepository(session)
-            for ts in timestamps:
-                upload_id = await self._extract_and_save_frame(
-                    job, video_path, ts, image_repo=image_repo, expires_at=expires_at
-                )
-                frames_out.append({"timestamp_ms": ts, "upload_id": str(upload_id)})
-            await session.commit()
+        try:
+            async with self._db_manager.session() as session:
+                image_repo = UserImageRepository(session)
+                for ts in timestamps:
+                    upload_id = await self._extract_and_save_frame(
+                        job,
+                        video_path,
+                        ts,
+                        image_repo=image_repo,
+                        expires_at=expires_at,
+                        uploaded_keys=uploaded_keys,
+                    )
+                    frames_out.append({"timestamp_ms": ts, "upload_id": str(upload_id)})
+                await session.commit()
+        except Exception:
+            if uploaded_keys:
+                try:
+                    await self._storage.delete_many(uploaded_keys)
+                except Exception:
+                    logger.warning(
+                        "frames.extract_orphan_cleanup_failed",
+                        job_id=str(job.id),
+                        key_count=len(uploaded_keys),
+                    )
+            raise
 
         return {"frames": frames_out}
 
@@ -229,6 +246,7 @@ class FrameExtractionWorker(PeriodicWorker):
         *,
         image_repo: UserImageRepository,
         expires_at: datetime,
+        uploaded_keys: list[str],
     ) -> UUID:
         png_bytes = await frame_ffmpeg.extract_frame(
             video_path,
@@ -245,6 +263,7 @@ class FrameExtractionWorker(PeriodicWorker):
             content_type=MediaFormat.PNG.content_type,
             storage_type=StorageType.UPLOAD,
         )
+        uploaded_keys.append(upload_result.storage_key)
 
         dims = await read_dimensions(png_bytes)
 
@@ -277,6 +296,7 @@ class FrameExtractionWorker(PeriodicWorker):
                     content_type=generated.result.content_type,
                     storage_type=StorageType.UPLOAD,
                 )
+                uploaded_keys.append(thumb_result.storage_key)
                 await image_repo.create(
                     id=thumb_result.id,
                     user_id=job.user_id,

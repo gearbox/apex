@@ -123,7 +123,10 @@ is validated at the request layer (`422`-style `400` on a malformed body via
 the standard msgspec validation path); whether each timestamp is actually
 within the video's duration is validated **after** the job starts running
 (the worker has to probe the file anyway) — see §4, a job can fail with a
-precise out-of-range error.
+precise out-of-range error. The valid range is `[0, duration_ms)` — the
+upper bound is **exclusive**, matching the preview strip's timestamps
+(`compute_uniform_timestamps` never returns the exact end either), since an
+end-of-stream seek frequently decodes nothing.
 
 **Response:** same `FrameJobCreatedResponse` shape as `/preview`, `status:
 "queued"`.

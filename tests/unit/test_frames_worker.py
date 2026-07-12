@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.api.services.frames.ffmpeg import FfprobeError, VideoProbe
+from src.api.services.frames.ffmpeg import FfmpegError, FfprobeError, VideoProbe
 from src.api.services.frames.worker import FrameExtractionWorker
 from src.core.enums import FrameExtractionKind
 
@@ -258,6 +258,109 @@ class TestWorkerExtract:
         job_repo.mark_failed.assert_awaited_once()
         error_message = job_repo.mark_failed.call_args.kwargs["error"]
         assert "out of range" in error_message.lower()
+
+    async def test_worker_rejects_timestamp_equal_to_duration(self) -> None:
+        """Upper bound is exclusive — ts == duration_ms fails fast rather than
+        letting an end-of-stream seek decode nothing inside ffmpeg."""
+        job = _make_job(
+            kind=FrameExtractionKind.EXTRACT.value,
+            params={"timestamps_ms": [10_000]},
+            source_output_id=uuid4(),
+            source_upload_id=None,
+        )
+        output = MagicMock(storage_key="users/u/outputs/j/vid.mp4", content_type="video/mp4")
+
+        sessions = [_make_session(), _make_session(), _make_session()]
+        worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
+        r2_storage.download = AsyncMock(return_value=b"fake video bytes")
+
+        job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
+        job_repo.claim_next = AsyncMock(return_value=job)
+        job_repo.mark_failed = AsyncMock()
+        output_repo = AsyncMock()
+        output_repo.get = AsyncMock(return_value=output)
+
+        probe_result = VideoProbe(duration_ms=10_000, width=640, height=480, codec="h264")
+
+        with (
+            patch.multiple(
+                "src.api.services.frames.worker",
+                FrameExtractionJobRepository=MagicMock(return_value=job_repo),
+                OutputRepository=MagicMock(return_value=output_repo),
+            ),
+            patch(
+                "src.api.services.frames.worker.frame_ffmpeg.probe",
+                AsyncMock(return_value=probe_result),
+            ),
+        ):
+            await worker.run_once()
+
+        job_repo.mark_failed.assert_awaited_once()
+        error_message = job_repo.mark_failed.call_args.kwargs["error"]
+        assert "out of range" in error_message.lower()
+        assert "[0, 10000)ms" in error_message
+
+    async def test_worker_cleans_up_uploaded_frames_on_partial_failure(self) -> None:
+        """A failure on frame 2 must not orphan frame 1's already-uploaded R2
+        object — it's deleted best-effort and the real error still surfaces."""
+        job = _make_job(
+            kind=FrameExtractionKind.EXTRACT.value,
+            params={"timestamps_ms": [1000, 2000]},
+            source_output_id=uuid4(),
+            source_upload_id=None,
+        )
+        output = MagicMock(storage_key="users/u/outputs/j/vid.mp4", content_type="video/mp4")
+
+        sessions = [_make_session(), _make_session(), _make_session(), _make_session()]
+        worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
+        r2_storage.download = AsyncMock(return_value=b"fake video bytes")
+        upload_result = MagicMock(id=uuid4(), storage_key="users/u/uploads/frame1.png")
+        r2_storage.upload = AsyncMock(return_value=upload_result)
+        r2_storage.delete_many = AsyncMock(return_value=1)
+
+        job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
+        job_repo.claim_next = AsyncMock(return_value=job)
+        job_repo.mark_failed = AsyncMock()
+        output_repo = AsyncMock()
+        output_repo.get = AsyncMock(return_value=output)
+        image_repo = AsyncMock()
+        image_repo.create = AsyncMock(return_value=MagicMock(id=upload_result.id))
+
+        probe_result = VideoProbe(duration_ms=10_000, width=640, height=480, codec="h264")
+
+        with (
+            patch.multiple(
+                "src.api.services.frames.worker",
+                FrameExtractionJobRepository=MagicMock(return_value=job_repo),
+                OutputRepository=MagicMock(return_value=output_repo),
+                UserImageRepository=MagicMock(return_value=image_repo),
+            ),
+            patch(
+                "src.api.services.frames.worker.frame_ffmpeg.probe",
+                AsyncMock(return_value=probe_result),
+            ),
+            patch(
+                "src.api.services.frames.worker.frame_ffmpeg.extract_frame",
+                AsyncMock(
+                    side_effect=[b"\x89PNGfakepng", FfmpegError("decoder crashed on frame 2")]
+                ),
+            ),
+            patch(
+                "src.api.services.frames.worker.read_dimensions",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "src.api.services.frames.worker.make_image_thumbnails",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            await worker.run_once()
+
+        r2_storage.delete_many.assert_awaited_once_with([upload_result.storage_key])
+        job_repo.mark_failed.assert_awaited_once()
+        assert "decoder crashed on frame 2" in job_repo.mark_failed.call_args.kwargs["error"]
 
 
 class TestWorkerFailureHandling:

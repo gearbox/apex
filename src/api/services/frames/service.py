@@ -261,11 +261,12 @@ class FrameExtractionService:
         entries: list[dict[str, Any]] = result["frames"]
         upload_ids = [UUID(entry["upload_id"]) for entry in entries]
         derivatives_map = await self._image_repo.batch_derivatives(upload_ids)
+        uploads_map = await self._image_repo.get_many(upload_ids, user_id=user_id)
 
         frames: list[ExtractedFrame] = []
         for entry in entries:
             upload_id = UUID(entry["upload_id"])
-            upload = await self._image_repo.get(upload_id, user_id=user_id)
+            upload = uploads_map.get(upload_id)
             if upload is None:
                 # Extracted frame was deleted (retention sweep, manual delete)
                 # since the job completed — drop it from the response rather

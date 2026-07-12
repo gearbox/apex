@@ -122,6 +122,31 @@ class UserImageRepository(BaseRepository[UserImage]):
         """
         return await self._get_with_optional_owner(image_id, user_id=user_id)
 
+    async def get_many(
+        self,
+        ids: Sequence[UUID],
+        *,
+        user_id: UUID,
+    ) -> dict[UUID, UserImage]:
+        """Batch-fetch user images by ID, ownership-scoped.
+
+        Args:
+            ids: Image IDs to look up.
+            user_id: Owner — rows of other users are excluded.
+
+        Returns:
+            Mapping from id to UserImage for rows that exist and are
+            owned by ``user_id``. Missing/foreign ids are simply absent
+            from the result (caller decides how to handle misses).
+        """
+        if not ids:
+            return {}
+
+        result = await self._session.execute(
+            select(UserImage).where(UserImage.id.in_(ids), UserImage.user_id == user_id)
+        )
+        return {image.id: image for image in result.scalars().all()}
+
     async def get_by_key(self, storage_key: str) -> UserImage | None:
         """Get a user image by storage key.
 

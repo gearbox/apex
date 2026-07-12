@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import select, update
 
@@ -14,6 +14,7 @@ from src.db.repositories.base import BaseRepository
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from sqlalchemy import CursorResult
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -122,17 +123,20 @@ class FrameExtractionJobRepository(BaseRepository[FrameExtractionJob]):
         Returns:
             Number of rows updated.
         """
-        result = await self._session.execute(
-            update(FrameExtractionJob)
-            .where(
-                FrameExtractionJob.status == FrameExtractionStatus.RUNNING.value,
-                FrameExtractionJob.started_at < cutoff,
-            )
-            .values(
-                status=FrameExtractionStatus.FAILED.value,
-                error="worker died mid-execution",
-                finished_at=datetime.now(UTC),
-            )
-            .execution_options(synchronize_session=False)
+        result = cast(
+            "CursorResult[tuple[()]]",
+            await self._session.execute(
+                update(FrameExtractionJob)
+                .where(
+                    FrameExtractionJob.status == FrameExtractionStatus.RUNNING.value,
+                    FrameExtractionJob.started_at < cutoff,
+                )
+                .values(
+                    status=FrameExtractionStatus.FAILED.value,
+                    error="worker died mid-execution",
+                    finished_at=datetime.now(UTC),
+                )
+                .execution_options(synchronize_session=False)
+            ),
         )
         return result.rowcount or 0

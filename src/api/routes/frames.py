@@ -132,7 +132,9 @@ class FramesController(Controller):
         Exactly one of ``source_output_id`` / ``source_upload_id`` must be
         provided. Each saved frame becomes a ``UserImage`` upload with
         lineage, immediately usable for i2i/i2v and downloadable via the
-        content proxy.
+        content proxy. Each timestamp must be within ``[0, duration_ms)`` —
+        the upper bound is exclusive, since an end-of-stream seek frequently
+        decodes nothing.
         """
         if (data.source_output_id is None) == (data.source_upload_id is None):
             return _invalid_source_response()
