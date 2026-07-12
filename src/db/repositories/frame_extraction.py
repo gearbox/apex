@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from src.core.enums import FrameExtractionStatus
 from src.db.models.frame_extraction import FrameExtractionJob
@@ -111,3 +111,28 @@ class FrameExtractionJobRepository(BaseRepository[FrameExtractionJob]):
         job.error = error
         job.finished_at = datetime.now(UTC)
         await self._session.flush()
+
+    async def fail_stale_running(self, *, cutoff: datetime) -> int:
+        """Mark running jobs started before ``cutoff`` as failed.
+
+        Catches jobs orphaned by a worker process that died between the
+        claim-commit and the completion-commit — otherwise invisible to
+        ``claim_next`` and polled by the user forever.
+
+        Returns:
+            Number of rows updated.
+        """
+        result = await self._session.execute(
+            update(FrameExtractionJob)
+            .where(
+                FrameExtractionJob.status == FrameExtractionStatus.RUNNING.value,
+                FrameExtractionJob.started_at < cutoff,
+            )
+            .values(
+                status=FrameExtractionStatus.FAILED.value,
+                error="worker died mid-execution",
+                finished_at=datetime.now(UTC),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount or 0

@@ -8,6 +8,7 @@ ffmpeg is never invoked from unit tests).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -51,6 +52,7 @@ def _make_settings(**overrides: object) -> MagicMock:
     settings.frame_extract_ffmpeg_timeout_seconds = 30
     settings.frame_preview_max_edge = 512
     settings.retention_days = 7
+    settings.frame_extract_stale_running_seconds = 300
     for k, v in overrides.items():
         setattr(settings, k, v)
     return settings
@@ -75,7 +77,7 @@ def _make_worker(
     sessions: list[AsyncMock] | None = None,
     settings: MagicMock | None = None,
 ) -> tuple[FrameExtractionWorker, MagicMock, AsyncMock]:
-    sessions = sessions or [_make_session() for _ in range(3)]
+    sessions = sessions or [_make_session() for _ in range(4)]
     db_manager = _make_db_manager(sessions)
     r2_storage = AsyncMock()
     worker = FrameExtractionWorker(
@@ -91,11 +93,12 @@ class TestWorkerClaimsAndCompletesPreview:
         job = _make_job(kind=FrameExtractionKind.PREVIEW.value, params={"frame_count": 2})
         output = MagicMock(storage_key="users/u/uploads/vid.mp4", content_type="video/mp4")
 
-        sessions = [_make_session(), _make_session()]
+        sessions = [_make_session(), _make_session(), _make_session()]
         worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
         r2_storage.download = AsyncMock(return_value=b"fake video bytes")
 
         job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
         job_repo.claim_next = AsyncMock(return_value=job)
         job_repo.mark_completed = AsyncMock()
         output_repo = AsyncMock()
@@ -135,10 +138,11 @@ class TestWorkerClaimsAndCompletesPreview:
         assert all("key" in f for f in result["frames"])
 
     async def test_worker_noop_when_nothing_queued(self) -> None:
-        sessions = [_make_session()]
+        sessions = [_make_session(), _make_session()]
         worker, _db_manager, _r2 = _make_worker(sessions=sessions)
 
         job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
         job_repo.claim_next = AsyncMock(return_value=None)
 
         with patch.multiple(
@@ -160,13 +164,14 @@ class TestWorkerExtract:
         )
         output = MagicMock(storage_key="users/u/outputs/j/vid.mp4", content_type="video/mp4")
 
-        sessions = [_make_session(), _make_session(), _make_session()]
+        sessions = [_make_session(), _make_session(), _make_session(), _make_session()]
         worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
         r2_storage.download = AsyncMock(return_value=b"fake video bytes")
         upload_result = MagicMock(id=uuid4(), storage_key="users/u/uploads/frame.png")
         r2_storage.upload = AsyncMock(return_value=upload_result)
 
         job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
         job_repo.claim_next = AsyncMock(return_value=job)
         job_repo.mark_completed = AsyncMock()
         output_repo = AsyncMock()
@@ -224,11 +229,12 @@ class TestWorkerExtract:
         )
         output = MagicMock(storage_key="users/u/outputs/j/vid.mp4", content_type="video/mp4")
 
-        sessions = [_make_session(), _make_session()]
+        sessions = [_make_session(), _make_session(), _make_session()]
         worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
         r2_storage.download = AsyncMock(return_value=b"fake video bytes")
 
         job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
         job_repo.claim_next = AsyncMock(return_value=job)
         job_repo.mark_failed = AsyncMock()
         output_repo = AsyncMock()
@@ -259,11 +265,12 @@ class TestWorkerFailureHandling:
         job = _make_job()
         output = MagicMock(storage_key="users/u/outputs/j/vid.mp4", content_type="video/mp4")
 
-        sessions = [_make_session(), _make_session()]
+        sessions = [_make_session(), _make_session(), _make_session()]
         worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
         r2_storage.download = AsyncMock(return_value=b"not a real video")
 
         job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
         job_repo.claim_next = AsyncMock(return_value=job)
         job_repo.mark_failed = AsyncMock()
         output_repo = AsyncMock()
@@ -288,11 +295,12 @@ class TestWorkerFailureHandling:
     async def test_worker_survives_job_failure_and_continues_loop(self) -> None:
         """run_once() must never raise — a failed job is recorded, not propagated."""
         job = _make_job()
-        sessions = [_make_session(), _make_session()]
+        sessions = [_make_session(), _make_session(), _make_session()]
         worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
         r2_storage.download = AsyncMock(side_effect=RuntimeError("R2 unreachable"))
 
         job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
         job_repo.claim_next = AsyncMock(return_value=job)
         job_repo.mark_failed = AsyncMock()
         output_repo = AsyncMock()
@@ -312,10 +320,11 @@ class TestWorkerFailureHandling:
 
     async def test_worker_rejects_non_video_source_defensively(self) -> None:
         job = _make_job()
-        sessions = [_make_session(), _make_session()]
+        sessions = [_make_session(), _make_session(), _make_session()]
         worker, _db_manager, r2_storage = _make_worker(sessions=sessions)
 
         job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
         job_repo.claim_next = AsyncMock(return_value=job)
         job_repo.mark_failed = AsyncMock()
         output_repo = AsyncMock()
@@ -333,3 +342,43 @@ class TestWorkerFailureHandling:
         job_repo.mark_failed.assert_awaited_once()
         assert "not a video" in job_repo.mark_failed.call_args.kwargs["error"]
         r2_storage.download.assert_not_awaited()
+
+
+class TestWorkerStaleRunningSweep:
+    async def test_sweep_runs_before_claim_in_its_own_transaction(self) -> None:
+        """The sweep must commit in a separate, prior transaction from the claim."""
+        sessions = [_make_session(), _make_session()]
+        worker, _db_manager, _r2 = _make_worker(sessions=sessions)
+
+        job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=2)
+        job_repo.claim_next = AsyncMock(return_value=None)
+
+        with patch.multiple(
+            "src.api.services.frames.worker",
+            FrameExtractionJobRepository=MagicMock(return_value=job_repo),
+        ):
+            await worker.run_once()
+
+        job_repo.fail_stale_running.assert_awaited_once()
+        cutoff = job_repo.fail_stale_running.call_args.kwargs["cutoff"]
+        assert cutoff < datetime.now(UTC)
+        # Sweep session committed before the claim session was ever touched.
+        sessions[0].commit.assert_awaited_once()
+        job_repo.claim_next.assert_awaited_once()
+
+    async def test_no_stale_jobs_does_not_short_circuit_claim(self) -> None:
+        sessions = [_make_session(), _make_session()]
+        worker, _db_manager, _r2 = _make_worker(sessions=sessions)
+
+        job_repo = AsyncMock()
+        job_repo.fail_stale_running = AsyncMock(return_value=0)
+        job_repo.claim_next = AsyncMock(return_value=None)
+
+        with patch.multiple(
+            "src.api.services.frames.worker",
+            FrameExtractionJobRepository=MagicMock(return_value=job_repo),
+        ):
+            await worker.run_once()
+
+        job_repo.claim_next.assert_awaited_once()

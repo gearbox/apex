@@ -886,6 +886,16 @@ class Settings(BaseSettings):
             "out-of-band, not this application."
         ),
     )
+    frame_extract_stale_running_seconds: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        description=(
+            "A frame_extraction_jobs row stuck in 'running' longer than this is "
+            "assumed to be from a worker that died mid-execution and is failed by "
+            "the next sweep. Default is 10x the default ffmpeg timeout."
+        ),
+    )
 
     # Email
     resend_api_key: str = Field(

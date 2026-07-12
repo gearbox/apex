@@ -80,9 +80,20 @@ class FrameExtractionWorker(PeriodicWorker):
         self._ffmpeg_timeout = settings.frame_extract_ffmpeg_timeout_seconds
         self._preview_max_edge = settings.frame_preview_max_edge
         self._retention_days = settings.retention_days
+        self._stale_running_seconds = settings.frame_extract_stale_running_seconds
 
     async def run_once(self) -> None:
-        """Claim (and commit) one job, then execute it outside any DB transaction."""
+        """Fail stale running jobs, then claim (and commit) one job, then
+        execute it outside any DB transaction."""
+        async with self._db_manager.session() as session:
+            cutoff = datetime.now(UTC) - timedelta(seconds=self._stale_running_seconds)
+            stale_count = await FrameExtractionJobRepository(session).fail_stale_running(
+                cutoff=cutoff
+            )
+            await session.commit()
+            if stale_count > 0:
+                logger.warning("frames.stale_jobs_failed", count=stale_count)
+
         async with self._db_manager.session() as session:
             job = await FrameExtractionJobRepository(session).claim_next()
             if job is None:
