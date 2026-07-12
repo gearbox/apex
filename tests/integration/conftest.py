@@ -24,13 +24,16 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from src.core.enums import FrameExtractionKind, FrameExtractionStatus
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 from src.db.models.billing import Organization, TokenAccount
+from src.db.models.frame_extraction import FrameExtractionJob
 from src.db.models.gpu_session import GpuSession
 from src.db.models.storage import GenerationJob, UserImage
 from src.db.models.user import User
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.billing import BillingRepository
+from src.db.repositories.frame_extraction import FrameExtractionJobRepository
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
@@ -64,6 +67,7 @@ TokenAccountFactory = Callable[..., Coroutine[Any, Any, TokenAccount]]
 JobFactory = Callable[..., Coroutine[Any, Any, GenerationJob]]
 GpuSessionFactory = Callable[..., Coroutine[Any, Any, GpuSession]]
 UserImageFactory = Callable[..., Coroutine[Any, Any, UserImage]]
+FrameExtractionJobFactory = Callable[..., Coroutine[Any, Any, FrameExtractionJob]]
 VerificationTokenFactory = Callable[..., Coroutine[Any, Any, tuple[EmailVerificationToken, str]]]
 ResetTokenFactory = Callable[..., Coroutine[Any, Any, tuple[PasswordResetToken, str]]]
 
@@ -318,6 +322,12 @@ async def user_image_repo(db_session: AsyncSession) -> UserImageRepository:
 
 
 @pytest_asyncio.fixture
+async def frame_extraction_job_repo(db_session: AsyncSession) -> FrameExtractionJobRepository:
+    """FrameExtractionJobRepository bound to the test session."""
+    return FrameExtractionJobRepository(db_session)
+
+
+@pytest_asyncio.fixture
 async def auth_token_repo(db_session: AsyncSession) -> AuthTokenRepository:
     """AuthTokenRepository bound to the test session."""
     return AuthTokenRepository(db_session)
@@ -544,6 +554,56 @@ async def make_user_image(db_session: AsyncSession, make_user: UserFactory) -> U
         db_session.add(image)
         await db_session.flush()
         return image
+
+    return _factory
+
+
+@pytest_asyncio.fixture
+async def make_frame_extraction_job(
+    db_session: AsyncSession,
+    make_user: UserFactory,
+    make_user_image: UserImageFactory,
+) -> FrameExtractionJobFactory:
+    """Factory fixture: create a FrameExtractionJob row (upload source by
+    default) and flush it. Pass an explicit ``created_at``/``started_at`` to
+    control ordering/staleness — the model's server_default only applies when
+    the column is omitted from the INSERT."""
+
+    async def _factory(
+        *,
+        user: User | None = None,
+        source_upload_id: UUID | None = None,
+        source_output_id: UUID | None = None,
+        kind: str = FrameExtractionKind.PREVIEW.value,
+        status: str = FrameExtractionStatus.QUEUED.value,
+        params: dict[str, Any] | None = None,
+        job_id: UUID | None = None,
+        product_id: str = "vex",
+        created_at: datetime | None = None,
+        started_at: datetime | None = None,
+    ) -> FrameExtractionJob:
+        if user is None:
+            user = await make_user(email=f"frameuser-{uuid4().hex[:8]}@example.com")
+        if source_upload_id is None and source_output_id is None:
+            upload = await make_user_image(user=user, content_type="video/mp4")
+            source_upload_id = upload.id
+        job = FrameExtractionJob(
+            id=job_id or uuid4(),
+            user_id=user.id,
+            product_id=product_id,
+            kind=kind,
+            status=status,
+            source_output_id=source_output_id,
+            source_upload_id=source_upload_id,
+            params=params if params is not None else {"frame_count": 12},
+        )
+        if created_at is not None:
+            job.created_at = created_at
+        if started_at is not None:
+            job.started_at = started_at
+        db_session.add(job)
+        await db_session.flush()
+        return job
 
     return _factory
 
