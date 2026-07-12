@@ -96,7 +96,6 @@ class FrameExtractionService:
             source_output_id=source_id if source_kind == "output" else None,
             source_upload_id=source_id if source_kind == "upload" else None,
         )
-        await self._session.commit()
         logger.info(
             "frames.preview_job_created",
             job_id=str(job.id),
@@ -128,7 +127,6 @@ class FrameExtractionService:
             source_output_id=source_id if source_kind == "output" else None,
             source_upload_id=source_id if source_kind == "upload" else None,
         )
-        await self._session.commit()
         logger.info(
             "frames.extract_job_created",
             job_id=str(job.id),
