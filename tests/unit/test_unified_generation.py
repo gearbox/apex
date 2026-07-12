@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -969,6 +969,173 @@ class TestGenerationServiceGenerate:
 
         output_repo.get.assert_awaited_once_with(source_output_id, user_id=user_id)
         mock_provider.submit.assert_not_awaited()
+
+
+class TestGenerationServiceSlidingRetention:
+    """Sliding upload retention: using an upload as input resets its expiry."""
+
+    async def test_generate_bumps_input_image_expiry(self) -> None:
+        input_image_id = uuid4()
+        user_id = uuid4()
+        mock_provider = _make_mock_provider()
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=AsyncMock(
+                resolve_account_for_user=AsyncMock(return_value=MagicMock(id=uuid4())),
+                assert_sufficient_balance=AsyncMock(),
+            ),
+            pricing_service=AsyncMock(quote=AsyncMock(return_value=50)),
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+            retention_days=7,
+        )
+        request = UnifiedGenerationRequest(
+            prompt="Edit this",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            input_image_id=input_image_id,
+        )
+
+        image_repo = MagicMock()
+        image_repo.touch_expiry = AsyncMock(return_value=True)
+        before = datetime.now(UTC)
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=image_repo,
+            ),
+        ):
+            await service.generate(
+                request,
+                user_id=user_id,
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+        after = datetime.now(UTC)
+
+        image_repo.touch_expiry.assert_awaited_once()
+        call_kwargs = image_repo.touch_expiry.await_args.kwargs
+        assert image_repo.touch_expiry.await_args.args[0] == input_image_id
+        assert call_kwargs["user_id"] == user_id
+        expected_min = before + timedelta(days=7) - timedelta(seconds=5)
+        expected_max = after + timedelta(days=7) + timedelta(seconds=5)
+        assert expected_min <= call_kwargs["expires_at"] <= expected_max
+        # Called before provider.submit
+        mock_provider.submit.assert_awaited_once()
+
+    async def test_generate_unowned_input_image_rejected(self) -> None:
+        input_image_id = uuid4()
+        mock_provider = _make_mock_provider()
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=AsyncMock(
+                resolve_account_for_user=AsyncMock(return_value=MagicMock(id=uuid4())),
+                assert_sufficient_balance=AsyncMock(),
+            ),
+            pricing_service=AsyncMock(quote=AsyncMock(return_value=50)),
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+        )
+        request = UnifiedGenerationRequest(
+            prompt="Edit this",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            input_image_id=input_image_id,
+        )
+
+        image_repo = MagicMock()
+        image_repo.touch_expiry = AsyncMock(return_value=False)
+        session = AsyncMock()
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=image_repo,
+            ),
+            pytest.raises(ValueError, match="Input image not found"),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        mock_provider.submit.assert_not_awaited()
+        session.commit.assert_not_awaited()
+
+    async def test_generate_source_output_does_not_touch_uploads(self) -> None:
+        source_output_id = uuid4()
+        user_id = uuid4()
+        source_output = MagicMock()
+        source_output.job_id = uuid4()
+        output_repo = MagicMock()
+        output_repo.get = AsyncMock(return_value=source_output)
+        mock_provider = _make_mock_provider()
+        service = _make_service(providers={Provider.GROK: mock_provider})
+        request = UnifiedGenerationRequest(
+            prompt="Remix",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_output_id=source_output_id,
+        )
+
+        image_repo = MagicMock()
+        image_repo.touch_expiry = AsyncMock(return_value=True)
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch("src.db.repositories.output.OutputRepository", return_value=output_repo),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=image_repo,
+            ),
+        ):
+            await service.generate(
+                request,
+                user_id=user_id,
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        image_repo.touch_expiry.assert_not_awaited()
+
+    async def test_generate_t2i_does_not_touch_uploads(self) -> None:
+        mock_provider = _make_mock_provider()
+        service = _make_service(providers={Provider.GROK: mock_provider})
+        request = UnifiedGenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+
+        image_repo = MagicMock()
+        image_repo.touch_expiry = AsyncMock(return_value=True)
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=image_repo,
+            ),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        image_repo.touch_expiry.assert_not_awaited()
 
 
 class TestGenerationServiceRateLimit:
