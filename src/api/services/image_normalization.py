@@ -207,6 +207,25 @@ def _normalize_sync(
     )
 
 
+def _read_image_dimensions_sync(data: bytes) -> tuple[int, int]:
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            # Header-only size read — same as _check_pixel_cap, no full decode.
+            return img.size
+    except Exception as e:
+        raise ImageNormalizationError("File is not a decodable image") from e
+
+
+async def read_image_dimensions(data: bytes) -> tuple[int, int]:
+    """Read (width, height) from image bytes without a full pixel decode.
+
+    Used to derive an i2i output canvas from the source image's aspect when
+    the caller omits an explicit aspect_ratio. Raises
+    ``ImageNormalizationError`` if the bytes cannot be decoded by Pillow.
+    """
+    return await asyncio.to_thread(_read_image_dimensions_sync, data)
+
+
 async def normalize_image(data: bytes, *, max_megapixels: float) -> NormalizedImage:
     """Normalize arbitrary image bytes to a storable format.
 

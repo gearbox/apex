@@ -1,6 +1,8 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-12 — Added **Video Frame Extraction** (new §9b): `POST /v1/frames/preview` and `POST /v1/frames/extract` run as free, non-billed background jobs (no `Idempotency-Key`) against either a `GenerationOutput` video or a user-uploaded video; poll `GET /v1/frames/jobs/{id}` until `completed`/`failed`. Preview frames are presigned R2 URLs generated fresh per poll (never cache beyond the current session — see §9b); extracted frames become ordinary uploads (standard `MediaObject`, stable `/v1/content/uploads/{id}` URLs) with new source-video lineage. Also: `POST /v1/storage/upload` (§8) now accepts video (`video/mp4`, `video/webm`, `video/quicktime`, ≤20MB, ffprobe-validated server-side — the declared `Content-Type` is never trusted); the Content Proxy (§9) inline-safe `Content-Type` allowlist grew to match. New enums `FrameExtractionKind`/`FrameExtractionStatus` (§17); `MediaFormat` gained `webm`/`mov`. Frontend must regenerate types (`gen:api`) — see `docs/contracts/video-frame-extraction.md` for the full contract._
+> _Last updated: 2026-07-13 — **Breaking change:** fixed i2i aspect-ratio distortion. `aspect_ratio` on `POST /v1/generate` (§4) is now **optional** — `None`/omitted means "provider default" for t2i (1:1 image, 16:9 video) and "follow the source image's aspect" for i2i. For i2i, an explicit `aspect_ratio` is now capability-gated per model: `GET /v1/providers` `ImageConstraints` (§5) gained `edit_aspect_ratios` — an empty list means the model cannot reshape on edit (it would silently stretch the source) and any explicit `aspect_ratio` on an i2i request for that model now returns `400 validation_error`; `grok-imagine-image` currently has an empty list, `aisha-image` supports the full ratio list. t2i requests are now also validated against the model's `aspect_ratios` list (previously unenforced — any value silently passed through). `aspect_ratio: null` on job/gallery responses (§6, §10) now additionally means "generation followed the source image's aspect" for i2i jobs, alongside its prior meanings. Frontend must regenerate types (`gen:api`) and stop hardcoding an `aspect_ratio` default on i2i requests for non-reshaping models._
+>
+> _Prior (2026-07-12): Added **Video Frame Extraction** (new §9b): `POST /v1/frames/preview` and `POST /v1/frames/extract` run as free, non-billed background jobs (no `Idempotency-Key`) against either a `GenerationOutput` video or a user-uploaded video; poll `GET /v1/frames/jobs/{id}` until `completed`/`failed`. Preview frames are presigned R2 URLs generated fresh per poll (never cache beyond the current session — see §9b); extracted frames become ordinary uploads (standard `MediaObject`, stable `/v1/content/uploads/{id}` URLs) with new source-video lineage. Also: `POST /v1/storage/upload` (§8) now accepts video (`video/mp4`, `video/webm`, `video/quicktime`, ≤20MB, ffprobe-validated server-side — the declared `Content-Type` is never trusted); the Content Proxy (§9) inline-safe `Content-Type` allowlist grew to match. New enums `FrameExtractionKind`/`FrameExtractionStatus` (§17); `MediaFormat` gained `webm`/`mov`. Frontend must regenerate types (`gen:api`) — see `docs/contracts/video-frame-extraction.md` for the full contract._
 >
 > _Prior (2026-07-12): Gallery items now expose `expires_at` (§10): `GalleryGridItem.expires_at` (sourced from the cover output) and `GalleryOutputItem.expires_at` (per-output), matching the existing `ImageListItem`/`OutputListItem` contract in Storage (§8). Frontend can now render a "Delete in N days/hours/minutes" badge directly from the gallery grid/detail responses without a separate Storage lookup. Also: content retention is now actively enforced by a periodic sweeper — see the new retention note in §8. Frontend must regenerate types (`gen:api`)._
 >
@@ -13,7 +15,7 @@
 > **Source:** `gearbox/apex` repository
 > **Framework:** Litestar 2.5+ / Python 3.13
 > **Schema:** `GET /docs/openapi.json` from running backend (Litestar OpenAPIConfig has `path="/docs"`)
-> **Last synced:** 2026-07-12 — `master` @ `d9121e90e51a79eaa1a69ad78091b6571e2bc7b2` (+ pending gallery `expires_at` change, + pending video frame extraction change)
+> **Last synced:** 2026-07-13 — `master` @ `20bec2ec71a432f8cdb1325da4f816fe38641a7a` (+ pending i2i aspect-ratio capability fix, v0.26.0)
 >
 > _2026-07-08: **Breaking change** — replaced fixed token packages with tiered free-amount top-up (§11). `POST /v1/billing/topup/{stripe,nowpayments}` now take `{ amount_usd: int }` instead of `{ package_id: string }`; `GET /v1/billing/packages` is removed, replaced by `GET /v1/billing/topup/options`. Frontend must regenerate types (`gen:api`) and update the top-up UI to a preset-amounts + free-input flow (separate prompt)._
 >
@@ -328,7 +330,12 @@ Request: {
   }>,                             // mutually exclusive with top-level input_image_id/source_output_id
   input_video_url?: string,       // required for v2v (public URL)
   negative_prompt?: string (≤2048 chars),  // applied by Aisha; stored but ignored by Grok
-  aspect_ratio?: AspectRatio (default "1:1"),
+  aspect_ratio?: AspectRatio | null,  // omit/null ⇒ provider default for t2i (1:1 image, 16:9 video);
+                                      //   for i2i, omit/null ⇒ output follows the source image's aspect.
+                                      //   For i2i, an explicit value is only accepted when the model's
+                                      //   edit_aspect_ratios (see GET /v1/providers, §5) includes it —
+                                      //   otherwise 400 validation_error (the model would silently stretch
+                                      //   the source to fit instead of recomposing it).
   n?: int (1–10, default 1),      // number of outputs; clamped to model max (see ModelType.max_images)
   name?: string,                  // auto-generated from prompt[:50] if omitted
 
@@ -379,6 +386,14 @@ Note:     source_output_id enables "remix from gallery" — the backend resolves
           is not set, the request returns 403 age_verification_required and no job is created / no tokens
           are charged. Capture verification first via PATCH /v1/users/me (§3). The gate is per-model and
           authoritative regardless of the product's age_gate policy.
+
+          Aspect-ratio capability gate: t2i requests validate aspect_ratio against the model's
+          aspect_ratios list (GET /v1/providers). i2i requests validate against the model's
+          edit_aspect_ratios list instead — a separate, usually smaller/empty capability, since
+          reshaping the *output* canvas of an edit is a different (and not universally supported)
+          operation from generating a fresh canvas from scratch. An unsupported value on either path
+          returns 400 validation_error with an actionable message (e.g. "omit aspect_ratio to preserve
+          the source aspect"); no job is created and no tokens are charged.
 ```
 
 ### JobCreatedResponse Schema
@@ -432,7 +447,7 @@ ModelInfo: {
   max_images: int,                   // max outputs per request
   max_prompt_length: int,
   supports_negative_prompt: bool,
-  aspect_ratios: string[],           // e.g. ["1:1", "16:9"]
+  aspect_ratios: string[],           // e.g. ["1:1", "16:9"] — t2i only; see ImageConstraints.edit_aspect_ratios for i2i
   requires_age_verification: bool,   // true ⇒ user must be age-verified (PATCH /v1/users/me) before
                                      //   generating; enforced at POST /v1/generate. Collect the 18+
                                      //   confirmation before starting a (billable) GPU session.
@@ -453,8 +468,15 @@ ImageConstraints: {
   supported_tiers: string[] | null,  // image quality tiers, e.g. ["draft","standard","high","ultra"]
                                       // null for models with fixed sizing (e.g. Grok)
   default_tier: string | null,       // default quality tier; null for fixed-sizing models
-  tier_megapixels: { [tier: string]: number } | null  // target megapixel budget per tier
+  tier_megapixels: { [tier: string]: number } | null,  // target megapixel budget per tier
                                       // actual W×H depends on model + aspect ratio
+  edit_aspect_ratios: string[]       // aspect ratios this model can reshape TO during image editing
+                                      // (i2i). Empty array ⇒ the model cannot reshape on edit — clients
+                                      // must omit aspect_ratio on i2i requests for this model, and the
+                                      // output follows the source image's own aspect. e.g. grok-imagine-image
+                                      // → [] (accepts the param on edits but stretches instead of
+                                      // recomposing); aisha-image → full AspectRatio list (recomposes
+                                      // natively onto the requested canvas).
 }
 
 VideoConstraints: {
@@ -565,7 +587,8 @@ interface UnifiedJobResponse {
   generation_type: GenerationType;
   prompt: string;
   negative_prompt: string | null;
-  aspect_ratio: string | null;
+  aspect_ratio: string | null;  // null ⇒ i2i generation that followed the source image's aspect
+                                 // (no explicit aspect_ratio was requested/capability-approved)
   token_cost: number | null;
   created_at: string;       // ISO datetime
   started_at: string | null;
@@ -1152,7 +1175,7 @@ interface GalleryGridItem {
   output_count: number;     // non-thumbnail outputs in this group
   generation_type: GenerationType;
   model: string | null;
-  aspect_ratio: string | null; // e.g. "16:9"
+  aspect_ratio: string | null; // e.g. "16:9"; null ⇒ i2i job that followed the source image's aspect
   prompt_snippet: string;   // first 100 chars of the prompt
   created_at: string;       // ISO datetime
   expires_at: string;       // ISO datetime — sourced from the cover output; all outputs in a
@@ -1176,7 +1199,7 @@ interface GalleryGroupDetail {
   model: string | null;
   provider: string;
   generation_type: GenerationType;
-  aspect_ratio: string | null;
+  aspect_ratio: string | null;  // null ⇒ i2i job that followed the source image's aspect
   token_cost: number | null;
   created_at: string;
   completed_at: string | null;
@@ -2270,6 +2293,10 @@ Per-user readiness of an `on_demand` model. Surfaced as `ModelInfo.session_state
 ### AspectRatio
 
 Values: `"1:1"`, `"16:9"`, `"9:16"`, `"4:3"`, `"3:4"`, `"2:3"`, `"3:2"`
+
+> `aspect_ratio` on `POST /v1/generate` (§4) is optional. Omitting it means "provider default" for
+> t2i and "follow the source image's aspect" for i2i. For i2i, an explicit value is only accepted for
+> models whose `edit_aspect_ratios` (`GET /v1/providers`, §5) includes it — see §4 for the full gate.
 
 ### VideoResolution
 

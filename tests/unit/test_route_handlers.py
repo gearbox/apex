@@ -1193,6 +1193,53 @@ class TestProvidersRouteHandlers:
 
         assert result.user_context is None
 
+    async def test_providers_endpoint_exposes_edit_aspect_ratios(self) -> None:
+        from src.api.routes.providers import ProvidersController
+        from src.core.enums import AspectRatio
+
+        session = AsyncMock()
+        grok_record = MagicMock()
+        grok_record.model_key = "grok-imagine-image"
+        grok_record.name = "Grok Imagine"
+        grok_record.description = "Grok image model"
+        grok_record.is_enabled = True
+
+        aisha_record = MagicMock()
+        aisha_record.model_key = "aisha-image"
+        aisha_record.name = "Aisha Image"
+        aisha_record.description = "Aisha image model"
+        aisha_record.is_enabled = True
+
+        generation_service = MagicMock()
+        generation_service.configured_providers = frozenset()
+
+        with patch("src.api.routes.providers.GenerationModelRepository") as repo_cls:
+            repo = MagicMock()
+            repo.list_enabled_for_product = AsyncMock(return_value=[grok_record, aisha_record])
+            repo_cls.return_value = repo
+
+            product_config = MagicMock()
+            product_config.is_model_allowed.return_value = True
+
+            result = await ProvidersController.list_providers.fn(  # type: ignore[attr-defined]
+                MagicMock(),
+                session=session,
+                generation_service=generation_service,
+                current_user_id=None,
+                product_config=product_config,
+                product_id="vex",
+            )
+
+        grok_provider = next(p for p in result.providers if p.provider == "grok")
+        grok_model = next(m for m in grok_provider.models if m.model_key == "grok-imagine-image")
+        assert grok_model.image is not None
+        assert grok_model.image.edit_aspect_ratios == []
+
+        aisha_provider = next(p for p in result.providers if p.provider == "aisha")
+        aisha_model = next(m for m in aisha_provider.models if m.model_key == "aisha-image")
+        assert aisha_model.image is not None
+        assert set(aisha_model.image.edit_aspect_ratios) == {ar.value for ar in AspectRatio}
+
 
 # ---------------------------------------------------------------------------
 # AuthController (auth.py)

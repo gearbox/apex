@@ -147,6 +147,43 @@ class TestExplicitOverride:
         assert dims.height <= 768
 
 
+class TestRawFractionAspectRatio:
+    """resolve_dimensions also accepts a raw (w, h) fraction, e.g. an i2i
+    source image's exact aspect, in addition to an AspectRatio enum member."""
+
+    def test_resolve_dimensions_accepts_raw_fraction(self) -> None:
+        dims = resolve_dimensions(
+            aspect_ratio=(1080, 1920),
+            max_megapixels=2.0,
+            latent_multiple=16,
+            max_edge=2048,
+            tier=Resolution.STANDARD,
+        )
+        # Portrait fraction (9:16-equivalent) -> taller than wide.
+        assert dims.height > dims.width
+        assert dims.width % 16 == 0
+        assert dims.height % 16 == 0
+        assert dims.megapixels <= 2.0 + 0.01
+
+    def test_raw_fraction_matches_equivalent_enum_ratio(self) -> None:
+        """(9, 16) should resolve to the same dims as the RATIO_9_16 enum."""
+        from_enum = resolve_dimensions(
+            aspect_ratio=AspectRatio.RATIO_9_16,
+            max_megapixels=2.0,
+            latent_multiple=16,
+            max_edge=2048,
+            tier=Resolution.STANDARD,
+        )
+        from_fraction = resolve_dimensions(
+            aspect_ratio=(9, 16),
+            max_megapixels=2.0,
+            latent_multiple=16,
+            max_edge=2048,
+            tier=Resolution.STANDARD,
+        )
+        assert from_enum == from_fraction
+
+
 class TestResolvedDimensionsProperty:
     def test_megapixels_property(self) -> None:
         d = ResolvedDimensions(width=1000, height=1000)

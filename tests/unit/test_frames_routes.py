@@ -226,10 +226,14 @@ class TestRequestCapsMatchCoreConstants:
 
     def test_frame_count_bound_matches_max_preview_frame_count(self) -> None:
         info = msgspec.inspect.type_info(FramePreviewRequest)
+        assert isinstance(info, msgspec.inspect.StructType)
         frame_count = next(f for f in info.fields if f.name == "frame_count")
+        assert isinstance(frame_count.type, msgspec.inspect.IntType)
         assert frame_count.type.le == MAX_PREVIEW_FRAME_COUNT
 
     def test_timestamps_ms_bound_matches_max_extract_timestamps(self) -> None:
         info = msgspec.inspect.type_info(FrameExtractRequest)
+        assert isinstance(info, msgspec.inspect.StructType)
         timestamps_ms = next(f for f in info.fields if f.name == "timestamps_ms")
+        assert isinstance(timestamps_ms.type, msgspec.inspect.ListType)
         assert timestamps_ms.type.max_length == MAX_EXTRACT_TIMESTAMPS

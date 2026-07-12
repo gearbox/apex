@@ -89,8 +89,11 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     negative_prompt: NegativePromptStr | None = None
     """Negative prompt. Applied by Aisha provider; stored but ignored by Grok."""
 
-    aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1
-    """Aspect ratio for the generated content."""
+    aspect_ratio: AspectRatio | None = None
+    """Requested output aspect ratio. None = provider default for t2i (1:1 image,
+    16:9 video); for i2i, None means the output follows the source image's aspect.
+    For i2i, non-None values are only accepted when the model's edit_aspect_ratios
+    capability includes the value (see /v1/providers)."""
 
     n: ImageCount = 1
     """Number of outputs to generate (image models only). Max varies by model (see ModelType.max_concurrent_outputs)."""

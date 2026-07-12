@@ -36,6 +36,7 @@ from src.core.generation_config import (
     GenerationConstraints,
     GenerationDefaults,
 )
+from src.core.resolution import resolve_dimensions
 
 
 def _make_request() -> UnifiedGenerationRequest:
@@ -1028,6 +1029,127 @@ class TestAishaProviderI2IBridge:
 
         billing.check_and_reserve.assert_not_called()
         MockJobRepo.return_value.create.assert_not_called()
+
+
+class TestAishaProviderI2IAspectDerivation:
+    """C5: when aspect_ratio is omitted on i2i, the output canvas follows the
+    source image's exact aspect instead of always defaulting to 1:1."""
+
+    async def _submit_with_source_image(
+        self,
+        *,
+        source_bytes: bytes,
+        aspect_ratio: AspectRatio | None,
+    ) -> MagicMock:
+        """Runs provider.submit() with a real source image and returns the
+        MagicMock workflow so callers can inspect apply_parameters' request."""
+        workflow = MagicMock()
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=source_bytes)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        user_image_row = MagicMock()
+        user_image_row.storage_key = "users/abc/uploads/source.png"
+        user_image_row.original_filename = "source.png"
+
+        request = UnifiedGenerationRequest(
+            prompt="a cat in a hat",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=aspect_ratio,
+            n=1,
+            input_image_id=uuid4(),
+        )
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-1"})
+            MockComfyClient.return_value = mock_client
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
+
+            await provider.submit(
+                request,
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        return workflow
+
+    async def test_aisha_i2i_derives_canvas_from_source_dimensions_when_aspect_unset(
+        self,
+    ) -> None:
+        """A 16:9 source with no requested aspect_ratio must resolve to a
+        16:9-ish canvas, not the 1:1 t2i default."""
+        workflow = await self._submit_with_source_image(
+            source_bytes=_png_bytes(size=(1600, 900)),
+            aspect_ratio=None,
+        )
+
+        expected = resolve_dimensions(
+            aspect_ratio=(16, 9),
+            max_megapixels=1.05,
+            latent_multiple=16,
+            max_edge=1536,
+            tier=Resolution.STANDARD,
+        )
+        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        assert legacy_request.width == expected.width
+        assert legacy_request.height == expected.height
+        # Sanity: landscape in, landscape out — not the 1:1 t2i fallback.
+        assert legacy_request.width > legacy_request.height
+
+    async def test_aisha_i2i_uses_requested_aspect_when_set(self) -> None:
+        """An explicit aspect_ratio wins over the source image's own aspect."""
+        workflow = await self._submit_with_source_image(
+            source_bytes=_png_bytes(size=(1600, 900)),  # 16:9 source
+            aspect_ratio=AspectRatio.RATIO_9_16,  # explicit portrait request
+        )
+
+        expected = resolve_dimensions(
+            aspect_ratio=AspectRatio.RATIO_9_16,
+            max_megapixels=1.05,
+            latent_multiple=16,
+            max_edge=1536,
+            tier=Resolution.STANDARD,
+        )
+        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        assert legacy_request.width == expected.width
+        assert legacy_request.height == expected.height
+        assert legacy_request.height > legacy_request.width
 
 
 class TestSanitizeFilename:

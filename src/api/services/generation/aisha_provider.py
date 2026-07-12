@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
@@ -22,9 +23,10 @@ from src.api.services.image_normalization import (
     ImageNormalizationError,
     ImageTooLargeError,
     ensure_comfyui_input,
+    read_image_dimensions,
     sniff_format,
 )
-from src.core.enums import JobStatus, ModelType, Provider, Sampler, Scheduler
+from src.core.enums import AspectRatio, JobStatus, ModelType, Provider, Sampler, Scheduler
 from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
@@ -310,6 +312,23 @@ class AishaGenerationProvider:
         # as a 5xx. Either way: no reservation made, nothing to refund.
         i2i_input = await self._resolve_input_image(request, session)
 
+        # Aspect-ratio resolution: explicit request value wins; otherwise for
+        # i2i the output canvas follows the source image's exact aspect
+        # (Qwen-Image-Edit recomposes onto whatever latent we request); for
+        # t2i we fall back to the provider default, at parity with Grok.
+        effective_aspect: AspectRatio | tuple[int, int]
+        if request.aspect_ratio is not None:
+            effective_aspect = request.aspect_ratio
+        elif i2i_input is not None:
+            try:
+                src_w, src_h = await read_image_dimensions(i2i_input[0])
+            except ImageNormalizationError as e:
+                raise ValueError("Input image is not decodable") from e
+            gcd = math.gcd(src_w, src_h)
+            effective_aspect = (src_w // gcd, src_h // gcd)
+        else:
+            effective_aspect = AspectRatio.RATIO_1_1
+
         # Resolve per-model generation config from bundle.yaml (before billing)
         gen_cfg: BundleGenerationConfig = self._bundle_index.get_generation_config(
             gpu_session.bundle_name, gpu_session.bundle_version
@@ -319,7 +338,7 @@ class AishaGenerationProvider:
         tier = request.image_resolution or gen_cfg.defaults.resolution
         has_explicit_dims = request.width is not None and request.height is not None
         dims = resolve_dimensions(
-            aspect_ratio=request.aspect_ratio,
+            aspect_ratio=effective_aspect,
             max_megapixels=gen_cfg.constraints.max_megapixels,
             latent_multiple=gen_cfg.constraints.latent_multiple,
             max_edge=gen_cfg.constraints.max_edge,
@@ -336,7 +355,7 @@ class AishaGenerationProvider:
                     requested_mp=requested_mp,
                     resolved_mp=round(dims.megapixels, 3),
                     max_megapixels=gen_cfg.constraints.max_megapixels,
-                    aspect_ratio=request.aspect_ratio.value,
+                    aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else "source",
                 )
 
         # Resolve + validate sampler params (raises ValueError → 4xx, no reservation made)
@@ -375,7 +394,7 @@ class AishaGenerationProvider:
             negative_prompt=request.negative_prompt or DEFAULT_NEGATIVE_PROMPT,
             height=dims.height,
             width=dims.width,
-            aspect_ratio=request.aspect_ratio,
+            aspect_ratio=request.aspect_ratio or AspectRatio.RATIO_1_1,
             model_type=request.model,
             generation_type=request.generation_type,
             max_images=request.n,
@@ -397,7 +416,7 @@ class AishaGenerationProvider:
             status=JobStatus.PENDING,
             provider=Provider.AISHA,
             model=request.model.value,
-            aspect_ratio=request.aspect_ratio.value,
+            aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else None,
             product_id=product_id,
             source_job_id=source_job_id,
             source_output_id=source_output_id,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.enums import ModelType
+from src.core.enums import AspectRatio, ModelType
 from src.core.model_registry import MODEL_METADATA, get_model_meta
 
 
@@ -69,6 +69,25 @@ class TestGetModelMeta:
     def test_raises_keyerror_for_unknown(self) -> None:
         with pytest.raises(KeyError):
             get_model_meta("not-a-model")  # type: ignore[arg-type]
+
+
+class TestEditAspectRatiosCapability:
+    """Registry invariants for the i2i reshape-on-edit capability (edit_aspect_ratios)."""
+
+    def test_grok_imagine_image_declares_no_edit_reshape_capability(self) -> None:
+        meta = get_model_meta(ModelType.GROK_IMAGINE_IMAGE)
+        assert meta.image is not None
+        assert meta.image.edit_aspect_ratios == ()
+
+    def test_grok_2_image_declares_no_edit_reshape_capability(self) -> None:
+        meta = get_model_meta(ModelType.GROK_2_IMAGE)
+        assert meta.image is not None
+        assert meta.image.edit_aspect_ratios == ()
+
+    def test_aisha_image_declares_full_edit_reshape_capability(self) -> None:
+        meta = get_model_meta(ModelType.AISHA_IMAGE)
+        assert meta.image is not None
+        assert len(meta.image.edit_aspect_ratios) == len(tuple(AspectRatio.__members__.values()))
 
 
 class TestRateLimitConfig:

@@ -102,6 +102,7 @@ def _build_model_info(
                     if meta.image.supported_tiers is not None
                     else None
                 ),
+                edit_aspect_ratios=[ar.value for ar in meta.image.edit_aspect_ratios],
             )
             if meta.image is not None
             else None
