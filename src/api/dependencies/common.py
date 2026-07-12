@@ -836,6 +836,7 @@ async def init_services(settings: Settings) -> JWTService:
         pricing_service=get_pricing_service(),
         rate_limiter=model_rate_limiter,
         event_bus=_services.event_bus,
+        retention_days=settings.retention_days,
     )
     logger.info(
         "generation_service.initialized",
