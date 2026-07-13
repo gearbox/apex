@@ -598,7 +598,11 @@ async def init_services(settings: Settings) -> JWTService:
             retention_days=settings.retention_days,
         )
         _services.r2_storage = R2StorageService(r2_settings)
-        logger.info("r2.initialized", bucket=settings.r2_bucket_name)
+        logger.info(
+            "r2.initialized",
+            bucket=settings.r2_bucket_name,
+            retention_days=settings.retention_days,
+        )
     else:
         logger.warning("r2.not_configured")
 
@@ -616,7 +620,12 @@ async def init_services(settings: Settings) -> JWTService:
             interval=settings.content_cleanup_interval_seconds,
         )
         await _services.content_retention_worker.start()
-        logger.info("content_retention_worker.started")
+        logger.info(
+            "content_retention_worker.started",
+            retention_days=settings.retention_days,
+            interval=settings.content_cleanup_interval_seconds,
+            batch_size=settings.content_cleanup_batch_size,
+        )
 
     # Initialize and start the frame extraction worker (requires R2; not
     # gated behind any provider config flag — core capability).
