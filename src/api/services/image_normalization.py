@@ -207,21 +207,32 @@ def _normalize_sync(
     )
 
 
+_EXIF_ORIENTATION_TAG = 0x0112
+_EXIF_TRANSPOSED_ORIENTATIONS = frozenset({5, 6, 7, 8})  # 90°/270° variants
+
+
 def _read_image_dimensions_sync(data: bytes) -> tuple[int, int]:
     try:
         with Image.open(io.BytesIO(data)) as img:
-            # Header-only size read — same as _check_pixel_cap, no full decode.
-            return img.size
+            # Header-only reads — neither .size nor .getexif() decodes pixels.
+            width, height = img.size
+            orientation = img.getexif().get(_EXIF_ORIENTATION_TAG, 1)
     except Exception as e:
         raise ImageNormalizationError("File is not a decodable image") from e
+    if orientation in _EXIF_TRANSPOSED_ORIENTATIONS:
+        return height, width
+    return width, height
 
 
 async def read_image_dimensions(data: bytes) -> tuple[int, int]:
-    """Read (width, height) from image bytes without a full pixel decode.
+    """Read (width, height) as displayed from image bytes, without a full pixel decode.
 
-    Used to derive an i2i output canvas from the source image's aspect when
-    the caller omits an explicit aspect_ratio. Raises
-    ``ImageNormalizationError`` if the bytes cannot be decoded by Pillow.
+    EXIF orientation (tag 0x0112) is applied to the raw header dimensions, so
+    the result matches what ComfyUI's loader and the user's gallery render —
+    not necessarily the raw encoded pixel grid. Used to derive an i2i output
+    canvas from the source image's aspect when the caller omits an explicit
+    aspect_ratio. Raises ``ImageNormalizationError`` if the bytes cannot be
+    decoded by Pillow.
     """
     return await asyncio.to_thread(_read_image_dimensions_sync, data)
 

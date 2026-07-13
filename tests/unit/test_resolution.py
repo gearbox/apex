@@ -184,6 +184,33 @@ class TestRawFractionAspectRatio:
         assert from_enum == from_fraction
 
 
+class TestFractionPositivityGuard:
+    """Non-positive (w, h) fraction components must raise ValueError, not
+
+    propagate into deep math errors (ZeroDivisionError / nonsense dims).
+    """
+
+    def test_resolve_dimensions_rejects_zero_fraction_component(self) -> None:
+        with pytest.raises(ValueError, match="positive components"):
+            resolve_dimensions(
+                aspect_ratio=(0, 9),
+                max_megapixels=2.0,
+                latent_multiple=16,
+                max_edge=2048,
+                tier=Resolution.STANDARD,
+            )
+
+    def test_resolve_dimensions_rejects_negative_fraction_component(self) -> None:
+        with pytest.raises(ValueError, match="positive components"):
+            resolve_dimensions(
+                aspect_ratio=(-16, 9),
+                max_megapixels=2.0,
+                latent_multiple=16,
+                max_edge=2048,
+                tier=Resolution.STANDARD,
+            )
+
+
 class TestResolvedDimensionsProperty:
     def test_megapixels_property(self) -> None:
         d = ResolvedDimensions(width=1000, height=1000)

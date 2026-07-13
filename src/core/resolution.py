@@ -79,11 +79,19 @@ def resolve_dimensions(
     ``aspect_ratio`` also accepts a raw ``(w, h)`` fraction (e.g. a source
     image's exact aspect) in addition to an ``AspectRatio`` enum member —
     math is scale-invariant so callers need not reduce it, though doing so
-    via ``math.gcd`` is cosmetic best practice.
+    via ``math.gcd`` is cosmetic best practice. Tuple components must both
+    be positive; a zero or negative component raises ``ValueError``.
 
     All outputs are snapped to `latent_multiple` and clamped so neither edge
     exceeds `max_edge` and total area does not exceed `max_megapixels`.
     """
+    if isinstance(aspect_ratio, tuple):
+        rw_raw, rh_raw = aspect_ratio
+        if rw_raw <= 0 or rh_raw <= 0:
+            raise ValueError(
+                f"aspect_ratio fraction must have positive components, got {aspect_ratio!r}"
+            )
+
     if explicit_width is not None and explicit_height is not None:
         w: float = explicit_width
         h: float = explicit_height

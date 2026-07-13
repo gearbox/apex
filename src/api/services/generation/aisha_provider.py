@@ -41,6 +41,13 @@ _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _MAX_SAFE_FILENAME_LEN = 64
 
 
+def _aspect_log_value(effective_aspect: AspectRatio | tuple[int, int]) -> str:
+    if isinstance(effective_aspect, AspectRatio):
+        return effective_aspect.value
+    w, h = effective_aspect
+    return f"{w}:{h}"
+
+
 def _sanitize_filename(name: str | None) -> str:
     """Reduce ``name`` to a safe-for-filesystem leaf name.
 
@@ -271,6 +278,27 @@ class AishaGenerationProvider:
         filename = f"{stem}.{normalized.format.value}"
         return normalized.data, filename
 
+    @staticmethod
+    async def _resolve_effective_aspect_ratio(
+        request: UnifiedGenerationRequest,
+        i2i_input: tuple[bytes, str] | None,
+    ) -> AspectRatio | tuple[int, int]:
+        """Explicit request value wins; otherwise for i2i the output canvas
+        follows the source image's exact aspect (Qwen-Image-Edit recomposes
+        onto whatever latent we request); for t2i we fall back to the
+        provider default, at parity with Grok.
+        """
+        if request.aspect_ratio is not None:
+            return request.aspect_ratio
+        if i2i_input is not None:
+            try:
+                src_w, src_h = await read_image_dimensions(i2i_input[0])
+            except ImageNormalizationError as e:
+                raise ValueError("Input image is not decodable") from e
+            gcd = math.gcd(src_w, src_h)
+            return (src_w // gcd, src_h // gcd)
+        return AspectRatio.RATIO_1_1
+
     async def submit(
         self,
         request: UnifiedGenerationRequest,
@@ -312,22 +340,9 @@ class AishaGenerationProvider:
         # as a 5xx. Either way: no reservation made, nothing to refund.
         i2i_input = await self._resolve_input_image(request, session)
 
-        # Aspect-ratio resolution: explicit request value wins; otherwise for
-        # i2i the output canvas follows the source image's exact aspect
-        # (Qwen-Image-Edit recomposes onto whatever latent we request); for
-        # t2i we fall back to the provider default, at parity with Grok.
-        effective_aspect: AspectRatio | tuple[int, int]
-        if request.aspect_ratio is not None:
-            effective_aspect = request.aspect_ratio
-        elif i2i_input is not None:
-            try:
-                src_w, src_h = await read_image_dimensions(i2i_input[0])
-            except ImageNormalizationError as e:
-                raise ValueError("Input image is not decodable") from e
-            gcd = math.gcd(src_w, src_h)
-            effective_aspect = (src_w // gcd, src_h // gcd)
-        else:
-            effective_aspect = AspectRatio.RATIO_1_1
+        # Aspect-ratio resolution must stay before check_and_reserve — undecodable
+        # input must surface as a no-reservation 4xx.
+        effective_aspect = await self._resolve_effective_aspect_ratio(request, i2i_input)
 
         # Resolve per-model generation config from bundle.yaml (before billing)
         gen_cfg: BundleGenerationConfig = self._bundle_index.get_generation_config(
@@ -355,7 +370,7 @@ class AishaGenerationProvider:
                     requested_mp=requested_mp,
                     resolved_mp=round(dims.megapixels, 3),
                     max_megapixels=gen_cfg.constraints.max_megapixels,
-                    aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else "source",
+                    aspect_ratio=_aspect_log_value(effective_aspect),
                 )
 
         # Resolve + validate sampler params (raises ValueError → 4xx, no reservation made)
@@ -394,7 +409,7 @@ class AishaGenerationProvider:
             negative_prompt=request.negative_prompt or DEFAULT_NEGATIVE_PROMPT,
             height=dims.height,
             width=dims.width,
-            aspect_ratio=request.aspect_ratio or AspectRatio.RATIO_1_1,
+            aspect_ratio=request.aspect_ratio,
             model_type=request.model,
             generation_type=request.generation_type,
             max_images=request.n,

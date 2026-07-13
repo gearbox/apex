@@ -54,7 +54,7 @@ class TestGenerationRequest:
 
         assert request.prompt == "A cat"
         assert request.height == 1024
-        assert request.aspect_ratio == AspectRatio.RATIO_1_1
+        assert request.aspect_ratio is None
         assert request.model_type == ModelType.AISHA_IMAGE
         assert request.max_images == 1
         assert request.steps == 12
@@ -93,6 +93,27 @@ class TestGenerationRequest:
             aspect_ratio=AspectRatio.RATIO_16_9,
         )
         assert request.get_calculated_width() == 1920
+
+    def test_legacy_generation_request_aspect_ratio_defaults_none(self) -> None:
+        """aspect_ratio must default to None, never a fabricated value."""
+        request = GenerationRequest(prompt="test")
+        assert request.aspect_ratio is None
+
+    def test_get_calculated_width_uses_aspect_fallback_when_set(self) -> None:
+        """Width falls back to aspect_ratio.calculate_width when width is unset."""
+        request = GenerationRequest(
+            prompt="test",
+            height=1080,
+            aspect_ratio=AspectRatio.RATIO_16_9,
+        )
+        assert request.width is None
+        assert request.get_calculated_width() == 1920
+
+    def test_get_calculated_width_raises_without_width_and_aspect(self) -> None:
+        """Neither width nor aspect_ratio set must fail loud, not fabricate a value."""
+        request = GenerationRequest(prompt="test")
+        with pytest.raises(ValueError, match="neither width nor aspect_ratio"):
+            request.get_calculated_width()
 
     def test_validation_prompt_required(self) -> None:
         """Test prompt is required."""

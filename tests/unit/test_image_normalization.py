@@ -17,6 +17,7 @@ from src.api.services.image_normalization import (
     _convert_to_png_sync,
     ensure_comfyui_input,
     normalize_image,
+    read_image_dimensions,
     sniff_format,
 )
 from src.core.enums import MediaFormat
@@ -36,6 +37,16 @@ def _jpeg(size: tuple[int, int] = (16, 12)) -> bytes:
     im = Image.new("RGB", size, (0, 255, 0))
     buf = io.BytesIO()
     im.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _jpeg_with_orientation(orientation: int, size: tuple[int, int] = (20, 10)) -> bytes:
+    """Build a JPEG with an EXIF Orientation tag, header dims == ``size``."""
+    im = Image.new("RGB", size, (0, 255, 0))
+    exif = im.getexif()
+    exif[0x0112] = orientation
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", exif=exif)
     return buf.getvalue()
 
 
@@ -334,3 +345,41 @@ class TestPixelCap:
         with pytest.raises(ImageNormalizationError) as exc_info:
             await normalize_image(_GARBAGE, max_megapixels=100.0)
         assert not isinstance(exc_info.value, ImageTooLargeError)
+
+
+# ---------------------------------------------------------------------------
+# C-R1 — EXIF-orientation-aware dimension reads
+# ---------------------------------------------------------------------------
+
+
+class TestReadImageDimensions:
+    async def test_read_image_dimensions_swaps_for_exif_orientation_6(self) -> None:
+        data = _jpeg_with_orientation(6, size=(400, 300))
+        assert await read_image_dimensions(data) == (300, 400)
+
+    @pytest.mark.parametrize("orientation", [5, 7, 8])
+    async def test_read_image_dimensions_swaps_for_other_transposed_orientations(
+        self, orientation: int
+    ) -> None:
+        data = _jpeg_with_orientation(orientation, size=(400, 300))
+        assert await read_image_dimensions(data) == (300, 400)
+
+    async def test_read_image_dimensions_orientation_1_unchanged(self) -> None:
+        data = _jpeg_with_orientation(1, size=(400, 300))
+        assert await read_image_dimensions(data) == (400, 300)
+
+    @pytest.mark.parametrize("orientation", [2, 3, 4])
+    async def test_read_image_dimensions_mirror_rotate_orientations_unchanged(
+        self, orientation: int
+    ) -> None:
+        """Orientations 2-4 mirror/rotate 180 without swapping width/height."""
+        data = _jpeg_with_orientation(orientation, size=(400, 300))
+        assert await read_image_dimensions(data) == (400, 300)
+
+    async def test_read_image_dimensions_no_exif_unchanged(self) -> None:
+        data = _png(size=(16, 12))
+        assert await read_image_dimensions(data) == (16, 12)
+
+    async def test_read_image_dimensions_garbage_raises(self) -> None:
+        with pytest.raises(ImageNormalizationError):
+            await read_image_dimensions(_GARBAGE)
