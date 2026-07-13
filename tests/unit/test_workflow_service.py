@@ -209,6 +209,7 @@ class TestEndToEndAishaImage:
         request = GenerationRequest(
             prompt="A ginger cat on grass",
             generation_type=GenerationType.T2I,
+            aspect_ratio=AspectRatio.RATIO_1_1,
         )
         configured = svc.apply_parameters(workflow=workflow, request=request)
 
@@ -260,7 +261,10 @@ class TestApplyParameters:
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
         original_prompt = workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"]
 
-        svc.apply_parameters(workflow=workflow, request=GenerationRequest(prompt="New prompt"))
+        svc.apply_parameters(
+            workflow=workflow,
+            request=GenerationRequest(prompt="New prompt", aspect_ratio=AspectRatio.RATIO_1_1),
+        )
 
         assert workflow[NodeIDs.POSITIVE_PROMPT]["inputs"]["prompt"] == original_prompt
 
@@ -269,7 +273,11 @@ class TestApplyParameters:
         svc = WorkflowService()
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(prompt="test", generation_type=GenerationType.I2I)
+        request = GenerationRequest(
+            prompt="test",
+            generation_type=GenerationType.I2I,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+        )
         modified = svc.apply_parameters(
             workflow=workflow,
             request=request,
@@ -285,7 +293,11 @@ class TestApplyParameters:
         svc = WorkflowService()
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(prompt="A cat", generation_type=GenerationType.T2I)
+        request = GenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+        )
         modified = svc.apply_parameters(workflow=workflow, request=request)
 
         positive_inputs = modified[NodeIDs.POSITIVE_PROMPT]["inputs"]
@@ -298,7 +310,11 @@ class TestApplyParameters:
         svc = WorkflowService()
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(prompt="Use this", generation_type=GenerationType.I2I)
+        request = GenerationRequest(
+            prompt="Use this",
+            generation_type=GenerationType.I2I,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+        )
         modified = svc.apply_parameters(
             workflow=workflow,
             request=request,
@@ -315,7 +331,11 @@ class TestApplyParameters:
         svc = WorkflowService()
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(prompt="Use this", generation_type=GenerationType.I2I)
+        request = GenerationRequest(
+            prompt="Use this",
+            generation_type=GenerationType.I2I,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+        )
         modified = svc.apply_parameters(
             workflow=workflow,
             request=request,
@@ -410,6 +430,7 @@ class TestApplyParametersFullSamplerInjection:
 
         request = GenerationRequest(
             prompt="test",
+            aspect_ratio=AspectRatio.RATIO_1_1,
             seed=99,
             steps=20,
             cfg=3.5,
@@ -447,7 +468,7 @@ class TestApplyParametersFullSamplerInjection:
         svc = WorkflowService()
         workflow = svc.load_workflow_from_bundle(bundle_root, "260103-19")
 
-        request = GenerationRequest(prompt="test")
+        request = GenerationRequest(prompt="test", aspect_ratio=AspectRatio.RATIO_1_1)
         result = svc.apply_parameters(workflow=workflow, request=request)
         ks = result[NodeIDs.KSAMPLER]["inputs"]
 

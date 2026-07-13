@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -45,7 +46,7 @@ class TestUnifiedGenerationRequestSchema:
         )
         assert req.prompt == "A cat"
         assert req.n == 1
-        assert req.aspect_ratio == AspectRatio.RATIO_1_1
+        assert req.aspect_ratio is None
         assert req.input_image_id is None
 
     def test_i2i_without_image_id_is_valid_at_schema_level(self) -> None:
@@ -208,6 +209,13 @@ class TestUnifiedGenerationRequestSchema:
         encoded = msgspec.json.encode(req)
         decoded = msgspec.json.decode(encoded, type=UnifiedGenerationRequest)
         assert decoded.prompt == "test"
+
+    def test_unified_request_aspect_ratio_optional(self) -> None:
+        req = msgspec.json.decode(
+            b'{"prompt":"x","generation_type":"t2i","model":"aisha-image"}',
+            type=UnifiedGenerationRequest,
+        )
+        assert req.aspect_ratio is None
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +474,101 @@ class TestGenerationServiceValidation:
         )
 
         assert GenerationService._input_image_count(request) == 3
+
+
+class TestGenerationServiceAspectRatioCapability:
+    """Step 1.7: registry-driven aspect-ratio capability validation."""
+
+    async def test_i2i_rejects_aspect_ratio_for_non_reshaping_model(self) -> None:
+        service = _make_service()
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_3_4,
+        )
+        with pytest.raises(ValueError, match="cannot reshape"):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+    async def test_i2i_accepts_aspect_ratio_for_reshaping_model(self) -> None:
+        """aisha-image can reshape on edit — a supported ratio must clear the
+        capability gate and proceed to later validation stages."""
+        service = _make_service(providers={Provider.AISHA: _make_mock_provider()})
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            input_image_id=uuid4(),
+            aspect_ratio=AspectRatio.RATIO_16_9,
+        )
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=None),
+            ),
+            pytest.raises(ModelDisabledError),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+    async def test_i2i_accepts_unset_aspect_ratio_for_any_model(self) -> None:
+        """None always clears the gate, even for a model with no reshape capability."""
+        service = _make_service()
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            input_image_id=uuid4(),
+            aspect_ratio=None,
+        )
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=None),
+            ),
+            pytest.raises(ModelDisabledError),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+    async def test_t2i_rejects_unsupported_aspect_ratio(self) -> None:
+        """No current registry entry restricts t2i aspect ratios, so the
+        capability list is faked via a patched get_model_meta to exercise
+        the previously-missing t2i validation branch."""
+        service = _make_service()
+        request = UnifiedGenerationRequest(
+            prompt="A cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_3_4,
+        )
+        fake_meta = SimpleNamespace(aspect_ratios=(AspectRatio.RATIO_1_1,), image=None)
+        with (
+            patch(
+                "src.api.services.generation.service.get_model_meta",
+                return_value=fake_meta,
+            ),
+            pytest.raises(ValueError, match="does not support aspect ratio"),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
 
 
 def _make_enabled_model_mock() -> MagicMock:

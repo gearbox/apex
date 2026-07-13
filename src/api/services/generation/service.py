@@ -9,6 +9,7 @@ import structlog
 
 from src.api.schemas.jobs import JobCreatedResponse
 from src.core.enums import GenerationType, JobStatus, Provider
+from src.core.model_registry import get_model_meta
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
@@ -131,6 +132,24 @@ class GenerationService:
             if age_user is None or age_user.age_verified_at is None:
                 raise AgeVerificationRequiredError(
                     f"Model '{request.model.value}' requires age verification"
+                )
+
+        # 1.7 Aspect-ratio capability validation (registry-driven)
+        if request.aspect_ratio is not None and not request.generation_type.is_video:
+            meta = get_model_meta(request.model)
+            if request.generation_type == GenerationType.I2I:
+                allowed = meta.image.edit_aspect_ratios if meta.image else ()
+                if request.aspect_ratio not in allowed:
+                    raise ValueError(
+                        f"Model '{request.model.value}' cannot reshape aspect ratio during "
+                        f"image editing; omit aspect_ratio to preserve the source aspect"
+                        + (f" or use one of: {[a.value for a in allowed]}" if allowed else "")
+                    )
+            elif request.aspect_ratio not in meta.aspect_ratios:
+                raise ValueError(
+                    f"Model '{request.model.value}' does not support aspect ratio "
+                    f"'{request.aspect_ratio.value}' for t2i; supported: "
+                    f"{[a.value for a in meta.aspect_ratios]}"
                 )
 
         # 2. Cross-cutting input validation

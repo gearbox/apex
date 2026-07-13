@@ -97,7 +97,7 @@ class _WriteThenFailProvider:
             status=JobStatus.PENDING,
             provider=Provider.AISHA,
             model=request.model.value,
-            aspect_ratio=request.aspect_ratio.value,
+            aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else None,
             product_id=product_id,
             gpu_session_id=self._gpu_session_id,
         )
@@ -159,7 +159,7 @@ class _WriteAndSucceedProvider:
             status=JobStatus.COMPLETED,
             provider=Provider.AISHA,
             model=request.model.value,
-            aspect_ratio=request.aspect_ratio.value,
+            aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else None,
             product_id=product_id,
             gpu_session_id=self._gpu_session_id,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
@@ -22,9 +23,10 @@ from src.api.services.image_normalization import (
     ImageNormalizationError,
     ImageTooLargeError,
     ensure_comfyui_input,
+    read_image_dimensions,
     sniff_format,
 )
-from src.core.enums import JobStatus, ModelType, Provider, Sampler, Scheduler
+from src.core.enums import AspectRatio, JobStatus, ModelType, Provider, Sampler, Scheduler
 from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
@@ -37,6 +39,13 @@ from src.db.repositories.user_image import UserImageRepository
 # components, restrict to a conservative ASCII charset, and cap length.
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _MAX_SAFE_FILENAME_LEN = 64
+
+
+def _aspect_log_value(effective_aspect: AspectRatio | tuple[int, int]) -> str:
+    if isinstance(effective_aspect, AspectRatio):
+        return effective_aspect.value
+    w, h = effective_aspect
+    return f"{w}:{h}"
 
 
 def _sanitize_filename(name: str | None) -> str:
@@ -269,6 +278,27 @@ class AishaGenerationProvider:
         filename = f"{stem}.{normalized.format.value}"
         return normalized.data, filename
 
+    @staticmethod
+    async def _resolve_effective_aspect_ratio(
+        request: UnifiedGenerationRequest,
+        i2i_input: tuple[bytes, str] | None,
+    ) -> AspectRatio | tuple[int, int]:
+        """Explicit request value wins; otherwise for i2i the output canvas
+        follows the source image's exact aspect (Qwen-Image-Edit recomposes
+        onto whatever latent we request); for t2i we fall back to the
+        provider default, at parity with Grok.
+        """
+        if request.aspect_ratio is not None:
+            return request.aspect_ratio
+        if i2i_input is not None:
+            try:
+                src_w, src_h = await read_image_dimensions(i2i_input[0])
+            except ImageNormalizationError as e:
+                raise ValueError("Input image is not decodable") from e
+            gcd = math.gcd(src_w, src_h)
+            return (src_w // gcd, src_h // gcd)
+        return AspectRatio.RATIO_1_1
+
     async def submit(
         self,
         request: UnifiedGenerationRequest,
@@ -310,6 +340,10 @@ class AishaGenerationProvider:
         # as a 5xx. Either way: no reservation made, nothing to refund.
         i2i_input = await self._resolve_input_image(request, session)
 
+        # Aspect-ratio resolution must stay before check_and_reserve — undecodable
+        # input must surface as a no-reservation 4xx.
+        effective_aspect = await self._resolve_effective_aspect_ratio(request, i2i_input)
+
         # Resolve per-model generation config from bundle.yaml (before billing)
         gen_cfg: BundleGenerationConfig = self._bundle_index.get_generation_config(
             gpu_session.bundle_name, gpu_session.bundle_version
@@ -319,7 +353,7 @@ class AishaGenerationProvider:
         tier = request.image_resolution or gen_cfg.defaults.resolution
         has_explicit_dims = request.width is not None and request.height is not None
         dims = resolve_dimensions(
-            aspect_ratio=request.aspect_ratio,
+            aspect_ratio=effective_aspect,
             max_megapixels=gen_cfg.constraints.max_megapixels,
             latent_multiple=gen_cfg.constraints.latent_multiple,
             max_edge=gen_cfg.constraints.max_edge,
@@ -336,7 +370,7 @@ class AishaGenerationProvider:
                     requested_mp=requested_mp,
                     resolved_mp=round(dims.megapixels, 3),
                     max_megapixels=gen_cfg.constraints.max_megapixels,
-                    aspect_ratio=request.aspect_ratio.value,
+                    aspect_ratio=_aspect_log_value(effective_aspect),
                 )
 
         # Resolve + validate sampler params (raises ValueError → 4xx, no reservation made)
@@ -397,7 +431,7 @@ class AishaGenerationProvider:
             status=JobStatus.PENDING,
             provider=Provider.AISHA,
             model=request.model.value,
-            aspect_ratio=request.aspect_ratio.value,
+            aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else None,
             product_id=product_id,
             source_job_id=source_job_id,
             source_output_id=source_output_id,
