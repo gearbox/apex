@@ -144,6 +144,7 @@ async def test_thumbnail_insert_failure_isolated_by_savepoint(
             user_id=user.id,
             job_id=job.id,
             parent_output_id=parent_id,
+            parent_output_index=0,
             source_bytes=b"source-bytes",
             expires_at=expires_at,
             product_id="vex",
