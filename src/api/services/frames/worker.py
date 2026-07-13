@@ -193,7 +193,7 @@ class FrameExtractionWorker(PeriodicWorker):
             await self._storage.put_raw(key, webp_bytes, content_type="image/webp")
             frames_out.append({"index": index, "timestamp_ms": ts, "key": key})
 
-        return {"frames": frames_out}
+        return {"frames": frames_out, "duration_ms": duration_ms}
 
     # -------------------------------------------------------------------
     # Extract

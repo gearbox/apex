@@ -229,7 +229,8 @@ class TestGetJob:
                 "frames": [
                     {"index": 0, "timestamp_ms": 0, "key": "frame-previews/u/j/000.webp"},
                     {"index": 1, "timestamp_ms": 500, "key": "frame-previews/u/j/001.webp"},
-                ]
+                ],
+                "duration_ms": 10_000,
             },
         )
         service._job_repo.get = AsyncMock(return_value=job)
@@ -241,8 +242,26 @@ class TestGetJob:
         assert response.preview is not None
         assert len(response.preview.frames) == 2
         assert response.preview.frames[0].url == "https://signed.example/frame"
+        assert response.preview.duration_ms == 10_000
         assert storage.sign_key.await_count == 2
         storage.sign_key.assert_any_await("frame-previews/u/j/000.webp", expires_in=3600)
+
+    async def test_preview_result_missing_duration_ms_raises(self) -> None:
+        service, storage = _make_service()
+        job = _make_job(
+            status=FrameExtractionStatus.COMPLETED.value,
+            kind=FrameExtractionKind.PREVIEW.value,
+            result={
+                "frames": [
+                    {"index": 0, "timestamp_ms": 0, "key": "frame-previews/u/j/000.webp"},
+                ]
+            },
+        )
+        service._job_repo.get = AsyncMock(return_value=job)
+        storage.sign_key = AsyncMock(return_value="https://signed.example/frame")
+
+        with pytest.raises(KeyError):
+            await service.get_job(uuid4(), job.id)
 
     async def test_raises_not_found_for_missing_job(self) -> None:
         service, _storage = _make_service()

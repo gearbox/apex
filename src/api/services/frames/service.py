@@ -253,7 +253,12 @@ class FrameExtractionService:
             )
             for entry in entries
         ]
-        return FramePreviewResult(frames=frames, expires_in_seconds=self._preview_url_ttl_seconds)
+        duration_ms: int = result["duration_ms"]
+        return FramePreviewResult(
+            frames=frames,
+            expires_in_seconds=self._preview_url_ttl_seconds,
+            duration_ms=duration_ms,
+        )
 
     async def _build_extract_result(
         self, user_id: UUID, result: dict[str, Any]

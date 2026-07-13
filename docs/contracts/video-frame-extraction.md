@@ -128,6 +128,15 @@ upper bound is **exclusive**, matching the preview strip's timestamps
 (`compute_uniform_timestamps` never returns the exact end either), since an
 end-of-stream seek frequently decodes nothing.
 
+**Use the server-probed `duration_ms`, not the browser's, as the bound.**
+`FramePreviewResult.duration_ms` (see `GET /jobs/{job_id}` below) is the
+ffprobe result for the source video — the same value the worker validates
+`timestamps_ms` against. Clamp scrubber selections to `duration_ms - 1`.
+Do **not** use `videoEl.duration` as the bound: the browser's own decoder
+can disagree with ffprobe by a frame or two, and a scrubber pinned to the
+browser's end-of-video can still produce an out-of-range job failure that
+the client cannot reliably prevent.
+
 **Response:** same `FrameJobCreatedResponse` shape as `/preview`, `status:
 "queued"`.
 
@@ -151,6 +160,7 @@ interface PreviewFrame {
 interface FramePreviewResult {
   frames: PreviewFrame[];
   expires_in_seconds: number; // TTL of every url above, as of this response
+  duration_ms: number; // server-probed (ffprobe) duration of the source video
 }
 
 interface ExtractedFrame {

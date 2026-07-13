@@ -135,6 +135,7 @@ class TestWorkerClaimsAndCompletesPreview:
         assert result["frames"][0]["timestamp_ms"] == 0
         assert result["frames"][1]["timestamp_ms"] == 5000
         assert all("key" in f for f in result["frames"])
+        assert result["duration_ms"] == 10_000
         assert r2_storage.put_raw.await_count == 2
 
     async def test_worker_noop_when_nothing_queued(self) -> None:
