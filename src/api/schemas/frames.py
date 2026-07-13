@@ -73,6 +73,9 @@ class FramePreviewResult(msgspec.Struct, kw_only=True):
 
     frames: list[PreviewFrame]
     expires_in_seconds: int
+    duration_ms: int
+    """Server-probed (ffprobe) duration of the source video. Valid extract
+    timestamps are exactly [0, duration_ms) — upper bound exclusive."""
 
 
 class ExtractedFrame(msgspec.Struct, kw_only=True):

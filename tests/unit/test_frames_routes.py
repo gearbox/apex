@@ -213,6 +213,32 @@ class TestGetJobHandler:
         assert response.content.extracted is not None
         assert response.content.extracted.frames[0].media.original.content_type == "image/png"
 
+    async def test_preview_result_contains_duration_ms(self) -> None:
+        from src.api.schemas.frames import FramePreviewResult, PreviewFrame
+
+        job_response = _make_job_response(
+            kind=FrameExtractionKind.PREVIEW.value,
+            status=FrameExtractionStatus.COMPLETED.value,
+            preview=FramePreviewResult(
+                frames=[PreviewFrame(index=0, timestamp_ms=0, url="https://signed.example/frame")],
+                expires_in_seconds=3600,
+                duration_ms=10_000,
+            ),
+        )
+        service = AsyncMock()
+        service.get_job = AsyncMock(return_value=job_response)
+
+        response = await FramesController.get_job.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            frame_extraction_service=service,
+            job_id=job_response.job_id,
+        )
+
+        assert response.status_code == 200
+        assert response.content.preview is not None
+        assert response.content.preview.duration_ms == 10_000
+
 
 class TestRequestCapsMatchCoreConstants:
     """Guards the msgspec bounds against silent drift from the core constants.
@@ -226,10 +252,14 @@ class TestRequestCapsMatchCoreConstants:
 
     def test_frame_count_bound_matches_max_preview_frame_count(self) -> None:
         info = msgspec.inspect.type_info(FramePreviewRequest)
+        assert isinstance(info, msgspec.inspect.StructType)
         frame_count = next(f for f in info.fields if f.name == "frame_count")
+        assert isinstance(frame_count.type, msgspec.inspect.IntType)
         assert frame_count.type.le == MAX_PREVIEW_FRAME_COUNT
 
     def test_timestamps_ms_bound_matches_max_extract_timestamps(self) -> None:
         info = msgspec.inspect.type_info(FrameExtractRequest)
+        assert isinstance(info, msgspec.inspect.StructType)
         timestamps_ms = next(f for f in info.fields if f.name == "timestamps_ms")
+        assert isinstance(timestamps_ms.type, msgspec.inspect.ListType)
         assert timestamps_ms.type.max_length == MAX_EXTRACT_TIMESTAMPS
