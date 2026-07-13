@@ -392,7 +392,7 @@ class GrokJobService:
     async def _store_image_result(
         self,
         *,
-        session: AsyncSession,  # noqa: ARG002
+        session: AsyncSession,
         output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
@@ -461,6 +461,7 @@ class GrokJobService:
         logger.debug("grok.image_output_stored", output_id=str(output_id), job_id=str(job_id))
 
         await self._store_output_thumbnails(
+            session=session,
             output_repo=output_repo,
             user_id=user_id,
             job_id=job_id,
@@ -473,6 +474,7 @@ class GrokJobService:
     async def _store_output_thumbnails(
         self,
         *,
+        session: AsyncSession,
         output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
@@ -505,24 +507,33 @@ class GrokJobService:
                         Body=generated.result.data,
                         ContentType=MediaFormat.WEBP.content_type,
                     )
-                await output_repo.create(
-                    id=thumb_id,
-                    user_id=user_id,
-                    job_id=job_id,
-                    storage_key=thumb_key,
-                    content_type=MediaFormat.WEBP.content_type,
-                    size_bytes=len(generated.result.data),
-                    format=MediaFormat.WEBP.value,
-                    output_index=0,
-                    expires_at=expires_at,
-                    input_image_id=None,
-                    is_thumbnail=True,
-                    parent_output_id=parent_output_id,
-                    thumbnail_max_edge=generated.spec.max_edge,
-                    width=generated.result.width,
-                    height=generated.result.height,
-                    product_id=product_id,
-                )
+                # SAVEPOINT: OutputRepository.create flushes immediately; without the
+                # nested transaction a failed INSERT aborts the whole outer transaction
+                # (parent output row, job state) and poisons the session for the rest
+                # of the request. Rolling back to the savepoint keeps "best-effort"
+                # honest: only this variant is lost.
+                # Ordering note: the R2 put above is outside the savepoint, so a failed
+                # insert orphans one WEBP object in R2 — accepted best-effort trade-off
+                # (same D3 philosophy as the retention sweeper).
+                async with session.begin_nested():
+                    await output_repo.create(
+                        id=thumb_id,
+                        user_id=user_id,
+                        job_id=job_id,
+                        storage_key=thumb_key,
+                        content_type=MediaFormat.WEBP.content_type,
+                        size_bytes=len(generated.result.data),
+                        format=MediaFormat.WEBP.value,
+                        output_index=0,
+                        expires_at=expires_at,
+                        input_image_id=None,
+                        is_thumbnail=True,
+                        parent_output_id=parent_output_id,
+                        thumbnail_max_edge=generated.spec.max_edge,
+                        width=generated.result.width,
+                        height=generated.result.height,
+                        product_id=product_id,
+                    )
                 logger.debug(
                     "grok.thumbnail_stored",
                     thumb_id=str(thumb_id),
@@ -878,7 +889,7 @@ class GrokJobService:
     async def _store_video_result(
         self,
         *,
-        session: AsyncSession,  # noqa: ARG002
+        session: AsyncSession,
         output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
@@ -934,6 +945,7 @@ class GrokJobService:
         frame_bytes = await extract_video_thumbnail(video_data)
         if frame_bytes:
             await self._store_output_thumbnails(
+                session=session,
                 output_repo=output_repo,
                 user_id=user_id,
                 job_id=job_id,

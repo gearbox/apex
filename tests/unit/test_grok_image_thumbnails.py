@@ -30,6 +30,20 @@ def _make_thumbnails() -> list[GeneratedThumbnail]:
     ]
 
 
+def _make_session() -> MagicMock:
+    """Session mock whose begin_nested() behaves like a real SAVEPOINT context manager."""
+    session = MagicMock()
+
+    def _begin_nested() -> AsyncMock:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=None)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    session.begin_nested = MagicMock(side_effect=_begin_nested)
+    return session
+
+
 def _make_service() -> tuple[GrokJobService, MagicMock]:
     storage = MagicMock()
     storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/f.jpg")
@@ -89,7 +103,7 @@ async def test_store_image_result_creates_sm_and_md_thumbnails() -> None:
         ),
     ):
         await svc._store_image_result(
-            session=AsyncMock(),
+            session=_make_session(),
             output_repo=output_repo,  # type: ignore[arg-type]
             user_id=uuid4(),
             job_id=uuid4(),
@@ -117,6 +131,67 @@ async def test_store_image_result_creates_sm_and_md_thumbnails() -> None:
     assert md_create["expires_at"] == parent_create["expires_at"]
 
     assert client_mock.put_object.await_count == 3
+
+
+async def test_store_image_result_db_failure_rolls_back_to_savepoint() -> None:
+    """A failed thumbnail insert must not raise, must be isolated via a SAVEPOINT,
+    and must not prevent the next variant from being attempted."""
+    svc, _client_mock = _make_service()
+
+    output_id = uuid4()
+    sm_thumb_id = uuid4()
+    md_thumb_id = uuid4()
+
+    created: list[dict[str, object]] = []
+
+    async def capture_create(**kwargs: object) -> MagicMock:
+        if kwargs.get("thumbnail_max_edge") == 150:
+            raise RuntimeError("constraint violation")
+        created.append(dict(kwargs))
+        m = MagicMock()
+        m.id = uuid4()
+        return m
+
+    output_repo = MagicMock()
+    output_repo.create = capture_create
+
+    result = GrokImageResult(
+        url="https://cdn.xai.com/image.jpg", base64_data=None, revised_prompt=None
+    )
+
+    session = _make_session()
+
+    with (
+        patch(
+            "src.api.services.grok.job_service.new_id",
+            side_effect=[output_id, sm_thumb_id, md_thumb_id],
+        ),
+        patch(
+            "src.api.services.grok.job_service.make_image_thumbnails",
+            new=AsyncMock(return_value=_make_thumbnails()),
+        ),
+    ):
+        await svc._store_image_result(
+            session=session,
+            output_repo=output_repo,  # type: ignore[arg-type]
+            user_id=uuid4(),
+            job_id=uuid4(),
+            result=result,
+            output_index=0,
+            input_image_id=None,
+            product_id="vex",
+        )
+
+    # Parent output create is untouched by the thumbnail failure; the md variant
+    # (the one after the failing sm variant) is still attempted and succeeds.
+    assert len(created) == 2
+    parent_create, md_create = created
+    assert "is_thumbnail" not in parent_create
+    assert md_create["is_thumbnail"] is True
+    assert md_create["thumbnail_max_edge"] == 512
+
+    # begin_nested was entered for both variants (sm failed, md succeeded).
+    assert session.begin_nested.call_count == 2
 
 
 async def test_store_image_result_thumbnail_failure_does_not_fail_parent() -> None:
@@ -151,7 +226,7 @@ async def test_store_image_result_thumbnail_failure_does_not_fail_parent() -> No
         ),
     ):
         await svc._store_image_result(
-            session=AsyncMock(),
+            session=_make_session(),
             output_repo=output_repo,  # type: ignore[arg-type]
             user_id=uuid4(),
             job_id=uuid4(),
