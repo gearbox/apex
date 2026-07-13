@@ -69,7 +69,15 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
     output_repo = MagicMock()
     output_repo.create = capture_create
 
-    session = AsyncMock()
+    session = MagicMock()
+
+    def _begin_nested() -> AsyncMock:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=None)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    session.begin_nested = MagicMock(side_effect=_begin_nested)
     jpeg_bytes = b"\xff\xd8\xff\xe0jpeg"
 
     with (

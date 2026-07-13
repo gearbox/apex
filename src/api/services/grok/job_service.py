@@ -392,7 +392,7 @@ class GrokJobService:
     async def _store_image_result(
         self,
         *,
-        session: AsyncSession,  # noqa: ARG002
+        session: AsyncSession,
         output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
@@ -459,6 +459,94 @@ class GrokJobService:
         )
 
         logger.debug("grok.image_output_stored", output_id=str(output_id), job_id=str(job_id))
+
+        await self._store_output_thumbnails(
+            session=session,
+            output_repo=output_repo,
+            user_id=user_id,
+            job_id=job_id,
+            parent_output_id=output_id,
+            parent_output_index=output_index,
+            source_bytes=image_data,
+            expires_at=expires_at,
+            product_id=product_id,
+        )
+
+    async def _store_output_thumbnails(
+        self,
+        *,
+        session: AsyncSession,
+        output_repo: OutputRepository,
+        user_id: UUID,
+        job_id: UUID,
+        parent_output_id: UUID,
+        parent_output_index: int,
+        source_bytes: bytes,
+        expires_at: datetime,
+        product_id: str,
+    ) -> None:
+        """Generate and store sm/md WEBP variants for a stored output.
+
+        Best-effort per variant: a thumbnail failure must never fail the parent
+        output (the original is already stored and billed). Mirrors the existing
+        video-path behaviour.
+        """
+        thumbnails = await make_image_thumbnails(source_bytes)
+        for generated in thumbnails:
+            thumb_id = new_id()
+            thumb_key = self._storage.build_storage_key(
+                user_id=user_id,
+                file_id=thumb_id,
+                storage_type=StorageType.OUTPUT,
+                format=MediaFormat.WEBP,
+                job_id=job_id,
+            )
+            try:
+                async with self._storage._get_client() as client:
+                    await client.put_object(
+                        Bucket=self._storage._settings.bucket_name,
+                        Key=thumb_key,
+                        Body=generated.result.data,
+                        ContentType=MediaFormat.WEBP.content_type,
+                    )
+                # SAVEPOINT: OutputRepository.create flushes immediately; without the
+                # nested transaction a failed INSERT aborts the whole outer transaction
+                # (parent output row, job state) and poisons the session for the rest
+                # of the request. Rolling back to the savepoint keeps "best-effort"
+                # honest: only this variant is lost.
+                # Ordering note: the R2 put above is outside the savepoint, so a failed
+                # insert orphans one WEBP object in R2 — accepted best-effort trade-off
+                # (same D3 philosophy as the retention sweeper).
+                async with session.begin_nested():
+                    await output_repo.create(
+                        id=thumb_id,
+                        user_id=user_id,
+                        job_id=job_id,
+                        storage_key=thumb_key,
+                        content_type=MediaFormat.WEBP.content_type,
+                        size_bytes=len(generated.result.data),
+                        format=MediaFormat.WEBP.value,
+                        output_index=parent_output_index,
+                        expires_at=expires_at,
+                        input_image_id=None,
+                        is_thumbnail=True,
+                        parent_output_id=parent_output_id,
+                        thumbnail_max_edge=generated.spec.max_edge,
+                        width=generated.result.width,
+                        height=generated.result.height,
+                        product_id=product_id,
+                    )
+                logger.debug(
+                    "grok.thumbnail_stored",
+                    thumb_id=str(thumb_id),
+                    max_edge=generated.spec.max_edge,
+                )
+            except Exception:
+                logger.warning(
+                    "grok.thumbnail_skipped",
+                    job_id=str(job_id),
+                    max_edge=generated.spec.max_edge,
+                )
 
     # -------------------------------------------------------------------------
     # Video Generation (Async Start)
@@ -803,7 +891,7 @@ class GrokJobService:
     async def _store_video_result(
         self,
         *,
-        session: AsyncSession,  # noqa: ARG002
+        session: AsyncSession,
         output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
@@ -858,54 +946,17 @@ class GrokJobService:
         # Extract first frame and generate sm + md WEBP poster variants
         frame_bytes = await extract_video_thumbnail(video_data)
         if frame_bytes:
-            thumbnails = await make_image_thumbnails(frame_bytes)
-            for generated in thumbnails:
-                thumb_id = new_id()
-                thumb_key = self._storage.build_storage_key(
-                    user_id=user_id,
-                    file_id=thumb_id,
-                    storage_type=StorageType.OUTPUT,
-                    format=MediaFormat.WEBP,
-                    job_id=job_id,
-                )
-                try:
-                    # TODO: migrate to put_raw (see video-frame-extraction review F5)
-                    async with self._storage._get_client() as client:
-                        await client.put_object(
-                            Bucket=self._storage._settings.bucket_name,
-                            Key=thumb_key,
-                            Body=generated.result.data,
-                            ContentType=MediaFormat.WEBP.content_type,
-                        )
-                    await output_repo.create(
-                        id=thumb_id,
-                        user_id=user_id,
-                        job_id=job_id,
-                        storage_key=thumb_key,
-                        content_type=MediaFormat.WEBP.content_type,
-                        size_bytes=len(generated.result.data),
-                        format=MediaFormat.WEBP.value,
-                        output_index=0,
-                        expires_at=expires_at,
-                        input_image_id=None,
-                        is_thumbnail=True,
-                        parent_output_id=output_id,
-                        thumbnail_max_edge=generated.spec.max_edge,
-                        width=generated.result.width,
-                        height=generated.result.height,
-                        product_id=product_id,
-                    )
-                    logger.debug(
-                        "grok.thumbnail_stored",
-                        thumb_id=str(thumb_id),
-                        max_edge=generated.spec.max_edge,
-                    )
-                except Exception:
-                    logger.warning(
-                        "grok.thumbnail_skipped",
-                        job_id=str(job_id),
-                        max_edge=generated.spec.max_edge,
-                    )
+            await self._store_output_thumbnails(
+                session=session,
+                output_repo=output_repo,
+                user_id=user_id,
+                job_id=job_id,
+                parent_output_id=output_id,
+                parent_output_index=0,
+                source_bytes=frame_bytes,
+                expires_at=expires_at,
+                product_id=product_id,
+            )
         else:
             logger.warning("grok.thumbnail_skipped", job_id=str(job_id))
 
