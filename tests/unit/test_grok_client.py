@@ -247,7 +247,7 @@ class TestImageEditing:
                 "https://example.test/source-1.png",
                 "https://example.test/source-2.png",
             ],
-            aspect_ratio="1:1",
+            aspect_ratio=None,
             image_format="url",
         )
 
@@ -263,3 +263,90 @@ class TestImageEditing:
             )
 
         image.sample_batch.assert_not_awaited()
+
+    async def test_edit_image_omits_aspect_ratio_when_none(self) -> None:
+        """Regression test for 03c179e: None must omit the protobuf field, not stretch the source."""
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[_ImageResponse(url="https://example.test/edited.png")]
+            )
+        )
+        client = self._client_with_image(image)
+
+        await client.edit_image(
+            "keep source aspect",
+            "https://example.test/input.png",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            n=1,
+            aspect_ratio=None,
+            image_format=ResponseImageFormat.URL,
+        )
+
+        image.sample_batch.assert_awaited_once_with(
+            model="grok-imagine-image",
+            prompt="keep source aspect",
+            n=1,
+            image_url="https://example.test/input.png",
+            image_urls=None,
+            aspect_ratio=None,
+            image_format="url",
+        )
+
+    async def test_edit_image_passes_explicit_aspect_ratio(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[_ImageResponse(url="https://example.test/edited.png")]
+            )
+        )
+        client = self._client_with_image(image)
+
+        await client.edit_image(
+            "reshape it",
+            "https://example.test/input.png",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            n=1,
+            aspect_ratio=AspectRatio.RATIO_16_9,
+            image_format=ResponseImageFormat.URL,
+        )
+
+        image.sample_batch.assert_awaited_once_with(
+            model="grok-imagine-image",
+            prompt="reshape it",
+            n=1,
+            image_url="https://example.test/input.png",
+            image_urls=None,
+            aspect_ratio="16:9",
+            image_format="url",
+        )
+
+
+class TestImageGeneration:
+    @staticmethod
+    def _client_with_image(image: object) -> GrokClient:
+        client = GrokClient.__new__(GrokClient)
+        client._client = cast("Any", SimpleNamespace(image=image))
+        return client
+
+    async def test_generate_image_omits_aspect_ratio_when_none(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[_ImageResponse(url="https://example.test/generated.png")]
+            )
+        )
+        client = self._client_with_image(image)
+
+        await client.generate_image(
+            "a cat in a tree",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            n=1,
+            aspect_ratio=None,
+            image_format=ResponseImageFormat.URL,
+        )
+
+        image.sample_batch.assert_awaited_once_with(
+            model="grok-imagine-image",
+            prompt="a cat in a tree",
+            n=1,
+            aspect_ratio=None,
+            image_format="url",
+        )

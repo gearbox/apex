@@ -157,7 +157,7 @@ class GrokJobService:
         model: ModelType,
         generation_type: GenerationType,
         n: int = 1,
-        aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1,
+        aspect_ratio: AspectRatio | None = None,
         name: str | None = None,
         negative_prompt: str | None = None,
         input_image_url: str | None = None,
@@ -188,7 +188,8 @@ class GrokJobService:
             model: Grok model to use.
             generation_type: T2I or I2I.
             n: Number of images to generate.
-            aspect_ratio: Image aspect ratio.
+            aspect_ratio: Image aspect ratio. None for t2i defaults to 1:1;
+                None for i2i preserves the source image's aspect.
             name: Job name (auto-generated if not provided).
             negative_prompt: Negative prompt (stored but not used by Grok).
             input_image_url: Input image URL for I2I.
@@ -215,6 +216,17 @@ class GrokJobService:
             if len(prompt) > 50:
                 name += "..."
 
+        # t2i: apply the provider-side default so job.aspect_ratio always
+        # reflects the actual output. i2i: forward None as-is — the
+        # orchestrator (C3) already guarantees any non-None value here is
+        # capability-approved for this model, and NULL uniformly means
+        # "followed source aspect" across providers.
+        resolved_aspect_ratio = (
+            aspect_ratio
+            if generation_type == GenerationType.I2I
+            else (aspect_ratio or AspectRatio.RATIO_1_1)
+        )
+
         # Create job record
         job_id = new_id()
         job: GenerationJob | None = await job_repo.create(
@@ -226,7 +238,7 @@ class GrokJobService:
             status=JobStatus.PENDING,
             provider=Provider.GROK,
             model=model.value,
-            aspect_ratio=aspect_ratio.value,
+            aspect_ratio=resolved_aspect_ratio.value if resolved_aspect_ratio is not None else None,
             product_id=product_id,
             source_job_id=source_job_id,
             source_output_id=source_output_id,
@@ -276,7 +288,7 @@ class GrokJobService:
                     image_urls=input_image_urls,
                     model=model,
                     n=n,
-                    aspect_ratio=aspect_ratio,
+                    aspect_ratio=resolved_aspect_ratio,
                     image_format=ResponseImageFormat.URL,
                 )
             else:
@@ -285,7 +297,7 @@ class GrokJobService:
                     prompt=prompt,
                     model=model,
                     n=n,
-                    aspect_ratio=aspect_ratio,
+                    aspect_ratio=resolved_aspect_ratio,
                     image_format=ResponseImageFormat.URL,
                 )
 
@@ -461,7 +473,7 @@ class GrokJobService:
         model: ModelType = ModelType.GROK_IMAGINE_VIDEO,
         generation_type: GenerationType = GenerationType.T2V,
         duration: int = 5,
-        aspect_ratio: AspectRatio = AspectRatio.RATIO_16_9,
+        aspect_ratio: AspectRatio | None = None,
         resolution: VideoResolution = VideoResolution.RES_720P,
         name: str | None = None,
         input_image_url: str | None = None,
@@ -486,7 +498,9 @@ class GrokJobService:
             model: Grok model (must be grok-imagine-video).
             generation_type: T2V or I2V.
             duration: Video duration in seconds (1-15).
-            aspect_ratio: Video aspect ratio.
+            aspect_ratio: Video aspect ratio. None applies the provider
+                default (16:9) — no video reshape-capability semantics
+                change in this PR, pure behavior preservation.
             resolution: Video resolution.
             name: Job name.
             input_image_url: Source image URL for I2V.
@@ -509,6 +523,8 @@ class GrokJobService:
             if len(prompt) > 50:
                 name += "..."
 
+        resolved_aspect_ratio = aspect_ratio or AspectRatio.RATIO_16_9
+
         # Create job record
         job_id = new_id()
         job: GenerationJob | None = await job_repo.create(
@@ -520,7 +536,7 @@ class GrokJobService:
             status=JobStatus.PENDING,
             provider=Provider.GROK,
             model=model.value,
-            aspect_ratio=aspect_ratio.value,
+            aspect_ratio=resolved_aspect_ratio.value,
             product_id=product_id,
             source_job_id=source_job_id,
             source_output_id=source_output_id,
@@ -552,7 +568,7 @@ class GrokJobService:
                 prompt=prompt,
                 model=model,
                 duration=duration,
-                aspect_ratio=aspect_ratio,
+                aspect_ratio=resolved_aspect_ratio,
                 resolution=resolution,
                 image_url=input_image_url,
                 video_url=input_video_url,

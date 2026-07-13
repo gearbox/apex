@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+import structlog.testing
 from PIL import Image
 
 from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
@@ -36,6 +37,7 @@ from src.core.generation_config import (
     GenerationConstraints,
     GenerationDefaults,
 )
+from src.core.resolution import resolve_dimensions
 
 
 def _make_request() -> UnifiedGenerationRequest:
@@ -525,6 +527,16 @@ def _jpeg_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
     im = Image.new("RGB", size, (0, 255, 0))
     buf = io.BytesIO()
     im.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _jpeg_bytes_with_orientation(orientation: int, size: tuple[int, int] = (16, 12)) -> bytes:
+    """JPEG whose header ``size`` differs from its EXIF-displayed size."""
+    im = Image.new("RGB", size, (0, 255, 0))
+    exif = im.getexif()
+    exif[0x0112] = orientation
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", exif=exif)
     return buf.getvalue()
 
 
@@ -1030,6 +1042,202 @@ class TestAishaProviderI2IBridge:
         MockJobRepo.return_value.create.assert_not_called()
 
 
+class TestAishaProviderI2IAspectDerivation:
+    """C5: when aspect_ratio is omitted on i2i, the output canvas follows the
+    source image's exact aspect instead of always defaulting to 1:1."""
+
+    async def _submit_with_source_image(
+        self,
+        *,
+        source_bytes: bytes,
+        aspect_ratio: AspectRatio | None,
+    ) -> MagicMock:
+        """Runs provider.submit() with a real source image and returns the
+        MagicMock workflow so callers can inspect apply_parameters' request."""
+        workflow = MagicMock()
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=source_bytes)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            bundle_index=_make_bundle_index_mock(),
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        user_image_row = MagicMock()
+        user_image_row.storage_key = "users/abc/uploads/source.png"
+        user_image_row.original_filename = "source.png"
+
+        request = UnifiedGenerationRequest(
+            prompt="a cat in a hat",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=aspect_ratio,
+            n=1,
+            input_image_id=uuid4(),
+        )
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-1"})
+            MockComfyClient.return_value = mock_client
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
+
+            await provider.submit(
+                request,
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        return workflow
+
+    async def test_aisha_i2i_derives_canvas_from_source_dimensions_when_aspect_unset(
+        self,
+    ) -> None:
+        """A 16:9 source with no requested aspect_ratio must resolve to a
+        16:9-ish canvas, not the 1:1 t2i default."""
+        workflow = await self._submit_with_source_image(
+            source_bytes=_png_bytes(size=(1600, 900)),
+            aspect_ratio=None,
+        )
+
+        expected = resolve_dimensions(
+            aspect_ratio=(16, 9),
+            max_megapixels=1.05,
+            latent_multiple=16,
+            max_edge=1536,
+            tier=Resolution.STANDARD,
+        )
+        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        assert legacy_request.width == expected.width
+        assert legacy_request.height == expected.height
+        # Sanity: landscape in, landscape out — not the 1:1 t2i fallback.
+        assert legacy_request.width > legacy_request.height
+
+    async def test_aisha_i2i_uses_requested_aspect_when_set(self) -> None:
+        """An explicit aspect_ratio wins over the source image's own aspect."""
+        workflow = await self._submit_with_source_image(
+            source_bytes=_png_bytes(size=(1600, 900)),  # 16:9 source
+            aspect_ratio=AspectRatio.RATIO_9_16,  # explicit portrait request
+        )
+
+        expected = resolve_dimensions(
+            aspect_ratio=AspectRatio.RATIO_9_16,
+            max_megapixels=1.05,
+            latent_multiple=16,
+            max_edge=1536,
+            tier=Resolution.STANDARD,
+        )
+        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        assert legacy_request.width == expected.width
+        assert legacy_request.height == expected.height
+        assert legacy_request.height > legacy_request.width
+
+    async def test_aisha_i2i_derives_portrait_canvas_from_exif_rotated_source(self) -> None:
+        """C-R1: a landscape-stored, EXIF-rotated-to-portrait source must derive
+        a portrait canvas — the reduced fraction is (3, 4), not the raw
+        header's (4, 3)."""
+        workflow = await self._submit_with_source_image(
+            source_bytes=_jpeg_bytes_with_orientation(6, size=(400, 300)),
+            aspect_ratio=None,
+        )
+
+        expected = resolve_dimensions(
+            aspect_ratio=(3, 4),
+            max_megapixels=1.05,
+            latent_multiple=16,
+            max_edge=1536,
+            tier=Resolution.STANDARD,
+        )
+        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        assert legacy_request.width == expected.width
+        assert legacy_request.height == expected.height
+        assert legacy_request.height > legacy_request.width
+
+
+class TestResolveEffectiveAspectRatio:
+    """R2: _resolve_effective_aspect_ratio is unit-testable in isolation."""
+
+    async def test_resolve_effective_aspect_ratio_explicit_wins(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_9_16,
+            n=1,
+            input_image_id=uuid4(),
+        )
+        result = await AishaGenerationProvider._resolve_effective_aspect_ratio(
+            request, (_png_bytes(size=(1600, 900)), "source.png")
+        )
+        assert result == AspectRatio.RATIO_9_16
+
+    async def test_resolve_effective_aspect_ratio_t2i_defaults_1_1(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            n=1,
+        )
+        result = await AishaGenerationProvider._resolve_effective_aspect_ratio(request, None)
+        assert result is AspectRatio.RATIO_1_1
+
+    async def test_resolve_effective_aspect_ratio_derives_source_fraction(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            n=1,
+            input_image_id=uuid4(),
+        )
+        result = await AishaGenerationProvider._resolve_effective_aspect_ratio(
+            request, (_png_bytes(size=(1600, 900)), "source.png")
+        )
+        assert result == (16, 9)
+
+    async def test_resolve_effective_aspect_ratio_undecodable_raises_value_error(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            n=1,
+            input_image_id=uuid4(),
+        )
+        with pytest.raises(ValueError, match="not decodable"):
+            await AishaGenerationProvider._resolve_effective_aspect_ratio(
+                request, (b"garbage bytes, not an image", "broken.png")
+            )
+
+
 class TestSanitizeFilename:
     """Defense-in-depth: source filename derives from user-supplied
     UserImage.original_filename or an R2 storage_key tail. Either could
@@ -1432,3 +1640,86 @@ class TestAishaProviderResolutionAndSamplerValidation:
 
         # Should not raise
         await _submit_with_config(request, gen_cfg)
+
+
+class TestAishaProviderClampLogging:
+    """R5: the resolution-clamped log reports the actual derived fraction used,
+    not the opaque "source" placeholder — and reflects EXIF-corrected source
+    dimensions (C-R1)."""
+
+    async def test_clamp_log_reports_derived_fraction_for_source_aspect(self) -> None:
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            n=1,
+            input_image_id=uuid4(),
+        )
+        # tier STANDARD targets 1.0 MP; a 0.5 MP model cap forces
+        # dims.megapixels well below requested_mp * 0.9, so the clamp log fires.
+        gen_cfg = _make_constrained_gen_config(max_megapixels=0.5)
+
+        workflow = MagicMock()
+        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
+        workflow.validate_workflow = MagicMock()
+        workflow.inject_checkpoint = MagicMock()
+        workflow.apply_parameters.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        # 400x300 JPEG with EXIF orientation 6 -> displayed 300x400 -> "3:4".
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=_jpeg_bytes_with_orientation(6, size=(400, 300)))
+
+        bundle_index = MagicMock()
+        bundle_index.get_bundle_path = MagicMock(return_value=MagicMock())
+        bundle_index.get_generation_config = MagicMock(return_value=gen_cfg)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            bundle_index=bundle_index,
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        user_image_row = MagicMock()
+        user_image_row.storage_key = "users/abc/uploads/source.jpg"
+        user_image_row.original_filename = "source.jpg"
+
+        with (
+            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch(
+                "src.api.services.generation.aisha_provider.UserImageRepository"
+            ) as MockUserImageRepo,
+            structlog.testing.capture_logs() as cap,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-1"})
+            MockComfyClient.return_value = mock_client
+            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
+
+            await provider.submit(
+                request,
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        clamp_events = [e for e in cap if e["event"] == "generation.resolution.clamped"]
+        assert clamp_events, "expected a generation.resolution.clamped log event"
+        assert clamp_events[0]["aspect_ratio"] == "3:4"

@@ -33,6 +33,11 @@ class ImageConstraints(msgspec.Struct, kw_only=True):
     tier_megapixels: dict[str, float] | None = None
     """Target megapixel budget per tier. Actual W*H depends on model and aspect ratio."""
 
+    edit_aspect_ratios: list[str] = msgspec.field(default_factory=list)
+    """Aspect ratios this model can reshape to during image editing (i2i).
+    Empty list = no reshape on edit; clients must omit aspect_ratio for i2i
+    and the output follows the source image's aspect."""
+
 
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""

@@ -228,7 +228,7 @@ class GrokClient:
         *,
         model: ModelType = ModelType.GROK_IMAGINE_IMAGE,
         n: int = 1,
-        aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1,
+        aspect_ratio: AspectRatio | None = None,
         image_format: ResponseImageFormat = ResponseImageFormat.URL,
     ) -> list[GrokImageResult]:
         """Generate images from text prompt.
@@ -237,7 +237,9 @@ class GrokClient:
             prompt: Text description of the image to generate.
             model: Model to use (grok-imagine-image or grok-2-image-1212).
             n: Number of images to generate (1-10).
-            aspect_ratio: Aspect ratio for the generated image.
+            aspect_ratio: Aspect ratio for the generated image. None omits the
+                parameter entirely — the xai-sdk only sets the protobuf field
+                when non-None, so this must never be replaced with a sentinel.
             image_format: Output format - "url" or "base64".
 
         Returns:
@@ -258,7 +260,7 @@ class GrokClient:
                 model=model.value,
                 prompt=prompt,
                 n=n,
-                aspect_ratio=aspect_ratio.value,
+                aspect_ratio=aspect_ratio.value if aspect_ratio is not None else None,
                 image_format=image_format.value,
             )
             return [self._parse_image_response(r, image_format) for r in responses]
@@ -274,7 +276,7 @@ class GrokClient:
         model: ModelType = ModelType.GROK_IMAGINE_IMAGE,
         n: int = 1,
         image_urls: Sequence[str] | None = None,
-        aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1,
+        aspect_ratio: AspectRatio | None = None,
         image_format: ResponseImageFormat = ResponseImageFormat.URL,
     ) -> list[GrokImageResult]:
         """Generate one or more edited output variants from image input.
@@ -287,7 +289,11 @@ class GrokClient:
             n: Number of edited output variants to generate (1-10).
             image_urls: Optional list of source image URLs/base64 values for
                 multi-reference editing. Cannot be combined with image_url.
-            aspect_ratio: Aspect ratio for the generated image.
+            aspect_ratio: Aspect ratio for the generated image. None omits the
+                parameter — grok-imagine-image accepts aspect_ratio on edits
+                but stretches the source to fit rather than recomposing, so
+                callers must only pass a value for models verified to reshape
+                on edit (see ``ImageMeta.edit_aspect_ratios``).
             image_format: Output format - "url" or "base64".
 
         Returns:
@@ -312,7 +318,7 @@ class GrokClient:
                 n=n,
                 image_url=image_url,
                 image_urls=image_urls,
-                aspect_ratio=aspect_ratio.value,
+                aspect_ratio=aspect_ratio.value if aspect_ratio is not None else None,
                 image_format=image_format.value,
             )
             return [self._parse_image_response(r, image_format) for r in responses]

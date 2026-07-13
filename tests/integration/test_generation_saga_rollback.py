@@ -101,7 +101,7 @@ class _WriteThenFailProvider:
             status=JobStatus.PENDING,
             provider=Provider.AISHA,
             model=request.model.value,
-            aspect_ratio=request.aspect_ratio.value,
+            aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else None,
             product_id=product_id,
             # ck_generation_jobs_aisha_has_session requires a gpu_session_id
             # whenever provider='aisha'.

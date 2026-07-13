@@ -33,6 +33,14 @@ class ImageMeta:
     supported_types: frozenset[GenerationType]
     """Supported video generation types, e.g. frozenset({GenerationType.T2V, GenerationType.I2V})"""
 
+    edit_aspect_ratios: tuple[AspectRatio, ...]
+    """Aspect ratios this model can genuinely RESHAPE TO during image editing (i2i).
+    Empty tuple = model cannot reshape on edit: the aspect_ratio parameter MUST be
+    omitted from provider calls and the output follows the source image's aspect.
+    This is intentionally required with no default: every new image model must make
+    a conscious, verified reshape decision (fail-loud at review time, not runtime).
+    """
+
     min_height: int | None = None
     """Minimum height in pixels the user can request. None = not user-controllable."""
 
@@ -92,7 +100,7 @@ class ModelMeta:
     """Whether this model accepts negative prompts."""
 
     aspect_ratios: tuple[AspectRatio, ...]
-    """Allowed aspect ratios for this model."""
+    """Allowed aspect ratios for text-to-image generation."""
 
     max_concurrent_outputs: int
     """Maximum number of outputs this model can produce per request."""
@@ -134,6 +142,11 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
                     GenerationType.I2I,
                 }
             ),
+            # Verified via direct curl against xAI's edit endpoint: the model
+            # accepts aspect_ratio on edits but stretches the source to fit
+            # rather than recomposing. xAI's own console hides the aspect
+            # control for this model in edit mode.
+            edit_aspect_ratios=(),
             # Grok does not expose a user-controllable resolution parameter.
             # Output is determined server-side based on aspect ratio.
             output_resolutions=("1024x1024", "2048x2048"),
@@ -152,6 +165,8 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
                     GenerationType.T2I,
                 }
             ),
+            # t2i-only model — trivially no edit reshape capability.
+            edit_aspect_ratios=(),
             output_resolutions=("1024x1024",),
         ),
         rate_limit=None,
@@ -189,6 +204,9 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
                     GenerationType.I2I,
                 }
             ),
+            # Qwen-Image-Edit recomposes natively onto the target latent —
+            # the source is conditioning, not the output canvas.
+            edit_aspect_ratios=ALL_ASPECT_RATIOS,
             min_height=256,
             max_height=2048,
             default_height=1024,

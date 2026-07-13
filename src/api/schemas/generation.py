@@ -43,7 +43,10 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     name: str | None = None
     negative_prompt: NegativePromptStr = DEFAULT_NEGATIVE_PROMPT
     height: Height = 1024
-    aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1
+    aspect_ratio: AspectRatio | None = None
+    """Requested aspect ratio, if the caller supplied one. None = no explicit
+    aspect (the resolved width/height are authoritative). Never fabricate a
+    value here — downstream consumers must not mistake a default for intent."""
     model_type: ModelType = ModelType.AISHA_IMAGE
     generation_type: GenerationType = GenerationType.T2I
     max_images: MaxImages = 1
@@ -72,6 +75,10 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
         """Return resolved width, or derive from height + aspect ratio as fallback."""
         if self.width is not None:
             return self.width
+        if self.aspect_ratio is None:
+            raise ValueError(
+                "GenerationRequest has neither width nor aspect_ratio; cannot derive a canvas width"
+            )
         return self.aspect_ratio.calculate_width(self.height)
 
 
