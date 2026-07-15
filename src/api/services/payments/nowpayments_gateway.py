@@ -58,7 +58,7 @@ class NowPaymentsGateway:
     async def create_charge(self, ctx: ChargeContext) -> ChargeResult:
         quote = ctx.quote
         product_id = ctx.product_config.slug
-        pay_currency = ctx.extra.get("pay_currency", "")
+        pay_currency = ctx.extra.get("pay_currency", "").strip()
         order_id = json.dumps(
             {
                 "account_id": str(ctx.account_id),
@@ -67,6 +67,18 @@ class NowPaymentsGateway:
             }
         )
 
+        payload: dict[str, Any] = {
+            "price_amount": float(quote.total_due),
+            "price_currency": "usd",
+            "order_id": order_id,
+            "order_description": (
+                f"{quote.tokens_granted} tokens "
+                f"(${quote.credits_usd} credit, {quote.discount_pct}% off)"
+            ),
+        }
+        if pay_currency:
+            payload["pay_currency"] = pay_currency
+
         async with self._client_factory() as client:
             response = await client.post(
                 f"{self._settings.nowpayments_api_base.rstrip('/')}/v1/invoice",
@@ -74,16 +86,7 @@ class NowPaymentsGateway:
                     "x-api-key": self._settings.nowpayments_api_key_for(product_id),
                     "Content-Type": "application/json",
                 },
-                json={
-                    "price_amount": float(quote.total_due),
-                    "price_currency": "usd",
-                    "pay_currency": pay_currency,
-                    "order_id": order_id,
-                    "order_description": (
-                        f"{quote.tokens_granted} tokens "
-                        f"(${quote.credits_usd} credit, {quote.discount_pct}% off)"
-                    ),
-                },
+                json=payload,
             )
             try:
                 response.raise_for_status()
@@ -101,7 +104,7 @@ class NowPaymentsGateway:
         return ChargeResult(
             external_id=str(data.get("id", "")),
             redirect_url=str(data.get("invoice_url", "")),
-            currency=pay_currency.upper(),
+            currency=pay_currency.upper() if pay_currency else "USD",
             provider_metadata={
                 **data,
                 "credits_usd": quote.credits_usd,
@@ -117,6 +120,10 @@ class NowPaymentsGateway:
         if not isinstance(parsed, dict):
             raise PaymentVerificationError("NowPayments IPN payload must be a JSON object")
 
+        # HMAC compatibility contract: the NowPayments dashboard IPN format MUST be
+        # "All-Strings". parse_float=str/parse_int=str + canonical json.dumps
+        # round-trips All-Strings bodies byte-identically; the "Classic" format
+        # (raw JSON numbers) re-serializes differently and fails every signature.
         canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
         expected = hmac.new(
             self._settings.nowpayments_ipn_secret_for(envelope.product_id).encode(),
@@ -168,10 +175,16 @@ class NowPaymentsGateway:
             metadata["ipn_actually_paid"] = str(amount_paid)
             metadata["ipn_pay_amount"] = str(amount_due)
 
+        settled_currency: str | None = None
+        if raw_pay_currency := parsed.get("pay_currency"):
+            settled_currency = str(raw_pay_currency).upper()
+            metadata["ipn_pay_currency"] = settled_currency
+
         return WebhookOutcome(
             lookup=PaymentLookup(by="payment_id", value=str(internal_payment_id)),
             status=status,
             metadata_patch=metadata,
             amount_paid=amount_paid,
             amount_due=amount_due,
+            settled_currency=settled_currency,
         )

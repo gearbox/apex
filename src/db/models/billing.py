@@ -382,7 +382,7 @@ class Payment(Base):
     )
     tokens_granted: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(
-        String(10),
+        String(20),
         nullable=False,
         server_default=text("'USD'"),
     )

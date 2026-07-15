@@ -39,6 +39,7 @@ _FULL_PAYMENT_TOLERANCE_LOW = Decimal("0.99")
 _FULL_PAYMENT_TOLERANCE_HIGH = Decimal("1.01")
 _EXTREME_RATIO_LOW = Decimal("0.5")
 _EXTREME_RATIO_HIGH = Decimal("2.0")
+_PAYMENT_CURRENCY_MAX_LEN = 20
 
 logger = structlog.get_logger(__name__)
 
@@ -195,6 +196,16 @@ class PaymentService:
             payment.status = outcome.status.value
         if outcome.status is PaymentStatus.COMPLETED:
             payment.completed_at = datetime.now(UTC)
+
+        if outcome.settled_currency and payment.currency != outcome.settled_currency:
+            if len(outcome.settled_currency) > _PAYMENT_CURRENCY_MAX_LEN:
+                logger.warning(
+                    "payment.settled_currency_overlong",
+                    payment_id=str(payment.id),
+                    settled_currency=outcome.settled_currency,
+                )
+            else:
+                payment.currency = outcome.settled_currency
 
         event: BalanceEvent | None = None
         credit_ratio: Decimal | None = None

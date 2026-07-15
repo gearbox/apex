@@ -157,6 +157,7 @@ def _make_payment(
     amount_usd: Decimal = Decimal("10.00"),
     status: str = PaymentStatus.PENDING.value,
     product_id: str = "vex",
+    currency: str = "USD",
 ) -> MagicMock:
     return MagicMock(
         id=uuid4(),
@@ -166,6 +167,7 @@ def _make_payment(
         tokens_granted=tokens_granted,
         product_id=product_id,
         provider_metadata={},
+        currency=currency,
     )
 
 
@@ -617,3 +619,119 @@ class TestLateIntermediateIPNStatusRegression:
             )
 
         assert payment.status == PaymentStatus.PENDING.value
+
+
+class TestSettledCurrencyPatch:
+    """D2: the orchestrator syncs Payment.currency from a provider-neutral
+    WebhookOutcome.settled_currency field — generic, not NowPayments-specific."""
+
+    async def test_settled_currency_updates_payment_currency(self) -> None:
+        payment = _make_payment(currency="USD")
+        gateway = AsyncMock()
+        gateway.verify_webhook = AsyncMock(
+            return_value=WebhookOutcome(
+                lookup=PaymentLookup(by="payment_id", value=str(payment.id)),
+                status=PaymentStatus.PENDING,
+                settled_currency="USDCMATIC",
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+
+        with patch("src.api.services.payments.service.BillingRepository", return_value=repo):
+            await _service(gateway, AsyncMock(), AsyncMock()).handle_webhook(
+                PaymentProvider.STRIPE,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        assert payment.currency == "USDCMATIC"
+
+    async def test_missing_settled_currency_leaves_payment_currency_untouched(self) -> None:
+        payment = _make_payment(currency="USD")
+        gateway = AsyncMock()
+        gateway.verify_webhook = AsyncMock(
+            return_value=WebhookOutcome(
+                lookup=PaymentLookup(by="payment_id", value=str(payment.id)),
+                status=PaymentStatus.PENDING,
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+
+        with patch("src.api.services.payments.service.BillingRepository", return_value=repo):
+            await _service(gateway, AsyncMock(), AsyncMock()).handle_webhook(
+                PaymentProvider.STRIPE,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        assert payment.currency == "USD"
+
+    async def test_overlong_ticker_skips_assignment_and_warns(self) -> None:
+        payment = _make_payment(tokens_granted=1000, currency="USD")
+        overlong = "A" * 21
+        gateway = AsyncMock()
+        gateway.verify_webhook = AsyncMock(
+            return_value=WebhookOutcome(
+                lookup=PaymentLookup(by="payment_id", value=str(payment.id)),
+                status=PaymentStatus.COMPLETED,
+                amount_paid=Decimal("10.00"),
+                amount_due=Decimal("10.00"),
+                settled_currency=overlong,
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+        repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+        billing = AsyncMock()
+        billing.credit = AsyncMock(return_value=MagicMock(event=None))
+
+        with (
+            patch("src.api.services.payments.service.BillingRepository", return_value=repo),
+            patch("src.api.services.payments.service.logger") as mock_logger,
+        ):
+            await _service(gateway, AsyncMock(), billing).handle_webhook(
+                PaymentProvider.STRIPE,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        assert payment.currency == "USD"
+        mock_logger.warning.assert_called_once()
+        assert mock_logger.warning.call_args.args[0] == "payment.settled_currency_overlong"
+        billing.credit.assert_awaited_once()
+        assert billing.credit.await_args.args[1] == 1000
+
+    async def test_full_settled_flow_charge_usd_then_ipn_patches_currency(self) -> None:
+        """End-to-end D2: charge created with currency="USD" (unset pay_currency),
+        the IPN later reports the customer-chosen settled currency, tokens credit
+        normally."""
+        payment = _make_payment(tokens_granted=1000, currency="USD")
+        gateway = AsyncMock()
+        gateway.verify_webhook = AsyncMock(
+            return_value=WebhookOutcome(
+                lookup=PaymentLookup(by="payment_id", value=str(payment.id)),
+                status=PaymentStatus.COMPLETED,
+                amount_paid=Decimal("10.00"),
+                amount_due=Decimal("10.00"),
+                settled_currency="USDCMATIC",
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+        repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+        billing = AsyncMock()
+        billing.credit = AsyncMock(return_value=MagicMock(event=None))
+
+        with patch("src.api.services.payments.service.BillingRepository", return_value=repo):
+            await _service(gateway, AsyncMock(), billing).handle_webhook(
+                PaymentProvider.STRIPE,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        assert payment.currency == "USDCMATIC"
+        assert payment.status == PaymentStatus.COMPLETED.value
+        billing.credit.assert_awaited_once()
+        assert billing.credit.await_args.args[1] == 1000

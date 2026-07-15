@@ -362,6 +362,7 @@ class BillingController(Controller):
             account = await billing_service.resolve_account_for_user(
                 current_user_id, session=session
             )
+            pay_currency = (data.pay_currency or "").strip()
             result = await payment_service.create_charge(
                 PaymentProvider.NOWPAYMENTS,
                 account.id,
@@ -369,7 +370,7 @@ class BillingController(Controller):
                 current_user_id,
                 session=session,
                 product_config=product_config,
-                extra={"pay_currency": data.pay_currency},
+                extra={"pay_currency": pay_currency} if pay_currency else {},
             )
             response = NowPaymentsInvoiceResponse(
                 invoice_url=result.redirect_url,

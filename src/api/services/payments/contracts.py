@@ -73,3 +73,7 @@ class WebhookOutcome(msgspec.Struct, frozen=True, kw_only=True):
     metadata_patch: dict[str, Any] = {}
     amount_paid: Decimal | None = None
     amount_due: Decimal | None = None
+    settled_currency: str | None = None
+    """Uppercased provider ticker of the currency the customer actually paid
+    in, when the provider reports it; the orchestrator syncs
+    ``Payment.currency`` to this value."""

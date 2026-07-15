@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.billing_errors import PaymentVerificationError
-from src.api.services.payments.contracts import ChargeContext, WebhookEnvelope
+from src.api.services.payments.contracts import ChargeContext, ChargeResult, WebhookEnvelope
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
 from src.core.config import Settings
 from src.core.enums import PaymentStatus
@@ -37,6 +37,7 @@ def _raw_payload(
     pay_amount: str | None = "10.00",
     include_actually_paid: bool = True,
     include_pay_amount: bool = True,
+    pay_currency: str | None = None,
 ) -> bytes:
     payment_id = uuid4()
     order_id = json.dumps({"payment_id": str(payment_id)})
@@ -49,6 +50,8 @@ def _raw_payload(
         parts.append(f'"actually_paid":{actually_paid}')
     if include_pay_amount:
         parts.append(f'"pay_amount":{pay_amount}')
+    if pay_currency is not None:
+        parts.append(f'"pay_currency":{json.dumps(pay_currency)}')
     return ("{" + ",".join(parts) + "}").encode()
 
 
@@ -66,6 +69,7 @@ def _envelope(
     pay_amount: str | None = "10.00",
     include_actually_paid: bool = True,
     include_pay_amount: bool = True,
+    pay_currency: str | None = None,
 ) -> WebhookEnvelope:
     raw = _raw_payload(
         status=status,
@@ -73,6 +77,7 @@ def _envelope(
         pay_amount=pay_amount,
         include_actually_paid=include_actually_paid,
         include_pay_amount=include_pay_amount,
+        pay_currency=pay_currency,
     )
     return WebhookEnvelope(
         raw_body=raw,
@@ -230,3 +235,72 @@ class TestCreateCharge:
         assert order["payment_id"] == str(payment_id)
         assert order["account_id"] == str(account_id)
         assert "package_id" not in order
+
+    @staticmethod
+    async def _create_charge(extra: dict[str, str]) -> tuple[dict[str, object], ChargeResult]:
+        """Build a gateway + mock client, run create_charge, return (sent_json, result)."""
+        settings = _settings()
+        quote = build_quote(
+            100,
+            tiers=topup_tiers_for("vex", settings),
+            tokens_per_usd=settings.billing_tokens_per_usd,
+        )
+        fake_response = MagicMock()
+        fake_response.raise_for_status = MagicMock()
+        fake_response.json = MagicMock(
+            return_value={"id": "np_invoice_123", "invoice_url": "https://nowpayments.io/pay/xyz"}
+        )
+        mock_http_client = AsyncMock()
+        mock_http_client.post = AsyncMock(return_value=fake_response)
+        mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+        mock_http_client.__aexit__ = AsyncMock(return_value=False)
+
+        gateway = NowPaymentsGateway(settings, client_factory=lambda: mock_http_client)
+        result = await gateway.create_charge(
+            ChargeContext(
+                payment_id=uuid4(),
+                account_id=uuid4(),
+                user_id=uuid4(),
+                product_config=VEX_CONFIG,
+                quote=quote,
+                extra=extra,
+            )
+        )
+        return mock_http_client.post.call_args.kwargs["json"], result
+
+    async def test_pinned_currency_is_included_and_uppercased_on_result(self) -> None:
+        sent_json, result = await self._create_charge({"pay_currency": "usdcmatic"})
+        assert sent_json["pay_currency"] == "usdcmatic"
+        assert result.currency == "USDCMATIC"
+
+    @pytest.mark.parametrize("extra", [{}, {"pay_currency": ""}, {"pay_currency": "  "}])
+    async def test_unset_currency_omits_key_from_payload(self, extra: dict[str, str]) -> None:
+        sent_json, result = await self._create_charge(extra)
+        assert "pay_currency" not in sent_json
+        assert result.currency == "USD"
+
+
+async def test_ipn_pay_currency_sets_settled_currency() -> None:
+    outcome = await NowPaymentsGateway(_settings()).verify_webhook(
+        _envelope("finished", pay_currency="usdttrc20")
+    )
+    assert outcome.settled_currency == "USDTTRC20"
+    assert outcome.metadata_patch["ipn_pay_currency"] == "USDTTRC20"
+
+
+async def test_ipn_without_pay_currency_leaves_settled_currency_none() -> None:
+    outcome = await NowPaymentsGateway(_settings()).verify_webhook(_envelope("finished"))
+    assert outcome.settled_currency is None
+    assert "ipn_pay_currency" not in outcome.metadata_patch
+
+
+async def test_ipn_pay_currency_extracted_on_intermediate_status() -> None:
+    outcome = await NowPaymentsGateway(_settings()).verify_webhook(
+        _envelope(
+            "waiting",
+            include_actually_paid=False,
+            include_pay_amount=False,
+            pay_currency="btc",
+        )
+    )
+    assert outcome.settled_currency == "BTC"
