@@ -37,6 +37,7 @@ coverage.xml
 .env.staging
 .env.production
 staging.env
+.secrets/
 
 # OS
 .DS_Store

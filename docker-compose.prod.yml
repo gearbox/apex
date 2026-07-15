@@ -57,6 +57,17 @@ services:
       FRAME_PREVIEW_URL_TTL_SECONDS: ${FRAME_PREVIEW_URL_TTL_SECONDS:-3600}
       FRAME_PREVIEW_RETENTION_DAYS: ${FRAME_PREVIEW_RETENTION_DAYS:-2}
       FRAME_EXTRACT_STALE_RUNNING_SECONDS: ${FRAME_EXTRACT_STALE_RUNNING_SECONDS:-1800}
+
+      # --- Apex web-push (optional; for push notifications) ---
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:?VAPID_PRIVATE_KEY is required for web-push}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:?VAPID_PUBLIC_KEY is required for web-push}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:?VAPID_SUBJECT is required for web-push}
+
+      # --- NowPayments (optional; for crypto payments) ---
+      NOWPAYMENTS_API_KEY_VEX: ${NOWPAYMENTS_API_KEY_VEX:?NOWPAYMENTS_API_KEY_VEX is required}
+      NOWPAYMENTS_IPN_SECRET_VEX: ${NOWPAYMENTS_IPN_SECRET_VEX:?NOWPAYMENTS_IPN_SECRET_VEX is required}
+      NOWPAYMENTS_API_BASE: ${NOWPAYMENTS_API_BASE:-https://api.nowpayments.io}
+      
     # Production resource limits
     deploy:
       resources:
