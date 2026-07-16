@@ -14,6 +14,7 @@ to a 400 response.
 from unittest.mock import ANY, AsyncMock, MagicMock
 from uuid import uuid4
 
+import msgspec
 import pytest
 from litestar.exceptions import HTTPException
 
@@ -277,3 +278,110 @@ async def test_topup_stripe_success_response_shape() -> None:
     idempotency_service.check.assert_awaited_once()
     assert response.status_code == 201
     assert isinstance(response.content, StripeCheckoutResponse)
+
+
+class TestOptionalPayCurrency:
+    """D1: an unset pay_currency deserializes fine, and the route forwards
+    ``extra`` only when a non-blank ticker was pinned — the gateway then owns
+    the omission-from-payload decision (see nowpayments_gateway tests)."""
+
+    def test_request_without_pay_currency_deserializes(self) -> None:
+        request = msgspec.json.decode(b'{"amount_usd": 100}', type=TopUpNowPaymentsRequest)
+        assert request.pay_currency is None
+
+    def test_request_with_pay_currency_deserializes(self) -> None:
+        request = msgspec.json.decode(
+            b'{"amount_usd": 100, "pay_currency": "btc"}', type=TopUpNowPaymentsRequest
+        )
+        assert request.pay_currency == "btc"
+
+    async def test_unset_pay_currency_forwards_empty_extra(self) -> None:
+        idempotency_service = AsyncMock()
+        idempotency_service.check = AsyncMock(return_value=uuid4())
+        billing_service = AsyncMock()
+        billing_service.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        payment_service = AsyncMock()
+        payment_service.create_charge = AsyncMock(
+            return_value=CreatedCharge(
+                redirect_url="https://nowpayments.io/pay/xyz",
+                external_id="np_1",
+                payment_id=uuid4(),
+            )
+        )
+
+        await BillingController.topup_nowpayments.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            data=TopUpNowPaymentsRequest(amount_usd=100),
+            session=AsyncMock(),
+            billing_service=billing_service,
+            payment_service=payment_service,
+            product_id="vex",
+            product_config=VEX_CONFIG,
+            idempotency_service=idempotency_service,
+            idempotency_key_header="key-unset-currency",
+        )
+
+        assert payment_service.create_charge.await_args.kwargs["extra"] == {}
+
+    async def test_whitespace_only_pay_currency_forwards_empty_extra(self) -> None:
+        """Normalize with .strip() before the truthiness check so a single
+        space doesn't pin a bogus ticker."""
+        idempotency_service = AsyncMock()
+        idempotency_service.check = AsyncMock(return_value=uuid4())
+        billing_service = AsyncMock()
+        billing_service.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        payment_service = AsyncMock()
+        payment_service.create_charge = AsyncMock(
+            return_value=CreatedCharge(
+                redirect_url="https://nowpayments.io/pay/xyz",
+                external_id="np_1",
+                payment_id=uuid4(),
+            )
+        )
+
+        await BillingController.topup_nowpayments.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency=" "),
+            session=AsyncMock(),
+            billing_service=billing_service,
+            payment_service=payment_service,
+            product_id="vex",
+            product_config=VEX_CONFIG,
+            idempotency_service=idempotency_service,
+            idempotency_key_header="key-whitespace-currency",
+        )
+
+        assert payment_service.create_charge.await_args.kwargs["extra"] == {}
+
+    async def test_pinned_pay_currency_is_stripped_and_forwarded(self) -> None:
+        idempotency_service = AsyncMock()
+        idempotency_service.check = AsyncMock(return_value=uuid4())
+        billing_service = AsyncMock()
+        billing_service.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        payment_service = AsyncMock()
+        payment_service.create_charge = AsyncMock(
+            return_value=CreatedCharge(
+                redirect_url="https://nowpayments.io/pay/xyz",
+                external_id="np_1",
+                payment_id=uuid4(),
+            )
+        )
+
+        await BillingController.topup_nowpayments.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="  usdcmatic  "),
+            session=AsyncMock(),
+            billing_service=billing_service,
+            payment_service=payment_service,
+            product_id="vex",
+            product_config=VEX_CONFIG,
+            idempotency_service=idempotency_service,
+            idempotency_key_header="key-pinned-currency",
+        )
+
+        assert payment_service.create_charge.await_args.kwargs["extra"] == {
+            "pay_currency": "usdcmatic"
+        }

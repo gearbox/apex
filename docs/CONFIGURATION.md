@@ -118,6 +118,38 @@ Obtain credentials from **Cloudflare Dashboard → R2 → Manage R2 API Tokens**
 
 ---
 
+### Cloudflare R2 Public Assets Bucket
+
+A second, **dedicated public** R2 bucket for static assets served directly to browsers —
+currently: cached payment currency logos, fetched from the provider at sync time and
+re-served from our own origin so a browser never loads an unvetted third-party image.
+This must be a bucket separate from `R2_BUCKET_NAME` above: that bucket is private and
+served only through the cookie-authenticated content proxy, and making it public would
+gut that auth model entirely.
+
+Shares the same R2 account credentials (`R2_ACCOUNT_ID`/`R2_ACCESS_KEY_ID`/
+`R2_SECRET_ACCESS_KEY`) as the user-content bucket — only the bucket name and public
+domain differ.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `R2_PUBLIC_ASSETS_BUCKET` | `None` | `str \| None` | Target bucket for public assets. Must exist before starting the service. |
+| `R2_PUBLIC_ASSETS_URL_BASE` | `None` | `str \| None` | Public custom domain fronting the bucket, e.g. `https://assets.yourdomain.com`. |
+
+**One-time setup per environment:**
+1. Create a new R2 bucket (e.g. `apex-public-assets`), distinct from the user-content bucket.
+2. In the Cloudflare dashboard, attach a public custom domain to that bucket.
+3. Set both variables above to the bucket name and domain.
+
+Both variables are optional and must be set together — when either is unset, the service
+logs a single `payment_currency.logo_cache_disabled` warning at startup and skips logo
+caching entirely; currency availability/metadata sync is unaffected, and
+`GET /v1/billing/currencies` serves `logo_url: null` for every entry. Cached logos are
+uploaded with `Cache-Control: public, max-age=31536000, immutable` (they're content-addressed
+by SHA-256, so the same key is always the same bytes).
+
+---
+
 ### Rate Limiting
 
 Controls rate limits for authentication endpoints using Redis sliding-window counters (or fallback to memory).

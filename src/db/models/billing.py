@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from sqlalchemy import (
@@ -29,6 +29,13 @@ from src.db.models.base import Base
 
 if TYPE_CHECKING:
     from src.db.models.user import User
+
+# Single length authority for payments.currency, payment_currencies.ticker,
+# and the settled-currency guard in PaymentService (src/api/services/payments/service.py).
+# A shared explicit constant instead of column-type introspection: reflection
+# yields int | None under mypy strict and inverts the dependency (service
+# reaching into the ORM column to learn a length it should just import).
+PAYMENT_CURRENCY_MAX_LEN: Final[int] = 20
 
 
 class Organization(Base):
@@ -382,7 +389,7 @@ class Payment(Base):
     )
     tokens_granted: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(
-        String(10),
+        String(PAYMENT_CURRENCY_MAX_LEN),
         nullable=False,
         server_default=text("'USD'"),
     )
@@ -463,3 +470,46 @@ class PaymentProviderState(Base):
     )
 
     __table_args__ = (UniqueConstraint("product_id", "provider", name="uq_payment_provider_state"),)
+
+
+class PaymentCurrency(Base):
+    """DB-cached currency catalog synced from a payment provider (e.g. NowPayments).
+
+    Availability is authoritative from the provider's merchant/coins-style
+    endpoint; name/network/logo are advisory display metadata that may be
+    NULL when the provider's metadata endpoint doesn't cover a selected
+    ticker. Rows are never deleted — a refresh flips `is_available` instead,
+    preserving reconciliation history (see D3 in the currency-catalog design).
+    """
+
+    __tablename__ = "payment_currencies"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(PAYMENT_CURRENCY_MAX_LEN), nullable=False)
+    is_available: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    network: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    logo_source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    logo_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    logo_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("product_id", "provider", "ticker", name="uq_payment_currencies"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PaymentCurrency {self.ticker} provider={self.provider} available={self.is_available}>"

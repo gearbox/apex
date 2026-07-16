@@ -1,6 +1,10 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-13 — **Breaking change:** fixed i2i aspect-ratio distortion. `aspect_ratio` on `POST /v1/generate` (§4) is now **optional** — `None`/omitted means "provider default" for t2i (1:1 image, 16:9 video) and "follow the source image's aspect" for i2i. For i2i, an explicit `aspect_ratio` is now capability-gated per model: `GET /v1/providers` `ImageConstraints` (§5) gained `edit_aspect_ratios` — an empty list means the model cannot reshape on edit (it would silently stretch the source) and any explicit `aspect_ratio` on an i2i request for that model now returns `400 validation_error`; `grok-imagine-image` currently has an empty list, `aisha-image` supports the full ratio list. t2i requests are now also validated against the model's `aspect_ratios` list (previously unenforced — any value silently passed through). `aspect_ratio: null` on job/gallery responses (§6, §10) now additionally means "generation followed the source image's aspect" for i2i jobs, alongside its prior meanings. Frontend must regenerate types (`gen:api`) and stop hardcoding an `aspect_ratio` default on i2i requests for non-reshaping models._
+> _Last updated: 2026-07-16 — Added the DB-cached **Payment Currency Catalog**: public `GET /v1/billing/currencies` (§11) returns available tickers with display name/network/R2-hosted logo, synced from NowPayments `merchant/coins` (availability) + `full-currencies` (metadata) by a periodic worker (default 3h) and on-demand via superadmin `GET/POST /v1/admin/payments/currencies[/refresh]` (§14). Empty list ⇒ hide the picker and omit `pay_currency`; catalog state never gates checkout. No hardcoded ticker list exists anywhere in the contract. Frontend should regenerate types (`gen:api`)._
+>
+> _Prior (2026-07-16): `pay_currency` on `POST /v1/billing/topup/nowpayments` (§11) is now **optional** (was required). Omit it to let the customer pick any currency/network NowPayments supports on the hosted invoice page instead of pinning one; blank/whitespace is treated the same as omitted. `PaymentResponse.currency` (admin §14) is `"USD"` at charge time for an unpinned invoice and is patched to the customer's actual settled ticker (e.g. `"USDCMATIC"`, `"USDTTRC20"`) once the first IPN reports it — this can happen on intermediate statuses, not just completion. This is backwards-compatible: existing callers that always send `pay_currency` see no behavior change. Frontend should regenerate types (`gen:api`) to pick up the now-optional field._
+>
+> _Prior (2026-07-13): **Breaking change:** fixed i2i aspect-ratio distortion. `aspect_ratio` on `POST /v1/generate` (§4) is now **optional** — `None`/omitted means "provider default" for t2i (1:1 image, 16:9 video) and "follow the source image's aspect" for i2i. For i2i, an explicit `aspect_ratio` is now capability-gated per model: `GET /v1/providers` `ImageConstraints` (§5) gained `edit_aspect_ratios` — an empty list means the model cannot reshape on edit (it would silently stretch the source) and any explicit `aspect_ratio` on an i2i request for that model now returns `400 validation_error`; `grok-imagine-image` currently has an empty list, `aisha-image` supports the full ratio list. t2i requests are now also validated against the model's `aspect_ratios` list (previously unenforced — any value silently passed through). `aspect_ratio: null` on job/gallery responses (§6, §10) now additionally means "generation followed the source image's aspect" for i2i jobs, alongside its prior meanings. Frontend must regenerate types (`gen:api`) and stop hardcoding an `aspect_ratio` default on i2i requests for non-reshaping models._
 >
 > _Prior (2026-07-12): Added **Video Frame Extraction** (new §9b): `POST /v1/frames/preview` and `POST /v1/frames/extract` run as free, non-billed background jobs (no `Idempotency-Key`) against either a `GenerationOutput` video or a user-uploaded video; poll `GET /v1/frames/jobs/{id}` until `completed`/`failed`. Preview frames are presigned R2 URLs generated fresh per poll (never cache beyond the current session — see §9b); extracted frames become ordinary uploads (standard `MediaObject`, stable `/v1/content/uploads/{id}` URLs) with new source-video lineage. Also: `POST /v1/storage/upload` (§8) now accepts video (`video/mp4`, `video/webm`, `video/quicktime`, ≤20MB, ffprobe-validated server-side — the declared `Content-Type` is never trusted); the Content Proxy (§9) inline-safe `Content-Type` allowlist grew to match. New enums `FrameExtractionKind`/`FrameExtractionStatus` (§17); `MediaFormat` gained `webm`/`mov`. Frontend must regenerate types (`gen:api`) — see `docs/contracts/video-frame-extraction.md` for the full contract._
 >
@@ -1361,7 +1365,7 @@ Note:     Redirect user to checkout_url for Stripe Checkout. The amount charged
 #### `POST /v1/billing/topup/nowpayments`
 
 ```
-Request:  { amount_usd: int, pay_currency: string }
+Request:  { amount_usd: int, pay_currency?: string }
 Response: { invoice_url: string, payment_id: UUID }
 Status:   201 Created
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
@@ -1371,6 +1375,20 @@ Errors:   409 idempotency_conflict
 Note:     Same discount-on-price semantics as the Stripe path. NowPayments IPN
           under/overpayments are credited proportionally to actually_paid/amount_usd
           (uncapped on overpayment) — never held for manual review.
+
+          pay_currency is optional. Pass a ticker (e.g. "usdcmatic") to pin the
+          invoice to that currency/network (unchanged behavior) — typically sourced
+          from GET /v1/billing/currencies. Omit it (or send blank/whitespace) to let
+          the customer pick any currency NowPayments supports on the hosted invoice
+          page — the checkout UI is never required to fetch or render a currency
+          list itself; the catalog is advisory UI only (see GET /v1/billing/currencies).
+
+          Payment.currency is "USD" at charge time when pay_currency was omitted
+          (mirrors price_currency — the invoice is USD-denominated until paid) and
+          is patched to the customer's actual settled ticker once the first IPN
+          reports it, even on intermediate (waiting/confirming) statuses. Poll
+          GET /v1/billing/... payment/transaction records after the invoice_url
+          redirect to observe the final currency; do not assume it stays "USD".
 ```
 
 ### Billing — Public (no auth)
@@ -1389,6 +1407,31 @@ Returns the ordered effective provider set for the product resolved from the req
 Effective means the provider is present in the product's static capability set and is not disabled
 by a runtime override. An absent override row means enabled. Disabled providers are omitted.
 Checkout UIs should render this list rather than hardcoding provider availability.
+
+#### `GET /v1/billing/currencies`
+
+```
+Auth:     none
+Response: Array<{
+  ticker: string,           // uppercased provider ticker, e.g. "BTC", "USDCMATIC"
+  name: string | null,
+  network: string | null,   // uppercased provider network code
+  logo_url: string | null   // served from the R2 public assets domain, never nowpayments.io
+}>
+```
+
+DB-cached currency catalog for the product's catalog-capable payment providers (currently
+NowPayments only), refreshed by a periodic worker (every `PAYMENT_CURRENCY_SYNC_INTERVAL_SECONDS`,
+default 3h) and on-demand by superadmin (`POST /v1/admin/payments/currencies/refresh`). Only
+`is_available` rows are returned, ordered by ticker. No hardcoded ticker list exists anywhere in
+this contract — availability is decided solely by the provider's own dashboard-checked list.
+
+FE contract:
+- **Empty array** (cold cache, or every catalog-capable provider disabled/unconfigured) ⇒ hide the
+  currency picker and omit `pay_currency` from `POST /v1/billing/topup/nowpayments` — NowPayments'
+  own hosted invoice-page picker takes over. Checkout has zero dependency on catalog state.
+- `logo_url: null` ⇒ render a generic coin icon.
+- `name`/`network: null` ⇒ render a ticker-only label.
 
 `GET /v1/billing/topup/options` and `GET /v1/billing/pricing` remain authenticated.
 
@@ -1668,7 +1711,10 @@ PaymentResponse: {
   status: PaymentStatus,
   amount_usd: string,        // decimal string
   tokens_granted: int,
-  currency: string,          // e.g. "USD"
+  currency: string,          // e.g. "USD"; for NowPayments with an unpinned
+                             // pay_currency, "USD" until the first IPN reports
+                             // the customer's chosen settlement ticker
+                             // (e.g. "USDCMATIC"), then that value
   created_at: datetime,
   completed_at: datetime | null
 }
@@ -1838,6 +1884,50 @@ Errors:   400 when neither field is supplied
           404 when provider is unknown or outside the product's static capability set
 Note:     Writes payment_provider.enable, payment_provider.disable, or
           payment_provider.reorder to the append-only audit log with target_user_id=null.
+```
+
+### Payment Currency Catalog
+
+Superadmin management of the DB-cached currency catalog (see `GET /v1/billing/currencies` for the
+public contract). All endpoints require **SUPERADMIN** and are scoped to the resolved product.
+
+```typescript
+AdminCurrency: {
+  ticker: string,
+  provider: "stripe" | "nowpayments",
+  is_available: boolean,          // false = flipped unavailable by the most recent sync, row kept
+  name: string | null,
+  network: string | null,
+  logo_key: string | null,        // R2 object key; null = no cached logo
+  logo_source_url: string | null, // provider URL last successfully cached (change detector)
+  logo_synced_at: string | null,  // ISO 8601
+  last_seen_at: string            // ISO 8601, touched on every sync that includes this ticker
+}
+
+SyncResult: {
+  provider: "stripe" | "nowpayments",
+  upserted: number,
+  deactivated: number
+}
+```
+
+#### `GET /v1/admin/payments/currencies`
+
+```
+Response: AdminCurrency[]
+Note:     Full catalog including unavailable rows, ordered by ticker. Unlike the public
+          endpoint, this never filters by is_available — used to audit sync history.
+```
+
+#### `POST /v1/admin/payments/currencies/refresh`
+
+```
+Response: SyncResult[]   // one entry per catalog-capable provider in the product's capability set
+Errors:   502 when any provider's merchant/coins or full-currencies call fails — the previously
+          synced catalog and logos are left untouched (no partial sync is ever committed)
+Note:     Synchronous — runs list_merchant_currencies + list_full_currencies + logo caching inline
+          and commits before responding. Writes payment_currencies.refresh to the audit log with
+          target_user_id=null and a detail blob of per-provider upserted/deactivated counts.
 ```
 
 ---

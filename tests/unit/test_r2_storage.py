@@ -276,6 +276,31 @@ class TestPutRaw:
             ContentType="image/webp",
         )
 
+    async def test_put_raw_passes_cache_control_when_given(
+        self, r2_service: R2StorageService
+    ) -> None:
+        mock_client = AsyncMock()
+
+        @asynccontextmanager
+        async def _fake_get_client():
+            yield mock_client
+
+        with patch.object(r2_service, "_get_client", _fake_get_client):
+            await r2_service.put_raw(
+                "payment-currency-logos/abc.svg",
+                b"<svg/>",
+                content_type="image/svg+xml",
+                cache_control="public, max-age=31536000, immutable",
+            )
+
+        mock_client.put_object.assert_awaited_once_with(
+            Bucket=r2_service._settings.bucket_name,
+            Key="payment-currency-logos/abc.svg",
+            Body=b"<svg/>",
+            ContentType="image/svg+xml",
+            CacheControl="public, max-age=31536000, immutable",
+        )
+
     async def test_put_raw_raises_storage_upload_error_on_client_error(
         self, r2_service: R2StorageService
     ) -> None:

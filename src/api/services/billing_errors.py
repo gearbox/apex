@@ -50,6 +50,14 @@ class PaymentVerificationError(Exception):
     """Webhook signature verification failed. → HTTP 400"""
 
 
+class PaymentCatalogError(Exception):
+    """A provider currency-catalog endpoint returned an unexpected shape or host."""
+
+
+class LogoCacheError(Exception):
+    """A currency logo failed to download, validate, or upload. Non-fatal to sync (D10)."""
+
+
 class UnsupportedProviderError(BillingError):
     """No gateway implementation is registered for a provider."""
 

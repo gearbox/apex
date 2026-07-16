@@ -135,10 +135,15 @@ class TopUpStripeRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=Tru
 
 
 class TopUpNowPaymentsRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
-    """Request to create a NowPayments invoice. See ``TopUpStripeRequest`` re: bounds."""
+    """Request to create a NowPayments invoice. See ``TopUpStripeRequest`` re: bounds.
+
+    ``pay_currency`` is optional: when omitted, the invoice is created without
+    a pinned ticker and the customer picks the currency on the NowPayments
+    invoice page.
+    """
 
     amount_usd: Annotated[int, msgspec.Meta(ge=1)]
-    pay_currency: str
+    pay_currency: str | None = None
 
 
 class AdminAdjustRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):

@@ -791,6 +791,23 @@ class Settings(BaseSettings):
         default=None,
         description="Public URL base for R2 content (if using custom domain)",
     )
+    r2_public_assets_bucket: str | None = Field(
+        default=None,
+        description=(
+            "Dedicated public R2 bucket for static assets (currency logos, etc.) — distinct "
+            "from r2_bucket_name, which is the private, cookie-authenticated user-content "
+            "bucket. Never make r2_bucket_name public; use this bucket for anything meant to "
+            "be served directly. Both this and r2_public_assets_url_base must be set to "
+            "enable logo caching."
+        ),
+    )
+    r2_public_assets_url_base: str | None = Field(
+        default=None,
+        description=(
+            "Public URL base (custom domain) fronting r2_public_assets_bucket. Both this and "
+            "r2_public_assets_bucket must be set to enable logo caching."
+        ),
+    )
 
     content_url_ttl: int = Field(
         default=10800,
@@ -1025,6 +1042,19 @@ class Settings(BaseSettings):
         default=10_000,
         gt=0,
         description="Maximum top-up amount in whole USD.",
+    )
+
+    # --- Payment Currency Catalog Sync ---
+    payment_currency_sync_interval_seconds: int = Field(
+        default=10800,
+        ge=300,
+        le=86400,
+        description=(
+            "Seconds between periodic payment currency catalog syncs (merchant/coins "
+            "+ full-currencies + logo caching). Default 3h matches how rarely a "
+            "NowPayments dashboard's enabled-currency list actually changes; also "
+            "triggerable on-demand via POST /v1/admin/payments/currencies/refresh."
+        ),
     )
 
     # -------------------------------------------------------------------------
@@ -1310,6 +1340,11 @@ class Settings(BaseSettings):
     def r2_configured(self) -> bool:
         """Check if R2 is properly configured."""
         return bool(self.r2_account_id and self.r2_access_key_id and self.r2_secret_access_key)
+
+    @property
+    def r2_public_assets_configured(self) -> bool:
+        """Check if the dedicated public assets bucket (for currency logos) is configured."""
+        return bool(self.r2_public_assets_bucket and self.r2_public_assets_url_base)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
