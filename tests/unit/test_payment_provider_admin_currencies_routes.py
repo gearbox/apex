@@ -95,3 +95,61 @@ async def test_refresh_provider_failure_returns_502_and_does_not_commit() -> Non
     assert exc_info.value.status_code == 502
     assert "nowpayments unreachable" in str(exc_info.value.detail)
     session.commit.assert_not_awaited()
+
+
+async def test_refresh_catalog_error_returns_502() -> None:
+    from src.api.services.billing_errors import PaymentCatalogError
+
+    sync_service = AsyncMock()
+    sync_service.refresh = AsyncMock(side_effect=PaymentCatalogError("bad shape"))
+    session = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await PaymentProviderAdminController.refresh_currencies.fn(
+            MagicMock(),
+            superadmin=MagicMock(id=uuid4()),
+            session=session,
+            product_config=VEX_CONFIG,
+            payment_currency_sync_service=sync_service,
+        )
+
+    assert exc_info.value.status_code == 502
+    session.commit.assert_not_awaited()
+
+
+async def test_refresh_http_error_returns_502() -> None:
+    import httpx
+
+    sync_service = AsyncMock()
+    sync_service.refresh = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+    session = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await PaymentProviderAdminController.refresh_currencies.fn(
+            MagicMock(),
+            superadmin=MagicMock(id=uuid4()),
+            session=session,
+            product_config=VEX_CONFIG,
+            payment_currency_sync_service=sync_service,
+        )
+
+    assert exc_info.value.status_code == 502
+    session.commit.assert_not_awaited()
+
+
+async def test_refresh_unexpected_exception_propagates_as_500() -> None:
+    """A genuine programming error must not be misreported as 'bad gateway'."""
+    sync_service = AsyncMock()
+    sync_service.refresh = AsyncMock(side_effect=AttributeError("'NoneType' has no attribute 'x'"))
+    session = AsyncMock()
+
+    with pytest.raises(AttributeError):
+        await PaymentProviderAdminController.refresh_currencies.fn(
+            MagicMock(),
+            superadmin=MagicMock(id=uuid4()),
+            session=session,
+            product_config=VEX_CONFIG,
+            payment_currency_sync_service=sync_service,
+        )
+
+    session.commit.assert_not_awaited()

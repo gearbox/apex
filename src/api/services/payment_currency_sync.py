@@ -43,7 +43,7 @@ class SyncResult(msgspec.Struct, frozen=True, kw_only=True):
 class PaymentCurrencySyncService:
     """Discover catalog-capable gateways and reconcile their catalogs into the DB."""
 
-    def __init__(self, registry: GatewayRegistry, logo_cache: LogoCacheService) -> None:
+    def __init__(self, registry: GatewayRegistry, logo_cache: LogoCacheService | None) -> None:
         self._registry = registry
         self._logo_cache = logo_cache
 
@@ -121,7 +121,7 @@ class PaymentCurrencySyncService:
             logo_key: str | None = None
             logo_source_url: str | None = None
             logo_synced_at: datetime | None = None
-            if info.logo_url:
+            if self._logo_cache is not None and info.logo_url:
                 existing_row = existing_by_ticker.get(ticker)
                 unchanged = (
                     existing_row is not None
@@ -130,7 +130,11 @@ class PaymentCurrencySyncService:
                 )
                 if not unchanged:
                     logo_key, hit = await self._cache_logo(
-                        info.logo_url, ticker=ticker, product_id=slug, provider=provider_value
+                        self._logo_cache,
+                        info.logo_url,
+                        ticker=ticker,
+                        product_id=slug,
+                        provider=provider_value,
                     )
                     if hit:
                         logo_source_url = info.logo_url
@@ -144,6 +148,7 @@ class PaymentCurrencySyncService:
                     ticker=ticker,
                     name=info.name,
                     network=info.network,
+                    has_metadata=True,
                     logo_key=logo_key,
                     logo_source_url=logo_source_url,
                     logo_synced_at=logo_synced_at,
@@ -160,11 +165,13 @@ class PaymentCurrencySyncService:
             logo_hits=logo_hits,
             logo_misses=logo_misses,
             metadata_missing=metadata_missing,
+            logos_disabled=self._logo_cache is None,
         )
         return SyncResult(provider=gateway.provider, upserted=upserted, deactivated=deactivated)
 
+    @staticmethod
     async def _cache_logo(
-        self,
+        logo_cache: LogoCacheService,
         logo_url: str,
         *,
         ticker: str,
@@ -173,7 +180,7 @@ class PaymentCurrencySyncService:
     ) -> tuple[str | None, bool]:
         """Attempt to cache one currency's logo. Per-logo failures are non-fatal (D10)."""
         try:
-            key = await self._logo_cache.ensure_cached(logo_url)
+            key = await logo_cache.ensure_cached(logo_url)
         except LogoCacheError as exc:
             logger.warning(
                 "payment_currency.logo_failed",

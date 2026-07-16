@@ -80,7 +80,9 @@ class BillingPublicController(Controller):
             product_config.slug, only_available=True
         )
         assets_base = (
-            settings.r2_public_url_base.rstrip("/") if settings.r2_public_url_base else None
+            settings.r2_public_assets_url_base.rstrip("/")
+            if settings.r2_public_assets_url_base
+            else None
         )
         return [
             PublicCurrency(

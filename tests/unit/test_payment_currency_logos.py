@@ -10,6 +10,7 @@ import pytest
 
 from src.api.services.billing_errors import LogoCacheError
 from src.api.services.payment_currency_logos import (
+    LOGO_CACHE_CONTROL,
     LOGO_KEY_PREFIX,
     MAX_LOGO_BYTES,
     LogoCacheService,
@@ -71,7 +72,9 @@ async def test_ensure_cached_uploads_and_returns_content_addressed_key() -> None
 
     digest = hashlib.sha256(content).hexdigest()[:16]
     assert key == f"{LOGO_KEY_PREFIX}/{digest}.svg"
-    r2.put_raw.assert_awaited_once_with(key, content, content_type="image/svg+xml")
+    r2.put_raw.assert_awaited_once_with(
+        key, content, content_type="image/svg+xml", cache_control=LOGO_CACHE_CONTROL
+    )
 
 
 async def test_ensure_cached_skips_upload_when_key_already_exists() -> None:

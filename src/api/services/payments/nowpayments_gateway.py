@@ -272,11 +272,15 @@ class NowPaymentsGateway:
             )
 
             raw_logo = entry.get("logo_url")
-            logo_url = (
-                self._resolve_logo_url(raw_logo)
-                if isinstance(raw_logo, str) and raw_logo.strip()
-                else None
-            )
+            logo_url: str | None = None
+            if isinstance(raw_logo, str) and raw_logo.strip():
+                logo_url = self._resolve_logo_url(raw_logo)
+                if logo_url is None:
+                    logger.warning(
+                        "payment_currency.logo_host_rejected",
+                        ticker=ticker,
+                        host=urlparse(urljoin(_NOWPAYMENTS_SITE_BASE, raw_logo)).hostname,
+                    )
 
             details[ticker] = CurrencyDetails(
                 ticker=ticker,
@@ -287,10 +291,15 @@ class NowPaymentsGateway:
         return details
 
     @staticmethod
-    def _resolve_logo_url(raw_logo_url: str) -> str:
-        """Resolve a possibly-relative provider logo URL against nowpayments.io (D11)."""
+    def _resolve_logo_url(raw_logo_url: str) -> str | None:
+        """Resolve a possibly-relative provider logo URL against nowpayments.io (D11).
+
+        Returns None (rather than raising) when the resolved host isn't
+        allowlisted — this iterates NowPayments' entire multi-thousand-coin
+        universe, so one exotic coin's off-host logo must degrade per-entry
+        rather than fail the whole catalog sync (D2/D10 extended one step
+        earlier in the pipeline). The caller logs the rejection.
+        """
         resolved = urljoin(_NOWPAYMENTS_SITE_BASE, raw_logo_url)
         host = urlparse(resolved).hostname
-        if host not in _ALLOWED_LOGO_HOSTS:
-            raise PaymentCatalogError(f"Disallowed NowPayments logo host: {host}")
-        return resolved
+        return None if host not in _ALLOWED_LOGO_HOSTS else resolved

@@ -30,11 +30,19 @@ logger = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class CatalogEntry:
-    """One synced ticker's availability plus optional display/logo metadata."""
+    """One synced ticker's availability plus optional display/logo metadata.
+
+    ``has_metadata`` distinguishes "the provider's full-currencies response
+    didn't include this ticker this sync" (``False`` — a transient gap that
+    must not erase a previously learned name/network) from "the provider
+    included this ticker with these (possibly null) fields" (``True`` — an
+    intentional overwrite, including a provider retracting a name to null).
+    """
 
     ticker: str
     name: str | None = None
     network: str | None = None
+    has_metadata: bool = False
     logo_key: str | None = None
     logo_source_url: str | None = None
     logo_synced_at: datetime | None = None
@@ -81,7 +89,11 @@ class PaymentCurrencyRepository:
         Logo columns (``logo_key``/``logo_source_url``/``logo_synced_at``) are
         written only when an entry carries a freshly-cached logo — an entry
         without logo data never nulls out a previously cached one, so the
-        unchanged-logo skip path (D8) doesn't erase history.
+        unchanged-logo skip path (D8) doesn't erase history. ``name``/
+        ``network`` follow the same pattern via ``entry.has_metadata``: a
+        ticker transiently missing from the provider's full-currencies
+        response keeps its previously learned display metadata rather than
+        being nulled out.
 
         Returns:
             ``(upserted_count, deactivated_count)``.
@@ -126,11 +138,12 @@ class PaymentCurrencyRepository:
             }
             update_values: dict[str, object] = {
                 "is_available": True,
-                "name": entry.name,
-                "network": entry.network,
                 "last_seen_at": now,
                 "updated_at": now,
             }
+            if entry.has_metadata:
+                update_values["name"] = entry.name
+                update_values["network"] = entry.network
             if entry.logo_key is not None:
                 values["logo_key"] = entry.logo_key
                 values["logo_source_url"] = entry.logo_source_url

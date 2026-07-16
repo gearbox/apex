@@ -134,6 +134,12 @@ services:
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is required}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME:-apex-staging}
 
+      # --- Public assets bucket (currency logos; distinct from the private
+      # user-content bucket above — see .env.example). Optional: unset disables
+      # logo caching but availability/metadata sync still runs.
+      R2_PUBLIC_ASSETS_BUCKET: ${R2_PUBLIC_ASSETS_BUCKET:-}
+      R2_PUBLIC_ASSETS_URL_BASE: ${R2_PUBLIC_ASSETS_URL_BASE:-}
+
       # --- Content retention (see .env.example) ---
       RETENTION_DAYS: ${RETENTION_DAYS:-7}
       CONTENT_CLEANUP_ENABLED: ${CONTENT_CLEANUP_ENABLED:-true}
@@ -188,6 +194,9 @@ services:
       NOWPAYMENTS_API_KEY_VEX: ${NOWPAYMENTS_API_KEY_VEX:?NOWPAYMENTS_API_KEY_VEX is required}
       NOWPAYMENTS_IPN_SECRET_VEX: ${NOWPAYMENTS_IPN_SECRET_VEX:?NOWPAYMENTS_IPN_SECRET_VEX is required}
       NOWPAYMENTS_API_BASE: ${NOWPAYMENTS_API_BASE:-https://api.nowpayments.io}
+
+      # --- Payment currency catalog sync (see .env.example) ---
+      PAYMENT_CURRENCY_SYNC_INTERVAL_SECONDS: ${PAYMENT_CURRENCY_SYNC_INTERVAL_SECONDS:-10800}
 
     # No host port binding — cloudflared connects to api:8100 inside the network
     ports: []

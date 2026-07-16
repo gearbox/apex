@@ -94,6 +94,7 @@ class ServiceContainer:
     aisha_job_poller: AishaJobPoller | None = None
     workflow_service: WorkflowService | None = None
     r2_storage: R2StorageService | None = None
+    r2_public_assets_storage: R2StorageService | None = None
     db_manager: DatabaseManager | None = None
     jwt_service: JWTService | None = None
     password_service: PasswordService | None = None
@@ -626,9 +627,29 @@ async def init_services(settings: Settings) -> JWTService:
             retention_days=settings.retention_days,
         )
 
-        # Currency catalog sync + logo caching requires R2 (logos are
-        # R2-cached, never on the container filesystem — D7).
-        logo_cache_service = LogoCacheService(r2_client=_services.r2_storage)
+        # Logo caching requires a dedicated *public* assets bucket — the
+        # user-content bucket (r2_storage above) is private and served only
+        # through the cookie-authenticated content proxy, so it can never
+        # back publicly-linked logo_url values. When the assets bucket isn't
+        # configured, logo caching is disabled but availability/metadata
+        # sync still runs (logo_cache=None).
+        logo_cache_service: LogoCacheService | None = None
+        if settings.r2_public_assets_configured:
+            assets_r2_settings = R2StorageSettings(
+                account_id=settings.r2_account_id,
+                access_key_id=settings.r2_access_key_id,
+                secret_access_key=settings.r2_secret_access_key,
+                bucket_name=settings.r2_public_assets_bucket or "",
+            )
+            _services.r2_public_assets_storage = R2StorageService(assets_r2_settings)
+            logo_cache_service = LogoCacheService(r2_client=_services.r2_public_assets_storage)
+            logger.info(
+                "payment_currency.logo_cache_enabled",
+                bucket=settings.r2_public_assets_bucket,
+            )
+        else:
+            logger.warning("payment_currency.logo_cache_disabled")
+
         _services.payment_currency_sync_service = PaymentCurrencySyncService(
             registry=gateway_registry,
             logo_cache=logo_cache_service,
@@ -1149,6 +1170,10 @@ async def shutdown_services() -> None:
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
         logger.info("r2.closed")
+
+    if _services.r2_public_assets_storage is not None:
+        await _services.r2_public_assets_storage.close()
+        logger.info("r2_public_assets.closed")
 
     if _services.db_manager is not None:
         await _services.db_manager.close()

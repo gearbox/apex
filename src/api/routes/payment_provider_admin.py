@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import httpx
 import msgspec
 from litestar import Controller, get, patch, post
 from litestar.di import Provide
@@ -16,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.dependencies.auth import get_current_superadmin_user
 from src.api.schemas.admin import PaymentProviderPatchRequest
 from src.api.security import auth_guard
-from src.api.services.billing_errors import UnknownProviderError
+from src.api.services.billing_errors import PaymentCatalogError, UnknownProviderError
 from src.api.services.payment_currency_sync import PaymentCurrencySyncService, SyncResult
 from src.api.services.payment_provider_state import (
     PaymentProviderStateService,
@@ -138,13 +139,17 @@ class PaymentProviderAdminController(Controller):
     ) -> list[SyncResult]:
         """Synchronously refresh the current product's currency catalog.
 
-        A provider failure aborts the whole refresh (502) and leaves the
-        previously synced catalog untouched — the route never commits a
-        partial sync (D6).
+        A provider/config failure aborts the whole refresh (502) and leaves
+        the previously synced catalog untouched — the route never commits a
+        partial sync (D6). Only failure modes that are genuinely upstream or
+        configuration problems (provider shape/HTTP errors, missing
+        credentials, or the repo's empty-set guard) map to 502; anything
+        else (e.g. a programming error) propagates as a 500 so it isn't
+        misreported as "bad gateway" and hidden from regression tracking.
         """
         try:
             results = await payment_currency_sync_service.refresh(product_config, session=session)
-        except Exception as exc:
+        except (PaymentCatalogError, httpx.HTTPError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
         detail = json.dumps(

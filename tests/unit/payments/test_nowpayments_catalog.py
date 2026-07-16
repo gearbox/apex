@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from src.api.services.billing_errors import PaymentCatalogError
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
@@ -155,14 +156,45 @@ class TestListFullCurrencies:
 
         assert details["BTC"].logo_url == "https://nowpayments.io/images/coins/btc.svg"
 
-    async def test_disallowed_absolute_host_raises(self) -> None:
+    async def test_disallowed_absolute_host_degrades_entry_instead_of_raising(self) -> None:
         client = _client_returning(
             {"currencies": [{"code": "btc", "logo_url": "https://evil.example.com/btc.svg"}]}
         )
         gateway = NowPaymentsGateway(_settings(), client_factory=lambda: client)
 
-        with pytest.raises(PaymentCatalogError, match="Disallowed"):
-            await gateway.list_full_currencies("vex")
+        with capture_logs() as logs:
+            details = await gateway.list_full_currencies("vex")
+
+        assert details["BTC"].logo_url is None
+        rejected = [
+            log for log in logs if log.get("event") == "payment_currency.logo_host_rejected"
+        ]
+        assert len(rejected) == 1
+        assert rejected[0]["ticker"] == "BTC"
+        assert rejected[0]["host"] == "evil.example.com"
+        assert rejected[0]["log_level"] == "warning"
+
+    async def test_other_entries_unaffected_by_one_disallowed_logo_host(self) -> None:
+        client = _client_returning(
+            {
+                "currencies": [
+                    {"code": "btc", "logo_url": "https://evil.example.com/btc.svg"},
+                    {
+                        "code": "eth",
+                        "name": "Ethereum",
+                        "logo_url": "https://nowpayments.io/images/coins/eth.svg",
+                    },
+                ]
+            }
+        )
+        gateway = NowPaymentsGateway(_settings(), client_factory=lambda: client)
+
+        with capture_logs():
+            details = await gateway.list_full_currencies("vex")
+
+        assert details["BTC"].logo_url is None
+        assert details["ETH"].name == "Ethereum"
+        assert details["ETH"].logo_url == "https://nowpayments.io/images/coins/eth.svg"
 
     async def test_allowed_www_subdomain_host(self) -> None:
         client = _client_returning(

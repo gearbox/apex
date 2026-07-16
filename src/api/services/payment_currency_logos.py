@@ -35,6 +35,9 @@ CONTENT_TYPE_EXTENSIONS: dict[str, str] = {
     "image/jpeg": "jpg",
 }
 LOGO_KEY_PREFIX = "payment-currency-logos"
+# Content-addressed keys never change contents, so the public assets domain
+# can cache them forever.
+LOGO_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
 class LogoCacheService:
@@ -73,7 +76,9 @@ class LogoCacheService:
             key = f"{LOGO_KEY_PREFIX}/{digest}.{ext}"
 
             if not await self._r2.exists(key):
-                await self._r2.put_raw(key, content, content_type=content_type)
+                await self._r2.put_raw(
+                    key, content, content_type=content_type, cache_control=LOGO_CACHE_CONTROL
+                )
             return key
 
     async def _download(self, logo_url: str) -> tuple[bytes, str]:

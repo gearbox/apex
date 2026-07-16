@@ -150,6 +150,47 @@ async def test_metadata_missing_ticker_stays_available_with_null_metadata() -> N
     assert entries[0].ticker == "DOGE"
     assert entries[0].name is None
     assert entries[0].network is None
+    assert entries[0].has_metadata is False
+    repo.sync_catalog.assert_awaited_once()
+
+
+async def test_ticker_present_in_details_marks_has_metadata_true() -> None:
+    details = {"BTC": CurrencyDetails(ticker="BTC", name="Bitcoin", network="BTC", logo_url=None)}
+    gateway = _FakeCatalogGateway(selected=["BTC"], details=details)
+    registry = GatewayRegistry([gateway])  # type: ignore[list-item]
+    service = PaymentCurrencySyncService(registry=registry, logo_cache=AsyncMock())
+
+    repo = _make_repo()
+    with patch(
+        "src.api.services.payment_currency_sync.PaymentCurrencyRepository", return_value=repo
+    ):
+        await service.refresh(VEX_CONFIG, session=MagicMock())
+
+    entries = repo.sync_catalog.call_args.args[2]
+    assert entries[0].has_metadata is True
+
+
+async def test_logo_cache_none_syncs_without_any_logo_calls() -> None:
+    details = {
+        "BTC": CurrencyDetails(
+            ticker="BTC", name="Bitcoin", network="BTC", logo_url="https://nowpayments.io/btc.svg"
+        )
+    }
+    gateway = _FakeCatalogGateway(selected=["BTC"], details=details)
+    registry = GatewayRegistry([gateway])  # type: ignore[list-item]
+    service = PaymentCurrencySyncService(registry=registry, logo_cache=None)
+
+    repo = _make_repo()
+    with patch(
+        "src.api.services.payment_currency_sync.PaymentCurrencyRepository", return_value=repo
+    ):
+        results = await service.refresh(VEX_CONFIG, session=MagicMock())
+
+    entries = repo.sync_catalog.call_args.args[2]
+    assert entries[0].logo_key is None
+    assert entries[0].logo_source_url is None
+    assert entries[0].has_metadata is True
+    assert results[0].provider == PaymentProvider.NOWPAYMENTS
     repo.sync_catalog.assert_awaited_once()
 
 
