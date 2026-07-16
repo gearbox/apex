@@ -58,6 +58,15 @@ class LogoCacheError(Exception):
     """A currency logo failed to download, validate, or upload. Non-fatal to sync (D10)."""
 
 
+class LogoStorageError(LogoCacheError):
+    """A currency logo failed because the R2 assets bucket itself is unavailable.
+
+    Distinct from a plain LogoCacheError (bad/oversized/wrong-type download) so the
+    sync service can short-circuit remaining logo attempts for the run (P1-2) instead
+    of retrying a dead storage backend once per ticker.
+    """
+
+
 class UnsupportedProviderError(BillingError):
     """No gateway implementation is registered for a provider."""
 

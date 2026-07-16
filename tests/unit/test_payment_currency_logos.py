@@ -8,13 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.api.services.billing_errors import LogoCacheError
+from src.api.services.billing_errors import LogoCacheError, LogoStorageError
 from src.api.services.payment_currency_logos import (
     LOGO_CACHE_CONTROL,
     LOGO_KEY_PREFIX,
     MAX_LOGO_BYTES,
     LogoCacheService,
 )
+from src.api.services.storage.exceptions import StorageConnectionError
 
 pytestmark = pytest.mark.unit
 
@@ -129,6 +130,32 @@ async def test_http_error_wrapped_as_logo_cache_error() -> None:
 
     with pytest.raises(LogoCacheError, match="Failed to download"):
         await service.ensure_cached("https://nowpayments.io/missing.png")
+
+
+async def test_exists_storage_error_raises_logo_storage_error() -> None:
+    content = b"<svg>coin</svg>"
+    response = _FakeStreamResponse(content_type="image/svg+xml", chunks=[content])
+    r2 = _r2_client()
+    r2.exists = AsyncMock(side_effect=StorageConnectionError("403 Forbidden on HeadObject"))
+    service = LogoCacheService(r2_client=r2, http_client_factory=lambda: _client_for(response))
+
+    with pytest.raises(LogoStorageError, match="R2 storage failure"):
+        await service.ensure_cached("https://nowpayments.io/btc.svg")
+
+    # LogoStorageError is a LogoCacheError subclass, so existing callers that
+    # only catch the base still see it.
+    assert issubclass(LogoStorageError, LogoCacheError)
+
+
+async def test_put_raw_storage_error_raises_logo_storage_error() -> None:
+    content = b"<svg>coin</svg>"
+    response = _FakeStreamResponse(content_type="image/svg+xml", chunks=[content])
+    r2 = _r2_client(exists=False)
+    r2.put_raw = AsyncMock(side_effect=StorageConnectionError("403 Forbidden on PutObject"))
+    service = LogoCacheService(r2_client=r2, http_client_factory=lambda: _client_for(response))
+
+    with pytest.raises(LogoStorageError, match="R2 storage failure"):
+        await service.ensure_cached("https://nowpayments.io/btc.svg")
 
 
 async def test_jpeg_extension_mapped_to_jpg() -> None:

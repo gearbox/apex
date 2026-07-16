@@ -148,6 +148,17 @@ caching entirely; currency availability/metadata sync is unaffected, and
 uploaded with `Cache-Control: public, max-age=31536000, immutable` (they're content-addressed
 by SHA-256, so the same key is always the same bytes).
 
+**R2 API token scope:** the app's R2 API token must carry **Object Read & Write on the
+assets bucket in addition to the content bucket** (`R2_BUCKET_NAME`) — a token scoped to
+only the content bucket returns `403 Forbidden` (not `404`) on `HeadObject` against the
+assets bucket, which is what a scope gap looks like in logs. A misconfigured/unreachable
+assets bucket degrades gracefully (per-run circuit breaker after the first storage
+failure — see `payment_currency.logo_storage_unavailable` at error level), but startup
+also runs a best-effort probe against the assets bucket and logs
+`payment_currency.logo_storage_probe_failed` at error level if it can't reach it, so a
+scope gap is visible in the first screen of boot logs rather than 33 minutes later inside
+a request.
+
 ---
 
 ### Rate Limiting

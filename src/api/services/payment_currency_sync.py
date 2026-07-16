@@ -10,13 +10,14 @@ commits.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
 
-from src.api.services.billing_errors import LogoCacheError
+from src.api.services.billing_errors import LogoCacheError, LogoStorageError
 from src.api.services.payments.catalog import SupportsCurrencyCatalog
 from src.core.product import PaymentProvider
 from src.db.repositories.payment_currency import CatalogEntry, PaymentCurrencyRepository
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.payment_currency_logos import LogoCacheService
+    from src.api.services.payments.catalog import CurrencyDetails
     from src.api.services.payments.registry import GatewayRegistry
     from src.core.product import ProductConfig
     from src.db.models.billing import PaymentCurrency
@@ -38,6 +40,21 @@ class SyncResult(msgspec.Struct, frozen=True, kw_only=True):
     provider: PaymentProvider
     upserted: int
     deactivated: int
+
+
+@dataclass
+class _LogoTally:
+    """Per-run logo-caching counters, threaded through one ticker at a time.
+
+    `storage_unavailable` is the P1-2 circuit breaker: once a `LogoStorageError`
+    is seen, every subsequent ticker in the same run skips `ensure_cached`
+    entirely instead of retrying a dead storage backend.
+    """
+
+    hits: int = 0
+    misses: int = 0
+    skipped_storage: int = 0
+    storage_unavailable: bool = False
 
 
 class PaymentCurrencySyncService:
@@ -102,9 +119,8 @@ class PaymentCurrencySyncService:
         existing_by_ticker: dict[str, PaymentCurrency] = {row.ticker: row for row in existing_rows}
 
         entries: list[CatalogEntry] = []
-        logo_hits = 0
-        logo_misses = 0
         metadata_missing = 0
+        tally = _LogoTally()
         for ticker in selected:
             info = details.get(ticker)
             if info is None:
@@ -118,31 +134,15 @@ class PaymentCurrencySyncService:
                 entries.append(CatalogEntry(ticker=ticker))
                 continue
 
-            logo_key: str | None = None
-            logo_source_url: str | None = None
-            logo_synced_at: datetime | None = None
-            if self._logo_cache is not None and info.logo_url:
-                existing_row = existing_by_ticker.get(ticker)
-                unchanged = (
-                    existing_row is not None
-                    and existing_row.logo_key is not None
-                    and existing_row.logo_source_url == info.logo_url
-                )
-                if not unchanged:
-                    logo_key, hit = await self._cache_logo(
-                        self._logo_cache,
-                        info.logo_url,
-                        ticker=ticker,
-                        product_id=slug,
-                        provider=provider_value,
-                    )
-                    if hit:
-                        logo_source_url = info.logo_url
-                        logo_synced_at = now
-                        logo_hits += 1
-                    else:
-                        logo_misses += 1
-
+            logo_key, logo_source_url, logo_synced_at = await self._resolve_logo(
+                info,
+                ticker=ticker,
+                product_id=slug,
+                provider=provider_value,
+                existing_row=existing_by_ticker.get(ticker),
+                tally=tally,
+                now=now,
+            )
             entries.append(
                 CatalogEntry(
                     ticker=ticker,
@@ -162,12 +162,70 @@ class PaymentCurrencySyncService:
             provider=provider_value,
             upserted=upserted,
             deactivated=deactivated,
-            logo_hits=logo_hits,
-            logo_misses=logo_misses,
+            logo_hits=tally.hits,
+            logo_misses=tally.misses,
             metadata_missing=metadata_missing,
             logos_disabled=self._logo_cache is None,
+            logos_skipped_storage=tally.skipped_storage,
         )
         return SyncResult(provider=gateway.provider, upserted=upserted, deactivated=deactivated)
+
+    async def _resolve_logo(
+        self,
+        info: CurrencyDetails,
+        *,
+        ticker: str,
+        product_id: str,
+        provider: str,
+        existing_row: PaymentCurrency | None,
+        tally: _LogoTally,
+        now: datetime,
+    ) -> tuple[str | None, str | None, datetime | None]:
+        """Resolve one ticker's logo fields, updating the run-wide `tally` (P1-2).
+
+        Returns (logo_key, logo_source_url, logo_synced_at) — all `None` when
+        there's nothing to do (no logo cache/URL, unchanged, or storage is
+        down for the rest of this run).
+        """
+        if self._logo_cache is None or not info.logo_url:
+            return None, None, None
+
+        unchanged = (
+            existing_row is not None
+            and existing_row.logo_key is not None
+            and existing_row.logo_source_url == info.logo_url
+        )
+        if unchanged:
+            return None, None, None
+
+        if tally.storage_unavailable:
+            tally.skipped_storage += 1
+            return None, None, None
+
+        try:
+            logo_key, hit = await self._cache_logo(
+                self._logo_cache,
+                info.logo_url,
+                ticker=ticker,
+                product_id=product_id,
+                provider=provider,
+            )
+        except LogoStorageError as exc:
+            tally.storage_unavailable = True
+            tally.skipped_storage += 1
+            logger.exception(
+                "payment_currency.logo_storage_unavailable",
+                product_id=product_id,
+                provider=provider,
+                error=str(exc),
+            )
+            return None, None, None
+
+        if hit:
+            tally.hits += 1
+            return logo_key, info.logo_url, now
+        tally.misses += 1
+        return None, None, None
 
     @staticmethod
     async def _cache_logo(
@@ -178,9 +236,14 @@ class PaymentCurrencySyncService:
         product_id: str,
         provider: str,
     ) -> tuple[str | None, bool]:
-        """Attempt to cache one currency's logo. Per-logo failures are non-fatal (D10)."""
+        """Attempt to cache one currency's logo. Per-logo download/validation failures
+        are non-fatal (D10); `LogoStorageError` propagates so the caller can
+        short-circuit the rest of the run (P1-2).
+        """
         try:
             key = await logo_cache.ensure_cached(logo_url)
+        except LogoStorageError:
+            raise
         except LogoCacheError as exc:
             logger.warning(
                 "payment_currency.logo_failed",

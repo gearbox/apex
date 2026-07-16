@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 import httpx
 import structlog
 
-from src.api.services.billing_errors import LogoCacheError
+from src.api.services.billing_errors import LogoCacheError, LogoStorageError
+from src.api.services.storage.exceptions import StorageError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -67,7 +68,10 @@ class LogoCacheService:
             LogoCacheError: On any download/validation/upload failure. The
                 caller (PaymentCurrencySyncService) treats this as a
                 per-logo failure (D10) — the entry's logo fields stay unset
-                and the sync continues.
+                and the sync continues. Storage-backend failures (auth,
+                timeout, 5xx) raise the `LogoStorageError` subclass so the
+                caller can short-circuit the rest of the run (P1-2) instead
+                of retrying a dead bucket once per ticker.
         """
         async with self._semaphore:
             content, content_type = await self._download(logo_url)
@@ -75,10 +79,13 @@ class LogoCacheService:
             digest = hashlib.sha256(content).hexdigest()[:16]
             key = f"{LOGO_KEY_PREFIX}/{digest}.{ext}"
 
-            if not await self._r2.exists(key):
-                await self._r2.put_raw(
-                    key, content, content_type=content_type, cache_control=LOGO_CACHE_CONTROL
-                )
+            try:
+                if not await self._r2.exists(key):
+                    await self._r2.put_raw(
+                        key, content, content_type=content_type, cache_control=LOGO_CACHE_CONTROL
+                    )
+            except StorageError as exc:
+                raise LogoStorageError(f"R2 storage failure for {key}: {exc}") from exc
             return key
 
     async def _download(self, logo_url: str) -> tuple[bytes, str]:
