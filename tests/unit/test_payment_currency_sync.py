@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.api.services.billing_errors import LogoCacheError
+from src.api.services.billing_errors import LogoCacheError, LogoStorageError
 from src.api.services.payment_currency_sync import PaymentCurrencySyncService
 from src.api.services.payments.catalog import CurrencyDetails
 from src.api.services.payments.registry import GatewayRegistry
@@ -228,3 +228,74 @@ async def test_merchant_currencies_failure_aborts_before_sync_catalog() -> None:
         await service.refresh(VEX_CONFIG, session=MagicMock())
 
     repo.sync_catalog.assert_not_awaited()
+
+
+def _three_ticker_details() -> dict[str, CurrencyDetails]:
+    return {
+        ticker: CurrencyDetails(
+            ticker=ticker,
+            name=ticker.title(),
+            network=ticker,
+            logo_url=f"https://nowpayments.io/{ticker.lower()}.svg",
+        )
+        for ticker in ("BTC", "ETH", "LTC")
+    }
+
+
+async def test_storage_failure_short_circuits_remaining_tickers() -> None:
+    """P1-2: once a LogoStorageError is seen, later tickers skip ensure_cached entirely."""
+    details = _three_ticker_details()
+    gateway = _FakeCatalogGateway(selected=["BTC", "ETH", "LTC"], details=details)
+    registry = GatewayRegistry([gateway])  # type: ignore[list-item]
+    logo_cache = AsyncMock()
+    logo_cache.ensure_cached = AsyncMock(side_effect=LogoStorageError("R2 storage failure"))
+    service = PaymentCurrencySyncService(registry=registry, logo_cache=logo_cache)
+
+    repo = _make_repo()
+    with (
+        patch(
+            "src.api.services.payment_currency_sync.PaymentCurrencyRepository", return_value=repo
+        ),
+        patch("src.api.services.payment_currency_sync.logger") as mock_logger,
+    ):
+        results = await service.refresh(VEX_CONFIG, session=MagicMock())
+
+    logo_cache.ensure_cached.assert_awaited_once()
+    entries = repo.sync_catalog.call_args.args[2]
+    assert [entry.ticker for entry in entries] == ["BTC", "ETH", "LTC"]
+    assert all(entry.logo_key is None for entry in entries)
+    assert all(entry.has_metadata is True for entry in entries)
+    repo.sync_catalog.assert_awaited_once()
+    assert results[0].provider == PaymentProvider.NOWPAYMENTS
+
+    error_calls = [
+        call
+        for call in mock_logger.exception.call_args_list
+        if call.args and call.args[0] == "payment_currency.logo_storage_unavailable"
+    ]
+    assert len(error_calls) == 1
+
+    sync_ok_call = next(
+        call
+        for call in mock_logger.info.call_args_list
+        if call.args[0] == "payment_currency.sync_ok"
+    )
+    assert sync_ok_call.kwargs["logos_skipped_storage"] == 3
+
+
+async def test_download_caused_failures_keep_attempting_per_ticker() -> None:
+    """Regression check: plain (non-storage) LogoCacheError does NOT short-circuit."""
+    details = _three_ticker_details()
+    gateway = _FakeCatalogGateway(selected=["BTC", "ETH", "LTC"], details=details)
+    registry = GatewayRegistry([gateway])  # type: ignore[list-item]
+    logo_cache = AsyncMock()
+    logo_cache.ensure_cached = AsyncMock(side_effect=LogoCacheError("bad content-type"))
+    service = PaymentCurrencySyncService(registry=registry, logo_cache=logo_cache)
+
+    repo = _make_repo()
+    with patch(
+        "src.api.services.payment_currency_sync.PaymentCurrencyRepository", return_value=repo
+    ):
+        await service.refresh(VEX_CONFIG, session=MagicMock())
+
+    assert logo_cache.ensure_cached.await_count == 3

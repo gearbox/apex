@@ -47,7 +47,7 @@ from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSn
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.organization import OrganizationService
-from src.api.services.payment_currency_logos import LogoCacheService
+from src.api.services.payment_currency_logos import LOGO_KEY_PREFIX, LogoCacheService
 from src.api.services.payment_currency_sync import PaymentCurrencySyncService
 from src.api.services.payment_provider_state import PaymentProviderStateService
 from src.api.services.payments import GatewayRegistry, PaymentService
@@ -56,7 +56,7 @@ from src.api.services.payments.stripe_gateway import StripeGateway
 from src.api.services.pricing import PricingService
 from src.api.services.push import PushService, PywebpushSender
 from src.api.services.sse_ticket import SSETicketService
-from src.api.services.storage import R2StorageService, R2StorageSettings
+from src.api.services.storage import R2StorageService, R2StorageSettings, StorageError
 from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
@@ -643,10 +643,24 @@ async def init_services(settings: Settings) -> JWTService:
             )
             _services.r2_public_assets_storage = R2StorageService(assets_r2_settings)
             logo_cache_service = LogoCacheService(r2_client=_services.r2_public_assets_storage)
-            logger.info(
-                "payment_currency.logo_cache_enabled",
-                bucket=settings.r2_public_assets_bucket,
-            )
+
+            # Best-effort probe (P2-1): a misconfigured/scope-limited token
+            # otherwise produces zero signal until the first sync tries (and
+            # fails) to cache a logo. Fail-open — a broken assets bucket must
+            # not block API startup; logo caching self-degrades per D10/P1-2.
+            try:
+                await _services.r2_public_assets_storage.exists(f"{LOGO_KEY_PREFIX}/.probe")
+            except StorageError as exc:
+                logger.exception(
+                    "payment_currency.logo_storage_probe_failed",
+                    bucket=settings.r2_public_assets_bucket,
+                    error=str(exc),
+                )
+            else:
+                logger.info(
+                    "payment_currency.logo_cache_enabled",
+                    bucket=settings.r2_public_assets_bucket,
+                )
         else:
             logger.warning("payment_currency.logo_cache_disabled")
 

@@ -66,6 +66,14 @@ services:
       R2_ACCESS_KEY_ID: "test"
       R2_SECRET_ACCESS_KEY: "test"
       R2_BUCKET_NAME: "test-bucket"
+      # Explicitly blank — otherwise pydantic-settings falls through to
+      # whatever real values live in the host's mounted .env file (this
+      # compose file bind-mounts the whole repo), producing a broken hybrid
+      # of the fake R2_ACCOUNT_ID above with a real public-assets bucket/URL.
+      # That sends the startup logo-storage probe to a nonexistent R2
+      # account and fails with an SSL handshake error.
+      R2_PUBLIC_ASSETS_BUCKET: ""
+      R2_PUBLIC_ASSETS_URL_BASE: ""
       REDIS_URL: "redis://redis-test:6379/0"
     command:
       [
