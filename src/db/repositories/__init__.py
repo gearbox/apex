@@ -6,6 +6,7 @@ from .frame_extraction import FrameExtractionJobRepository
 from .gpu_session import GpuSessionRepository
 from .job import JobRepository
 from .output import OutputRepository
+from .payment_currency import PaymentCurrencyRepository
 from .payment_provider_state import PaymentProviderStateRepository
 from .push_subscription import PushSubscriptionRepository
 from .user import UserRepository
@@ -18,6 +19,7 @@ __all__ = [
     "GpuSessionRepository",
     "JobRepository",
     "OutputRepository",
+    "PaymentCurrencyRepository",
     "PaymentProviderStateRepository",
     "PushSubscriptionRepository",
     "UserImageRepository",

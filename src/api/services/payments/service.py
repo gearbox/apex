@@ -23,6 +23,7 @@ from src.api.services.payments.contracts import (
 from src.core.enums import PaymentStatus
 from src.core.topup_pricing import TopUpQuote, build_quote, topup_tiers_for
 from src.core.uid import new_id
+from src.db.models.billing import PAYMENT_CURRENCY_MAX_LEN
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
@@ -39,7 +40,6 @@ _FULL_PAYMENT_TOLERANCE_LOW = Decimal("0.99")
 _FULL_PAYMENT_TOLERANCE_HIGH = Decimal("1.01")
 _EXTREME_RATIO_LOW = Decimal("0.5")
 _EXTREME_RATIO_HIGH = Decimal("2.0")
-_PAYMENT_CURRENCY_MAX_LEN = 20
 
 logger = structlog.get_logger(__name__)
 
@@ -198,7 +198,7 @@ class PaymentService:
             payment.completed_at = datetime.now(UTC)
 
         if outcome.settled_currency and payment.currency != outcome.settled_currency:
-            if len(outcome.settled_currency) > _PAYMENT_CURRENCY_MAX_LEN:
+            if len(outcome.settled_currency) > PAYMENT_CURRENCY_MAX_LEN:
                 logger.warning(
                     "payment.settled_currency_overlong",
                     payment_id=str(payment.id),

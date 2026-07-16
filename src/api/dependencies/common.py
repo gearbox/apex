@@ -47,6 +47,8 @@ from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSn
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.organization import OrganizationService
+from src.api.services.payment_currency_logos import LogoCacheService
+from src.api.services.payment_currency_sync import PaymentCurrencySyncService
 from src.api.services.payment_provider_state import PaymentProviderStateService
 from src.api.services.payments import GatewayRegistry, PaymentService
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
@@ -66,6 +68,7 @@ from src.db import DatabaseManager, init_db
 from src.db.repositories import UserRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
+from src.workers.payment_currency_sync import PaymentCurrencySyncWorker
 from src.workers.push_dispatcher import PushDispatcher
 from src.workers.token_cleanup import TokenCleanupWorker
 
@@ -97,6 +100,8 @@ class ServiceContainer:
     billing_service: BillingService | None = None
     payment_provider_state_service: PaymentProviderStateService | None = None
     payment_service: PaymentService | None = None
+    payment_currency_sync_service: PaymentCurrencySyncService | None = None
+    payment_currency_sync_worker: PaymentCurrencySyncWorker | None = None
     grok_job_service: GrokJobService | None = None
     grok_video_worker: GrokVideoWorker | None = None
     email_service: EmailService | None = None
@@ -412,6 +417,19 @@ def get_payment_provider_state_service() -> PaymentProviderStateService:
     return _services.payment_provider_state_service
 
 
+def get_payment_currency_sync_service() -> PaymentCurrencySyncService:
+    """Provide the payment currency catalog sync service singleton.
+
+    Raises:
+        RuntimeError: If not initialized (requires R2 to be configured).
+    """
+    if _services.payment_currency_sync_service is None:
+        raise RuntimeError(
+            "PaymentCurrencySyncService not initialized (requires R2 to be configured)"
+        )
+    return _services.payment_currency_sync_service
+
+
 def build_gateway_registry(settings: Settings) -> GatewayRegistry:
     """Build the default complete payment gateway registry."""
     return GatewayRegistry([StripeGateway(settings), NowPaymentsGateway(settings)])
@@ -575,11 +593,15 @@ async def init_services(settings: Settings) -> JWTService:
     _services.billing_service = BillingService()
     logger.info("billing_service.initialized")
 
+    # Built once and shared with PaymentCurrencySyncService below — gateways
+    # are stateless wrappers over settings, but a single registry instance
+    # avoids constructing two separate NowPaymentsGateway/StripeGateway sets.
+    gateway_registry = build_gateway_registry(settings)
     _services.payment_provider_state_service = PaymentProviderStateService(settings)
     _services.payment_service = PaymentService(
         billing_service=_services.billing_service,
         settings=settings,
-        registry=build_gateway_registry(settings),
+        registry=gateway_registry,
         provider_state_service=_services.payment_provider_state_service,
     )
     logger.info("payment_service.initialized")
@@ -603,6 +625,25 @@ async def init_services(settings: Settings) -> JWTService:
             bucket=settings.r2_bucket_name,
             retention_days=settings.retention_days,
         )
+
+        # Currency catalog sync + logo caching requires R2 (logos are
+        # R2-cached, never on the container filesystem — D7).
+        logo_cache_service = LogoCacheService(r2_client=_services.r2_storage)
+        _services.payment_currency_sync_service = PaymentCurrencySyncService(
+            registry=gateway_registry,
+            logo_cache=logo_cache_service,
+        )
+        logger.info("payment_currency_sync_service.initialized")
+
+        if workers_enabled:
+            _services.payment_currency_sync_worker = PaymentCurrencySyncWorker(
+                db_manager=_services.db_manager,
+                sync_service=_services.payment_currency_sync_service,
+                interval=settings.payment_currency_sync_interval_seconds,
+                redis_enabled=redis_enabled,
+            )
+            await _services.payment_currency_sync_worker.start()
+            logger.info("payment_currency_sync_worker.started")
     else:
         logger.warning("r2.not_configured")
 
@@ -1038,6 +1079,7 @@ async def init_services(settings: Settings) -> JWTService:
             _services.health_snapshot_worker,
             _services.health_snapshot_cleanup_worker,
             _services.grok_video_worker,
+            _services.payment_currency_sync_worker,
         )
         if w is not None
     ]
@@ -1085,6 +1127,9 @@ async def shutdown_services() -> None:
 
     if _services.content_retention_worker is not None:
         await _services.content_retention_worker.stop()
+
+    if _services.payment_currency_sync_worker is not None:
+        await _services.payment_currency_sync_worker.stop()
 
     if _services.frame_extraction_worker is not None:
         await _services.frame_extraction_worker.stop()
@@ -1148,6 +1193,9 @@ dependencies = {
     "payment_service": Provide(get_payment_service, sync_to_thread=False),
     "payment_provider_state_service": Provide(
         get_payment_provider_state_service, sync_to_thread=False
+    ),
+    "payment_currency_sync_service": Provide(
+        get_payment_currency_sync_service, sync_to_thread=False
     ),
     # Email services
     "email_verification_service": Provide(get_email_verification_service, sync_to_thread=False),

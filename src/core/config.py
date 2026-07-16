@@ -1027,6 +1027,19 @@ class Settings(BaseSettings):
         description="Maximum top-up amount in whole USD.",
     )
 
+    # --- Payment Currency Catalog Sync ---
+    payment_currency_sync_interval_seconds: int = Field(
+        default=10800,
+        ge=300,
+        le=86400,
+        description=(
+            "Seconds between periodic payment currency catalog syncs (merchant/coins "
+            "+ full-currencies + logo caching). Default 3h matches how rarely a "
+            "NowPayments dashboard's enabled-currency list actually changes; also "
+            "triggerable on-demand via POST /v1/admin/payments/currencies/refresh."
+        ),
+    )
+
     # -------------------------------------------------------------------------
     # Branding & Product Segmentation Settings
     # -------------------------------------------------------------------------
