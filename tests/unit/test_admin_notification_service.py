@@ -69,6 +69,24 @@ class TestReplacePreferences:
         with pytest.raises(ValueError, match="Unknown notification_class"):
             await service.replace_preferences(uuid4(), "vex", items, session=AsyncMock())
 
+    async def test_duplicate_class_raises_value_error(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+        from src.api.schemas.admin_notifications import NotificationPreferenceItem
+
+        items = [
+            NotificationPreferenceItem(
+                notification_class=NotificationClass.USER_REGISTERED.value,
+                min_interval_seconds=10,
+            ),
+            NotificationPreferenceItem(
+                notification_class=NotificationClass.USER_REGISTERED.value,
+                min_interval_seconds=20,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="Duplicate notification_class"):
+            await service.replace_preferences(uuid4(), "vex", items, session=AsyncMock())
+
     @pytest.mark.parametrize("interval", [-1, 86401])
     async def test_interval_out_of_bounds_raises_value_error(self, interval: int) -> None:
         service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
@@ -153,6 +171,7 @@ class TestTelegramLink:
             patch("src.api.services.admin_notifications.AdminRepository") as mock_admin_repo_cls,
         ):
             mock_repo = AsyncMock()
+            mock_repo.delete_link = AsyncMock(return_value=True)
             mock_repo_cls.return_value = mock_repo
             mock_admin_repo = AsyncMock()
             mock_admin_repo_cls.return_value = mock_admin_repo
@@ -161,3 +180,24 @@ class TestTelegramLink:
 
         mock_repo.delete_link.assert_awaited_once_with(user_id)
         mock_admin_repo.write_audit.assert_awaited_once()
+
+    async def test_unlink_with_no_existing_link_writes_no_audit(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+        user_id = uuid4()
+
+        with (
+            patch(
+                "src.api.services.admin_notifications.AdminNotificationRepository"
+            ) as mock_repo_cls,
+            patch("src.api.services.admin_notifications.AdminRepository") as mock_admin_repo_cls,
+        ):
+            mock_repo = AsyncMock()
+            mock_repo.delete_link = AsyncMock(return_value=False)
+            mock_repo_cls.return_value = mock_repo
+            mock_admin_repo = AsyncMock()
+            mock_admin_repo_cls.return_value = mock_admin_repo
+
+            await service.unlink(user_id, "vex", session=AsyncMock())
+
+        mock_repo.delete_link.assert_awaited_once_with(user_id)
+        mock_admin_repo.write_audit.assert_not_awaited()

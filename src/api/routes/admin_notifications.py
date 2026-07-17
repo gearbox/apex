@@ -12,7 +12,7 @@ from uuid import UUID
 import structlog
 from litestar import Controller, delete, get, post, put
 from litestar.di import Provide
-from litestar.exceptions import HTTPException, ValidationException
+from litestar.exceptions import HTTPException, NotFoundException, ValidationException
 from litestar.status_codes import HTTP_503_SERVICE_UNAVAILABLE
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from src.api.schemas.admin_notifications import (
     TelegramLinkStatusResponse,
 )
 from src.api.security import auth_guard
+from src.api.services.admin_management import AdminManagementError
 from src.api.services.admin_notifications import AdminNotificationService, TelegramLinkError
 from src.db.models import User
 
@@ -106,9 +107,15 @@ class AdminNotificationController(Controller):
         superadmin: User,  # noqa: ARG002
         user_id: UUID,
         session: AsyncSession,
+        product_id: str,
         admin_notification_service: AdminNotificationService,
     ) -> NotificationPreferencesResponse:
-        prefs = await admin_notification_service.get_preferences_for(user_id, session=session)
+        try:
+            prefs = await admin_notification_service.get_preferences_for(
+                user_id, product_id, session=session
+            )
+        except AdminManagementError as exc:
+            raise NotFoundException(detail=str(exc)) from exc
         return _to_preferences_response(prefs)
 
     @get("/telegram")

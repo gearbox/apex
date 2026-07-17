@@ -111,6 +111,23 @@ async def test_upsert_link_token_rotates_without_clearing_chat_id(
     assert rotated.link_token == "tok-b"
 
 
+async def test_get_link_by_chat_id_hit_and_miss(
+    db_session: AsyncSession, make_user: UserFactory
+) -> None:
+    user = await make_user(email="chatid1@example.com", product_id="vex")
+    repo = AdminNotificationRepository(db_session)
+    now = datetime.now(UTC)
+
+    await repo.upsert_link_token(user.id, "vex", "tok-chatid", now + timedelta(minutes=15))
+    await repo.confirm_link_by_token("tok-chatid", 987654321, now)
+
+    found = await repo.get_link_by_chat_id(987654321)
+    assert found is not None
+    assert found.user_id == user.id
+
+    assert await repo.get_link_by_chat_id(111111) is None
+
+
 async def test_delete_link_removes_row(db_session: AsyncSession, make_user: UserFactory) -> None:
     user = await make_user(email="link4@example.com", product_id="vex")
     repo = AdminNotificationRepository(db_session)

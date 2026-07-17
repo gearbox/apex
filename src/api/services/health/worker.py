@@ -77,8 +77,10 @@ class HealthSnapshotWorker(PeriodicWorker):
             logger.exception("health.snapshot_worker.load_previous_error")
 
         # Persist to DB
+        persisted = False
         try:
             await self._persist_snapshot(detailed)
+            persisted = True
         except Exception:
             logger.exception("health.snapshot_worker.persist_error")
 
@@ -90,11 +92,18 @@ class HealthSnapshotWorker(PeriodicWorker):
 
         # Detect per-subsystem transitions and publish ops events. Never
         # propagates — a Redis blip must not affect the already-persisted
-        # snapshot.
-        try:
-            await self._detect_and_publish_transitions(previous_snapshot_data, detailed)
-        except Exception:
-            logger.exception("health.snapshot_worker.transition_detect_error")
+        # snapshot. Gated on persist success: publishing against
+        # previous_snapshot_data when this cycle's snapshot never landed
+        # would re-detect the same edge next cycle (get_latest() still
+        # returns the older row) and fire a duplicate alert — deferring to
+        # the next successful cycle instead.
+        if persisted:
+            try:
+                await self._detect_and_publish_transitions(previous_snapshot_data, detailed)
+            except Exception:
+                logger.exception("health.snapshot_worker.transition_detect_error")
+        else:
+            logger.warning("health.snapshot_worker.transitions_skipped_unpersisted")
 
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.debug(

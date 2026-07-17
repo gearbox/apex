@@ -91,6 +91,17 @@ class AdminNotificationRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_link_by_chat_id(self, chat_id: int) -> AdminTelegramLink | None:
+        """Look up a link by Telegram chat id.
+
+        ``.first()``, not ``scalar_one_or_none()`` — ``chat_id`` is not
+        unique; two admins could in principle link the same group chat.
+        """
+        result = await self._session.execute(
+            select(AdminTelegramLink).where(AdminTelegramLink.chat_id == chat_id)
+        )
+        return result.scalars().first()
+
     async def upsert_link_token(
         self,
         user_id: UUID,

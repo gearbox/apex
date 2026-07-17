@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from litestar.exceptions import HTTPException, ValidationException
+from litestar.exceptions import HTTPException, NotFoundException, ValidationException
 
 from src.api.routes.admin_notifications import AdminNotificationController
 from src.api.schemas.admin_notifications import (
@@ -21,6 +21,7 @@ from src.api.schemas.admin_notifications import (
     NotificationPreferenceItem,
     NotificationPreferencesUpdateRequest,
 )
+from src.api.services.admin_management import AdminManagementError
 from src.api.services.admin_notifications import LinkInvite, TelegramLinkError
 from src.core.enums import NotificationClass
 
@@ -116,6 +117,36 @@ class TestReplacePreferences:
                 admin_notification_service=service,
             )
 
+    async def test_duplicate_class_maps_to_validation_exception_without_commit(self) -> None:
+        raw = AdminNotificationController.replace_preferences.fn  # type: ignore[attr-defined]
+        session = AsyncMock()
+        service = AsyncMock()
+        service.replace_preferences = AsyncMock(
+            side_effect=ValueError("Duplicate notification_class 'user.registered'")
+        )
+        data = NotificationPreferencesUpdateRequest(
+            items=[
+                NotificationPreferenceItem(
+                    notification_class=NotificationClass.USER_REGISTERED.value
+                ),
+                NotificationPreferenceItem(
+                    notification_class=NotificationClass.USER_REGISTERED.value
+                ),
+            ]
+        )
+
+        with pytest.raises(ValidationException, match="Duplicate notification_class"):
+            await raw(
+                MagicMock(),
+                admin=_make_admin(),
+                data=data,
+                session=session,
+                product_id="vex",
+                admin_notification_service=service,
+            )
+
+        session.commit.assert_not_awaited()
+
 
 class TestGetPreferencesFor:
     async def test_superadmin_can_view_target_users_preferences(self) -> None:
@@ -130,11 +161,30 @@ class TestGetPreferencesFor:
             superadmin=_make_admin(),
             user_id=target_id,
             session=session,
+            product_id="vex",
             admin_notification_service=service,
         )
 
-        service.get_preferences_for.assert_awaited_once_with(target_id, session=session)
+        service.get_preferences_for.assert_awaited_once_with(target_id, "vex", session=session)
         assert result.items == []
+
+    async def test_cross_product_target_maps_to_not_found(self) -> None:
+        raw = AdminNotificationController.get_preferences_for.fn  # type: ignore[attr-defined]
+        target_id = uuid4()
+        service = AsyncMock()
+        service.get_preferences_for = AsyncMock(
+            side_effect=AdminManagementError(f"User {target_id} not found in product synthara")
+        )
+
+        with pytest.raises(NotFoundException):
+            await raw(
+                MagicMock(),
+                superadmin=_make_admin(),
+                user_id=target_id,
+                session=AsyncMock(),
+                product_id="synthara",
+                admin_notification_service=service,
+            )
 
 
 class TestTelegramLink:

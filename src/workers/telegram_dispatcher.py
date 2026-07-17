@@ -142,12 +142,14 @@ class TelegramDispatcher:
             logger.info("telegram.dispatcher.subscribed")
 
             while self._running:
+                # NOTE: renewal-per-iteration here diverges deliberately from
+                # PushDispatcher — see review F2.
+                if not await self._lease.acquire_or_renew():
+                    return  # lost leadership — drop subscription and retry from the top
                 message = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=_POLL_TIMEOUT_SECONDS
                 )
                 if message is None:
-                    if not await self._lease.acquire_or_renew():
-                        return  # lost leadership — drop subscription and retry from the top
                     continue
                 if message["type"] != "message":
                     continue

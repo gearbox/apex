@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import msgspec
@@ -151,6 +151,55 @@ async def test_send_failure_for_one_recipient_does_not_block_next() -> None:
         await dispatcher._handle_raw_message(data)
 
     assert [chat_id for chat_id, _ in sender.sent] == [2]
+
+
+class TestLeaseRenewal:
+    async def test_renewed_every_iteration_and_stops_on_lost_leadership(self) -> None:
+        """F2: renewal must happen every loop iteration, not only when idle.
+
+        A continuous message stream (no idle window) with acquire_or_renew
+        called only in the `message is None` branch would never renew and
+        the lease would expire under sustained traffic. This asserts
+        renewal happens once per delivered message, and that losing
+        leadership mid-stream stops processing immediately.
+        """
+        sender = _FakeSender()
+        dispatcher = _make_dispatcher(sender)
+
+        data = _raw_envelope(
+            OpsEventType.USER_REGISTERED, "vex", UserRegisteredOpsPayload(user_id=uuid4())
+        )
+        recipient = RecipientRow(
+            user_id=uuid4(), product_id="vex", chat_id=99, min_interval_seconds=0
+        )
+
+        fake_pubsub = AsyncMock()
+        fake_pubsub.get_message = AsyncMock(return_value={"type": "message", "data": data})
+
+        fake_client = MagicMock()
+        fake_client.pubsub = MagicMock(return_value=fake_pubsub)
+
+        dispatcher._lease.acquire_or_renew = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[True, True, True, False]
+        )
+        dispatcher._running = True
+
+        with (
+            patch("src.workers.telegram_dispatcher.get_redis_client", return_value=fake_client),
+            patch("src.workers.telegram_dispatcher.AdminNotificationRepository") as mock_repo_cls,
+        ):
+            mock_repo = AsyncMock()
+            mock_repo.list_recipients_for_class = AsyncMock(return_value=[recipient])
+            mock_repo_cls.return_value = mock_repo
+
+            await dispatcher._listen_while_leader()
+
+        # One renewal per delivered message, plus the renewal that reports
+        # lost leadership and ends the loop.
+        assert dispatcher._lease.acquire_or_renew.await_count == 4
+        # No message was processed after leadership was lost.
+        assert len(sender.sent) == 3
+        assert fake_pubsub.get_message.await_count == 3
 
 
 class TestThrottle:

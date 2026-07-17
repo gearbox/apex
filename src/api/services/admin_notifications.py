@@ -13,11 +13,13 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.services.admin_management import AdminManagementError
 from src.core.enums import PLATFORM_SCOPED_NOTIFICATION_CLASSES, NotificationClass
 from src.core.uid import new_id
 from src.db.models.admin import AdminAuditLog
 from src.db.repositories.admin import AdminRepository
 from src.db.repositories.admin_notifications import AdminNotificationRepository
+from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -101,9 +103,18 @@ class AdminNotificationService:
         return await AdminNotificationRepository(session).list_preferences(user_id)
 
     async def get_preferences_for(
-        self, target_user_id: UUID, *, session: AsyncSession
+        self, target_user_id: UUID, product_id: str, *, session: AsyncSession
     ) -> Sequence[AdminNotificationPreference]:
-        """Superadmin-only read-only view of another admin's preferences."""
+        """Superadmin-only read-only view of another admin's preferences.
+
+        Raises:
+            AdminManagementError: Target user not found, or belongs to a
+                different product — same convention as
+                ``AdminManagementService._get_target_user``.
+        """
+        user = await UserRepository(session).get_active_user(target_user_id)
+        if user is None or user.product_id != product_id:
+            raise AdminManagementError(f"User {target_user_id} not found in product {product_id}")
         return await AdminNotificationRepository(session).list_preferences(target_user_id)
 
     async def replace_preferences(
@@ -117,14 +128,18 @@ class AdminNotificationService:
         """Validate and full-set-replace a user's notification preferences.
 
         Raises:
-            ValueError: An unknown notification_class, or min_interval_seconds
-                outside [0, 86400].
+            ValueError: An unknown notification_class, a duplicate
+                notification_class, or min_interval_seconds outside [0, 86400].
         """
         valid_classes = {cls.value for cls in NotificationClass}
+        seen_classes: set[str] = set()
         prefs: list[tuple[str, int]] = []
         for item in items:
             if item.notification_class not in valid_classes:
                 raise ValueError(f"Unknown notification_class '{item.notification_class}'")
+            if item.notification_class in seen_classes:
+                raise ValueError(f"Duplicate notification_class '{item.notification_class}'")
+            seen_classes.add(item.notification_class)
             if not 0 <= item.min_interval_seconds <= _MAX_MIN_INTERVAL_SECONDS:
                 raise ValueError(
                     "min_interval_seconds must be in [0, 86400] "
@@ -205,8 +220,15 @@ class AdminNotificationService:
         )
 
     async def unlink(self, user_id: UUID, product_id: str, *, session: AsyncSession) -> None:
+        """Delete the Telegram link, if one exists.
+
+        Idempotent — deleting a non-existent link is a no-op and writes no
+        audit row, since no state actually changed.
+        """
         repo = AdminNotificationRepository(session)
-        await repo.delete_link(user_id)
+        deleted = await repo.delete_link(user_id)
+        if not deleted:
+            return
 
         admin_repo = AdminRepository(session)
         await admin_repo.write_audit(

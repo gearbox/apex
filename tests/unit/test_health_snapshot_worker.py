@@ -133,6 +133,64 @@ class TestRunOnce:
         await worker.run_once()
 
 
+class TestTransitionsGatedOnPersist:
+    async def test_persist_failure_skips_transition_publish(self) -> None:
+        """F3: a failed persist must defer the edge, never duplicate it.
+
+        detect_transitions would find a real edge here (healthy -> degraded)
+        but the persist raised, so publishing against previous_snapshot_data
+        would re-fire the same edge next cycle once get_latest() still
+        returns the older row.
+        """
+        mock_service = AsyncMock()
+        mock_service.check_all_and_build = AsyncMock(
+            return_value={
+                "status": "degraded",
+                "checked_at": "2026-01-01T00:00:00Z",
+                "infrastructure": {"components": [{"name": "redis", "status": "degraded"}]},
+            }
+        )
+        ops_bus = AsyncMock()
+        worker = _make_worker(health_service=mock_service, ops_event_bus=ops_bus)
+        worker._load_previous_snapshot_data = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "status": "healthy",
+                "infrastructure": {"components": [{"name": "redis", "status": "healthy"}]},
+            }
+        )
+        worker._persist_snapshot = AsyncMock(side_effect=ConnectionError("db gone"))  # type: ignore[method-assign]
+        worker._publish_to_redis = AsyncMock()  # type: ignore[method-assign]
+
+        await worker.run_once()
+
+        ops_bus.publish.assert_not_awaited()
+
+    async def test_next_successful_cycle_fires_the_deferred_edge_exactly_once(self) -> None:
+        """The same diff, deferred by a failed persist, fires on the next successful cycle."""
+        mock_service = AsyncMock()
+        mock_service.check_all_and_build = AsyncMock(
+            return_value={
+                "status": "degraded",
+                "checked_at": "2026-01-01T00:00:00Z",
+                "infrastructure": {"components": [{"name": "redis", "status": "degraded"}]},
+            }
+        )
+        ops_bus = AsyncMock()
+        worker = _make_worker(health_service=mock_service, ops_event_bus=ops_bus)
+        worker._load_previous_snapshot_data = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "status": "healthy",
+                "infrastructure": {"components": [{"name": "redis", "status": "healthy"}]},
+            }
+        )
+        worker._persist_snapshot = AsyncMock()  # type: ignore[method-assign]
+        worker._publish_to_redis = AsyncMock()  # type: ignore[method-assign]
+
+        await worker.run_once()
+
+        ops_bus.publish.assert_awaited_once()
+
+
 class TestPersistSnapshot:
     async def test_inserts_snapshot_to_db(self) -> None:
         mock_db_manager = MagicMock()

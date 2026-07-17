@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.telegram.sender import TelegramSender, TelegramUpdate
+    from src.db.models.admin_notifications import AdminTelegramLink
 
 logger = structlog.get_logger(__name__)
 
@@ -89,10 +90,17 @@ class TelegramLinkPoller(PeriodicWorker):
         chat_id = message.chat.id
         now = datetime.now(UTC)
 
+        replay: AdminTelegramLink | None = None
         try:
             async with self._session_factory() as session:
                 repo = AdminNotificationRepository(session)
                 link = await repo.confirm_link_by_token(token, chat_id, now)
+                if link is None:
+                    # Offsets are confirmed only by the next getUpdates call — a
+                    # restart right after processing this token can replay it.
+                    # An already-linked chat means we already replied once;
+                    # a stranger's chat has no link row at all.
+                    replay = await repo.get_link_by_chat_id(chat_id)
                 await session.commit()
         except Exception:
             logger.exception("telegram.link.confirm_failed")
@@ -101,6 +109,9 @@ class TelegramLinkPoller(PeriodicWorker):
         if link is not None:
             logger.info("telegram.link.confirmed", user_id=str(link.user_id), chat_id=chat_id)
             reply = _SUCCESS_REPLY
+        elif replay is not None:
+            logger.info("telegram.link.replay_ignored", chat_id=chat_id)
+            return
         else:
             logger.info("telegram.link.token_rejected", chat_id=chat_id)
             reply = _INVALID_REPLY

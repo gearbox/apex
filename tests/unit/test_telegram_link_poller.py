@@ -62,6 +62,7 @@ async def test_start_command_confirms_token_and_replies_success() -> None:
 
 
 async def test_start_command_with_invalid_token_replies_invalid() -> None:
+    """Unknown token from an unlinked chat (no link row at all) still gets the invalid reply."""
     sender = AsyncMock()
     poller = _make_poller(sender)
     poller._session_factory = _FakeSession  # type: ignore[method-assign]
@@ -69,12 +70,36 @@ async def test_start_command_with_invalid_token_replies_invalid() -> None:
     with patch("src.workers.telegram_link_poller.AdminNotificationRepository") as mock_repo_cls:
         mock_repo = AsyncMock()
         mock_repo.confirm_link_by_token = AsyncMock(return_value=None)
+        mock_repo.get_link_by_chat_id = AsyncMock(return_value=None)
         mock_repo_cls.return_value = mock_repo
 
         await poller._handle_update(_update(1, "/start expired-token", chat_id=555))
 
+    mock_repo.get_link_by_chat_id.assert_awaited_once_with(555)
+    sender.send_message.assert_awaited_once()
     _, kwargs = sender.send_message.call_args
     assert "invalid" in kwargs["text"].lower() or "expired" in kwargs["text"].lower()
+
+
+async def test_replayed_consumed_token_from_already_linked_chat_sends_no_reply() -> None:
+    """F4: a restart-replayed, already-consumed /start from a linked chat must not
+    tell the admin their token is invalid — they successfully linked minutes ago."""
+    sender = AsyncMock()
+    poller = _make_poller(sender)
+    poller._session_factory = _FakeSession  # type: ignore[method-assign]
+
+    existing_link = AsyncMock()
+
+    with patch("src.workers.telegram_link_poller.AdminNotificationRepository") as mock_repo_cls:
+        mock_repo = AsyncMock()
+        mock_repo.confirm_link_by_token = AsyncMock(return_value=None)
+        mock_repo.get_link_by_chat_id = AsyncMock(return_value=existing_link)
+        mock_repo_cls.return_value = mock_repo
+
+        await poller._handle_update(_update(1, "/start already-consumed", chat_id=555))
+
+    mock_repo.get_link_by_chat_id.assert_awaited_once_with(555)
+    sender.send_message.assert_not_awaited()
 
 
 async def test_non_start_message_is_ignored_without_reply() -> None:
