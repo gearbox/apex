@@ -1382,7 +1382,8 @@ Note:     Same discount-on-price semantics as the Stripe path. NowPayments IPN
           under/overpayments are credited proportionally to actually_paid/amount_usd
           (uncapped on overpayment) — never held for manual review.
 
-          pay_currency is optional. Pass a ticker (e.g. "usdcmatic") to pin the
+          pay_currency is optional. Pass the exact ticker returned by
+          GET /v1/billing/currencies (e.g. "USDCMATIC") to pin the
           invoice to that currency/network (unchanged behavior) — typically sourced
           from GET /v1/billing/currencies. Omit it (or send blank/whitespace) to let
           the customer pick any currency NowPayments supports on the hosted invoice
