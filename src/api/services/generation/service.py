@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.schemas.jobs import JobCreatedResponse
+from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
+from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.core.model_registry import get_model_meta
 from src.db.repositories.generation_model import GenerationModelRepository
@@ -90,6 +92,7 @@ class GenerationService:
         pricing_service: PricingService,
         rate_limiter: ModelRateLimiter,
         event_bus: EventBus | None = None,
+        ops_event_bus: OpsEventBus | None = None,
         *,
         retention_days: int = 7,
     ) -> None:
@@ -98,6 +101,9 @@ class GenerationService:
         self._pricing = pricing_service
         self._rate_limiter = rate_limiter
         self._event_bus = event_bus
+        self._ops_event_bus = (
+            ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
+        )
         self._retention_days = retention_days
 
     @property
@@ -308,6 +314,17 @@ class GenerationService:
                 )
             except Exception:
                 logger.exception("generation.post_commit_publish_failed", job_id=str(job.id))
+
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.GENERATION_CREATED,
+            product_id=product_id,
+            payload=GenerationCreatedOpsPayload(
+                job_id=job.id,
+                user_id=user_id,
+                provider=request.model.provider.value,
+                generation_type=request.generation_type.value,
+            ),
+        )
 
         # 10. Build response
         return JobCreatedResponse(

@@ -69,6 +69,12 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:?VAPID_PUBLIC_KEY is required for web-push}
       VAPID_SUBJECT: ${VAPID_SUBJECT:?VAPID_SUBJECT is required for web-push}
 
+      # --- Telegram ops notifications (optional; bot token + Redis required to enable) ---
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_LINK_TOKEN_TTL_SECONDS: ${TELEGRAM_LINK_TOKEN_TTL_SECONDS:-900}
+      TELEGRAM_SEND_TIMEOUT_SECONDS: ${TELEGRAM_SEND_TIMEOUT_SECONDS:-10.0}
+      TELEGRAM_POLL_TIMEOUT_SECONDS: ${TELEGRAM_POLL_TIMEOUT_SECONDS:-25}
+
       # --- NowPayments (optional; for crypto payments) ---
       NOWPAYMENTS_API_KEY_VEX: ${NOWPAYMENTS_API_KEY_VEX:?NOWPAYMENTS_API_KEY_VEX is required}
       NOWPAYMENTS_IPN_SECRET_VEX: ${NOWPAYMENTS_IPN_SECRET_VEX:?NOWPAYMENTS_IPN_SECRET_VEX is required}

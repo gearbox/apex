@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 
 from src.api.middleware.rate_limit import init_rate_limiter
 from src.api.security import JWTConfig, JWTService, PasswordService
+from src.api.services.admin_notifications import AdminNotificationService
 from src.api.services.age_verification import AgeVerificationService
 from src.api.services.auth import AuthService
 from src.api.services.billing import BillingService
@@ -46,6 +47,7 @@ from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.jobs.sweep import JobSweepService
+from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.organization import OrganizationService
 from src.api.services.payment_currency_logos import LOGO_KEY_PREFIX, LogoCacheService
 from src.api.services.payment_currency_sync import PaymentCurrencySyncService
@@ -57,6 +59,7 @@ from src.api.services.pricing import PricingService
 from src.api.services.push import PushService, PywebpushSender
 from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings, StorageError
+from src.api.services.telegram.sender import HttpxTelegramSender
 from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
@@ -70,6 +73,8 @@ from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
 from src.workers.payment_currency_sync import PaymentCurrencySyncWorker
 from src.workers.push_dispatcher import PushDispatcher
+from src.workers.telegram_dispatcher import TelegramDispatcher
+from src.workers.telegram_link_poller import TelegramLinkPoller
 from src.workers.token_cleanup import TokenCleanupWorker
 
 if TYPE_CHECKING:
@@ -130,6 +135,13 @@ class ServiceContainer:
     # Web Push (optional — requires VAPID keys + Redis)
     push_service: PushService | None = None
     push_dispatcher: PushDispatcher | None = None
+    # Ops events (admin notifications) — always constructed; enabled=False no-ops without Redis
+    ops_event_bus: OpsEventBus | None = None
+    # Telegram ops notifications (optional — requires bot token + Redis)
+    telegram_sender: HttpxTelegramSender | None = None
+    telegram_dispatcher: TelegramDispatcher | None = None
+    telegram_link_poller: TelegramLinkPoller | None = None
+    admin_notification_service: AdminNotificationService | None = None
 
 
 _services = ServiceContainer()
@@ -284,6 +296,7 @@ def get_auth_service(session: AsyncSession) -> AuthService:
         password_service=get_password_service(),
         session=session,
         email_verification_service=get_email_verification_service(),
+        ops_event_bus=get_ops_event_bus(),
     )
 
 
@@ -365,6 +378,13 @@ def get_event_bus() -> EventBus:
     if _services.event_bus is None:
         raise RuntimeError("EventBus not initialized")
     return _services.event_bus
+
+
+def get_ops_event_bus() -> OpsEventBus:
+    """Provide OpsEventBus singleton."""
+    if _services.ops_event_bus is None:
+        raise RuntimeError("OpsEventBus not initialized")
+    return _services.ops_event_bus
 
 
 def get_sse_ticket_service() -> SSETicketService:
@@ -479,6 +499,18 @@ def get_push_service() -> PushService:
     return _services.push_service
 
 
+def get_admin_notification_service() -> AdminNotificationService:
+    """Provide the process-wide AdminNotificationService singleton.
+
+    Single instance for the whole process (like BillingService) because it
+    lazily caches the resolved Telegram bot username across calls — a
+    per-request instance would re-fetch getMe() on every request.
+    """
+    if _services.admin_notification_service is None:
+        raise RuntimeError("AdminNotificationService not initialized")
+    return _services.admin_notification_service
+
+
 def get_content_proxy(
     r2_storage: R2StorageService,
     settings: Settings,
@@ -587,6 +619,9 @@ async def init_services(settings: Settings) -> JWTService:
         )
     _services.event_bus = EventBus(enabled=settings.redis_url is not None)
     logger.info("event_bus.initialized", enabled=settings.redis_url is not None)
+
+    _services.ops_event_bus = OpsEventBus(enabled=settings.redis_url is not None)
+    logger.info("ops_event_bus.initialized", enabled=settings.redis_url is not None)
 
     # Single BillingService singleton for the whole process — it is stateless
     # (a pure event-builder; publishing is the caller's job via
@@ -739,6 +774,7 @@ async def init_services(settings: Settings) -> JWTService:
                 billing_service=get_billing_service(),
                 settings=settings,
                 event_bus=_services.event_bus,
+                ops_event_bus=_services.ops_event_bus,
                 redis_enabled=redis_enabled,
             )
             await _services.grok_video_worker.start()
@@ -799,6 +835,7 @@ async def init_services(settings: Settings) -> JWTService:
             billing_service=get_billing_service(),
             r2_storage=_services.r2_storage,
             config=poller_config,
+            ops_event_bus=_services.ops_event_bus,
             redis_enabled=redis_enabled,
         )
         await _services.aisha_job_poller.start()
@@ -847,6 +884,7 @@ async def init_services(settings: Settings) -> JWTService:
             session_factory=_services.db_manager.session_factory,
             event_bus=_services.event_bus,
             billing_service=get_billing_service(),
+            ops_event_bus=_services.ops_event_bus,
         )
 
         if settings.redis_url:
@@ -866,6 +904,7 @@ async def init_services(settings: Settings) -> JWTService:
             cooldown_store=cooldown_store,
             event_bus=_services.event_bus,
             job_sweep_service=job_sweep_service,
+            ops_event_bus=_services.ops_event_bus,
         )
 
         if workers_enabled:
@@ -880,6 +919,7 @@ async def init_services(settings: Settings) -> JWTService:
                 billing_service=billing_service_for_worker,
                 event_bus=_services.event_bus,
                 job_sweep_service=job_sweep_service,
+                ops_event_bus=_services.ops_event_bus,
                 redis_enabled=redis_enabled,
             )
             await _services.gpu_provisioning_worker.start()
@@ -957,6 +997,7 @@ async def init_services(settings: Settings) -> JWTService:
         pricing_service=get_pricing_service(),
         rate_limiter=model_rate_limiter,
         event_bus=_services.event_bus,
+        ops_event_bus=_services.ops_event_bus,
         retention_days=settings.retention_days,
     )
     logger.info(
@@ -1002,6 +1043,46 @@ async def init_services(settings: Settings) -> JWTService:
             "push.not_configured",
             hint="Set VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY/VAPID_SUBJECT and REDIS_URL to enable Web Push",
         )
+
+    # Initialize Telegram ops notifications (requires bot token + Redis — see
+    # Settings.telegram_enabled)
+    if settings.telegram_enabled:
+        if settings.telegram_bot_token is None:
+            raise RuntimeError("settings.telegram_enabled is True but telegram_bot_token is None")
+        _services.telegram_sender = HttpxTelegramSender(
+            bot_token=settings.telegram_bot_token.get_secret_value(),
+            send_timeout_seconds=settings.telegram_send_timeout_seconds,
+        )
+        logger.info("telegram_sender.initialized")
+
+        if workers_enabled:
+            _services.telegram_dispatcher = TelegramDispatcher(
+                sender=_services.telegram_sender,
+                session_factory=_services.db_manager.session_factory,
+                redis_enabled=redis_enabled,
+            )
+            await _services.telegram_dispatcher.start()
+            logger.info("telegram.dispatcher.started")
+
+            _services.telegram_link_poller = TelegramLinkPoller(
+                sender=_services.telegram_sender,
+                session_factory=_services.db_manager.session_factory,
+                poll_timeout_seconds=settings.telegram_poll_timeout_seconds,
+                redis_enabled=redis_enabled,
+            )
+            await _services.telegram_link_poller.start()
+            logger.info("telegram.link_poller.started")
+    else:
+        logger.warning(
+            "telegram.not_configured",
+            hint="Set TELEGRAM_BOT_TOKEN and REDIS_URL to enable Telegram ops notifications",
+        )
+
+    _services.admin_notification_service = AdminNotificationService(
+        sender=_services.telegram_sender,
+        link_token_ttl_seconds=settings.telegram_link_token_ttl_seconds,
+    )
+    logger.info("admin_notification_service.initialized")
 
     # Initialize health check registry and service
     from src.api.services.health.checkers.cloud_provider import GrokChecker
@@ -1087,6 +1168,7 @@ async def init_services(settings: Settings) -> JWTService:
             interval_seconds=settings.health_snapshot_interval_seconds,
             redis_url=settings.redis_url,
             session_credit_guard=session_credit_guard,
+            ops_event_bus=_services.ops_event_bus,
         )
         await _services.health_snapshot_worker.start()
 
@@ -1115,6 +1197,7 @@ async def init_services(settings: Settings) -> JWTService:
             _services.health_snapshot_cleanup_worker,
             _services.grok_video_worker,
             _services.payment_currency_sync_worker,
+            _services.telegram_link_poller,
         )
         if w is not None
     ]
@@ -1171,6 +1254,15 @@ async def shutdown_services() -> None:
 
     if _services.push_dispatcher is not None:
         await _services.push_dispatcher.stop()
+
+    if _services.telegram_dispatcher is not None:
+        await _services.telegram_dispatcher.stop()
+
+    if _services.telegram_link_poller is not None:
+        await _services.telegram_link_poller.stop()
+
+    if _services.telegram_sender is not None:
+        await _services.telegram_sender.aclose()
 
     if _services.health_snapshot_worker is not None:
         await _services.health_snapshot_worker.stop()
@@ -1266,4 +1358,6 @@ dependencies = {
     ),
     # Web Push
     "push_service": Provide(get_push_service, sync_to_thread=False),
+    # Admin ops notifications (Telegram)
+    "admin_notification_service": Provide(get_admin_notification_service, sync_to_thread=False),
 }

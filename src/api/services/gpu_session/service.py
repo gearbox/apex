@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
     from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.jobs.sweep import JobSweepService
+    from src.api.services.ops_event_bus import OpsEventBus
     from src.api.services.vastai.client import VastAIClient
     from src.api.services.vastai.schemas import VastAIOffer
     from src.core.config import Settings
@@ -188,6 +189,7 @@ class GpuSessionService:
         cooldown_store: NodeCooldownStore,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
+        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         self._vastai = vastai_client
         self._cf = cf_client
@@ -198,6 +200,7 @@ class GpuSessionService:
         self._cooldown = cooldown_store
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
+        self._ops_event_bus = ops_event_bus
 
     # ------------------------------------------------------------------ #
     # Public lifecycle methods                                             #
@@ -1413,6 +1416,7 @@ class GpuSessionService:
             previous_status=previous_status,
             error_message=error_message,
             reason=reason,
+            ops_event_bus=self._ops_event_bus,
         )
 
     async def _delete_tunnel_best_effort(self, tunnel_id: str, dns_record_id: str) -> None:

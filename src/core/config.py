@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.constants import MAX_EXTRACT_TIMESTAMPS, MAX_PREVIEW_FRAME_COUNT
@@ -1167,6 +1167,36 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
+    # Telegram Ops Notifications
+    # -------------------------------------------------------------------------
+
+    telegram_bot_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Telegram bot token from @BotFather. Telegram ops notifications are "
+            "enabled only when this AND redis_url are set — see telegram_enabled."
+        ),
+    )
+    telegram_link_token_ttl_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=3600,
+        description="How long a Telegram deep-link token stays valid before expiring.",
+    )
+    telegram_send_timeout_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=60.0,
+        description="Per-request timeout for Telegram Bot API sendMessage/getMe calls.",
+    )
+    telegram_poll_timeout_seconds: int = Field(
+        default=25,
+        ge=5,
+        le=50,
+        description="Long-poll timeout (seconds) for the Telegram getUpdates link poller.",
+    )
+
+    # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
 
@@ -1371,6 +1401,11 @@ class Settings(BaseSettings):
             and self.vapid_subject
             and self.redis_url
         )
+
+    @property
+    def telegram_enabled(self) -> bool:
+        """Telegram ops notifications require the bot token AND Redis."""
+        return bool(self.telegram_bot_token and self.redis_url)
 
     @property
     def grok_billing(self) -> GrokBillingConfig:

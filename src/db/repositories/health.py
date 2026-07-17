@@ -45,6 +45,17 @@ class HealthSnapshotRepository:
         self._session.add(snapshot)
         await self._session.flush()
 
+    async def get_latest(self) -> HealthSnapshot | None:
+        """Fetch the most recently persisted snapshot, or None if the table is empty.
+
+        Used by HealthSnapshotWorker to diff the current cycle against the
+        previous one for transition detection — a DB read survives worker
+        restarts and leader failover without duplicate or missed edges.
+        """
+        stmt = select(HealthSnapshot).order_by(HealthSnapshot.checked_at.desc()).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
     async def list_range(
         self,
         *,

@@ -126,6 +126,12 @@ services:
       # Branding
       APP_NAME: ${APP_NAME:-Apex}
       SUPPORT_EMAIL: ${SUPPORT_EMAIL:-support@apex.ai}
+
+      # Telegram ops notifications (optional; bot token + Redis required to enable)
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_LINK_TOKEN_TTL_SECONDS: ${TELEGRAM_LINK_TOKEN_TTL_SECONDS:-900}
+      TELEGRAM_SEND_TIMEOUT_SECONDS: ${TELEGRAM_SEND_TIMEOUT_SECONDS:-10.0}
+      TELEGRAM_POLL_TIMEOUT_SECONDS: ${TELEGRAM_POLL_TIMEOUT_SECONDS:-25}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:

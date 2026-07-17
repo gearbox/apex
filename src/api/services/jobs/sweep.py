@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from src.api.services.billing import BillingService
     from src.api.services.event_bus import EventBus
+    from src.api.services.ops_event_bus import OpsEventBus
 
 logger = structlog.get_logger(__name__)
 
@@ -51,10 +52,12 @@ class JobSweepService:
         session_factory: async_sessionmaker[AsyncSession],
         event_bus: EventBus | None,
         billing_service: BillingService,
+        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._event_bus = event_bus
         self._billing = billing_service
+        self._ops_event_bus = ops_event_bus
 
     async def sweep_session(
         self,
@@ -88,6 +91,7 @@ class JobSweepService:
                 session=session,
                 event_bus=self._event_bus,
                 billing_service=self._billing,
+                ops_event_bus=self._ops_event_bus,
             )
 
             swept = 0

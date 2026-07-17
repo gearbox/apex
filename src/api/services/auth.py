@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.schemas.ops_events import OpsEventType, UserRegisteredOpsPayload
 from src.api.security import (
     JWTService,
     PasswordService,
     generate_token,
     hash_token,
 )
+from src.api.services.ops_event_bus import OpsEventBus
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
@@ -82,6 +84,7 @@ class AuthService:
         password_service: PasswordService,
         session: AsyncSession | None = None,
         email_verification_service: EmailVerificationService | None = None,
+        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         """Initialize auth service.
 
@@ -93,12 +96,18 @@ class AuthService:
             email_verification_service: Optional — when provided, sends a
                 verification email immediately after successful registration.
                 Pass ``None`` to skip email sending (e.g. in tests).
+            ops_event_bus: Publishes admin ops notifications (Telegram).
+                Defaults to a disabled bus so callers that don't wire one
+                (tests, older call sites) simply skip publishing.
         """
         self._repo = repository
         self._jwt = jwt_service
         self._password = password_service
         self._session = session
         self._email_verification = email_verification_service
+        self._ops_event_bus = (
+            ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
+        )
 
     async def register(
         self,
@@ -147,6 +156,11 @@ class AuthService:
             logger.info("billing.account_created", user_id=str(user_id))
 
         logger.info("user.registered", user_id=str(user_id))
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.USER_REGISTERED,
+            product_id=product_id,
+            payload=UserRegisteredOpsPayload(user_id=user_id),
+        )
 
         # Generate tokens
         tokens = await self._create_token_pair(user_id, product_id=product_id)
