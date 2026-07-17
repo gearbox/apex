@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
+from src.api.services.admin_management import AdminManagementError
 from src.api.services.admin_notifications import AdminNotificationService, TelegramLinkError
 from src.core.enums import PLATFORM_SCOPED_NOTIFICATION_CLASSES, NotificationClass
 
@@ -26,6 +28,132 @@ class TestClassCatalog:
                 else "product"
             )
             assert entry.scope == expected_scope
+
+
+class TestGetPreferences:
+    async def test_returns_repo_rows(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+        user_id = uuid4()
+        rows = [object()]
+
+        with patch(
+            "src.api.services.admin_notifications.AdminNotificationRepository"
+        ) as mock_repo_cls:
+            mock_repo = AsyncMock()
+            mock_repo.list_preferences = AsyncMock(return_value=rows)
+            mock_repo_cls.return_value = mock_repo
+
+            result = await service.get_preferences(user_id, session=AsyncMock())
+
+        mock_repo.list_preferences.assert_awaited_once_with(user_id)
+        assert result is rows
+
+
+class TestGetPreferencesFor:
+    async def test_returns_rows_when_target_in_same_product(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+        target_id = uuid4()
+        rows = [object()]
+        target_user = MagicMock()
+        target_user.product_id = "vex"
+
+        with (
+            patch("src.api.services.admin_notifications.UserRepository") as mock_user_repo_cls,
+            patch(
+                "src.api.services.admin_notifications.AdminNotificationRepository"
+            ) as mock_notif_repo_cls,
+        ):
+            mock_user_repo = AsyncMock()
+            mock_user_repo.get_active_user = AsyncMock(return_value=target_user)
+            mock_user_repo_cls.return_value = mock_user_repo
+            mock_notif_repo = AsyncMock()
+            mock_notif_repo.list_preferences = AsyncMock(return_value=rows)
+            mock_notif_repo_cls.return_value = mock_notif_repo
+
+            result = await service.get_preferences_for(target_id, "vex", session=AsyncMock())
+
+        assert result is rows
+
+    async def test_raises_when_target_user_not_found(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+
+        with patch("src.api.services.admin_notifications.UserRepository") as mock_user_repo_cls:
+            mock_user_repo = AsyncMock()
+            mock_user_repo.get_active_user = AsyncMock(return_value=None)
+            mock_user_repo_cls.return_value = mock_user_repo
+
+            with pytest.raises(AdminManagementError, match="not found in product"):
+                await service.get_preferences_for(uuid4(), "vex", session=AsyncMock())
+
+    async def test_raises_when_target_user_in_different_product(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+        target_user = MagicMock()
+        target_user.product_id = "synthara"
+
+        with patch("src.api.services.admin_notifications.UserRepository") as mock_user_repo_cls:
+            mock_user_repo = AsyncMock()
+            mock_user_repo.get_active_user = AsyncMock(return_value=target_user)
+            mock_user_repo_cls.return_value = mock_user_repo
+
+            with pytest.raises(AdminManagementError, match="not found in product"):
+                await service.get_preferences_for(uuid4(), "vex", session=AsyncMock())
+
+
+class TestGetLinkStatus:
+    async def test_no_link_row_returns_unlinked(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+
+        with patch(
+            "src.api.services.admin_notifications.AdminNotificationRepository"
+        ) as mock_repo_cls:
+            mock_repo = AsyncMock()
+            mock_repo.get_link = AsyncMock(return_value=None)
+            mock_repo_cls.return_value = mock_repo
+
+            linked, linked_at, chat_id_last4 = await service.get_link_status(
+                uuid4(), session=AsyncMock()
+            )
+
+        assert (linked, linked_at, chat_id_last4) == (False, None, None)
+
+    async def test_link_row_without_chat_id_returns_unlinked(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+        link = MagicMock()
+        link.chat_id = None
+
+        with patch(
+            "src.api.services.admin_notifications.AdminNotificationRepository"
+        ) as mock_repo_cls:
+            mock_repo = AsyncMock()
+            mock_repo.get_link = AsyncMock(return_value=link)
+            mock_repo_cls.return_value = mock_repo
+
+            linked, linked_at, chat_id_last4 = await service.get_link_status(
+                uuid4(), session=AsyncMock()
+            )
+
+        assert (linked, linked_at, chat_id_last4) == (False, None, None)
+
+    async def test_confirmed_link_returns_last4_of_chat_id(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+        link = MagicMock()
+        link.chat_id = 123456789
+        link.linked_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        with patch(
+            "src.api.services.admin_notifications.AdminNotificationRepository"
+        ) as mock_repo_cls:
+            mock_repo = AsyncMock()
+            mock_repo.get_link = AsyncMock(return_value=link)
+            mock_repo_cls.return_value = mock_repo
+
+            linked, linked_at, chat_id_last4 = await service.get_link_status(
+                uuid4(), session=AsyncMock()
+            )
+
+        assert linked is True
+        assert linked_at == link.linked_at
+        assert chat_id_last4 == "6789"
 
 
 class TestReplacePreferences:
@@ -159,6 +287,12 @@ class TestTelegramLink:
 
         with pytest.raises(TelegramLinkError):
             await service.create_link_token(uuid4(), "vex", session=AsyncMock())
+
+    async def test_get_bot_username_without_sender_raises_telegram_link_error(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+
+        with pytest.raises(TelegramLinkError, match="not configured"):
+            await service._get_bot_username()
 
     async def test_unlink_deletes_and_audits(self) -> None:
         service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)

@@ -120,6 +120,21 @@ async def test_message_without_text_is_ignored() -> None:
     sender.send_message.assert_not_awaited()
 
 
+async def test_confirm_failure_is_logged_and_no_reply_sent() -> None:
+    sender = AsyncMock()
+    poller = _make_poller(sender)
+    poller._session_factory = _FakeSession  # type: ignore[method-assign]
+
+    with patch("src.workers.telegram_link_poller.AdminNotificationRepository") as mock_repo_cls:
+        mock_repo = AsyncMock()
+        mock_repo.confirm_link_by_token = AsyncMock(side_effect=RuntimeError("db gone"))
+        mock_repo_cls.return_value = mock_repo
+
+        await poller._handle_update(_update(1, "/start tok", chat_id=555))  # must not raise
+
+    sender.send_message.assert_not_awaited()
+
+
 async def test_run_once_advances_offset_and_processes_updates() -> None:
     sender = AsyncMock()
     sender.get_updates = AsyncMock(return_value=[_update(5, "hello"), _update(6, "/start tok")])

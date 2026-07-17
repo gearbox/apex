@@ -187,6 +187,25 @@ class TestGetPreferencesFor:
             )
 
 
+class TestGetTelegramStatus:
+    async def test_returns_status_from_service(self) -> None:
+        raw = AdminNotificationController.get_telegram_status.fn  # type: ignore[attr-defined]
+        service = AsyncMock()
+        linked_at = datetime.now(UTC)
+        service.get_link_status = AsyncMock(return_value=(True, linked_at, "6789"))
+
+        result = await raw(
+            MagicMock(),
+            admin=_make_admin(),
+            session=AsyncMock(),
+            admin_notification_service=service,
+        )
+
+        assert result.linked is True
+        assert result.linked_at == linked_at
+        assert result.chat_id_last4 == "6789"
+
+
 class TestTelegramLink:
     async def test_create_link_success(self) -> None:
         raw = AdminNotificationController.create_telegram_link.fn  # type: ignore[attr-defined]

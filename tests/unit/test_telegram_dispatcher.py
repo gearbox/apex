@@ -153,6 +153,102 @@ async def test_send_failure_for_one_recipient_does_not_block_next() -> None:
     assert [chat_id for chat_id, _ in sender.sent] == [2]
 
 
+async def test_unmapped_event_is_skipped_without_recipient_lookup() -> None:
+    """A validly-decoded envelope whose event_type has no notification mapping is skipped.
+
+    Distinct from the malformed-payload decode-failure case: here decode
+    succeeds and map_ops_event legitimately returns None (module docstring:
+    "e.g. an unknown event_type during a rolling deploy").
+    """
+    dispatcher = _make_dispatcher(_FakeSender())
+    data = _raw_envelope(
+        OpsEventType.USER_REGISTERED, "vex", UserRegisteredOpsPayload(user_id=uuid4())
+    )
+
+    with (
+        patch("src.workers.telegram_dispatcher.map_ops_event", return_value=None),
+        patch("src.workers.telegram_dispatcher.AdminNotificationRepository") as mock_repo_cls,
+    ):
+        await dispatcher._handle_raw_message(data)
+        mock_repo_cls.assert_not_called()
+
+
+async def test_recipient_lookup_failure_is_logged_and_does_not_raise() -> None:
+    sender = _FakeSender()
+    dispatcher = _make_dispatcher(sender)
+    data = _raw_envelope(
+        OpsEventType.USER_REGISTERED, "vex", UserRegisteredOpsPayload(user_id=uuid4())
+    )
+
+    with patch("src.workers.telegram_dispatcher.AdminNotificationRepository") as mock_repo_cls:
+        mock_repo = AsyncMock()
+        mock_repo.list_recipients_for_class = AsyncMock(side_effect=RuntimeError("db down"))
+        mock_repo_cls.return_value = mock_repo
+
+        await dispatcher._handle_raw_message(data)  # must not raise
+
+    assert sender.sent == []
+
+
+class TestLifecycle:
+    async def test_start_is_idempotent_and_stop_releases_lease(self) -> None:
+        dispatcher = _make_dispatcher(_FakeSender())
+        dispatcher._run_loop = AsyncMock()  # type: ignore[method-assign]
+        dispatcher._lease.release = AsyncMock()  # type: ignore[method-assign]
+
+        await dispatcher.start()
+        first_task = dispatcher._task
+        await dispatcher.start()  # idempotent — no second task created
+
+        assert dispatcher.is_running is True
+        assert dispatcher._task is first_task
+
+        await dispatcher.stop()
+
+        assert dispatcher.is_running is False
+        assert dispatcher._task is None
+        dispatcher._lease.release.assert_awaited_once()
+
+    async def test_stop_is_noop_when_not_running(self) -> None:
+        dispatcher = _make_dispatcher(_FakeSender())
+        dispatcher._lease.release = AsyncMock()  # type: ignore[method-assign]
+
+        await dispatcher.stop()
+
+        dispatcher._lease.release.assert_not_awaited()
+
+    async def test_interruptible_sleep_times_out_without_raising(self) -> None:
+        dispatcher = _make_dispatcher(_FakeSender())
+        await dispatcher._interruptible_sleep(0)
+
+    async def test_run_loop_backs_off_when_not_leader(self) -> None:
+        dispatcher = _make_dispatcher(_FakeSender())
+        dispatcher._running = True
+        dispatcher._lease.acquire_or_renew = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        dispatcher._interruptible_sleep = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda *_: setattr(dispatcher, "_running", False)
+        )
+
+        await dispatcher._run_loop()
+
+        dispatcher._interruptible_sleep.assert_awaited_once()
+
+    async def test_run_loop_backs_off_on_listen_error(self) -> None:
+        dispatcher = _make_dispatcher(_FakeSender())
+        dispatcher._running = True
+        dispatcher._lease.acquire_or_renew = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        dispatcher._listen_while_leader = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("boom")
+        )
+        dispatcher._interruptible_sleep = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda *_: setattr(dispatcher, "_running", False)
+        )
+
+        await dispatcher._run_loop()
+
+        dispatcher._interruptible_sleep.assert_awaited_once()
+
+
 class TestLeaseRenewal:
     async def test_renewed_every_iteration_and_stops_on_lost_leadership(self) -> None:
         """F2: renewal must happen every loop iteration, not only when idle.
