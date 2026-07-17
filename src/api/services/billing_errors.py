@@ -95,6 +95,14 @@ class TopUpAmountError(ValueError):
     """Top-up amount is outside configured payment bounds. → HTTP 400"""
 
 
+class PayCurrencySuppressedError(BillingError):
+    """Pinned pay_currency is admin-suppressed (provider-side zombie ticker). → HTTP 400"""
+
+    def __init__(self, ticker: str) -> None:
+        self.ticker = ticker
+        super().__init__(f"Pay currency is suppressed: {ticker}")
+
+
 class OrganizationPermissionError(Exception):
     """Insufficient org role for this action. → HTTP 403"""
 

@@ -37,6 +37,7 @@ from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import (
     OrganizationPermissionError,
+    PayCurrencySuppressedError,
     PaymentProviderDisabledError,
     TopUpAmountError,
 )
@@ -316,6 +317,9 @@ class BillingController(Controller):
         except PaymentProviderDisabledError:
             await idempotency_service.fail(record_id, session=session)
             raise
+        except PayCurrencySuppressedError:
+            await idempotency_service.fail(record_id, session=session)
+            raise
         except Exception:
             await idempotency_service.fail(record_id, session=session)
             raise
@@ -391,6 +395,9 @@ class BillingController(Controller):
             await idempotency_service.fail(record_id, session=session)
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except PaymentProviderDisabledError:
+            await idempotency_service.fail(record_id, session=session)
+            raise
+        except PayCurrencySuppressedError:
             await idempotency_service.fail(record_id, session=session)
             raise
         except Exception:

@@ -61,6 +61,12 @@ class PaymentProviderPatchRequest(msgspec.Struct, forbid_unknown_fields=True, kw
     display_order: Annotated[int, msgspec.Meta(ge=0, le=1000)] | None = None
 
 
+class CurrencySuppressPatchRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Admin toggle for a payment currency's suppression (deny-list) flag."""
+
+    is_suppressed: bool
+
+
 # --- Admin Management Response Structs ---
 
 

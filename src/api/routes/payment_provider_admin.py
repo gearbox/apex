@@ -15,7 +15,7 @@ from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_502_BAD_GATEWAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_superadmin_user
-from src.api.schemas.admin import PaymentProviderPatchRequest
+from src.api.schemas.admin import CurrencySuppressPatchRequest, PaymentProviderPatchRequest
 from src.api.security import auth_guard
 from src.api.services.billing_errors import PaymentCatalogError, UnknownProviderError
 from src.api.services.payment_currency_sync import PaymentCurrencySyncService, SyncResult
@@ -34,11 +34,12 @@ if TYPE_CHECKING:
 
 
 class AdminCurrency(msgspec.Struct, frozen=True, kw_only=True):
-    """Full catalog row (incl. unavailable) for superadmin visibility."""
+    """Full catalog row (incl. unavailable/suppressed) for superadmin visibility."""
 
     ticker: str
     provider: PaymentProvider
     is_available: bool
+    is_suppressed: bool
     name: str | None
     network: str | None
     logo_key: str | None
@@ -109,16 +110,17 @@ class PaymentProviderAdminController(Controller):
         session: AsyncSession,
         product_config: ProductConfig,
     ) -> list[AdminCurrency]:
-        """Full currency catalog including unavailable rows, for admin visibility."""
+        """Full currency catalog including unavailable/suppressed rows, for admin visibility."""
         del superadmin
         rows = await PaymentCurrencyRepository(session).list_currencies(
-            product_config.slug, only_available=False
+            product_config.slug, only_available=False, include_suppressed=True
         )
         return [
             AdminCurrency(
                 ticker=row.ticker,
                 provider=PaymentProvider(row.provider),
                 is_available=row.is_available,
+                is_suppressed=row.is_suppressed,
                 name=row.name,
                 network=row.network,
                 logo_key=row.logo_key,
@@ -128,6 +130,86 @@ class PaymentProviderAdminController(Controller):
             )
             for row in rows
         ]
+
+    @patch("/currencies/{provider:str}/{ticker:str}")
+    async def set_currency_suppressed(
+        self,
+        superadmin: User,
+        provider: str,
+        ticker: str,
+        data: CurrencySuppressPatchRequest,
+        session: AsyncSession,
+        product_config: ProductConfig,
+    ) -> AdminCurrency:
+        """Suppress/unsuppress one catalog ticker (D1/D4/D5).
+
+        404 on an unknown/non-capability provider or a ticker never seen for
+        this (product, provider) pair — suppression requires an existing
+        row (D5). Audit row written only when the flag actually changes
+        (a no-op PATCH must not pollute the audit log).
+        """
+        try:
+            provider_enum = PaymentProvider(provider)
+        except ValueError as exc:
+            raise NotFoundException(detail=f"Payment provider '{provider}' not found") from exc
+        if provider_enum not in product_config.payment_providers:
+            raise NotFoundException(
+                detail=f"Payment provider not available for this product: {provider_enum.value}"
+            )
+
+        repo = PaymentCurrencyRepository(session)
+        previous_suppressed = await repo.is_ticker_suppressed(
+            product_config.slug, provider_enum.value, ticker
+        )
+        row = await repo.set_suppressed(
+            product_config.slug,
+            provider_enum.value,
+            ticker,
+            is_suppressed=data.is_suppressed,
+        )
+        if row is None:
+            raise NotFoundException(
+                detail=f"Currency '{ticker.strip().upper()}' not found for provider "
+                f"'{provider_enum.value}'"
+            )
+
+        if data.is_suppressed != previous_suppressed:
+            action = (
+                "payment_currency.suppress" if data.is_suppressed else "payment_currency.unsuppress"
+            )
+            detail = json.dumps(
+                {
+                    "product_id": product_config.slug,
+                    "provider": provider_enum.value,
+                    "ticker": row.ticker,
+                    "is_suppressed": row.is_suppressed,
+                },
+                sort_keys=True,
+            )
+            await AdminRepository(session).write_audit(
+                AdminAuditLog(
+                    id=new_id(),
+                    actor_id=superadmin.id,
+                    target_user_id=None,
+                    product_id=product_config.slug,
+                    action=action,
+                    detail=detail,
+                    source="api",
+                )
+            )
+        await session.commit()
+        return AdminCurrency(
+            ticker=row.ticker,
+            provider=PaymentProvider(row.provider),
+            is_available=row.is_available,
+            is_suppressed=row.is_suppressed,
+            name=row.name,
+            network=row.network,
+            logo_key=row.logo_key,
+            logo_source_url=row.logo_source_url,
+            logo_synced_at=row.logo_synced_at,
+            last_seen_at=row.last_seen_at,
+        )
 
     @post("/currencies/refresh")
     async def refresh_currencies(

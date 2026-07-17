@@ -25,7 +25,11 @@ from src.api.schemas.billing import (
     TopUpNowPaymentsRequest,
     TopUpStripeRequest,
 )
-from src.api.services.billing_errors import PaymentProviderDisabledError, TopUpAmountError
+from src.api.services.billing_errors import (
+    PayCurrencySuppressedError,
+    PaymentProviderDisabledError,
+    TopUpAmountError,
+)
 from src.api.services.payments import CreatedCharge
 from src.core.product import PaymentProvider
 from src.core.product_registry import VEX_CONFIG
@@ -56,6 +60,36 @@ async def test_disabled_provider_fails_idempotency_record() -> None:
             idempotency_service=idempotency,
             idempotency_key_header="key-1",
         )
+    idempotency.fail.assert_awaited_once_with(record_id, session=ANY)
+
+
+async def test_suppressed_pay_currency_fails_idempotency_record() -> None:
+    """D4: a suppressed pinned pay_currency must release the idempotency key,
+    mirroring the disabled-provider path, and propagate unwrapped for the
+    app-level pay_currency_suppressed_handler to map to the stable 400 body."""
+    record_id = uuid4()
+    idempotency = AsyncMock()
+    idempotency.check = AsyncMock(return_value=record_id)
+    billing = AsyncMock()
+    billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+    payment = AsyncMock()
+    payment.create_charge = AsyncMock(side_effect=PayCurrencySuppressedError("USDTXTZ"))
+
+    with pytest.raises(PayCurrencySuppressedError) as exc_info:
+        await BillingController.topup_nowpayments.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            data=TopUpNowPaymentsRequest(amount_usd=100, pay_currency="usdtxtz"),
+            session=AsyncMock(),
+            billing_service=billing,
+            payment_service=payment,
+            product_id="vex",
+            product_config=VEX_CONFIG,
+            idempotency_service=idempotency,
+            idempotency_key_header="key-suppressed",
+        )
+
+    assert exc_info.value.ticker == "USDTXTZ"
     idempotency.fail.assert_awaited_once_with(record_id, session=ANY)
 
 

@@ -1,6 +1,8 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-16 — Added the DB-cached **Payment Currency Catalog**: public `GET /v1/billing/currencies` (§11) returns available tickers with display name/network/R2-hosted logo, synced from NowPayments `merchant/coins` (availability) + `full-currencies` (metadata) by a periodic worker (default 3h) and on-demand via superadmin `GET/POST /v1/admin/payments/currencies[/refresh]` (§14). Empty list ⇒ hide the picker and omit `pay_currency`; catalog state never gates checkout. No hardcoded ticker list exists anywhere in the contract. Frontend should regenerate types (`gen:api`)._
+> _Last updated: 2026-07-17 — Added **Currency Suppression**: a superadmin deny-list for provider-side "zombie" tickers (NowPayments confirmed a data bug where `merchant/coins` can report currencies they've effectively delisted and won't fix). New `PATCH /v1/admin/payments/currencies/{provider}/{ticker}` (§14) toggles `is_suppressed` on a catalog row — suppressed tickers are immediately excluded from `GET /v1/billing/currencies` (§11), which now gained `AdminCurrency.is_suppressed` on the admin GET, and pinning a suppressed ticker on `POST /v1/billing/topup/nowpayments` (§11) now returns `400 { "code": "pay_currency_suppressed", "pay_currency": "<TICKER>" }`. Suppression survives every catalog sync (the sync code never reads/writes the flag) and requires an already-seen ticker (404 otherwise — no pre-emptive/pattern suppression). See the "Provider-side zombie currencies" ops note under §14. Frontend should regenerate types (`gen:api`) and handle the new 400 by re-fetching `/currencies` and re-prompting the user._
+>
+> _Prior (2026-07-16): Added the DB-cached **Payment Currency Catalog**: public `GET /v1/billing/currencies` (§11) returns available tickers with display name/network/R2-hosted logo, synced from NowPayments `merchant/coins` (availability) + `full-currencies` (metadata) by a periodic worker (default 3h) and on-demand via superadmin `GET/POST /v1/admin/payments/currencies[/refresh]` (§14). Empty list ⇒ hide the picker and omit `pay_currency`; catalog state never gates checkout. No hardcoded ticker list exists anywhere in the contract. Frontend should regenerate types (`gen:api`)._
 >
 > _Prior (2026-07-16): `pay_currency` on `POST /v1/billing/topup/nowpayments` (§11) is now **optional** (was required). Omit it to let the customer pick any currency/network NowPayments supports on the hosted invoice page instead of pinning one; blank/whitespace is treated the same as omitted. `PaymentResponse.currency` (admin §14) is `"USD"` at charge time for an unpinned invoice and is patched to the customer's actual settled ticker (e.g. `"USDCMATIC"`, `"USDTTRC20"`) once the first IPN reports it — this can happen on intermediate statuses, not just completion. This is backwards-compatible: existing callers that always send `pay_currency` see no behavior change. Frontend should regenerate types (`gen:api`) to pick up the now-optional field._
 >
@@ -1372,6 +1374,10 @@ Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Errors:   409 idempotency_conflict
           409 { "code": "payment_provider_disabled", "provider": "nowpayments" }
           400 if amount_usd is outside the configured min/max top-up bounds
+          400 { "code": "pay_currency_suppressed", "pay_currency": "<TICKER>" } when a pinned
+              pay_currency has been superadmin-suppressed (see §14) — never raised when
+              pay_currency is omitted; a stale currency picker should re-fetch
+              GET /v1/billing/currencies and ask the user to pick again
 Note:     Same discount-on-price semantics as the Stripe path. NowPayments IPN
           under/overpayments are credited proportionally to actually_paid/amount_usd
           (uncapped on overpayment) — never held for manual review.
@@ -1422,9 +1428,11 @@ Response: Array<{
 
 DB-cached currency catalog for the product's catalog-capable payment providers (currently
 NowPayments only), refreshed by a periodic worker (every `PAYMENT_CURRENCY_SYNC_INTERVAL_SECONDS`,
-default 3h) and on-demand by superadmin (`POST /v1/admin/payments/currencies/refresh`). Only
-`is_available` rows are returned, ordered by ticker. No hardcoded ticker list exists anywhere in
-this contract — availability is decided solely by the provider's own dashboard-checked list.
+default 3h) and on-demand by superadmin (`POST /v1/admin/payments/currencies/refresh`). Only rows
+that are both `is_available` and **not** superadmin-suppressed are returned, ordered by ticker. No
+hardcoded ticker list exists anywhere in this contract — availability is decided solely by the
+provider's own dashboard-checked list, and suppression is a superadmin-authored deny-list layered
+on top (see §14) for tickers the provider wrongly reports as available.
 
 FE contract:
 - **Empty array** (cold cache, or every catalog-capable provider disabled/unconfigured) ⇒ hide the
@@ -1896,6 +1904,8 @@ AdminCurrency: {
   ticker: string,
   provider: "stripe" | "nowpayments",
   is_available: boolean,          // false = flipped unavailable by the most recent sync, row kept
+  is_suppressed: boolean,         // true = superadmin deny-listed; excluded from the public picker
+                                  // and from pinned top-ups regardless of is_available
   name: string | null,
   network: string | null,
   logo_key: string | null,        // R2 object key; null = no cached logo
@@ -1915,8 +1925,28 @@ SyncResult: {
 
 ```
 Response: AdminCurrency[]
-Note:     Full catalog including unavailable rows, ordered by ticker. Unlike the public
-          endpoint, this never filters by is_available — used to audit sync history.
+Note:     Full catalog including unavailable and suppressed rows, ordered by ticker. Unlike the
+          public endpoint, this never filters by is_available or is_suppressed — used to audit
+          sync history and manage the deny-list.
+```
+
+#### `PATCH /v1/admin/payments/currencies/{provider}/{ticker}`
+
+```
+Request:  { is_suppressed: boolean }
+Response: AdminCurrency
+Errors:   404 when provider is unknown or outside the product's static capability set
+          404 when ticker has never been seen for this (product, provider) pair — suppression
+              requires an existing catalog row; there is no pre-emptive or pattern
+              (e.g. "all *XTZ") suppression
+Note:     ticker is case-insensitive (uppercased server-side before lookup). Takes effect
+          immediately — GET /v1/billing/currencies excludes a newly suppressed ticker on its
+          very next request, no catalog sync required, and the flag is never touched by
+          POST /v1/admin/payments/currencies/refresh (a suppression survives every sync,
+          including a deactivate→reappear cycle). Writes payment_currency.suppress or
+          payment_currency.unsuppress to the audit log with target_user_id=null — only when
+          is_suppressed actually changes; a PATCH that sets the value it already has is a
+          no-op (200, unchanged row, no new audit row).
 ```
 
 #### `POST /v1/admin/payments/currencies/refresh`
@@ -1928,7 +1958,33 @@ Errors:   502 when any provider's merchant/coins or full-currencies call fails �
 Note:     Synchronous — runs list_merchant_currencies + list_full_currencies + logo caching inline
           and commits before responding. Writes payment_currencies.refresh to the audit log with
           target_user_id=null and a detail blob of per-provider upserted/deactivated counts.
+          Never reads or writes is_suppressed — a refresh cannot resurrect a suppressed ticker.
 ```
+
+#### Ops note: provider-side zombie currencies
+
+NowPayments confirmed (support ticket) a data bug on their side: `merchant/coins` can report
+tickers they have effectively delisted/killed. They will not fix it, and their only offered
+remedy is a new account — which doesn't prevent recurrence. Since NowPayments would still create
+invoices for such zombie currencies (stranding customer payments on a dead rail), suppression is
+the authoritative-negative override: **workflow** is support confirms a specific dead ticker →
+superadmin `PATCH`es it suppressed → it vanishes from the public picker immediately, no sync
+needed. Suppression never invents an *allow* — an unsuppressed/unknown ticker on a pinned top-up
+still passes through to NowPayments' own validation (their 4xx is the validator, unchanged).
+
+**Residual risk (accepted, documented, not built around):** the NowPayments-hosted invoice page
+(the customer-chooses flow used when `pay_currency` is omitted) renders *their* currency list —
+Apex cannot filter that page, so a zombie ticker may still be selectable there. Suppression fully
+protects the Apex-rendered picker and any pinned invoice. If this residual path ever strands a
+real payment, the escalation is a frontend policy of pinned-currency-only checkout (forcing
+`pay_currency` to always be set from `GET /v1/billing/currencies`) — not implemented today.
+
+**FE addendum:** the admin panel gains a suppress/unsuppress toggle per catalog row (driven by
+`PATCH /v1/admin/payments/currencies/{provider}/{ticker}`). Checkout must handle the new
+`400 { "code": "pay_currency_suppressed", "pay_currency": "<TICKER>" }` from
+`POST /v1/billing/topup/nowpayments` by re-fetching `GET /v1/billing/currencies` and asking the
+user to pick a currency again — this is a narrow race window (the ticker was suppressed between
+the picker load and the top-up submit), not a normal-path error.
 
 ---
 

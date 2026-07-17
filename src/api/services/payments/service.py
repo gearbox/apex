@@ -11,6 +11,7 @@ import structlog
 
 from src.api.services.billing_errors import (
     AccountNotFoundError,
+    PayCurrencySuppressedError,
     PaymentProviderDisabledError,
     PaymentVerificationError,
     TopUpAmountError,
@@ -25,6 +26,7 @@ from src.core.topup_pricing import TopUpQuote, build_quote, topup_tiers_for
 from src.core.uid import new_id
 from src.db.models.billing import PAYMENT_CURRENCY_MAX_LEN
 from src.db.repositories.billing import BillingRepository
+from src.db.repositories.payment_currency import PaymentCurrencyRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,6 +107,12 @@ class PaymentService:
             raise AccountNotFoundError(f"Account {account_id} not found")
         if not await self._provider_state.is_effective(product_config, provider, session=session):
             raise PaymentProviderDisabledError(provider)
+
+        pinned_ticker = (extra or {}).get("pay_currency", "").strip().upper()
+        if pinned_ticker and await PaymentCurrencyRepository(session).is_ticker_suppressed(
+            product_config.slug, provider.value, pinned_ticker
+        ):
+            raise PayCurrencySuppressedError(pinned_ticker)
 
         payment_id = new_id()
         result = await self._registry.get(provider).create_charge(

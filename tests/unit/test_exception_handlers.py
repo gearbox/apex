@@ -19,6 +19,7 @@ from src.api.app import (
     moderation_error_handler,
     organization_balance_handler,
     organization_permission_handler,
+    pay_currency_suppressed_handler,
     payment_verification_handler,
     price_not_found_handler,
     refund_not_eligible_handler,
@@ -30,6 +31,7 @@ from src.api.services.billing_errors import (
     ModerationError,
     OrganizationBalanceError,
     OrganizationPermissionError,
+    PayCurrencySuppressedError,
     PaymentVerificationError,
     PriceNotFoundError,
     RefundNotEligibleError,
@@ -230,6 +232,20 @@ class TestBusinessExceptionHandlers:
         log = next(r for r in cap if r["event"] == "organization.balance_nonzero")
         assert log["balance"] == 500
         assert log["status_code"] == 409
+        assert log["method"] == "POST"
+
+    def test_pay_currency_suppressed_returns_stable_400_body(self) -> None:
+        req = _mock_request()
+        exc = PayCurrencySuppressedError("USDTXTZ")
+
+        with capture_logs() as cap:
+            resp = pay_currency_suppressed_handler(req, exc)
+
+        assert resp.status_code == 400
+        assert resp.content == {"code": "pay_currency_suppressed", "pay_currency": "USDTXTZ"}
+        log = next(r for r in cap if r["event"] == "payment.pay_currency_suppressed")
+        assert log["ticker"] == "USDTXTZ"
+        assert log["status_code"] == 400
         assert log["method"] == "POST"
 
 

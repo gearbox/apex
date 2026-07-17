@@ -56,6 +56,7 @@ from src.api.services.billing_errors import (
     ModerationError,
     OrganizationBalanceError,
     OrganizationPermissionError,
+    PayCurrencySuppressedError,
     PaymentProviderDisabledError,
     PaymentVerificationError,
     PriceNotFoundError,
@@ -212,6 +213,22 @@ def payment_provider_disabled_handler(
     return Response(
         content={"code": "payment_provider_disabled", "provider": exc.provider.value},
         status_code=HTTP_409_CONFLICT,
+    )
+
+
+def pay_currency_suppressed_handler(
+    request: Request[Any, Any, Any],
+    exc: PayCurrencySuppressedError,
+) -> Response[Any]:
+    _log_handler_event(
+        "payment.pay_currency_suppressed",
+        request,
+        HTTP_400_BAD_REQUEST,
+        ticker=exc.ticker,
+    )
+    return Response(
+        content={"code": "pay_currency_suppressed", "pay_currency": exc.ticker},
+        status_code=HTTP_400_BAD_REQUEST,
     )
 
 
@@ -416,6 +433,7 @@ def create_app() -> Litestar:
             ModerationError: moderation_error_handler,
             PaymentVerificationError: payment_verification_handler,
             PaymentProviderDisabledError: payment_provider_disabled_handler,
+            PayCurrencySuppressedError: pay_currency_suppressed_handler,
             OrganizationPermissionError: organization_permission_handler,
             OrganizationBalanceError: organization_balance_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
