@@ -26,6 +26,8 @@ from sqlalchemy import CursorResult, func
 from sqlalchemy import update as sa_update
 
 from src.api.schemas.events import EventType, JobStatusPayload
+from src.api.schemas.ops_events import GenerationFailedOpsPayload, OpsEventType
+from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import JobStatus
 from src.db.models.storage import GenerationJob
 from src.db.repositories.job import JobRepository
@@ -77,10 +79,14 @@ class JobStateTransitionService:
         session: AsyncSession,
         event_bus: EventBus | None,
         billing_service: BillingService,
+        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         self._session = session
         self._event_bus = event_bus
         self._billing = billing_service
+        self._ops_event_bus = (
+            ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
+        )
         self._job_repo = JobRepository(session)
         self._output_repo = OutputRepository(session)
 
@@ -261,6 +267,16 @@ class JobStateTransitionService:
             "job.transition.failed",
             job_id=str(job_id),
             error=error_message[:200],
+        )
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.GENERATION_FAILED,
+            product_id=product_id,
+            payload=GenerationFailedOpsPayload(
+                job_id=job.id,
+                user_id=job.user_id,
+                provider=str(job.provider),
+                generation_type=str(job.generation_type),
+            ),
         )
 
         if refund:

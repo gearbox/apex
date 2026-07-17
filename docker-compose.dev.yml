@@ -31,6 +31,10 @@ services:
       DB_ECHO: "true"
       LOG_FORMAT: "console"
       LOG_LEVEL: "DEBUG"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_LINK_TOKEN_TTL_SECONDS: ${TELEGRAM_LINK_TOKEN_TTL_SECONDS:-900}
+      TELEGRAM_SEND_TIMEOUT_SECONDS: ${TELEGRAM_SEND_TIMEOUT_SECONDS:-10.0}
+      TELEGRAM_POLL_TIMEOUT_SECONDS: ${TELEGRAM_POLL_TIMEOUT_SECONDS:-25}
     volumes:
       # Mount source code for hot reload
       - ./src:/app/src:ro

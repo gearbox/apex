@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class Product(StrEnum):
@@ -523,3 +524,27 @@ class SupportedLocale(StrEnum):
     EN = "en"  # English
     RU = "ru"  # Russian
     SR = "sr"  # Serbian (Latin)
+
+
+class NotificationClass(StrEnum):
+    """Admin-facing ops notification classes.
+
+    Adding a new class = add a member here + a mapping branch in
+    telegram_mapping.py + a catalog entry. No schema change.
+    """
+
+    USER_REGISTERED = "user.registered"
+    GENERATION_CREATED = "generation.created"
+    GPU_NODE_STARTED = "gpu_node.started"
+    GENERATION_FAILED = "generation.failed"
+    HEALTH_DEGRADED = "health.degraded"
+    HEALTH_RESTORED = "health.restored"
+
+
+# Classes 1-4 (USER_REGISTERED..GENERATION_FAILED) are product-scoped: delivered
+# only to recipients whose product matches the event's product_id. Classes 5-6
+# (health) are platform-scoped: delivered to any subscribed admin/superadmin
+# regardless of product, since health applies to the whole platform.
+PLATFORM_SCOPED_NOTIFICATION_CLASSES: Final[frozenset[NotificationClass]] = frozenset(
+    {NotificationClass.HEALTH_DEGRADED, NotificationClass.HEALTH_RESTORED}
+)

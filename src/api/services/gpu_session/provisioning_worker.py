@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
     from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.jobs.sweep import JobSweepService
+    from src.api.services.ops_event_bus import OpsEventBus
     from src.api.services.vastai.client import VastAIClient
     from src.api.services.vastai.schemas import VastAIInstance
     from src.core.config import Settings
@@ -141,6 +142,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
+        ops_event_bus: OpsEventBus | None = None,
         redis_enabled: bool = False,
     ) -> None:
         super().__init__(
@@ -159,6 +161,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         self._billing_service = billing_service
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
+        self._ops_event_bus = ops_event_bus
 
     async def run_once(self) -> None:
         """One full sweep: query non-terminal sessions and advance each."""
@@ -916,6 +919,7 @@ class GpuProvisioningWorker(PeriodicWorker):
             session,
             previous_status=previous_status,
             error_message=error_message,
+            ops_event_bus=self._ops_event_bus,
         )
 
     # ------------------------------------------------------------------

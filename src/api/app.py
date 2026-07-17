@@ -30,6 +30,7 @@ from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_
 from src.api.responses import error_response as _error
 from src.api.routes.admin import AdminController
 from src.api.routes.admin_management import AdminManagementController
+from src.api.routes.admin_notifications import AdminNotificationController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.billing_public import BillingPublicController
@@ -401,6 +402,7 @@ def create_app() -> Litestar:
             # Admin
             AdminController,
             AdminManagementController,
+            AdminNotificationController,
             PaymentProviderAdminController,
             # Generation (unified)
             UnifiedGenerationController,  # POST /v1/generate

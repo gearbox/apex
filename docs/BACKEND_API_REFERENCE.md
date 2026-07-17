@@ -1,6 +1,8 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-17 — Added **Currency Suppression**: a superadmin deny-list for provider-side "zombie" tickers (NowPayments confirmed a data bug where `merchant/coins` can report currencies they've effectively delisted and won't fix). New `PATCH /v1/admin/payments/currencies/{provider}/{ticker}` (§14) toggles `is_suppressed` on a catalog row — suppressed tickers are immediately excluded from `GET /v1/billing/currencies` (§11), which now gained `AdminCurrency.is_suppressed` on the admin GET, and pinning a suppressed ticker on `POST /v1/billing/topup/nowpayments` (§11) now returns `400 { "code": "pay_currency_suppressed", "pay_currency": "<TICKER>" }`. Suppression survives every catalog sync (the sync code never reads/writes the flag) and requires an already-seen ticker (404 otherwise — no pre-emptive/pattern suppression). See the "Provider-side zombie currencies" ops note under §14. Frontend should regenerate types (`gen:api`) and handle the new 400 by re-fetching `/currencies` and re-prompting the user._
+> _Last updated: 2026-07-17 — Added **Admin Ops Notifications (Telegram)** (new §15c): admins/superadmins can subscribe to operational events — `user.registered`, `generation.created`, `gpu_node.started`, `generation.failed` (product-scoped) and `health.degraded`/`health.restored` (platform-scoped) — and receive them as Telegram messages via a one-time `t.me` deep-link flow. New endpoints under `/v1/admin/notifications/*`: `GET /classes` (catalog), `GET`/`PUT /preferences` (per-class subscribe + optional `min_interval_seconds` throttle, full-set replace), `GET /preferences/{user_id}` (superadmin-only read of another admin's set), `GET`/`POST /telegram`/`DELETE /telegram` (link status, create/rotate deep link, unlink). Backend-only — no frontend/consumer-facing surface changes. New `NotificationClass` enum (§17). `AuditLogEntry.action` (§14) gained `notification_prefs.update`, `telegram.link_requested`, `telegram.unlinked`. Requires `TELEGRAM_BOT_TOKEN` + `REDIS_URL` server-side to actually deliver; preference endpoints work regardless._
+>
+> _Prior (2026-07-17): Added **Currency Suppression**: a superadmin deny-list for provider-side "zombie" tickers (NowPayments confirmed a data bug where `merchant/coins` can report currencies they've effectively delisted and won't fix). New `PATCH /v1/admin/payments/currencies/{provider}/{ticker}` (§14) toggles `is_suppressed` on a catalog row — suppressed tickers are immediately excluded from `GET /v1/billing/currencies` (§11), which now gained `AdminCurrency.is_suppressed` on the admin GET, and pinning a suppressed ticker on `POST /v1/billing/topup/nowpayments` (§11) now returns `400 { "code": "pay_currency_suppressed", "pay_currency": "<TICKER>" }`. Suppression survives every catalog sync (the sync code never reads/writes the flag) and requires an already-seen ticker (404 otherwise — no pre-emptive/pattern suppression). See the "Provider-side zombie currencies" ops note under §14. Frontend should regenerate types (`gen:api`) and handle the new 400 by re-fetching `/currencies` and re-prompting the user._
 >
 > _Prior (2026-07-16): Added the DB-cached **Payment Currency Catalog**: public `GET /v1/billing/currencies` (§11) returns available tickers with display name/network/R2-hosted logo, synced from NowPayments `merchant/coins` (availability) + `full-currencies` (metadata) by a periodic worker (default 3h) and on-demand via superadmin `GET/POST /v1/admin/payments/currencies[/refresh]` (§14). Empty list ⇒ hide the picker and omit `pay_currency`; catalog state never gates checkout. No hardcoded ticker list exists anywhere in the contract. Frontend should regenerate types (`gen:api`)._
 >
@@ -1790,7 +1792,8 @@ AuditLogEntry: {
   id: UUID,
   actor_id: UUID,
   target_user_id: UUID | null,
-  action: string,   // role.*, permission.*, or payment_provider.enable/disable/reorder
+  action: string,   // role.*, permission.*, payment_provider.enable/disable/reorder,
+                    // or notification_prefs.update / telegram.link_requested / telegram.unlinked (§15c)
   detail: string,   // human-readable, e.g. "Role changed from 'user' to 'admin'"
   source: string,   // "api" | "cli"
   created_at: datetime
@@ -2323,6 +2326,125 @@ self.addEventListener('notificationclick', (event) => {
 
 ---
 
+## 15c. Admin Ops Notifications (Telegram)
+
+Backend-driven **operational alerting for admins/superadmins**, delivered as Telegram messages — separate from the consumer-facing SSE (§15) and Web Push (§15b) channels above. This is an admin-panel-only feature; it has no effect on and no dependency on the end-user-facing API surface.
+
+> **Requires bot token + Redis**: Telegram delivery is only active when `TELEGRAM_BOT_TOKEN` and `REDIS_URL` are both configured on the server. When disabled, `POST /v1/admin/notifications/telegram/link` returns `503 Service Unavailable`. The preference endpoints (`/classes`, `/preferences`) work regardless — an admin can configure subscriptions ahead of Telegram being enabled.
+
+### Notification Classes
+
+| Class | Scope | Fires when |
+|-------|-------|------------|
+| `user.registered` | product | A new user registers on the admin's own product |
+| `generation.created` | product | A new generation job is submitted |
+| `gpu_node.started` | product | A GPU node finishes provisioning — `provisioning → active` only; resuming a paused session does **not** count as "started" |
+| `generation.failed` | product | A generation job transitions to `failed` |
+| `health.degraded` | platform | A platform health subsystem becomes `degraded`, `unhealthy`, or `unknown` |
+| `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
+
+- **Product-scoped** classes (the first four) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
+- **Platform-scoped** classes (`health.*`) are delivered to every subscribed admin/superadmin regardless of product, since platform health applies everywhere.
+- Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
+- Each subscribed class carries an optional `min_interval_seconds` throttle (default `0` = unthrottled, max `86400`). Messages suppressed during the cooldown are counted; the next delivered message for that class appends `(+N suppressed)` to the text.
+
+### Telegram Linking Flow
+
+```
+1. Admin     POST /v1/admin/notifications/telegram/link        →  { deep_link, expires_at }
+2. Admin     opens deep_link (https://t.me/<bot>?start=<token>) and taps Start in Telegram
+3. Telegram  sends "/start <token>" to the bot
+4. Backend   confirms the token (single-use), stores the chat_id, replies "✅ Telegram linked..."
+5. Backend   delivers every subscribed notification class to that chat_id from then on
+```
+
+- Link tokens expire after `TELEGRAM_LINK_TOKEN_TTL_SECONDS` (default `900`s / 15 min) and are single-use — replaying a `/start <token>` after it's been consumed (or expired) gets "⚠️ Link token is invalid or expired."
+- Re-requesting a link while already linked **rotates the token but does not clear the existing chat_id** — it's a way to re-link (e.g. after losing access to the chat), not an implicit unlink.
+- `DELETE /v1/admin/notifications/telegram` unlinks immediately and stops all further deliveries to that admin.
+
+### Endpoints
+
+All endpoints require **ADMIN or SUPERADMIN** role, except reading another admin's preferences, which is **SUPERADMIN-only**.
+
+#### `GET /v1/admin/notifications/classes`
+
+```
+Response: [ { notification_class: string, scope: "product" | "platform", description: string }, ... ]
+Status:   200 OK
+Note:     Static catalog derived from the NotificationClass enum (§17) — no DB round-trip.
+```
+
+#### `GET /v1/admin/notifications/preferences`
+
+```
+Response: { items: [ { notification_class: string, min_interval_seconds: int }, ... ] }
+Status:   200 OK
+Note:     The caller's own subscribed set. A class absent from `items` means "not subscribed".
+```
+
+#### `PUT /v1/admin/notifications/preferences`
+
+```
+Request:  { items: [ { notification_class: string, min_interval_seconds?: int }, ... ] }
+Response: { items: [ ... ] }   // the updated set, echoed back
+Status:   200 OK
+Errors:   400 validation_error (unknown notification_class, or min_interval_seconds outside [0, 86400])
+Note:     Full-set replace, idempotent. Send the complete desired set every time —
+          omitted classes are unsubscribed, not left untouched.
+```
+
+#### `GET /v1/admin/notifications/preferences/{user_id}` *(SUPERADMIN only)*
+
+```
+Response: { items: [ ... ] }   // read-only view of another admin's preferences
+Status:   200 OK
+Errors:   403 forbidden (caller is ADMIN, not SUPERADMIN)
+```
+
+#### `GET /v1/admin/notifications/telegram`
+
+```
+Response: { linked: boolean, linked_at: string | null, chat_id_last4: string | null }
+Status:   200 OK
+Note:     chat_id_last4 is the last 4 digits of the Telegram chat id, for the admin to
+          confirm which chat is linked without exposing the full id.
+```
+
+#### `POST /v1/admin/notifications/telegram/link`
+
+```
+Response: { deep_link: string, expires_at: string }
+Status:   200 OK
+Errors:   503 (Telegram not configured — no TELEGRAM_BOT_TOKEN/REDIS_URL)
+Note:     Creates a new link token (or rotates an existing one) and returns the
+          ready-to-open t.me deep link.
+```
+
+#### `DELETE /v1/admin/notifications/telegram`
+
+```
+Response: { message: string }
+Status:   200 OK
+Note:     Idempotent — succeeds even if no link exists.
+```
+
+### Message Format
+
+Messages use Telegram's `parse_mode=HTML`, always prefixed with the product tag — `[vex]`, `[synthara]`, or `[platform]` for the platform-scoped health classes. Every interpolated value (ids, statuses) is HTML-escaped. Example:
+
+```
+[vex] ❌ Generation failed
+job <code>3fa85f64-...</code> · grok/t2i
+```
+
+### Delivery Guarantees
+
+- **Best-effort**, same as SSE (§15) and Push (§15b) — if the Telegram dispatcher process is down, or Redis drops, notifications are lost. No replay, no persistence queue.
+- **Role and active-status are checked at delivery time** against the live user row, not cached on the subscription — a demoted or deactivated admin stops receiving immediately, with no preference cleanup required.
+- **Throttling is per-process, in-memory** — `min_interval_seconds` cooldowns reset on a dispatcher restart. Accepted tradeoff for v1 rather than adding another Redis-backed key namespace.
+
+---
+
 ## 16. Product Reference
 
 ### Products
@@ -2513,6 +2635,19 @@ Values: `"superadmin"`, `"admin"`, `"user"`
 Values: `"billing_adjust"`
 
 > Granular permissions that a superadmin can grant to ADMIN-role users. Currently only `billing_adjust` exists (enables `POST /v1/admin/accounts/{id}/adjust` for that admin).
+
+### NotificationClass
+
+| Value | Scope | Fires when |
+|-------|-------|------------|
+| `user.registered` | product | New user registration |
+| `generation.created` | product | New generation job submitted |
+| `gpu_node.started` | product | GPU node finishes provisioning (`provisioning → active` only) |
+| `generation.failed` | product | Generation job transitions to `failed` |
+| `health.degraded` | platform | A health subsystem becomes `degraded`/`unhealthy`/`unknown` |
+| `health.restored` | platform | A health subsystem recovers |
+
+> Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 
 ### OrgRole
 

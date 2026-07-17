@@ -1,6 +1,7 @@
 """Database models module."""
 
 from .admin import AdminAuditLog, AdminPermissionGrant
+from .admin_notifications import AdminNotificationPreference, AdminTelegramLink
 from .auth_tokens import EmailVerificationToken, PasswordResetToken
 from .base import Base
 from .billing import (
@@ -24,7 +25,9 @@ from .user import RefreshToken, User
 
 __all__ = [
     "AdminAuditLog",
+    "AdminNotificationPreference",
     "AdminPermissionGrant",
+    "AdminTelegramLink",
     "Base",
     "EmailVerificationToken",
     "FrameExtractionJob",

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
     from src.api.services.billing import BillingService
     from src.api.services.event_bus import EventBus
+    from src.api.services.ops_event_bus import OpsEventBus
     from src.db.models.gpu_session import GpuSession
     from src.db.models.storage import GenerationJob
 
@@ -87,6 +88,7 @@ class AishaJobPoller(PeriodicWorker):
         billing_service: BillingService,
         r2_storage: R2StorageService | None,
         config: AishaPollerConfig,
+        ops_event_bus: OpsEventBus | None = None,
         redis_enabled: bool = False,
     ) -> None:
         super().__init__(
@@ -97,6 +99,7 @@ class AishaJobPoller(PeriodicWorker):
         self._session_factory = session_factory
         self._event_bus = event_bus
         self._billing = billing_service
+        self._ops_event_bus = ops_event_bus
         self._r2 = r2_storage
         self._config = config
 
@@ -120,6 +123,7 @@ class AishaJobPoller(PeriodicWorker):
             session=session,
             event_bus=self._event_bus,
             billing_service=self._billing,
+            ops_event_bus=self._ops_event_bus,
         )
 
     async def start(self) -> None:

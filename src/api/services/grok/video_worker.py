@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from src.api.services.billing import BillingService
     from src.api.services.event_bus import EventBus
     from src.api.services.grok.job_service import GrokJobService
+    from src.api.services.ops_event_bus import OpsEventBus
     from src.core.config import Settings
     from src.db import DatabaseManager
     from src.db.models import GenerationJob
@@ -49,6 +50,7 @@ class GrokVideoWorker(PeriodicWorker):
         billing_service: BillingService,
         settings: Settings,
         event_bus: EventBus | None = None,
+        ops_event_bus: OpsEventBus | None = None,
         *,
         redis_enabled: bool = False,
     ) -> None:
@@ -61,6 +63,7 @@ class GrokVideoWorker(PeriodicWorker):
                 for timeout/failure refunds.
             settings: Application settings.
             event_bus: Optional event bus for publishing job events.
+            ops_event_bus: Optional ops event bus for admin notifications.
             redis_enabled: Whether Redis is configured (enables the leader lease).
         """
         super().__init__(
@@ -73,6 +76,7 @@ class GrokVideoWorker(PeriodicWorker):
         self._billing = billing_service
         self._max_poll_time = settings.grok_video_max_poll_time
         self._event_bus = event_bus
+        self._ops_event_bus = ops_event_bus
         self._max_concurrent_polls = settings.grok_video_max_concurrent_polls
 
     def _make_transition_service(self, session: AsyncSession) -> JobStateTransitionService:
@@ -80,6 +84,7 @@ class GrokVideoWorker(PeriodicWorker):
             session=session,
             event_bus=self._event_bus,
             billing_service=self._billing,
+            ops_event_bus=self._ops_event_bus,
         )
 
     async def _emit_progress(self, job: GenerationJob, progress_pct: int) -> None:
