@@ -205,3 +205,131 @@ async def test_list_currencies_filters_by_availability(db_session: AsyncSession)
 
     assert [row.ticker for row in available] == ["BTC"]
     assert {row.ticker for row in all_rows} == {"BTC", "ETH"}
+
+
+# ---------------------------------------------------------------------------
+# Currency suppression (D1-D5): set_suppressed, is_ticker_suppressed,
+# list_currencies(include_suppressed), and the D2 sync-never-touches-the-flag
+# regression.
+# ---------------------------------------------------------------------------
+
+
+async def test_set_suppressed_round_trip(db_session: AsyncSession) -> None:
+    repo = PaymentCurrencyRepository(db_session)
+    await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW)
+
+    row = await repo.set_suppressed("vex", "nowpayments", "BTC", is_suppressed=True)
+    assert row is not None
+    assert row.is_suppressed is True
+
+    row = await repo.set_suppressed("vex", "nowpayments", "BTC", is_suppressed=False)
+    assert row is not None
+    assert row.is_suppressed is False
+
+
+async def test_set_suppressed_returns_none_for_unseen_ticker(db_session: AsyncSession) -> None:
+    repo = PaymentCurrencyRepository(db_session)
+    await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW)
+
+    row = await repo.set_suppressed("vex", "nowpayments", "GHOST", is_suppressed=True)
+    assert row is None
+
+
+async def test_set_suppressed_normalizes_ticker_case(db_session: AsyncSession) -> None:
+    repo = PaymentCurrencyRepository(db_session)
+    await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW)
+
+    row = await repo.set_suppressed("vex", "nowpayments", "  btc  ", is_suppressed=True)
+    assert row is not None
+    assert row.ticker == "BTC"
+    assert row.is_suppressed is True
+
+
+async def test_is_ticker_suppressed_true_false_and_unseen(db_session: AsyncSession) -> None:
+    repo = PaymentCurrencyRepository(db_session)
+    await repo.sync_catalog(
+        "vex", "nowpayments", [CatalogEntry(ticker="BTC"), CatalogEntry(ticker="ETH")], now=_NOW
+    )
+    await repo.set_suppressed("vex", "nowpayments", "BTC", is_suppressed=True)
+
+    assert await repo.is_ticker_suppressed("vex", "nowpayments", "BTC") is True
+    assert await repo.is_ticker_suppressed("vex", "nowpayments", "ETH") is False
+    assert await repo.is_ticker_suppressed("vex", "nowpayments", "GHOST") is False
+    # Case-insensitive lookup, mirroring the gateway's strip+uppercase normalization.
+    assert await repo.is_ticker_suppressed("vex", "nowpayments", "btc") is True
+
+
+async def test_list_currencies_include_suppressed_matrix(db_session: AsyncSession) -> None:
+    repo = PaymentCurrencyRepository(db_session)
+    await repo.sync_catalog(
+        "vex", "nowpayments", [CatalogEntry(ticker="BTC"), CatalogEntry(ticker="ETH")], now=_NOW
+    )
+    await repo.sync_catalog(
+        "vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW
+    )  # ETH -> unavailable
+    await repo.set_suppressed("vex", "nowpayments", "BTC", is_suppressed=True)
+
+    # Public path: only_available=True, include_suppressed=False (default).
+    public = await repo.list_currencies("vex", "nowpayments", only_available=True)
+    assert not [row.ticker for row in public]
+
+    # Admin path: only_available=False, include_suppressed=True — sees everything.
+    admin = await repo.list_currencies(
+        "vex", "nowpayments", only_available=False, include_suppressed=True
+    )
+    assert {row.ticker for row in admin} == {"BTC", "ETH"}
+
+    # only_available=True with include_suppressed=True still excludes the unavailable ETH
+    # but includes the available-but-suppressed BTC.
+    available_incl_suppressed = await repo.list_currencies(
+        "vex", "nowpayments", only_available=True, include_suppressed=True
+    )
+    assert [row.ticker for row in available_incl_suppressed] == ["BTC"]
+
+    # only_available=False with include_suppressed=False (default) excludes suppressed BTC
+    # but includes unavailable ETH.
+    all_not_suppressed = await repo.list_currencies("vex", "nowpayments", only_available=False)
+    assert [row.ticker for row in all_not_suppressed] == ["ETH"]
+
+
+class TestSuppressionSurvivesSync:
+    """D2 regression: sync_catalog must never read or write is_suppressed."""
+
+    async def test_suppression_survives_upsert_touch(self, db_session: AsyncSession) -> None:
+        repo = PaymentCurrencyRepository(db_session)
+        await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW)
+        await repo.set_suppressed("vex", "nowpayments", "BTC", is_suppressed=True)
+
+        # A normal sync that re-touches BTC (still seen) must not clear suppression.
+        await repo.sync_catalog(
+            "vex", "nowpayments", [CatalogEntry(ticker="BTC", name="Bitcoin")], now=_NOW
+        )
+
+        rows = await _rows(db_session)
+        assert rows["BTC"].is_suppressed is True
+        assert rows["BTC"].is_available is True
+
+    async def test_suppression_survives_deactivation_pass(self, db_session: AsyncSession) -> None:
+        repo = PaymentCurrencyRepository(db_session)
+        await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW)
+        await repo.set_suppressed("vex", "nowpayments", "BTC", is_suppressed=True)
+
+        # BTC missing from this sync -> deactivated (is_available flips false).
+        await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="ETH")], now=_NOW)
+
+        rows = await _rows(db_session)
+        assert rows["BTC"].is_available is False
+        assert rows["BTC"].is_suppressed is True
+
+    async def test_suppression_survives_reappearance(self, db_session: AsyncSession) -> None:
+        repo = PaymentCurrencyRepository(db_session)
+        await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW)
+        await repo.set_suppressed("vex", "nowpayments", "BTC", is_suppressed=True)
+
+        # Deactivate, then bring BTC back — is_available flips true, suppression stays.
+        await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="ETH")], now=_NOW)
+        await repo.sync_catalog("vex", "nowpayments", [CatalogEntry(ticker="BTC")], now=_NOW)
+
+        rows = await _rows(db_session)
+        assert rows["BTC"].is_available is True
+        assert rows["BTC"].is_suppressed is True

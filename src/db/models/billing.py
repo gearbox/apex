@@ -480,6 +480,12 @@ class PaymentCurrency(Base):
     NULL when the provider's metadata endpoint doesn't cover a selected
     ticker. Rows are never deleted — a refresh flips `is_available` instead,
     preserving reconciliation history (see D3 in the currency-catalog design).
+
+    `is_suppressed` is a superadmin-authored deny-list flag, orthogonal to
+    `is_available`: effective public offering is `is_available AND NOT
+    is_suppressed`. The catalog sync never reads or writes this column —
+    admin suppressions survive every refresh (see the currency-suppression
+    design).
     """
 
     __tablename__ = "payment_currencies"
@@ -493,6 +499,12 @@ class PaymentCurrency(Base):
         nullable=False,
         default=True,
         server_default=text("true"),
+    )
+    is_suppressed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
     )
     name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     network: Mapped[str | None] = mapped_column(String(30), nullable=True)

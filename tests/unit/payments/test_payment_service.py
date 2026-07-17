@@ -7,7 +7,11 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.billing import BillingService
-from src.api.services.billing_errors import PaymentProviderDisabledError, PaymentVerificationError
+from src.api.services.billing_errors import (
+    PayCurrencySuppressedError,
+    PaymentProviderDisabledError,
+    PaymentVerificationError,
+)
 from src.api.services.payments import (
     ChargeResult,
     GatewayRegistry,
@@ -90,6 +94,146 @@ async def test_disabled_provider_stops_before_gateway_call() -> None:
             product_config=VEX_CONFIG,
         )
     gateway.create_charge.assert_not_awaited()
+
+
+class TestPayCurrencySuppressionGuard:
+    """D4: a pinned pay_currency matching a suppressed catalog row must stop
+    the charge before any gateway call, mirroring the disabled-provider guard."""
+
+    async def test_pinned_suppressed_ticker_raises_before_gateway_call(self) -> None:
+        gateway = AsyncMock()
+        state = AsyncMock()
+        state.is_effective = AsyncMock(return_value=True)
+        repo = AsyncMock()
+        repo.get_account = AsyncMock(return_value=MagicMock())
+        currency_repo = AsyncMock()
+        currency_repo.is_ticker_suppressed = AsyncMock(return_value=True)
+
+        with (
+            patch("src.api.services.payments.service.BillingRepository", return_value=repo),
+            patch(
+                "src.api.services.payments.service.PaymentCurrencyRepository",
+                return_value=currency_repo,
+            ),
+            pytest.raises(PayCurrencySuppressedError) as exc_info,
+        ):
+            await _service(gateway, state).create_charge(
+                PaymentProvider.STRIPE,
+                uuid4(),
+                100,
+                uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+                extra={"pay_currency": "USDTXTZ"},
+            )
+
+        assert exc_info.value.ticker == "USDTXTZ"
+        gateway.create_charge.assert_not_awaited()
+
+    async def test_unsuppressed_ticker_proceeds(self) -> None:
+        gateway = AsyncMock()
+        gateway.create_charge = AsyncMock(
+            return_value=ChargeResult(
+                external_id="cs_1",
+                redirect_url="https://checkout/1",
+                currency="USDTXTZ",
+                provider_metadata={},
+            )
+        )
+        state = AsyncMock()
+        state.is_effective = AsyncMock(return_value=True)
+        repo = AsyncMock()
+        repo.get_account = AsyncMock(return_value=MagicMock())
+        currency_repo = AsyncMock()
+        currency_repo.is_ticker_suppressed = AsyncMock(return_value=False)
+
+        with (
+            patch("src.api.services.payments.service.BillingRepository", return_value=repo),
+            patch(
+                "src.api.services.payments.service.PaymentCurrencyRepository",
+                return_value=currency_repo,
+            ),
+        ):
+            result = await _service(gateway, state).create_charge(
+                PaymentProvider.STRIPE,
+                uuid4(),
+                100,
+                uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+                extra={"pay_currency": "btc"},
+            )
+
+        assert result.external_id == "cs_1"
+        gateway.create_charge.assert_awaited_once()
+
+    async def test_omitted_pay_currency_skips_suppression_lookup(self) -> None:
+        gateway = AsyncMock()
+        gateway.create_charge = AsyncMock(
+            return_value=ChargeResult(
+                external_id="cs_1",
+                redirect_url="https://checkout/1",
+                currency="USD",
+                provider_metadata={},
+            )
+        )
+        state = AsyncMock()
+        state.is_effective = AsyncMock(return_value=True)
+        repo = AsyncMock()
+        repo.get_account = AsyncMock(return_value=MagicMock())
+        currency_repo = AsyncMock()
+
+        with (
+            patch("src.api.services.payments.service.BillingRepository", return_value=repo),
+            patch(
+                "src.api.services.payments.service.PaymentCurrencyRepository",
+                return_value=currency_repo,
+            ),
+        ):
+            await _service(gateway, state).create_charge(
+                PaymentProvider.STRIPE,
+                uuid4(),
+                100,
+                uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        currency_repo.is_ticker_suppressed.assert_not_awaited()
+
+    async def test_lowercase_pinned_ticker_matches_uppercased_suppressed_row(self) -> None:
+        """Mirror the gateway's own strip+uppercase normalization (D4 pitfall) —
+        a lowercase pinned ticker must be looked up uppercased, or a suppressed
+        USDTXTZ row would let a lowercase usdtxtz pin sail through."""
+        gateway = AsyncMock()
+        state = AsyncMock()
+        state.is_effective = AsyncMock(return_value=True)
+        repo = AsyncMock()
+        repo.get_account = AsyncMock(return_value=MagicMock())
+        currency_repo = AsyncMock()
+        currency_repo.is_ticker_suppressed = AsyncMock(return_value=True)
+
+        with (
+            patch("src.api.services.payments.service.BillingRepository", return_value=repo),
+            patch(
+                "src.api.services.payments.service.PaymentCurrencyRepository",
+                return_value=currency_repo,
+            ),
+            pytest.raises(PayCurrencySuppressedError),
+        ):
+            await _service(gateway, state).create_charge(
+                PaymentProvider.STRIPE,
+                uuid4(),
+                100,
+                uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+                extra={"pay_currency": "  usdtxtz  "},
+            )
+
+        currency_repo.is_ticker_suppressed.assert_awaited_once_with(
+            VEX_CONFIG.slug, PaymentProvider.STRIPE.value, "USDTXTZ"
+        )
 
 
 async def test_completed_webhook_credits_once_and_replay_noops() -> None:

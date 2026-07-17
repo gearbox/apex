@@ -60,21 +60,69 @@ class PaymentCurrencyRepository:
         provider: str | None = None,
         *,
         only_available: bool,
+        include_suppressed: bool = False,
     ) -> Sequence[PaymentCurrency]:
         """List cached currencies for a product, ordered by ticker.
 
         ``provider=None`` (the default) returns rows across every provider
         for the product — used by the public/admin catalog endpoints, which
-        are not provider-scoped.
+        are not provider-scoped. ``include_suppressed=False`` (the default)
+        excludes admin-suppressed tickers — the public catalog path
+        (``only_available=True, include_suppressed=False``); the admin path
+        passes ``include_suppressed=True`` to see everything.
         """
         stmt = select(PaymentCurrency).where(PaymentCurrency.product_id == product_id)
         if provider is not None:
             stmt = stmt.where(PaymentCurrency.provider == provider)
         if only_available:
             stmt = stmt.where(PaymentCurrency.is_available.is_(True))
+        if not include_suppressed:
+            stmt = stmt.where(PaymentCurrency.is_suppressed.is_(False))
         stmt = stmt.order_by(PaymentCurrency.ticker)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+    async def set_suppressed(
+        self,
+        product_id: str,
+        provider: str,
+        ticker: str,
+        *,
+        is_suppressed: bool,
+    ) -> PaymentCurrency | None:
+        """Set the suppression flag for one (product, provider, ticker) row.
+
+        Returns ``None`` when no row exists for that ticker (D5: suppression
+        requires an already-seen ticker) — the caller maps that to a 404.
+        """
+        ticker = ticker.strip().upper()
+        stmt = select(PaymentCurrency).where(
+            PaymentCurrency.product_id == product_id,
+            PaymentCurrency.provider == provider,
+            PaymentCurrency.ticker == ticker,
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        row.is_suppressed = is_suppressed
+        await self._session.flush()
+        return row
+
+    async def is_ticker_suppressed(self, product_id: str, provider: str, ticker: str) -> bool:
+        """Cheap single-row lookup for the charge-creation guard.
+
+        An unseen ticker is never suppressed — nothing to check.
+        """
+        ticker = ticker.strip().upper()
+        stmt = select(PaymentCurrency.is_suppressed).where(
+            PaymentCurrency.product_id == product_id,
+            PaymentCurrency.provider == provider,
+            PaymentCurrency.ticker == ticker,
+        )
+        result = await self._session.execute(stmt)
+        value = result.scalar_one_or_none()
+        return bool(value)
 
     async def sync_catalog(
         self,
