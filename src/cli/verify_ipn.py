@@ -18,6 +18,9 @@ body and how to read each reason code.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 
@@ -26,6 +29,7 @@ from rich.console import Console
 
 from src.api.services.billing_errors import PaymentVerificationError
 from src.api.services.payments.contracts import WebhookEnvelope
+from src.api.services.payments.ipn_canonical import canonical_bytes, parse_ipn_body
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
 from src.core.config import Settings
 
@@ -44,6 +48,43 @@ _SIGNATURE_ENV_VAR = "NOWPAYMENTS_IPN_SIGNATURE"
 _BODY_OPTION = typer.Option(
     ..., "--body", "-b", exists=True, help="Path to a raw captured IPN body file"
 )
+
+
+def _matrix_variants(raw_body: bytes) -> dict[str, bytes]:
+    """Candidate canonicalizations for offline signature-recipe forensics (Step 0).
+
+    Kept permanently as the diagnostic tool for any future signature drift on
+    NowPayments' side — not just for this incident. ``sorted_compact_strhooks``
+    is the pre-fix production recipe, retained as a regression reference; the
+    real fix is ``canonical_rawnumber`` (``ipn_canonical.canonical_bytes``).
+    """
+    plain = json.loads(raw_body)
+    strhooks = json.loads(raw_body, parse_float=str, parse_int=str)
+    return {
+        "raw_body_bytes": raw_body,
+        "sorted_compact_plain": json.dumps(plain, sort_keys=True, separators=(",", ":")).encode(),
+        "sorted_compact_plain_noascii": json.dumps(
+            plain, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode(),
+        "sorted_compact_strhooks(pre-fix)": json.dumps(
+            strhooks, sort_keys=True, separators=(",", ":")
+        ).encode(),
+        "sorted_default_seps_plain": json.dumps(plain, sort_keys=True).encode(),
+        "toplevel_sort_only_plain": json.dumps(
+            dict(sorted(plain.items())), separators=(",", ":")
+        ).encode(),
+        "canonical_rawnumber(shipped)": canonical_bytes(parse_ipn_body(raw_body)),
+    }
+
+
+def _run_matrix(*, raw_body: bytes, signature: str, secret: str) -> None:
+    key = secret.encode()
+    received = signature.strip().lower()
+    for name, candidate in _matrix_variants(raw_body).items():
+        computed = hmac.new(key, candidate, hashlib.sha512).hexdigest()
+        mark = "  <<< MATCH" if hmac.compare_digest(computed, received) else ""
+        console.print(f"{computed[:8]}  {name}{mark}")
+    console.print(f"{received[:8]}  RECEIVED")
 
 
 async def _verify(*, raw_body: bytes, signature: str, product: str) -> None:
@@ -83,6 +124,15 @@ def check(
         help=f"x-nowpayments-sig header value (falls back to ${_SIGNATURE_ENV_VAR})",
     ),
     product: str = typer.Option(..., "--product", "-p", help="Product slug (vex, synthara)"),
+    matrix: bool = typer.Option(
+        False,
+        "--matrix",
+        help=(
+            "Forensic mode: print the HMAC-SHA512 prefix for each candidate "
+            "canonicalization recipe and mark the one matching --signature, "
+            "instead of running normal verification."
+        ),
+    ),
 ) -> None:
     """Verify a captured IPN body+signature through the production verification path."""
     sig = signature or os.environ.get(_SIGNATURE_ENV_VAR, "")
@@ -91,6 +141,12 @@ def check(
             f"[red]No signature provided — pass --signature or set ${_SIGNATURE_ENV_VAR}[/red]"
         )
         raise typer.Exit(1)
+
+    if matrix:
+        settings = Settings()
+        secret = settings.nowpayments_ipn_secret_for(product)
+        _run_matrix(raw_body=body.read_bytes(), signature=sig, secret=secret)
+        return
 
     asyncio.run(_verify(raw_body=body.read_bytes(), signature=sig, product=product))
 

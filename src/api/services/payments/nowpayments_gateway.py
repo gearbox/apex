@@ -26,6 +26,7 @@ from src.api.services.payments.contracts import (
     WebhookEnvelope,
     WebhookOutcome,
 )
+from src.api.services.payments.ipn_canonical import canonical_bytes, parse_ipn_body
 from src.core.enums import PaymentStatus
 from src.core.product import PaymentProvider
 
@@ -141,7 +142,7 @@ class NowPaymentsGateway:
     async def verify_webhook(self, envelope: WebhookEnvelope) -> WebhookOutcome:
         body_diagnostics = self._body_diagnostics(envelope.raw_body)
         try:
-            parsed = json.loads(envelope.raw_body, parse_float=str, parse_int=str)
+            parsed = parse_ipn_body(envelope.raw_body)
         except json.JSONDecodeError as exc:
             raise PaymentVerificationError(
                 "NowPayments IPN payload is not valid JSON",
@@ -164,27 +165,31 @@ class NowPaymentsGateway:
                 context={"payload_keys": payload_keys, **body_diagnostics},
             )
 
-        # HMAC compatibility contract: the NowPayments dashboard IPN format MUST be
-        # "All-Strings". parse_float=str/parse_int=str + canonical json.dumps
-        # round-trips All-Strings bodies byte-identically; the "Classic" format
-        # (raw JSON numbers) re-serializes differently and fails every signature.
-        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
-        expected = hmac.new(
-            self._settings.nowpayments_ipn_secret_for(envelope.product_id).encode(),
-            canonical,
-            hashlib.sha512,
-        ).hexdigest()
-        if not hmac.compare_digest(expected, received_sig):
+        # Format-agnostic HMAC verification: any dashboard IPN format (All-Strings,
+        # Classic, or mixed) verifies correctly. Try the raw wire bytes first (D2) —
+        # cheap, and covers deliveries whose wire order already matches signed order —
+        # then fall back to the lexeme-preserving canonical form (D1), which
+        # byte-matches NowPayments' signed bytes regardless of number formatting.
+        secret = self._settings.nowpayments_ipn_secret_for(envelope.product_id).encode()
+        raw_expected = hmac.new(secret, envelope.raw_body, hashlib.sha512).hexdigest()
+        verified = hmac.compare_digest(raw_expected, received_sig)
+        canonical_expected = raw_expected
+        if not verified:
+            canonical = canonical_bytes(parsed)
+            canonical_expected = hmac.new(secret, canonical, hashlib.sha512).hexdigest()
+            verified = hmac.compare_digest(canonical_expected, received_sig)
+        if not verified:
             raise PaymentVerificationError(
                 "NowPayments HMAC signature invalid",
                 reason=PaymentVerificationReason.SIGNATURE_MISMATCH,
                 context={
                     "received_sig_prefix": received_sig[:8],
-                    "computed_sig_prefix": expected[:8],
+                    "computed_sig_prefix": canonical_expected[:8],
                     "payload_keys": payload_keys,
                     "secret_source": self._settings.nowpayments_ipn_secret_source_for(
                         envelope.product_id
                     ),
+                    "raw_path_checked": "true",
                     **body_diagnostics,
                 },
             )

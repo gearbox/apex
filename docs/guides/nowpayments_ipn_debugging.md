@@ -29,6 +29,12 @@ This runs the exact production verification path
 (`NowPaymentsGateway.verify_webhook`) against the `Settings` resolved from
 your local/deployed environment — no network calls, no DB access.
 
+Verification is format-agnostic: it accepts the dashboard's IPN body in any
+format (All-Strings, Classic, or mixed number formatting) — see
+`src/api/services/payments/ipn_canonical.py`. Historically this
+implementation required the dashboard toggle set to "All-Strings"; that
+constraint no longer applies.
+
 ## 3. Reading the reason codes
 
 | Reason | Meaning |
@@ -44,22 +50,35 @@ your local/deployed environment — no network calls, no DB access.
 ### Interpreting `signature_mismatch`
 
 The context carries `received_sig_prefix` and `computed_sig_prefix` (first
-8 hex chars of each), `body_sha256_prefix`, and `secret_source`
-(`per_product` or `legacy_global` — never the secret value itself).
+8 hex chars of each), `body_sha256_prefix`, `secret_source`
+(`per_product` or `legacy_global` — never the secret value itself), and
+`raw_path_checked` (confirms the raw-body fast path was tried before the
+canonical fallback).
 
 - **`body_sha256_prefix` matches a known-good capture, but prefixes still
-  differ:** the HMAC canonicalization is correct and the body is intact —
-  the deployed IPN secret doesn't match what's configured in the
-  NowPayments dashboard for this product, **or** the dashboard's IPN
-  format is set to "Classic" instead of "All-Strings". **All-Strings is
-  mandatory** for this implementation (see `NowPaymentsGateway.verify_webhook`
-  docstring) — `parse_float=str, parse_int=str` only round-trips
-  byte-identically for All-Strings bodies; Classic re-serializes numbers
-  differently and fails every signature check regardless of whether the
-  secret is correct.
+  differ:** the body is intact and the canonicalization matched neither the
+  raw wire bytes nor the sorted-canonical form — almost always the deployed
+  IPN secret doesn't match what's configured in the NowPayments dashboard
+  for this product. If you suspect the canonicalizer itself, run
+  `--matrix` (below) against the capture to see every candidate recipe's
+  computed prefix side by side.
 - **`body_sha256_prefix` differs from what you expect:** the capture itself
   is different from what NowPayments actually sent (e.g. a proxy/tunnel
   mutated it) — re-capture before concluding anything about the secret.
+
+## 4. Forensic matrix mode
+
+If a signature still doesn't verify and the secret is confirmed correct,
+`--matrix` prints the HMAC-SHA512 prefix for every candidate
+canonicalization recipe (raw bytes, several sorted/compact `json.dumps`
+variants, the pre-fix string-hook recipe, and the shipped lexeme-preserving
+canonicalizer) and marks whichever one matches the received signature —
+turning "NowPayments changed their signer" into a one-command diagnosis
+instead of a guessing game:
+
+```bash
+python -m src.cli.verify_ipn --body capture.json --signature <sig-from-header> --product vex --matrix
+```
 
 A clean run (`OK`) prints the resolved `status`, `lookup`, and settlement
 amounts, confirming the whole verification path — including the
