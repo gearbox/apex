@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import stripe
 
+from src.api.services.billing_errors import PaymentVerificationError, PaymentVerificationReason
 from src.api.services.payments.contracts import ChargeContext, WebhookEnvelope
 from src.api.services.payments.stripe_gateway import StripeGateway
 from src.core.config import Settings
@@ -98,3 +100,51 @@ async def test_non_checkout_event_is_ignored() -> None:
             )
         )
     assert outcome.status is None
+
+
+async def test_missing_signature_header_raises() -> None:
+    with pytest.raises(PaymentVerificationError, match="signature header missing") as exc_info:
+        await StripeGateway(_settings()).verify_webhook(
+            WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex")
+        )
+    assert exc_info.value.reason is PaymentVerificationReason.MISSING_SIGNATURE_HEADER
+
+
+async def test_bad_signature_raises_signature_mismatch() -> None:
+    with (
+        patch(
+            "stripe.Webhook.construct_event",
+            side_effect=stripe.SignatureVerificationError(  # type: ignore[no-untyped-call]
+                "Bad sig", "sig-header", b"{}"
+            ),
+        ),
+        pytest.raises(PaymentVerificationError, match="signature invalid") as exc_info,
+    ):
+        await StripeGateway(_settings()).verify_webhook(
+            WebhookEnvelope(
+                raw_body=b"{}",
+                headers={"stripe-signature": "sig"},
+                product_id="vex",
+            )
+        )
+    exc = exc_info.value
+    assert exc.reason is PaymentVerificationReason.SIGNATURE_MISMATCH
+    assert exc.context["error"] == "Bad sig"
+    assert "{}" not in str(exc.context)
+
+
+async def test_malformed_payload_raises_malformed_json() -> None:
+    with (
+        patch("stripe.Webhook.construct_event", side_effect=ValueError("bad payload")),
+        pytest.raises(PaymentVerificationError, match="payload malformed") as exc_info,
+    ):
+        await StripeGateway(_settings()).verify_webhook(
+            WebhookEnvelope(
+                raw_body=b"not json",
+                headers={"stripe-signature": "sig"},
+                product_id="vex",
+            )
+        )
+    exc = exc_info.value
+    assert exc.reason is PaymentVerificationReason.MALFORMED_JSON
+    assert exc.context["error"] == "bad payload"

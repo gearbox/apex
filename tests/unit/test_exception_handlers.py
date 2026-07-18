@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from litestar import Request
 from litestar.exceptions import HTTPException
 from structlog.testing import capture_logs
@@ -33,10 +34,14 @@ from src.api.services.billing_errors import (
     OrganizationPermissionError,
     PayCurrencySuppressedError,
     PaymentVerificationError,
+    PaymentVerificationReason,
     PriceNotFoundError,
     RefundNotEligibleError,
 )
 from src.api.services.idempotency import IdempotencyConflictError
+from src.api.services.payments.contracts import WebhookEnvelope
+from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
+from src.core.config import Settings
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -199,7 +204,11 @@ class TestBusinessExceptionHandlers:
 
     def test_payment_verification_logs_and_returns_400(self) -> None:
         req = _mock_request()
-        exc = PaymentVerificationError("Bad signature")
+        exc = PaymentVerificationError(
+            "Bad signature",
+            reason=PaymentVerificationReason.SIGNATURE_MISMATCH,
+            context={"received_sig_prefix": "deadbeef", "body_len": "42"},
+        )
 
         with capture_logs() as cap:
             resp = payment_verification_handler(req, exc)
@@ -208,6 +217,35 @@ class TestBusinessExceptionHandlers:
         log = next(r for r in cap if r["event"] == "payment.verification_failed")
         assert log["status_code"] == 400
         assert log["method"] == "POST"
+        assert log["reason"] == "signature_mismatch"
+        assert log["received_sig_prefix"] == "deadbeef"
+        assert log["body_len"] == "42"
+
+    async def test_payment_verification_never_logs_the_secret(self) -> None:
+        """D2: every raise-site's diagnostics, once logged, must never contain the secret."""
+        secret = "super-secret-ipn-value-must-never-leak"
+        settings = Settings(
+            jwt_secret_key="test-secret-key-that-is-definitely-long-enough-32bytes",
+            nowpayments_ipn_secret_vex=secret,
+            nowpayments_api_key_vex="np_key_vex",
+        )
+        gateway = NowPaymentsGateway(settings)
+        envelope = WebhookEnvelope(
+            raw_body=b'{"a":1}',
+            headers={"x-nowpayments-sig": "deadbeef"},
+            product_id="vex",
+        )
+
+        with pytest.raises(PaymentVerificationError) as exc_info:
+            await gateway.verify_webhook(envelope)
+
+        req = _mock_request()
+        with capture_logs() as cap:
+            payment_verification_handler(req, exc_info.value)
+
+        log = next(r for r in cap if r["event"] == "payment.verification_failed")
+        for value in log.values():
+            assert secret not in str(value)
 
     def test_organization_permission_logs_and_returns_403(self) -> None:
         req = _mock_request()

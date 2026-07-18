@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.30.0"
+version = "0.31.0"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -100,7 +100,7 @@ select = [
     "PLW",  # Pylint warnings
     "FA",   # flake8-future-annotations
     "PGH",  # pygrep-hooks, bans blanket # type: ignore and # noqa
-    "TC",   #flake8-type-checking, moves typing-only imports into TYPE_CHECKING
+    "TC",   # flake8-type-checking, moves typing-only imports into TYPE_CHECKING
     "FLY",  # F-string formatting style
     "ANN",  # Type annotations
 ]
@@ -145,6 +145,7 @@ runtime-evaluated-base-classes = [
 "src/api/middleware/rate_limit.py" = ["PLW0603"]   # module-level singleton limiter storage, init by design
 "src/api/dependencies/common.py" = ["PLW0603"]   # module-level singleton service container, init/close by design
 "src/db/models/*.py" = ["TC003"]   # SQLAlchemy declarative annotations are runtime-sensitive
+"src/cli/verify_ipn.py" = ["TC003"]   # Typer resolves annotations at runtime via get_type_hints
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

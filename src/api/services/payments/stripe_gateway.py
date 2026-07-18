@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 import stripe
 
-from src.api.services.billing_errors import PaymentVerificationError
+from src.api.services.billing_errors import PaymentVerificationError, PaymentVerificationReason
 from src.api.services.payments.contracts import (
     ChargeContext,
     ChargeResult,
@@ -78,14 +79,39 @@ class StripeGateway:
         )
 
     async def verify_webhook(self, envelope: WebhookEnvelope) -> WebhookOutcome:
+        sig_header = envelope.headers.get("stripe-signature", "")
+        if not sig_header:
+            raise PaymentVerificationError(
+                "Stripe signature header missing",
+                reason=PaymentVerificationReason.MISSING_SIGNATURE_HEADER,
+                context={"body_len": str(len(envelope.raw_body))},
+            )
+
+        # SignatureVerificationError.__str__ returns only its `message` arg
+        # (StripeError.__str__ never surfaces http_body/sig_header), so str(exc)
+        # is safe to log — it never leaks the payload or secret (D2).
         try:
             event = stripe.Webhook.construct_event(  # type: ignore[no-untyped-call]
                 envelope.raw_body,
-                envelope.headers.get("stripe-signature", ""),
+                sig_header,
                 self._settings.stripe_webhook_secret_for(envelope.product_id),
             )
-        except (stripe.SignatureVerificationError, ValueError) as exc:
-            raise PaymentVerificationError(f"Stripe signature invalid: {exc}") from exc
+        except stripe.SignatureVerificationError as exc:
+            raise PaymentVerificationError(
+                "Stripe signature invalid",
+                reason=PaymentVerificationReason.SIGNATURE_MISMATCH,
+                context={
+                    "error": str(exc),
+                    "body_len": str(len(envelope.raw_body)),
+                    "body_sha256_prefix": hashlib.sha256(envelope.raw_body).hexdigest()[:16],
+                },
+            ) from exc
+        except ValueError as exc:
+            raise PaymentVerificationError(
+                "Stripe payload malformed",
+                reason=PaymentVerificationReason.MALFORMED_JSON,
+                context={"error": str(exc), "body_len": str(len(envelope.raw_body))},
+            ) from exc
 
         event_id = str(event.id)
         if event.type != "checkout.session.completed":

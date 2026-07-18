@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.api.services.billing_errors import PaymentVerificationError
+from src.api.services.billing_errors import PaymentVerificationError, PaymentVerificationReason
 from src.api.services.payments.contracts import ChargeContext, ChargeResult, WebhookEnvelope
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
 from src.core.config import Settings
@@ -114,14 +114,56 @@ async def test_float_lexeme_is_preserved_for_hmac() -> None:
 
 
 async def test_bad_signature_raises() -> None:
-    with pytest.raises(PaymentVerificationError, match="HMAC"):
+    with pytest.raises(PaymentVerificationError, match="HMAC") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(_envelope("finished", signature="bad"))
+    exc = exc_info.value
+    assert exc.reason is PaymentVerificationReason.SIGNATURE_MISMATCH
+    assert exc.context["received_sig_prefix"] == "bad"
+    assert len(exc.context["computed_sig_prefix"]) == 8
+    assert len(exc.context["body_sha256_prefix"]) == 16
+    assert exc.context["secret_source"] == "per_product"
+    assert "payment_status" in exc.context["payload_keys"]
+
+
+async def test_missing_signature_header_raises() -> None:
+    raw = _raw_payload(status="finished")
+    envelope = WebhookEnvelope(raw_body=raw, headers={}, product_id="vex")
+    with pytest.raises(PaymentVerificationError, match="signature header missing") as exc_info:
+        await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    exc = exc_info.value
+    assert exc.reason is PaymentVerificationReason.MISSING_SIGNATURE_HEADER
+    assert "received_sig_prefix" not in exc.context
+    assert exc.context["body_len"] == str(len(raw))
+
+
+async def test_invalid_json_raises() -> None:
+    envelope = WebhookEnvelope(
+        raw_body=b"not json", headers={"x-nowpayments-sig": "irrelevant"}, product_id="vex"
+    )
+    with pytest.raises(PaymentVerificationError, match="not valid JSON") as exc_info:
+        await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    exc = exc_info.value
+    assert exc.reason is PaymentVerificationReason.MALFORMED_JSON
+    assert exc.context["error"]
+    assert exc.context["body_len"] == "8"
+
+
+async def test_non_object_json_raises() -> None:
+    raw = b"[1,2,3]"
+    envelope = WebhookEnvelope(
+        raw_body=raw, headers={"x-nowpayments-sig": "irrelevant"}, product_id="vex"
+    )
+    with pytest.raises(PaymentVerificationError, match="JSON object") as exc_info:
+        await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    exc = exc_info.value
+    assert exc.reason is PaymentVerificationReason.MALFORMED_JSON
+    assert exc.context["parsed_type"] == "list"
 
 
 async def test_malformed_order_id_raises() -> None:
     raw = b'{"order_id":"bad","payment_status":"finished"}'
     signature = _sign(raw)
-    with pytest.raises(PaymentVerificationError, match="order_id"):
+    with pytest.raises(PaymentVerificationError, match="order_id") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(
             WebhookEnvelope(
                 raw_body=raw,
@@ -129,6 +171,9 @@ async def test_malformed_order_id_raises() -> None:
                 product_id="vex",
             )
         )
+    exc = exc_info.value
+    assert exc.reason is PaymentVerificationReason.MALFORMED_ORDER_ID
+    assert exc.context["error_type"] == "JSONDecodeError"
 
 
 @pytest.mark.parametrize("status", ["finished", "partially_paid"])
@@ -136,33 +181,39 @@ async def test_missing_actually_paid_on_settled_status_raises(status: str) -> No
     """P1-1: no silent full-credit fallback to price_amount when actually_paid
     is absent from a COMPLETED/PARTIALLY_PAID IPN."""
     envelope = _envelope(status, include_actually_paid=False)
-    with pytest.raises(PaymentVerificationError, match="actually_paid/pay_amount"):
+    with pytest.raises(PaymentVerificationError, match="actually_paid/pay_amount") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    assert exc_info.value.reason is PaymentVerificationReason.AMOUNT_FIELDS_INVALID
+    assert exc_info.value.context["raw_status"] == status
 
 
 @pytest.mark.parametrize("status", ["finished", "partially_paid"])
 async def test_missing_pay_amount_on_settled_status_raises(status: str) -> None:
     envelope = _envelope(status, include_pay_amount=False)
-    with pytest.raises(PaymentVerificationError, match="actually_paid/pay_amount"):
+    with pytest.raises(PaymentVerificationError, match="actually_paid/pay_amount") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    assert exc_info.value.reason is PaymentVerificationReason.AMOUNT_FIELDS_INVALID
 
 
 async def test_zero_pay_amount_raises() -> None:
     envelope = _envelope("finished", pay_amount="0")
-    with pytest.raises(PaymentVerificationError, match="positive"):
+    with pytest.raises(PaymentVerificationError, match="positive") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    assert exc_info.value.reason is PaymentVerificationReason.AMOUNT_FIELDS_INVALID
 
 
 async def test_negative_pay_amount_raises() -> None:
     envelope = _envelope("finished", pay_amount="-1.00")
-    with pytest.raises(PaymentVerificationError, match="positive"):
+    with pytest.raises(PaymentVerificationError, match="positive") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    assert exc_info.value.reason is PaymentVerificationReason.AMOUNT_FIELDS_INVALID
 
 
 async def test_malformed_amount_fields_raise() -> None:
     envelope = _envelope("finished", actually_paid='"not-a-number"')
-    with pytest.raises(PaymentVerificationError, match="malformed"):
+    with pytest.raises(PaymentVerificationError, match="malformed") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    assert exc_info.value.reason is PaymentVerificationReason.AMOUNT_FIELDS_INVALID
 
 
 async def test_intermediate_status_does_not_require_amount_fields() -> None:

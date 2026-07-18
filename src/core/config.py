@@ -1473,16 +1473,34 @@ class Settings(BaseSettings):
             return key
         raise RuntimeError(f"No NowPayments API key configured for product '{product_id}'")
 
+    def _nowpayments_ipn_secret_with_source(
+        self, product_id: str
+    ) -> tuple[str, Literal["per_product", "legacy_global"]]:
+        if per_product := {"vex": self.nowpayments_ipn_secret_vex}.get(product_id):
+            return per_product, "per_product"
+        if self.nowpayments_ipn_secret:
+            return self.nowpayments_ipn_secret, "legacy_global"
+        raise RuntimeError(f"No NowPayments IPN secret configured for product '{product_id}'")
+
     def nowpayments_ipn_secret_for(self, product_id: str) -> str:
         """Resolve the NowPayments IPN HMAC secret for a product.
 
         Raises:
             RuntimeError: Neither a per-product nor a legacy secret is configured.
         """
-        per_product = {"vex": self.nowpayments_ipn_secret_vex}.get(product_id)
-        if secret := per_product or self.nowpayments_ipn_secret:
-            return secret
-        raise RuntimeError(f"No NowPayments IPN secret configured for product '{product_id}'")
+        secret, _source = self._nowpayments_ipn_secret_with_source(product_id)
+        return secret
+
+    def nowpayments_ipn_secret_source_for(
+        self, product_id: str
+    ) -> Literal["per_product", "legacy_global"]:
+        """Which credential source resolved the IPN secret — diagnostic only, never the value.
+
+        Raises:
+            RuntimeError: Neither a per-product nor a legacy secret is configured.
+        """
+        _secret, source = self._nowpayments_ipn_secret_with_source(product_id)
+        return source
 
     @property
     def email_configured(self) -> bool:

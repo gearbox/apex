@@ -13,7 +13,11 @@ from uuid import UUID
 import httpx
 import structlog
 
-from src.api.services.billing_errors import PaymentCatalogError, PaymentVerificationError
+from src.api.services.billing_errors import (
+    PaymentCatalogError,
+    PaymentVerificationError,
+    PaymentVerificationReason,
+)
 from src.api.services.payments.catalog import CurrencyDetails
 from src.api.services.payments.contracts import (
     ChargeContext,
@@ -64,6 +68,18 @@ class NowPaymentsGateway:
     ) -> None:
         self._settings = settings
         self._client_factory = client_factory or httpx.AsyncClient
+
+    @staticmethod
+    def _body_diagnostics(raw_body: bytes) -> dict[str, str]:
+        """Safe-to-log body fingerprint (D2): length + a truncated content hash.
+
+        Neither value reveals body content; the hash prefix only lets an
+        operator compare two captures for byte-identity.
+        """
+        return {
+            "body_len": str(len(raw_body)),
+            "body_sha256_prefix": hashlib.sha256(raw_body).hexdigest()[:16],
+        }
 
     async def create_charge(self, ctx: ChargeContext) -> ChargeResult:
         quote = ctx.quote
@@ -123,12 +139,30 @@ class NowPaymentsGateway:
         )
 
     async def verify_webhook(self, envelope: WebhookEnvelope) -> WebhookOutcome:
+        body_diagnostics = self._body_diagnostics(envelope.raw_body)
         try:
             parsed = json.loads(envelope.raw_body, parse_float=str, parse_int=str)
         except json.JSONDecodeError as exc:
-            raise PaymentVerificationError("NowPayments IPN payload is not valid JSON") from exc
+            raise PaymentVerificationError(
+                "NowPayments IPN payload is not valid JSON",
+                reason=PaymentVerificationReason.MALFORMED_JSON,
+                context={"error": str(exc), **body_diagnostics},
+            ) from exc
         if not isinstance(parsed, dict):
-            raise PaymentVerificationError("NowPayments IPN payload must be a JSON object")
+            raise PaymentVerificationError(
+                "NowPayments IPN payload must be a JSON object",
+                reason=PaymentVerificationReason.MALFORMED_JSON,
+                context={"parsed_type": type(parsed).__name__, **body_diagnostics},
+            )
+        payload_keys = ",".join(sorted(parsed.keys()))
+
+        received_sig = envelope.headers.get("x-nowpayments-sig", "")
+        if not received_sig:
+            raise PaymentVerificationError(
+                "NowPayments IPN signature header missing",
+                reason=PaymentVerificationReason.MISSING_SIGNATURE_HEADER,
+                context={"payload_keys": payload_keys, **body_diagnostics},
+            )
 
         # HMAC compatibility contract: the NowPayments dashboard IPN format MUST be
         # "All-Strings". parse_float=str/parse_int=str + canonical json.dumps
@@ -140,14 +174,30 @@ class NowPaymentsGateway:
             canonical,
             hashlib.sha512,
         ).hexdigest()
-        if not hmac.compare_digest(expected, envelope.headers.get("x-nowpayments-sig", "")):
-            raise PaymentVerificationError("NowPayments HMAC signature invalid")
+        if not hmac.compare_digest(expected, received_sig):
+            raise PaymentVerificationError(
+                "NowPayments HMAC signature invalid",
+                reason=PaymentVerificationReason.SIGNATURE_MISMATCH,
+                context={
+                    "received_sig_prefix": received_sig[:8],
+                    "computed_sig_prefix": expected[:8],
+                    "payload_keys": payload_keys,
+                    "secret_source": self._settings.nowpayments_ipn_secret_source_for(
+                        envelope.product_id
+                    ),
+                    **body_diagnostics,
+                },
+            )
 
         try:
             order = json.loads(str(parsed.get("order_id", "")))
             internal_payment_id = UUID(str(order["payment_id"]))
         except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
-            raise PaymentVerificationError("NowPayments IPN order_id is malformed") from exc
+            raise PaymentVerificationError(
+                "NowPayments IPN order_id is malformed",
+                reason=PaymentVerificationReason.MALFORMED_ORDER_ID,
+                context={"error_type": type(exc).__name__},
+            ) from exc
 
         raw_status = str(parsed.get("payment_status", ""))
         status = _STATUS_MAP.get(raw_status)
@@ -163,19 +213,31 @@ class NowPaymentsGateway:
         if status in {PaymentStatus.COMPLETED, PaymentStatus.PARTIALLY_PAID}:
             paid_raw = parsed.get("actually_paid")
             due_raw = parsed.get("pay_amount")
+            amount_context = {
+                "internal_payment_id": str(internal_payment_id),
+                "raw_status": raw_status,
+            }
             if paid_raw is None or due_raw is None:
                 raise PaymentVerificationError(
-                    "NowPayments IPN missing actually_paid/pay_amount for settled status"
+                    "NowPayments IPN missing actually_paid/pay_amount for settled status",
+                    reason=PaymentVerificationReason.AMOUNT_FIELDS_INVALID,
+                    context={"payload_keys": payload_keys, **amount_context},
                 )
             try:
                 amount_paid = Decimal(str(paid_raw))
                 amount_due = Decimal(str(due_raw))
             except InvalidOperation as exc:
                 raise PaymentVerificationError(
-                    "NowPayments IPN actually_paid/pay_amount is malformed"
+                    "NowPayments IPN actually_paid/pay_amount is malformed",
+                    reason=PaymentVerificationReason.AMOUNT_FIELDS_INVALID,
+                    context=amount_context,
                 ) from exc
             if amount_due <= 0:
-                raise PaymentVerificationError("NowPayments IPN pay_amount must be positive")
+                raise PaymentVerificationError(
+                    "NowPayments IPN pay_amount must be positive",
+                    reason=PaymentVerificationReason.AMOUNT_FIELDS_INVALID,
+                    context=amount_context,
+                )
 
         metadata: dict[str, Any] = {
             "ipn_payment_id": str(parsed.get("payment_id", "")),

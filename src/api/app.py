@@ -197,7 +197,17 @@ def payment_verification_handler(
     request: Request[Any, Any, Any],
     exc: PaymentVerificationError,
 ) -> Response[Any]:
-    _log_handler_event("payment.verification_failed", request, HTTP_400_BAD_REQUEST)
+    # exc.context keys are our own fixed diagnostic field names (body_len,
+    # payload_keys, ...) and never collide with _log_handler_event's typed
+    # kwargs (level, exc_info) — mypy can't prove that for an arbitrary
+    # dict[str, str] splat, hence the ignore.
+    _log_handler_event(
+        "payment.verification_failed",
+        request,
+        HTTP_400_BAD_REQUEST,
+        reason=exc.reason.value,
+        **exc.context,  # type: ignore[arg-type]
+    )
     return _error("payment_verification_failed", str(exc), HTTP_400_BAD_REQUEST)
 
 

@@ -11,6 +11,7 @@ from src.api.services.billing_errors import (
     PayCurrencySuppressedError,
     PaymentProviderDisabledError,
     PaymentVerificationError,
+    PaymentVerificationReason,
 )
 from src.api.services.payments import (
     ChargeResult,
@@ -350,13 +351,36 @@ class TestProportionalSettlement:
 
         with (
             patch("src.api.services.payments.service.BillingRepository", return_value=repo),
-            pytest.raises(PaymentVerificationError, match="product mismatch"),
+            pytest.raises(PaymentVerificationError, match="product mismatch") as exc_info,
         ):
             await _service(gateway, AsyncMock()).handle_webhook(
                 PaymentProvider.STRIPE,
                 WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
                 session=AsyncMock(),
             )
+        assert exc_info.value.reason is PaymentVerificationReason.PRODUCT_MISMATCH
+        assert exc_info.value.context == {
+            "payment_product_id": "synthara",
+            "request_product_id": "vex",
+        }
+
+    async def test_malformed_payment_id_lookup_raises(self) -> None:
+        gateway = AsyncMock()
+        gateway.verify_webhook = AsyncMock(
+            return_value=WebhookOutcome(
+                lookup=PaymentLookup(by="payment_id", value="not-a-uuid"),
+                status=PaymentStatus.COMPLETED,
+            )
+        )
+
+        with pytest.raises(PaymentVerificationError, match="payment_id is malformed") as exc_info:
+            await _service(gateway, AsyncMock()).handle_webhook(
+                PaymentProvider.STRIPE,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+        assert exc_info.value.reason is PaymentVerificationReason.MALFORMED_ORDER_ID
+        assert exc_info.value.context == {"lookup_by": "payment_id"}
 
     async def test_zero_amount_due_raises(self) -> None:
         payment = _make_payment()
@@ -374,13 +398,14 @@ class TestProportionalSettlement:
 
         with (
             patch("src.api.services.payments.service.BillingRepository", return_value=repo),
-            pytest.raises(PaymentVerificationError),
+            pytest.raises(PaymentVerificationError) as exc_info,
         ):
             await _service(gateway, AsyncMock()).handle_webhook(
                 PaymentProvider.STRIPE,
                 WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
                 session=AsyncMock(),
             )
+        assert exc_info.value.reason is PaymentVerificationReason.AMOUNT_FIELDS_INVALID
 
     async def test_ratio_is_pay_currency_units_independent_of_fiat_price(self) -> None:
         """actually_paid=0.5, pay_amount=1.0 -> half tokens, regardless of
