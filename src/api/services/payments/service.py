@@ -14,6 +14,7 @@ from src.api.services.billing_errors import (
     PayCurrencySuppressedError,
     PaymentProviderDisabledError,
     PaymentVerificationError,
+    PaymentVerificationReason,
     TopUpAmountError,
 )
 from src.api.services.payments.contracts import (
@@ -179,7 +180,11 @@ class PaymentService:
             try:
                 payment_id = UUID(outcome.lookup.value)
             except ValueError as exc:
-                raise PaymentVerificationError("Webhook payment_id is malformed") from exc
+                raise PaymentVerificationError(
+                    "Webhook payment_id is malformed",
+                    reason=PaymentVerificationReason.MALFORMED_ORDER_ID,
+                    context={"lookup_by": outcome.lookup.by},
+                ) from exc
             payment = await repo.get_payment_for_update(payment_id)
 
         if payment is None:
@@ -193,7 +198,14 @@ class PaymentService:
         if payment.status == PaymentStatus.COMPLETED.value:
             return None
         if payment.product_id != envelope.product_id:
-            raise PaymentVerificationError("Payment webhook product mismatch")
+            raise PaymentVerificationError(
+                "Payment webhook product mismatch",
+                reason=PaymentVerificationReason.PRODUCT_MISMATCH,
+                context={
+                    "payment_product_id": payment.product_id,
+                    "request_product_id": envelope.product_id,
+                },
+            )
 
         # Do not let a late/out-of-order intermediate IPN (e.g. waiting/confirming)
         # regress a payment that has already been marked partially paid.
@@ -222,7 +234,9 @@ class PaymentService:
         if outcome.amount_paid is not None:
             if outcome.amount_due is None or outcome.amount_due <= 0:
                 raise PaymentVerificationError(
-                    "Webhook amount_paid provided without a valid amount_due"
+                    "Webhook amount_paid provided without a valid amount_due",
+                    reason=PaymentVerificationReason.AMOUNT_FIELDS_INVALID,
+                    context={"payment_id": str(payment.id), "provider": provider.value},
                 )
             expected_usd = Decimal(str(payment.amount_usd))
             ratio = outcome.amount_paid / outcome.amount_due

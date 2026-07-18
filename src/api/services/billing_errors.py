@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -46,8 +47,41 @@ class ModerationError(Exception):
         super().__init__(f"Content moderated by {provider} (policy: {policy})")
 
 
+class PaymentVerificationReason(StrEnum):
+    """Why a webhook/IPN failed verification — the alerting-stable field.
+
+    Distinguishes signature/format failures (dashboard IPN-format toggle,
+    secret mismatch) from payload-shape failures, so an incident doesn't
+    require redeploying with extra logging to find out which check failed.
+    """
+
+    SIGNATURE_MISMATCH = "signature_mismatch"
+    MISSING_SIGNATURE_HEADER = "missing_signature_header"
+    MALFORMED_JSON = "malformed_json"
+    MISSING_FIELD = "missing_field"
+    MALFORMED_ORDER_ID = "malformed_order_id"
+    PRODUCT_MISMATCH = "product_mismatch"
+    AMOUNT_FIELDS_INVALID = "amount_fields_invalid"
+
+
 class PaymentVerificationError(Exception):
-    """Webhook signature verification failed. → HTTP 400"""
+    """Webhook signature verification failed. → HTTP 400
+
+    ``context`` holds pre-sanitized diagnostic fields only (see D2 in
+    ipn-verification-observability-prompt.md) — never the secret, full body,
+    full signatures, amounts, or order_id contents.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: PaymentVerificationReason,
+        context: dict[str, str] | None = None,
+    ) -> None:
+        self.reason = reason
+        self.context = context or {}
+        super().__init__(message)
 
 
 class PaymentCatalogError(Exception):
