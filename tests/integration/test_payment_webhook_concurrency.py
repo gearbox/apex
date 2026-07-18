@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from src.api.services.billing import BillingService
 from src.api.services.payment_provider_state import PaymentProviderStateService
 from src.api.services.payments import GatewayRegistry, PaymentService, WebhookEnvelope
+from src.api.services.payments.ipn_canonical import canonical_bytes, parse_ipn_body
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
 from src.api.services.payments.stripe_gateway import StripeGateway
 from src.core.config import Settings
@@ -230,8 +231,7 @@ async def test_concurrent_nowpayments_ipn_deliveries_credit_exactly_once(
         '"actually_paid":10.00,"pay_amount":10.00}'
     ).encode()
 
-    parsed = json.loads(raw_payload, parse_float=str, parse_int=str)
-    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
+    canonical = canonical_bytes(parse_ipn_body(raw_payload))
     signature = hmac.new(ipn_secret.encode(), canonical, hashlib.sha512).hexdigest()
 
     try:
@@ -320,8 +320,7 @@ async def test_concurrent_partial_ipns_never_overcredit(db_engine: AsyncEngine) 
         '"actually_paid":4.00,"pay_amount":10.00}'
     ).encode()
 
-    parsed = json.loads(raw_payload, parse_float=str, parse_int=str)
-    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
+    canonical = canonical_bytes(parse_ipn_body(raw_payload))
     signature = hmac.new(ipn_secret.encode(), canonical, hashlib.sha512).hexdigest()
 
     try:

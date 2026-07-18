@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 from typer.testing import CliRunner
 
+from src.api.services.payments.ipn_canonical import canonical_bytes, parse_ipn_body
 from src.cli.verify_ipn import app
 
 if TYPE_CHECKING:
@@ -23,8 +24,7 @@ _SECRET = "cli-test-ipn-secret"
 
 
 def _sign(raw: bytes) -> str:
-    parsed = json.loads(raw, parse_float=str, parse_int=str)
-    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
+    canonical = canonical_bytes(parse_ipn_body(raw))
     return hmac.new(_SECRET.encode(), canonical, hashlib.sha512).hexdigest()
 
 
@@ -112,3 +112,30 @@ def test_missing_body_file_fails() -> None:
     )
 
     assert result.exit_code != 0
+
+
+def test_matrix_mode_marks_the_matching_recipe(tmp_path: Path) -> None:
+    raw = _valid_raw_body()
+    body_path = _write_body(tmp_path, raw)
+
+    result = runner.invoke(
+        app,
+        ["--body", str(body_path), "--signature", _sign(raw), "--product", "vex", "--matrix"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "<<< MATCH" in result.output
+    assert "canonical_rawnumber(shipped)  <<< MATCH" in result.output
+    assert _SECRET not in result.output
+
+
+def test_matrix_mode_marks_nothing_for_bad_signature(tmp_path: Path) -> None:
+    body_path = _write_body(tmp_path, _valid_raw_body())
+
+    result = runner.invoke(
+        app,
+        ["--body", str(body_path), "--signature", "deadbeef", "--product", "vex", "--matrix"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "<<< MATCH" not in result.output

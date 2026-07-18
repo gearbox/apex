@@ -3,6 +3,8 @@
 import hashlib
 import hmac
 import json
+import os
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -10,6 +12,7 @@ import pytest
 
 from src.api.services.billing_errors import PaymentVerificationError, PaymentVerificationReason
 from src.api.services.payments.contracts import ChargeContext, ChargeResult, WebhookEnvelope
+from src.api.services.payments.ipn_canonical import canonical_bytes, parse_ipn_body
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
 from src.core.config import Settings
 from src.core.enums import PaymentStatus
@@ -56,8 +59,14 @@ def _raw_payload(
 
 
 def _sign(raw: bytes) -> str:
-    parsed = json.loads(raw, parse_float=str, parse_int=str)
-    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
+    """Sign over the sorted canonical form — exercises the D1 fallback path.
+
+    Deliberately not the raw-body fast path (D2): the hand-built payloads in
+    this file assemble fields in a fixed, non-sorted wire order, so signing
+    over canonical bytes (not raw wire bytes) is what a real dashboard
+    delivery whose signed order differs from wire order looks like.
+    """
+    canonical = canonical_bytes(parse_ipn_body(raw))
     return hmac.new(_SECRET.encode(), canonical, hashlib.sha512).hexdigest()
 
 
@@ -113,6 +122,35 @@ async def test_float_lexeme_is_preserved_for_hmac() -> None:
     assert str(outcome.amount_due) == "10.00"
 
 
+async def test_raw_body_fast_path_verifies_without_canonicalization() -> None:
+    """D2: a signature computed directly over the raw wire bytes (no key
+    reordering) verifies via the fast path, without needing the canonical
+    fallback at all."""
+    raw = _raw_payload(status="finished")
+    signature = hmac.new(_SECRET.encode(), raw, hashlib.sha512).hexdigest()
+    outcome = await NowPaymentsGateway(_settings()).verify_webhook(
+        WebhookEnvelope(raw_body=raw, headers={"x-nowpayments-sig": signature}, product_id="vex")
+    )
+    assert outcome.status is PaymentStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("actually_paid", "pay_amount"),
+    [
+        ("10.00", "10.00"),  # bare JSON number lexeme (RawNumber)
+        ('"10.00"', '"10.00"'),  # quoted JSON string (All-Strings)
+    ],
+)
+async def test_amount_extraction_matches_for_bare_and_quoted_lexemes(
+    actually_paid: str, pay_amount: str
+) -> None:
+    """D3: RawNumber and quoted-string amounts convert to the same Decimal."""
+    envelope = _envelope("finished", actually_paid=actually_paid, pay_amount=pay_amount)
+    outcome = await NowPaymentsGateway(_settings()).verify_webhook(envelope)
+    assert outcome.amount_paid == Decimal("10.00")
+    assert outcome.amount_due == Decimal("10.00")
+
+
 async def test_bad_signature_raises() -> None:
     with pytest.raises(PaymentVerificationError, match="HMAC") as exc_info:
         await NowPaymentsGateway(_settings()).verify_webhook(_envelope("finished", signature="bad"))
@@ -122,6 +160,7 @@ async def test_bad_signature_raises() -> None:
     assert len(exc.context["computed_sig_prefix"]) == 8
     assert len(exc.context["body_sha256_prefix"]) == 16
     assert exc.context["secret_source"] == "per_product"
+    assert exc.context["raw_path_checked"] == "true"
     assert "payment_status" in exc.context["payload_keys"]
 
 
@@ -355,3 +394,47 @@ async def test_ipn_pay_currency_extracted_on_intermediate_status() -> None:
         )
     )
     assert outcome.settled_currency == "BTC"
+
+
+# --- Incident regression: real captured IPN body + signature -----------------
+#
+# The exact wire bytes and x-nowpayments-sig from the incident that motivated
+# this canonicalizer (agent_prompts/capture.json / np-request.txt) — a mixed
+# Classic/nested body that the pre-fix `parse_float=str, parse_int=str`
+# canonicalization rejected as SIGNATURE_MISMATCH. The secret is never
+# committed; the test is skipped when it isn't supplied via env.
+_INCIDENT_BODY = (
+    b'{"actually_paid":4.98842,"actually_paid_at_fiat":0,"fee":{"currency":"usdtmatic",'
+    b'"depositFee":"0.034133","serviceFee":"0.04883","withdrawalFee":"0.068969"},'
+    b'"invoice_id":5872157465,"order_description":"500 tokens ($5 credit, 0% off)",'
+    b'"order_id":"{\\"account_id\\": \\"019e1653-0483-784b-b172-958f5eb53f20\\", '
+    b'\\"payment_id\\": \\"019f751d-2af1-7b50-a156-d2aeef629802\\", \\"credits_usd\\": 5}",'
+    b'"outcome_amount":4.834165,"outcome_currency":"usdtmatic","parent_payment_id":null,'
+    b'"pay_address":"0xc2Ad29a67e7576a4C980564B726e587f62cbbB16","pay_amount":4.98842014,'
+    b'"pay_currency":"usdcbsc","payin_extra_id":null,"payment_extra_ids":null,'
+    b'"payment_id":5954418507,"payment_status":"finished","price_amount":5,'
+    b'"price_currency":"usd","purchase_id":"4787968135"}'
+)
+_INCIDENT_SIGNATURE = (
+    "1b4476ddfb4c91379788056a93aa8f280a328a8dc36706a81924799f050fbfa8b423de8ca929b6278d"
+    "14d69a80ef07a55e5774bf84bbddee1c41e41d29d6994c"
+)
+
+
+@pytest.mark.skipif(
+    "NOWPAYMENTS_INCIDENT_IPN_SECRET" not in os.environ,
+    reason="requires NOWPAYMENTS_INCIDENT_IPN_SECRET (the real per-product IPN secret)",
+)
+async def test_incident_capture_verifies() -> None:
+    secret = os.environ["NOWPAYMENTS_INCIDENT_IPN_SECRET"]
+    outcome = await NowPaymentsGateway(_settings(nowpayments_ipn_secret_vex=secret)).verify_webhook(
+        WebhookEnvelope(
+            raw_body=_INCIDENT_BODY,
+            headers={"x-nowpayments-sig": _INCIDENT_SIGNATURE},
+            product_id="vex",
+        )
+    )
+    assert outcome.status is PaymentStatus.COMPLETED
+    assert outcome.amount_paid == Decimal("4.98842")
+    assert outcome.amount_due == Decimal("4.98842014")
+    assert outcome.settled_currency == "USDCBSC"
