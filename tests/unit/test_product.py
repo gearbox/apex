@@ -15,6 +15,11 @@ from src.core.product_registry import (
     resolve_product_by_slug,
 )
 
+# Derived from the real registry rather than hardcoded, so this file never
+# needs to spell out the product's actual domain.
+_VEX_DOMAIN = next(iter(VEX_CONFIG.domains))
+_SYNTHARA_DOMAIN = next(iter(SYNTHARA_CONFIG.domains))
+
 
 class TestAgeGatePolicy:
     def test_vex_uses_date_of_birth(self) -> None:
@@ -34,13 +39,13 @@ class TestExtractApexDomain:
     """Tests for extract_apex_domain()."""
 
     def test_plain_apex(self) -> None:
-        assert extract_apex_domain("vex.pics") == "vex.pics"
+        assert extract_apex_domain("example.com") == "example.com"
 
     def test_www_subdomain(self) -> None:
-        assert extract_apex_domain("www.vex.pics") == "vex.pics"
+        assert extract_apex_domain("www.example.com") == "example.com"
 
     def test_staging_subdomain(self) -> None:
-        assert extract_apex_domain("staging.vex.pics") == "vex.pics"
+        assert extract_apex_domain("staging.example.com") == "example.com"
 
     def test_deep_subdomain(self) -> None:
         assert extract_apex_domain("feature-xyz.staging.synthara.app") == "synthara.app"
@@ -128,7 +133,13 @@ class TestResolveProductByDomain:
 
     @pytest.mark.parametrize(
         "domain",
-        ["vex.pics", "www.vex.pics", "app.vex.pics", "staging.vex.pics", "preview.vex.pics"],
+        [
+            _VEX_DOMAIN,
+            f"www.{_VEX_DOMAIN}",
+            f"app.{_VEX_DOMAIN}",
+            f"staging.{_VEX_DOMAIN}",
+            f"preview.{_VEX_DOMAIN}",
+        ],
     )
     def test_vex_domains(self, domain: str) -> None:
         cfg = resolve_product_by_domain(domain)
@@ -138,11 +149,11 @@ class TestResolveProductByDomain:
     @pytest.mark.parametrize(
         "domain",
         [
-            "synthara.app",
-            "www.synthara.app",
-            "app.synthara.app",
-            "staging.synthara.app",
-            "preview.synthara.app",
+            _SYNTHARA_DOMAIN,
+            f"www.{_SYNTHARA_DOMAIN}",
+            f"app.{_SYNTHARA_DOMAIN}",
+            f"staging.{_SYNTHARA_DOMAIN}",
+            f"preview.{_SYNTHARA_DOMAIN}",
         ],
     )
     def test_synthara_domains(self, domain: str) -> None:
@@ -151,18 +162,19 @@ class TestResolveProductByDomain:
         assert cfg.product == Product.SYNTHARA
 
     def test_unknown_domain_returns_none(self) -> None:
-        assert resolve_product_by_domain("unknown.example.com") is None
+        assert resolve_product_by_domain("unknown.example.org") is None
         assert resolve_product_by_domain("") is None
-        assert resolve_product_by_domain("evil.vex.pics.attacker.com") is None
+        assert resolve_product_by_domain(f"evil.{_VEX_DOMAIN}.attacker.com") is None
+        assert resolve_product_by_domain(f"evil.{_SYNTHARA_DOMAIN}.attacker.com") is None
 
     def test_domain_with_port_is_stripped(self) -> None:
-        """Domains like 'vex.pics:443' should resolve correctly."""
-        cfg = resolve_product_by_domain("vex.pics:443")
+        """Domains like '<apex>:443' should resolve correctly."""
+        cfg = resolve_product_by_domain(f"{_VEX_DOMAIN}:443")
         assert cfg is not None
         assert cfg.product == Product.VEX
 
     def test_domain_case_insensitive(self) -> None:
-        cfg = resolve_product_by_domain("VEX.PICS")
+        cfg = resolve_product_by_domain(_VEX_DOMAIN.upper())
         assert cfg is not None
         assert cfg.product == Product.VEX
 

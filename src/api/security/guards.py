@@ -196,7 +196,7 @@ async def optional_auth_guard(
     a token's product claim is checked here too — but unlike ``auth_guard``,
     a product mismatch degrades to anonymous instead of raising 401. An
     optional guard should degrade, not reject: a stale other-product token
-    sitting in a shared browser (e.g. a prior vex.pics login while visiting a
+    sitting in a shared browser (e.g. a prior vex-domain.com login while visiting a
     synthara.app page) must not break access to a page that doesn't require
     authentication in the first place.
 

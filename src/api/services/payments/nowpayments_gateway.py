@@ -86,6 +86,12 @@ class NowPaymentsGateway:
         quote = ctx.quote
         product_id = ctx.product_config.slug
         pay_currency = ctx.extra.get("pay_currency", "").strip()
+        ipn_callback_url = self._settings.nowpayments_ipn_callback_url
+        if not ipn_callback_url:
+            raise RuntimeError(
+                "NOWPAYMENTS_IPN_CALLBACK_URL is not configured; refusing to create a "
+                "NowPayments invoice that NowPayments would have nowhere to send IPNs for"
+            )
         order_id = json.dumps(
             {
                 "account_id": str(ctx.account_id),
@@ -102,6 +108,7 @@ class NowPaymentsGateway:
                 f"{quote.tokens_granted} tokens "
                 f"(${quote.credits_usd} credit, {quote.discount_pct}% off)"
             ),
+            "ipn_callback_url": ipn_callback_url,
         }
         if pay_currency:
             payload["pay_currency"] = pay_currency

@@ -86,6 +86,40 @@ class TestFrameExtractStaleRunningThreshold:
         assert settings.frame_extract_stale_running_seconds == 1800
 
 
+class TestNowpaymentsIpnCallbackUrl:
+    def test_unset_accepted(self) -> None:
+        settings = Settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.nowpayments_ipn_callback_url is None
+
+    def test_valid_https_url_accepted(self) -> None:
+        url = "https://api.example.com/v1/billing/webhooks/nowpayments"
+        settings = Settings(jwt_secret_key=_JWT_SECRET, nowpayments_ipn_callback_url=url)
+        assert settings.nowpayments_ipn_callback_url == url
+
+    def test_valid_http_url_accepted_for_local_dev(self) -> None:
+        url = "http://localhost:8000/v1/billing/webhooks/nowpayments"
+        settings = Settings(jwt_secret_key=_JWT_SECRET, nowpayments_ipn_callback_url=url)
+        assert settings.nowpayments_ipn_callback_url == url
+
+    def test_scheme_less_url_rejected(self) -> None:
+        with pytest.raises(ValueError, match="nowpayments_ipn_callback_url"):
+            Settings(
+                jwt_secret_key=_JWT_SECRET,
+                nowpayments_ipn_callback_url="api.example.com/v1/billing/webhooks/nowpayments",
+            )
+
+    def test_garbage_value_rejected(self) -> None:
+        with pytest.raises(ValueError, match="nowpayments_ipn_callback_url"):
+            Settings(jwt_secret_key=_JWT_SECRET, nowpayments_ipn_callback_url="not a url")
+
+    def test_ftp_scheme_rejected(self) -> None:
+        with pytest.raises(ValueError, match="nowpayments_ipn_callback_url"):
+            Settings(
+                jwt_secret_key=_JWT_SECRET,
+                nowpayments_ipn_callback_url="ftp://example.com/callback",
+            )
+
+
 class TestPricingTiersValidAccepted:
     def test_default_tiers_accepted(self) -> None:
         settings = Settings(jwt_secret_key=_JWT_SECRET)

@@ -14,7 +14,12 @@ from litestar import Litestar, get
 from litestar.config.cors import CORSConfig
 from litestar.testing import TestClient
 
-from src.core.product_registry import PRODUCT_REGISTRY
+from src.core.product_registry import PRODUCT_REGISTRY, SYNTHARA_CONFIG, VEX_CONFIG
+
+# Derived from the real registry rather than hardcoded, so this file never
+# needs to spell out the product's actual domain.
+_VEX_DOMAIN = next(iter(VEX_CONFIG.domains))
+_SYNTHARA_DOMAIN = next(iter(SYNTHARA_CONFIG.domains))
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,12 +68,12 @@ class TestCORSAllowedOrigins:
     @pytest.mark.parametrize(
         "origin",
         [
-            "https://vex.pics",
-            "https://app.vex.pics",
-            "https://staging.vex.pics",
-            "https://synthara.app",
-            "https://app.synthara.app",
-            "https://preview.synthara.app",
+            f"https://{_VEX_DOMAIN}",
+            f"https://app.{_VEX_DOMAIN}",
+            f"https://staging.{_VEX_DOMAIN}",
+            f"https://{_SYNTHARA_DOMAIN}",
+            f"https://app.{_SYNTHARA_DOMAIN}",
+            f"https://preview.{_SYNTHARA_DOMAIN}",
         ],
     )
     def test_preflight_allowed_for_product_origin(self, origin: str) -> None:
@@ -93,7 +98,7 @@ class TestCORSAllowedOrigins:
             resp = client.options(
                 "/test",
                 headers={
-                    "Origin": "https://vex.pics",
+                    "Origin": f"https://{_VEX_DOMAIN}",
                     "Access-Control-Request-Method": "GET",
                 },
             )
@@ -107,9 +112,9 @@ class TestCORSRejectedOrigins:
         "origin",
         [
             "https://evil.com",
-            "https://notvex.pics",
-            "https://vex.pics.evil.com",
-            "http://vex.pics",  # http not https
+            f"https://not{_VEX_DOMAIN}",
+            f"https://{_VEX_DOMAIN}.evil.com",
+            f"http://{_VEX_DOMAIN}",  # http not https
         ],
     )
     def test_unknown_origin_rejected(self, origin: str) -> None:
@@ -131,7 +136,7 @@ class TestCORSIdempotencyKey:
 
     @pytest.mark.parametrize(
         "origin",
-        ["https://vex.pics", "https://synthara.app"],
+        [f"https://{_VEX_DOMAIN}", f"https://{_SYNTHARA_DOMAIN}"],
     )
     def test_preflight_allows_idempotency_key(self, origin: str) -> None:
         app = _make_app()
@@ -157,7 +162,7 @@ class TestCORSIdempotencyKey:
             resp = client.options(
                 "/test",
                 headers={
-                    "Origin": "https://vex.pics",
+                    "Origin": f"https://{_VEX_DOMAIN}",
                     "Access-Control-Request-Method": "POST",
                     "Access-Control-Request-Headers": "X-Request-Id",
                 },
