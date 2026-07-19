@@ -93,7 +93,7 @@ class GalleryGridItem(msgspec.Struct, kw_only=True):
 
 The proxy architecture is designed so that switching to Cloudflare Workers requires only:
 
-1. Deploy a CF Worker at `cdn.vex.pics` / `cdn.synthara.app`.
+1. Deploy a CF Worker at `cdn.vex-domain.com` / `cdn.synthara-domain.com`.
 2. Worker validates session cookie or JWT → proxies/redirects to short-lived presigned URL.
 3. Cloudflare caches the response at the edge.
 4. Gallery service changes URL prefix from `/v1/content/` to `https://cdn.{product}/content/`.

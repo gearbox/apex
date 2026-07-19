@@ -1264,7 +1264,7 @@ class TestAuthRouteHandlers:
         jwt_service = MagicMock()
         jwt_service.create_content_token.return_value = ("content_tok", None)
         product_config = MagicMock()
-        product_config.cookie_domain = "vex.pics"
+        product_config.cookie_domain = "example.com"
         settings = MagicMock()
         settings.content_cookie_ttl_hours = 1
         settings.content_cookie_secure = True
@@ -1437,7 +1437,7 @@ class TestAuthRouteHandlers:
         jwt_service = MagicMock()
         jwt_service.create_content_token.return_value = ("content_tok", None)
         product_config = MagicMock()
-        product_config.cookie_domain = "vex.pics"
+        product_config.cookie_domain = "example.com"
         settings = MagicMock()
         settings.content_cookie_ttl_hours = 1
         settings.content_cookie_secure = True
@@ -1525,7 +1525,7 @@ class TestAuthRouteHandlers:
         jwt_service.decode_access_token.return_value = None  # skip cookie on MagicMock token
         jwt_service.create_content_token.return_value = ("content_token", None)
         product_config = MagicMock()
-        product_config.cookie_domain = "vex.pics"
+        product_config.cookie_domain = "example.com"
         settings = MagicMock()
         settings.content_cookie_ttl_hours = 1
         settings.content_cookie_secure = True
@@ -1628,7 +1628,7 @@ class TestAuthRouteHandlers:
         data = MagicMock()
         data.refresh_token = "ref"
         product_config = MagicMock()
-        product_config.cookie_domain = "vex.pics"
+        product_config.cookie_domain = "example.com"
         settings = MagicMock()
         settings.content_cookie_secure = True
 

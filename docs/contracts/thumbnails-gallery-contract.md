@@ -15,7 +15,7 @@ Media URLs in the new contract are **root-relative API paths** to an auth-gated,
 /v1/content/uploads/{id}      # uploaded image (or its thumbnail)
 ```
 
-These are served by `api.<product>` which shares an eTLD+1 with the app (`api.vex.pics` ↔ `vex.pics`, `api.synthara.app` ↔ `synthara.app`), so the backend issues a **first-party `SameSite=Lax` cookie** (`apex_content`, `HttpOnly; Secure; Domain=<product>; Path=/v1/content`) that the browser sends automatically on `<img>`/`<video>` subresource loads. **No per-image token logic, no URL signing, no expiry handling.**
+These are served by `api.<product>` which shares an eTLD+1 with the app (`api.vex-domain.com` ↔ `vex-domain.com`, `api.synthara-domain.com` ↔ `synthara-domain.com`), so the backend issues a **first-party `SameSite=Lax` cookie** (`apex_content`, `HttpOnly; Secure; Domain=<product>; Path=/v1/content`) that the browser sends automatically on `<img>`/`<video>` subresource loads. **No per-image token logic, no URL signing, no expiry handling.**
 
 **What the FE must do — exactly two things:**
 
@@ -23,7 +23,7 @@ These are served by `api.<product>` which shares an eTLD+1 with the app (`api.ve
 2. **Prefix the relative URLs with the product API origin** when rendering: `src = ${API_ORIGIN}${media.original.url}`. That's the entire transform — no token, no helper beyond the origin prefix.
 
 ```ts
-const API_ORIGIN = "https://api.vex.pics"; // per product/env
+const API_ORIGIN = "https://api.vex-domain.com"; // per product/env
 const toMediaSrc = (path: string) => `${API_ORIGIN}${path}`;
 ```
 

@@ -167,6 +167,7 @@ services:
       NOWPAYMENTS_API_KEY_VEX: ${NOWPAYMENTS_API_KEY_VEX:?NOWPAYMENTS_API_KEY_VEX is required}
       NOWPAYMENTS_IPN_SECRET_VEX: ${NOWPAYMENTS_IPN_SECRET_VEX:?NOWPAYMENTS_IPN_SECRET_VEX is required}
       NOWPAYMENTS_API_BASE: ${NOWPAYMENTS_API_BASE:-https://api.nowpayments.io}
+      NOWPAYMENTS_IPN_CALLBACK_URL: ${NOWPAYMENTS_IPN_CALLBACK_URL:?NOWPAYMENTS_IPN_CALLBACK_URL is required}
 
     # Never expose the API port to the host — cloudflared connects to api:8100
     # inside the Docker network. This explicitly cancels any ports: defined in

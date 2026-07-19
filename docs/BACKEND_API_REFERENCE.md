@@ -97,8 +97,8 @@ The backend serves two distinct products from the same codebase:
 
 | Product | Slug | Domains | Audience | Content |
 |---------|------|---------|----------|---------|
-| **vex.pics** | `vex` | `vex.pics`, `www.vex.pics`, `app.vex.pics` | Consumer / creator | Permissive — NSFW-capable models available |
-| **Synthara** | `synthara` | `synthara.app`, `www.synthara.app`, `app.synthara.app` | Enterprise / business | SFW only, professional |
+| **example.com** | `vex` | `vex-domain.com`, `www.vex-domain.com`, `app.vex-domain.com` | Consumer / creator | Permissive — NSFW-capable models available |
+| **Synthara** | `synthara` | `synthara-domain.com`, `www.synthara-domain.com`, `app.synthara-domain.com` | Enterprise / business | SFW only, professional |
 
 ### Product Resolution
 
@@ -147,7 +147,7 @@ JWT tokens embed a `product_id` claim. Tokens issued for one product are rejecte
 ```
 Response: {
   product: string,              // "vex" | "synthara"
-  display_name: string,         // e.g. "vex.pics"
+  display_name: string,         // e.g. "example.com"
   age_gate: string,             // "none" | "checkbox" | "date_of_birth"
   allowed_auth_methods: string[],  // e.g. ["email_password", "google_oauth"]
   content_rating: string,       // "sfw" | "permissive"
@@ -428,7 +428,7 @@ Note:     source_output_id enables "remix from gallery" — the backend resolves
 
 Auth-optional: unauthenticated callers get the full capabilities catalog; authenticated callers additionally receive `user_context` with their subscription tier.
 
-Models are **filtered by the current product** — Synthara only returns SFW-safe models; vex.pics returns all enabled models.
+Models are **filtered by the current product** — Synthara only returns SFW-safe models; Vex returns all enabled models.
 
 ```
 Response: {
@@ -2451,8 +2451,8 @@ job <code>3fa85f64-...</code> · grok/t2i
 
 | Slug | Display Name | Domains | Content Rating | Age Gate | Payment Providers | Org Feature |
 |------|-------------|---------|---------------|----------|------------------|-------------|
-| `vex` | vex.pics | vex.pics, www.vex.pics, app.vex.pics | permissive | date_of_birth | Stripe + NowPayments | No |
-| `synthara` | Synthara | synthara.app, www.synthara.app, app.synthara.app | sfw | none | Stripe only | Yes |
+| `vex` | Vex | vex-domain.com, www.vex-domain.com, app.vex-domain.com | permissive | date_of_birth | Stripe + NowPayments | No |
+| `synthara` | Synthara | synthara-domain.com, www.synthara-domain.com, app.synthara-domain.com | sfw | none | Stripe only | Yes |
 
 ### AgeGatePolicy
 

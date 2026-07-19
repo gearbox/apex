@@ -103,7 +103,7 @@ class ProductConfig:
     display_name: str
     domains: frozenset[str]
     # Canonical frontend origin (scheme + host, no trailing slash), e.g.
-    # "https://vex.pics". Used to build redirect URLs (e.g. Stripe Checkout
+    # "https://vex-domain.com". Used to build redirect URLs (e.g. Stripe Checkout
     # success/cancel) without hardcoding brand strings in service code.
     frontend_origin: str
 
@@ -138,7 +138,7 @@ class ProductConfig:
     # Feature flags — extensible set of feature slugs
     features: frozenset[str] = field(default_factory=frozenset)
 
-    # Cookie domain — registrable domain for the content cookie (e.g. "vex.pics").
+    # Cookie domain — registrable domain for the content cookie (e.g. "vex-domain.com").
     # None for localhost/dev pseudo-products that don't set Domain on the cookie.
     cookie_domain: str | None = None
 

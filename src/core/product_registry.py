@@ -41,7 +41,7 @@ VEX_CONFIG = ProductConfig(
             AuthMethod.GOOGLE_OAUTH,
         }
     ),
-    # vex.pics: all models allowed (permissive)
+    # vex-domain.com: all models allowed (permissive)
     allowed_models=None,
     blocked_models=frozenset(),
     content_policy=ContentPolicyConfig(
@@ -147,9 +147,9 @@ def extract_apex_domain(hostname: str) -> str | None:
 
     Examples::
 
-        extract_apex_domain("staging.vex.pics")   -> "vex.pics"
+        extract_apex_domain("staging.vex-domain.com")   -> "vex-domain.com"
         extract_apex_domain("app.synthara.app")    -> "synthara.app"
-        extract_apex_domain("vex.pics")            -> "vex.pics"
+        extract_apex_domain("vex-domain.com")            -> "vex-domain.com"
         extract_apex_domain("localhost")           -> None
         extract_apex_domain("127.0.0.1")           -> None
 
@@ -168,8 +168,8 @@ def get_product_config(product: Product) -> ProductConfig:
 def resolve_product_by_domain(hostname: str) -> ProductConfig | None:
     """Resolve product config from a raw hostname (may include subdomain).
 
-    Matching is performed on the eTLD+1 so that ``staging.vex.pics``,
-    ``app.vex.pics`` and ``vex.pics`` all resolve to the same product.
+    Matching is performed on the eTLD+1 so that ``staging.vex-domain.com``,
+    ``app.vex-domain.com`` and ``vex-domain.com`` all resolve to the same product.
     """
     apex = extract_apex_domain(hostname.lower().split(":")[0])
     if apex is None:

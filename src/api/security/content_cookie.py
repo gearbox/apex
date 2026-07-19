@@ -41,7 +41,7 @@ def build_content_cookie(
 
     Args:
         token: Signed content JWT to store.
-        domain: Registrable domain (e.g. "vex.pics"), or None for localhost.
+        domain: Registrable domain (e.g. "vex-domain.com"), or None for localhost.
         secure: Whether to set the Secure attribute.
         max_age: Cookie lifetime in seconds.
 

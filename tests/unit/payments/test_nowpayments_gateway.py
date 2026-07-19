@@ -22,6 +22,7 @@ from src.core.topup_pricing import build_quote, topup_tiers_for
 pytestmark = pytest.mark.unit
 
 _SECRET = "ipn-secret"
+_IPN_CALLBACK_URL = "https://api.example.com/v1/billing/webhooks/nowpayments"
 
 
 def _settings(**overrides: object) -> Settings:
@@ -29,6 +30,7 @@ def _settings(**overrides: object) -> Settings:
         "jwt_secret_key": "test-secret-key-that-is-definitely-long-enough-32bytes",
         "nowpayments_ipn_secret_vex": _SECRET,
         "nowpayments_api_key_vex": "np_key_vex_123",
+        "nowpayments_ipn_callback_url": _IPN_CALLBACK_URL,
     } | overrides
     return Settings(**defaults)  # type: ignore[arg-type]
 
@@ -321,6 +323,7 @@ class TestCreateCharge:
 
         sent_json = mock_http_client.post.call_args.kwargs["json"]
         assert sent_json["price_amount"] == float(quote.total_due)
+        assert sent_json["ipn_callback_url"] == _IPN_CALLBACK_URL
         order = json.loads(sent_json["order_id"])
         assert order["payment_id"] == str(payment_id)
         assert order["account_id"] == str(account_id)
@@ -368,6 +371,32 @@ class TestCreateCharge:
         sent_json, result = await self._create_charge(extra)
         assert "pay_currency" not in sent_json
         assert result.currency == "USD"
+
+    async def test_missing_ipn_callback_url_raises_before_http_call(self) -> None:
+        settings = _settings(nowpayments_ipn_callback_url=None)
+        quote = build_quote(
+            100,
+            tiers=topup_tiers_for("vex", settings),
+            tokens_per_usd=settings.billing_tokens_per_usd,
+        )
+        mock_http_client = AsyncMock()
+        mock_http_client.post = AsyncMock()
+        mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+        mock_http_client.__aexit__ = AsyncMock(return_value=False)
+
+        gateway = NowPaymentsGateway(settings, client_factory=lambda: mock_http_client)
+        with pytest.raises(RuntimeError, match="NOWPAYMENTS_IPN_CALLBACK_URL"):
+            await gateway.create_charge(
+                ChargeContext(
+                    payment_id=uuid4(),
+                    account_id=uuid4(),
+                    user_id=uuid4(),
+                    product_config=VEX_CONFIG,
+                    quote=quote,
+                    extra={},
+                )
+            )
+        mock_http_client.post.assert_not_called()
 
 
 async def test_ipn_pay_currency_sets_settled_currency() -> None:

@@ -8,6 +8,12 @@ from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST
 from litestar.testing import TestClient
 
 from src.api.middleware.product import ProductMiddleware
+from src.core.product_registry import SYNTHARA_CONFIG, VEX_CONFIG
+
+# Derived from the real registry rather than hardcoded, so this file never
+# needs to spell out the product's actual domain.
+_VEX_DOMAIN = next(iter(VEX_CONFIG.domains))
+_SYNTHARA_DOMAIN = next(iter(SYNTHARA_CONFIG.domains))
 
 # ---------------------------------------------------------------------------
 # Minimal test app
@@ -38,14 +44,14 @@ class TestProductMiddlewareResolution:
     def test_origin_header_vex(self) -> None:
         app = build_test_app()
         with TestClient(app=app) as client:
-            resp = client.get("/test", headers={"Origin": "https://vex.pics"})
+            resp = client.get("/test", headers={"Origin": f"https://{_VEX_DOMAIN}"})
         assert resp.status_code == HTTP_200_OK
         assert resp.headers.get("x-product-id") == "vex"
 
     def test_origin_header_synthara(self) -> None:
         app = build_test_app()
         with TestClient(app=app) as client:
-            resp = client.get("/test", headers={"Origin": "https://app.synthara.app"})
+            resp = client.get("/test", headers={"Origin": f"https://app.{_SYNTHARA_DOMAIN}"})
         assert resp.status_code == HTTP_200_OK
         assert resp.headers.get("x-product-id") == "synthara"
 
@@ -87,8 +93,8 @@ class TestProductMiddlewareResolution:
             resp = client.get(
                 "/test",
                 headers={
-                    "Origin": "https://vex.pics",
-                    "Host": "synthara.app",
+                    "Origin": f"https://{_VEX_DOMAIN}",
+                    "Host": f"{_SYNTHARA_DOMAIN}",
                 },
             )
         assert resp.status_code == HTTP_200_OK
@@ -99,20 +105,20 @@ class TestProductMiddlewareResolution:
         """Successful response should always include X-Product-Id header."""
         app = build_test_app()
         with TestClient(app=app) as client:
-            resp = client.get("/test", headers={"Origin": "https://synthara.app"})
+            resp = client.get("/test", headers={"Origin": f"https://{_SYNTHARA_DOMAIN}"})
         assert resp.status_code == HTTP_200_OK
         assert "x-product-id" in resp.headers
 
     @pytest.mark.parametrize(
         "origin",
         [
-            "https://staging.vex.pics",
-            "https://preview.vex.pics",
-            "https://feature-xyz.vex.pics",
+            f"https://staging.{_VEX_DOMAIN}",
+            f"https://preview.{_VEX_DOMAIN}",
+            f"https://feature-xyz.{_VEX_DOMAIN}",
         ],
     )
     def test_subdomain_origin_resolves_to_vex(self, origin: str) -> None:
-        """Any subdomain of vex.pics in Origin should resolve to the vex product."""
+        """Any subdomain of the vex domain in Origin should resolve to the vex product."""
         app = build_test_app()
         with TestClient(app=app) as client:
             resp = client.get("/test", headers={"Origin": origin})
@@ -122,8 +128,8 @@ class TestProductMiddlewareResolution:
     @pytest.mark.parametrize(
         "origin",
         [
-            "https://staging.synthara.app",
-            "https://preview.synthara.app",
+            f"https://staging.{_SYNTHARA_DOMAIN}",
+            f"https://preview.{_SYNTHARA_DOMAIN}",
         ],
     )
     def test_subdomain_origin_resolves_to_synthara(self, origin: str) -> None:

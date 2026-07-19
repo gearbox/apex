@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
 PRODUCT_ID = "vex"
-COOKIE_DOMAIN = "vex.pics"
+COOKIE_DOMAIN = "vex-domain.com"  # arbitrary fixture domain, not the real product config value
 COOKIE_NAME = "apex_content"
 
 
@@ -516,7 +516,7 @@ class TestEffectiveCookieDomain:
         )
         vex_config = resolve_product_by_slug("vex")
         assert vex_config is not None
-        assert effective_cookie_domain(prod_settings, vex_config) == "vex.pics"
+        assert effective_cookie_domain(prod_settings, vex_config) == vex_config.cookie_domain
 
 
 # ---------------------------------------------------------------------------

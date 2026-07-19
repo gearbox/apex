@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -958,15 +959,15 @@ class Settings(BaseSettings):
     # Per-product Stripe keys
     stripe_secret_key_vex: str | None = Field(
         default=None,
-        description="Stripe secret key for vex.pics",
+        description="Stripe secret key for Vex",
     )
     stripe_webhook_secret_vex: str | None = Field(
         default=None,
-        description="Stripe webhook secret for vex.pics",
+        description="Stripe webhook secret for Vex",
     )
     stripe_publishable_key_vex: str | None = Field(
         default=None,
-        description="Stripe publishable key for vex.pics",
+        description="Stripe publishable key for Vex",
     )
     stripe_secret_key_synthara: str | None = Field(
         default=None,
@@ -994,15 +995,24 @@ class Settings(BaseSettings):
         default="https://api.nowpayments.io",
         description="NowPayments API base URL; override to use the sandbox.",
     )
+    nowpayments_ipn_callback_url: str | None = Field(
+        default=None,
+        description=(
+            "Absolute public URL of this environment's NowPayments IPN endpoint, e.g. "
+            "https://api.example.com/v1/billing/webhooks/nowpayments. Required for "
+            "NowPayments charges; passed per-invoice so environments sharing one "
+            "NowPayments account each receive their own IPNs."
+        ),
+    )
 
-    # Per-product NowPayments keys (vex.pics only — crypto payments for consumers)
+    # Per-product NowPayments keys (vex-domain.com only — crypto payments for consumers)
     nowpayments_api_key_vex: str | None = Field(
         default=None,
-        description="NowPayments API key for vex.pics",
+        description="NowPayments API key for Vex",
     )
     nowpayments_ipn_secret_vex: str | None = Field(
         default=None,
-        description="NowPayments IPN HMAC secret for vex.pics",
+        description="NowPayments IPN HMAC secret for Vex",
     )
 
     # Stripe Checkout redirect paths — appended to a product's ProductConfig.frontend_origin.
@@ -1083,7 +1093,7 @@ class Settings(BaseSettings):
     # Per-product app URLs (for email links)
     app_url_vex: str = Field(
         default="https://vex.pics",
-        description="Base URL for vex.pics frontend (used in email links).",
+        description="Base URL for Vex frontend (used in email links).",
     )
     app_url_synthara: str = Field(
         default="https://synthara.app",
@@ -1300,6 +1310,23 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_nowpayments_ipn_callback_url(self) -> "Settings":
+        """Reject a malformed NowPayments IPN callback URL at startup (D3).
+
+        Must be an absolute URL with a scheme and netloc. http:// is permitted
+        (not just https://) only to allow local-dev tunnels/hosts explicitly
+        configured that way.
+        """
+        if self.nowpayments_ipn_callback_url is not None:
+            parsed = urlparse(self.nowpayments_ipn_callback_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(
+                    "nowpayments_ipn_callback_url must be an absolute URL with an "
+                    f"http:// or https:// scheme (got {self.nowpayments_ipn_callback_url!r})"
+                )
+        return self
+
+    @model_validator(mode="after")
     def validate_billing_pricing_tiers(self) -> "Settings":
         """Fail loud on a malformed top-up pricing config.
 
@@ -1463,7 +1490,7 @@ class Settings(BaseSettings):
         raise RuntimeError(f"No Stripe webhook secret configured for product '{product_id}'")
 
     def nowpayments_api_key_for(self, product_id: str) -> str:
-        """Resolve the NowPayments API key for a product (vex.pics only today).
+        """Resolve the NowPayments API key for a product.
 
         Raises:
             RuntimeError: Neither a per-product nor a legacy key is configured.
