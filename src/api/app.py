@@ -41,6 +41,7 @@ from src.api.routes.gpu_session import GpuSessionController
 from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.routes.jobs import UnifiedJobController
+from src.api.routes.library import LibraryController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.payment_provider_admin import PaymentProviderAdminController
 from src.api.routes.providers import ProvidersController
@@ -430,6 +431,8 @@ def create_app() -> Litestar:
             SSEController,
             # Gallery
             GalleryController,
+            # Library
+            LibraryController,
             # Content proxy
             ContentProxyController,
             # Web Push

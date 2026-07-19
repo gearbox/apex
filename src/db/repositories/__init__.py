@@ -5,6 +5,7 @@ from .billing import BillingRepository
 from .frame_extraction import FrameExtractionJobRepository
 from .gpu_session import GpuSessionRepository
 from .job import JobRepository
+from .library import LibraryRepository
 from .output import OutputRepository
 from .payment_currency import PaymentCurrencyRepository
 from .payment_provider_state import PaymentProviderStateRepository
@@ -18,6 +19,7 @@ __all__ = [
     "FrameExtractionJobRepository",
     "GpuSessionRepository",
     "JobRepository",
+    "LibraryRepository",
     "OutputRepository",
     "PaymentCurrencyRepository",
     "PaymentProviderStateRepository",

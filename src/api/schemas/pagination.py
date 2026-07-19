@@ -89,3 +89,58 @@ def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
         return datetime.fromisoformat(data["created_at"]), UUID(data["id"])
     except Exception as exc:
         raise ValueError(f"Invalid pagination cursor: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Library cursor encode / decode helpers
+# ---------------------------------------------------------------------------
+#
+# Distinct from encode_cursor/decode_cursor above: the library read model
+# unions two tables (uploads, outputs) ranked against each other, so the
+# keyset needs a third component — a fixed per-source rank — to keep the
+# tuple comparison consistent with the union's ORDER BY. See
+# src/db/repositories/library.py.
+
+_LIBRARY_CURSOR_SOURCES: frozenset[str] = frozenset({"upload", "output"})
+
+
+def encode_library_cursor(created_at: datetime, source: str, id: UUID) -> str:
+    """Encode a (created_at, source, id) triple into an opaque cursor string.
+
+    Args:
+        created_at: Timestamp of the last item on the current page.
+        source: ``"upload"`` or ``"output"`` — the last item's asset source.
+        id: Primary key of the last item on the current page.
+
+    Returns:
+        URL-safe base64-encoded JSON token.
+    """
+    payload = {"created_at": created_at.isoformat(), "source": source, "id": str(id)}
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def decode_library_cursor(cursor: str) -> tuple[datetime, str, UUID]:
+    """Decode an opaque library cursor string into a (created_at, source, id) triple.
+
+    Args:
+        cursor: Token returned by a previous library ``CursorPage.next_cursor``.
+
+    Returns:
+        ``(created_at, source, id)`` suitable for building a keyset WHERE clause.
+
+    Raises:
+        ValueError: If the cursor is malformed, missing required fields, or
+            ``source`` is not one of ``{"upload", "output"}``.
+    """
+    try:
+        data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        created_at = datetime.fromisoformat(data["created_at"])
+        source = data["source"]
+        id_ = UUID(data["id"])
+    except Exception as exc:
+        raise ValueError(f"Invalid pagination cursor: {exc}") from exc
+
+    if source not in _LIBRARY_CURSOR_SOURCES:
+        raise ValueError(f"Invalid pagination cursor: unknown source {source!r}")
+
+    return created_at, source, id_

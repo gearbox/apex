@@ -357,6 +357,33 @@ class GallerySourceType(StrEnum):
     GENERATION = "generation"
 
 
+class LibrarySort(StrEnum):
+    """Sort order for the library list endpoint."""
+
+    NEWEST = "newest"
+    OLDEST = "oldest"
+
+
+class LibraryGroupSourceType(StrEnum):
+    """Type of input source for library group-detail lineage display.
+
+    Distinct from GallerySourceType (D1 — Library uses upload/output
+    vocabulary, not upload/generation)."""
+
+    UPLOAD = "upload"
+    OUTPUT = "output"
+
+
+class LibraryBadge(StrEnum):
+    """Badge type for a library group detail — describes the input source.
+
+    Distinct from GalleryBadge (D1 — no cross-import between gallery and
+    library modules)."""
+
+    IMAGE = "image"
+    PROMPT = "prompt"
+
+
 class SubscriptionTier(StrEnum):
     """User subscription tiers."""
 
