@@ -47,6 +47,7 @@ from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.jobs.sweep import JobSweepService
+from src.api.services.library import LibraryService
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.organization import OrganizationService
 from src.api.services.payment_currency_logos import LOGO_KEY_PREFIX, LogoCacheService
@@ -522,6 +523,11 @@ def get_content_proxy(
 def get_gallery_service(session: AsyncSession) -> GalleryService:
     """Provide GalleryService per-request."""
     return GalleryService(session=session)
+
+
+def get_library_service(session: AsyncSession) -> LibraryService:
+    """Provide LibraryService per-request."""
+    return LibraryService(session=session)
 
 
 def provide_settings() -> Settings:
@@ -1346,6 +1352,8 @@ dependencies = {
     "content_proxy": Provide(get_content_proxy, sync_to_thread=False),
     # Gallery
     "gallery_service": Provide(get_gallery_service, sync_to_thread=False),
+    # Library
+    "library_service": Provide(get_library_service, sync_to_thread=False),
     # Idempotency
     "idempotency_service": Provide(get_idempotency_service, sync_to_thread=False),
     # Health

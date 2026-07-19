@@ -16,11 +16,15 @@ import structlog
 from sqlalchemy import delete, exists, select, update
 
 from src.api.services.storage.exceptions import StorageDeleteError
+from src.core.library_ref import LibraryAssetSource
+from src.db.models.library import LibraryAssetMetadata
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.storage.r2 import R2StorageService
@@ -148,10 +152,15 @@ class ContentRetentionService:
                 )
                 batch_jobs_soft_deleted = soft_delete_result.rowcount or 0  # type: ignore[attr-defined]
 
+                metadata_purged = await self._purge_metadata(
+                    session, LibraryAssetSource.OUTPUT, expired_ids
+                )
+
                 await session.commit()
 
             rows_deleted += batch_rows_deleted
             jobs_soft_deleted += batch_jobs_soft_deleted
+            logger.info("content_retention.metadata_purged", count=metadata_purged)
 
             deleted, failed = await self._delete_r2_keys(keys)
             r2_keys_deleted += deleted
@@ -203,9 +212,14 @@ class ContentRetentionService:
                 )
                 batch_rows_deleted = delete_result.rowcount or 0  # type: ignore[attr-defined]
 
+                metadata_purged = await self._purge_metadata(
+                    session, LibraryAssetSource.UPLOAD, expired_ids
+                )
+
                 await session.commit()
 
             rows_deleted += batch_rows_deleted
+            logger.info("content_retention.metadata_purged", count=metadata_purged)
 
             deleted, failed = await self._delete_r2_keys(keys)
             r2_keys_deleted += deleted
@@ -230,6 +244,29 @@ class ContentRetentionService:
             r2_delete_failed=r2_delete_failed,
             batches=batches,
         )
+
+    async def _purge_metadata(
+        self,
+        session: AsyncSession,
+        source: LibraryAssetSource,
+        asset_ids: list[UUID],
+    ) -> int:
+        """Purge library_asset_metadata rows for a just-deleted batch (D14).
+
+        Runs in the same transaction as the batch's row DELETE, before that
+        transaction's commit — a polymorphic FK is impossible here (asset_type
+        discriminates two different tables), so this explicit purge is the
+        only way to keep library_asset_metadata from accumulating orphans.
+        """
+        if not asset_ids:
+            return 0
+        result = await session.execute(
+            delete(LibraryAssetMetadata).where(
+                LibraryAssetMetadata.asset_type == source.value,
+                LibraryAssetMetadata.asset_id.in_(asset_ids),
+            )
+        )
+        return result.rowcount or 0  # type: ignore[attr-defined]
 
     async def _delete_r2_keys(self, keys: list[str]) -> tuple[int, bool]:
         """Best-effort R2 cleanup after the DB rows are already committed gone.

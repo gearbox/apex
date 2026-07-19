@@ -19,6 +19,7 @@ from .generation_model import GenerationModel
 from .gpu_session import GpuSession
 from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
+from .library import LibraryAssetMetadata
 from .push_subscription import PushSubscription
 from .storage import GenerationJob, GenerationOutput, UserImage
 from .user import RefreshToken, User
@@ -37,6 +38,7 @@ __all__ = [
     "GpuSession",
     "HealthSnapshot",
     "IdempotencyKey",
+    "LibraryAssetMetadata",
     "Organization",
     "OrganizationMember",
     "PasswordResetToken",
