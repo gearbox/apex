@@ -104,43 +104,67 @@ def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
 _LIBRARY_CURSOR_SOURCES: frozenset[str] = frozenset({"upload", "output"})
 
 
-def encode_library_cursor(created_at: datetime, source: str, id: UUID) -> str:
+def encode_library_cursor(created_at: datetime, source: str, id: UUID, sort: str = "newest") -> str:
     """Encode a (created_at, source, id) triple into an opaque cursor string.
 
     Args:
-        created_at: Timestamp of the last item on the current page.
+        created_at: Timestamp of the last item on the current page. For the
+            ``expiring_soon`` sort this is the item's ``expires_at`` value —
+            the field name is generic; it always holds whatever timestamp
+            the requested sort keys off of.
         source: ``"upload"`` or ``"output"`` — the last item's asset source.
         id: Primary key of the last item on the current page.
+        sort: The ``LibrarySort`` value this cursor was produced under.
+            Embedded so ``decode_library_cursor`` can reject a cursor reused
+            after a sort switch (the keyset column differs per sort — reusing
+            it blindly would silently misorder the page rather than error).
 
     Returns:
         URL-safe base64-encoded JSON token.
     """
-    payload = {"created_at": created_at.isoformat(), "source": source, "id": str(id)}
+    payload = {"created_at": created_at.isoformat(), "source": source, "id": str(id), "sort": sort}
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
 
 
-def decode_library_cursor(cursor: str) -> tuple[datetime, str, UUID]:
+def decode_library_cursor(
+    cursor: str,
+    *,
+    expected_sort: str | None = None,
+) -> tuple[datetime, str, UUID]:
     """Decode an opaque library cursor string into a (created_at, source, id) triple.
 
     Args:
         cursor: Token returned by a previous library ``CursorPage.next_cursor``.
+        expected_sort: When provided, the cursor's embedded ``sort`` must
+            match this value or decoding fails — guards against a client
+            reusing a page-2 cursor from one sort under a different sort.
+            Cursors encoded without a ``sort`` field (there are none from
+            this codebase, but defensively) are treated as ``"newest"``.
 
     Returns:
         ``(created_at, source, id)`` suitable for building a keyset WHERE clause.
 
     Raises:
-        ValueError: If the cursor is malformed, missing required fields, or
-            ``source`` is not one of ``{"upload", "output"}``.
+        ValueError: If the cursor is malformed, missing required fields,
+            ``source`` is not one of ``{"upload", "output"}``, or
+            ``expected_sort`` is given and doesn't match the cursor's sort.
     """
     try:
         data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
         created_at = datetime.fromisoformat(data["created_at"])
         source = data["source"]
         id_ = UUID(data["id"])
+        sort = data.get("sort", "newest")
     except Exception as exc:
         raise ValueError(f"Invalid pagination cursor: {exc}") from exc
 
     if source not in _LIBRARY_CURSOR_SOURCES:
         raise ValueError(f"Invalid pagination cursor: unknown source {source!r}")
+
+    if expected_sort is not None and sort != expected_sort:
+        raise ValueError(
+            f"Invalid pagination cursor: cursor was created for sort={sort!r}, "
+            f"expected {expected_sort!r}"
+        )
 
     return created_at, source, id_

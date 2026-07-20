@@ -348,6 +348,8 @@ class LibrarySort(StrEnum):
 
     NEWEST = "newest"
     OLDEST = "oldest"
+    EXPIRING_SOON = "expiring_soon"
+    """Ascending by expires_at — soonest-to-expire first (P6)."""
 
 
 class LibraryGroupSourceType(StrEnum):

@@ -41,6 +41,7 @@ from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.routes.jobs import UnifiedJobController
 from src.api.routes.library import LibraryController
+from src.api.routes.library_project import LibraryProjectController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.payment_provider_admin import PaymentProviderAdminController
 from src.api.routes.providers import ProvidersController
@@ -64,6 +65,7 @@ from src.api.services.billing_errors import (
     RefundNotEligibleError,
 )
 from src.api.services.idempotency import IdempotencyConflictError
+from src.api.services.library_project import LibraryProjectNameConflictError
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
 from src.core.product_registry import PRODUCT_REGISTRY
@@ -269,6 +271,14 @@ def organization_balance_handler(
     )
 
 
+def library_project_name_conflict_handler(
+    request: Request[Any, Any, Any],
+    exc: LibraryProjectNameConflictError,
+) -> Response[Any]:
+    _log_handler_event("library.project_name_conflict", request, HTTP_409_CONFLICT, name=exc.name)
+    return _error("project_name_conflict", str(exc), HTTP_409_CONFLICT)
+
+
 def idempotency_conflict_handler(
     request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
@@ -430,6 +440,7 @@ def create_app() -> Litestar:
             SSEController,
             # Library
             LibraryController,
+            LibraryProjectController,
             # Content proxy
             ContentProxyController,
             # Web Push
@@ -448,6 +459,7 @@ def create_app() -> Litestar:
             PayCurrencySuppressedError: pay_currency_suppressed_handler,
             OrganizationPermissionError: organization_permission_handler,
             OrganizationBalanceError: organization_balance_handler,
+            LibraryProjectNameConflictError: library_project_name_conflict_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
             Exception: global_exception_handler,
         },
