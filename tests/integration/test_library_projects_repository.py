@@ -257,6 +257,119 @@ class TestProjectNameConflict:
         assert created.name == "Not Taken"
 
 
+class TestProjectServiceListGetDelete:
+    """LibraryProjectService.list_projects/get/delete — the thin service-layer
+    wrappers around LibraryProjectRepository. Other tests in this module and
+    in test_library_bulk.py exercise `create`/`patch` through the service,
+    but list_projects/get/delete were previously only exercised via
+    `project_repo` directly, leaving the service methods themselves uncovered.
+    """
+
+    async def test_get_found_returns_project(
+        self,
+        project_service: LibraryProjectService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"psvcget-{uuid4().hex[:8]}@example.com")
+        created = await project_service.create(
+            user.id, "vex", "Service Get", "desc", session=db_session
+        )
+
+        fetched = await project_service.get(created.id, user.id, "vex", session=db_session)
+        assert fetched is not None
+        assert fetched.id == created.id
+        assert fetched.name == "Service Get"
+        assert fetched.description == "desc"
+
+    async def test_get_cross_user_returns_none(
+        self,
+        project_service: LibraryProjectService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        owner = await make_user(email=f"psvcowner-{uuid4().hex[:8]}@example.com")
+        other = await make_user(email=f"psvcother-{uuid4().hex[:8]}@example.com")
+        created = await project_service.create(
+            owner.id, "vex", "Owner Only", None, session=db_session
+        )
+
+        assert await project_service.get(created.id, other.id, "vex", session=db_session) is None
+
+    async def test_list_projects_returns_page_with_asset_counts(
+        self,
+        project_service: LibraryProjectService,
+        library_repo: LibraryRepository,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"psvclist-{uuid4().hex[:8]}@example.com")
+        first = await project_service.create(user.id, "vex", "Alpha", None, session=db_session)
+        await project_service.create(user.id, "vex", "Beta", None, session=db_session)
+
+        image = await make_user_image(user=user)
+        await library_repo.upsert_metadata(
+            user.id, "vex", LibraryAssetSource.UPLOAD, image.id, project_id=first.id
+        )
+
+        page = await project_service.list_projects(user.id, "vex", session=db_session, limit=30)
+        assert page.has_more is False
+        assert page.next_cursor is None
+        names = {item.name: item.asset_count for item in page.items}
+        assert names == {"Alpha": 1, "Beta": 0}
+
+    async def test_list_projects_paginates_with_cursor(
+        self,
+        project_service: LibraryProjectService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"psvcpage-{uuid4().hex[:8]}@example.com")
+        await project_service.create(user.id, "vex", "One", None, session=db_session)
+        await project_service.create(user.id, "vex", "Two", None, session=db_session)
+        await project_service.create(user.id, "vex", "Three", None, session=db_session)
+
+        first_page = await project_service.list_projects(
+            user.id, "vex", session=db_session, limit=2
+        )
+        assert len(first_page.items) == 2
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+
+        second_page = await project_service.list_projects(
+            user.id, "vex", session=db_session, limit=2, cursor=first_page.next_cursor
+        )
+        assert len(second_page.items) == 1
+        assert second_page.has_more is False
+
+        seen = {item.name for item in first_page.items} | {item.name for item in second_page.items}
+        assert seen == {"One", "Two", "Three"}
+
+    async def test_delete_found_returns_true(
+        self,
+        project_service: LibraryProjectService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"psvcdel-{uuid4().hex[:8]}@example.com")
+        created = await project_service.create(
+            user.id, "vex", "Deletable", None, session=db_session
+        )
+
+        assert await project_service.delete(created.id, user.id, "vex", session=db_session) is True
+        assert await project_service.get(created.id, user.id, "vex", session=db_session) is None
+
+    async def test_delete_not_found_returns_false(
+        self,
+        project_service: LibraryProjectService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"psvcdelnf-{uuid4().hex[:8]}@example.com")
+        assert await project_service.delete(uuid4(), user.id, "vex", session=db_session) is False
+
+
 class TestProjectDeleteSetsNull:
     async def test_delete_project_unassigns_asset_not_delete_it(
         self,

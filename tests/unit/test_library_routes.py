@@ -15,9 +15,20 @@ from litestar.exceptions import NotFoundException
 from litestar.status_codes import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
 from src.api.routes.library import LibraryController
-from src.api.schemas.library import LibraryAssetDetail, LibraryAssetPatch, LibraryGroupDetail
+from src.api.schemas.library import (
+    BulkDelete,
+    BulkOperationItemResult,
+    BulkOperationResult,
+    LibraryAssetDetail,
+    LibraryAssetPatch,
+    LibraryGroupDetail,
+)
 from src.api.schemas.pagination import CursorPage
-from src.api.services.library import LibraryValidationError
+from src.api.services.library import (
+    LibraryBulkValidationError,
+    LibraryProjectNotFoundError,
+    LibraryValidationError,
+)
 from src.core.product_registry import VEX_CONFIG
 
 pytestmark = pytest.mark.unit
@@ -197,6 +208,23 @@ class TestPatchAsset:
         )
         assert response.status_code == HTTP_404_NOT_FOUND
 
+    async def test_unknown_project_id_returns_404(self) -> None:
+        service = AsyncMock()
+        service.patch_asset.side_effect = LibraryProjectNotFoundError(uuid4())
+
+        response = await LibraryController.patch_asset.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            product_config=VEX_CONFIG,
+            asset_ref="upload:x",
+            data=LibraryAssetPatch(project_id=uuid4()),
+            session=MagicMock(),
+            library_service=service,
+        )
+        assert response.status_code == HTTP_404_NOT_FOUND
+        assert response.content.error == "not_found"
+
     async def test_success_returns_detail(self) -> None:
         detail = _detail(display_title="New Title")
         service = AsyncMock()
@@ -213,6 +241,63 @@ class TestPatchAsset:
             library_service=service,
         )
         assert response.content is detail
+
+
+class TestBulkApply:
+    async def test_success_returns_result(self) -> None:
+        ref = "upload:x"
+        result = BulkOperationResult(
+            op="set_favorite",
+            results=[BulkOperationItemResult(asset_ref=ref, success=True)],
+            succeeded=1,
+            failed=0,
+        )
+        service = AsyncMock()
+        service.bulk_apply.return_value = result
+
+        response = await LibraryController.bulk_apply.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            data=BulkDelete(asset_refs=[ref]),
+            session=MagicMock(),
+            library_service=service,
+            content_proxy=MagicMock(),
+        )
+        assert response.content is result
+
+    async def test_invalid_refs_returns_400(self) -> None:
+        service = AsyncMock()
+        service.bulk_apply.side_effect = LibraryBulkValidationError(["upload:bogus"])
+
+        response = await LibraryController.bulk_apply.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            data=BulkDelete(asset_refs=["upload:bogus"]),
+            session=MagicMock(),
+            library_service=service,
+            content_proxy=MagicMock(),
+        )
+        assert response.status_code == HTTP_400_BAD_REQUEST
+        assert response.content.error == "invalid_asset_refs"
+        assert response.content.detail == {"invalid_refs": ["upload:bogus"]}
+
+    async def test_unknown_project_id_returns_404(self) -> None:
+        service = AsyncMock()
+        service.bulk_apply.side_effect = LibraryProjectNotFoundError(uuid4())
+
+        response = await LibraryController.bulk_apply.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            data=BulkDelete(asset_refs=["upload:x"]),
+            session=MagicMock(),
+            library_service=service,
+            content_proxy=MagicMock(),
+        )
+        assert response.status_code == HTTP_404_NOT_FOUND
+        assert response.content.error == "not_found"
 
 
 class TestFavoriteIdempotency:
