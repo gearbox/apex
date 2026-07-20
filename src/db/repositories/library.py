@@ -9,6 +9,7 @@ constant, so a single keyset cursor can page across both tables in a stable
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -34,19 +35,31 @@ from sqlalchemy.sql import Select
 from sqlalchemy.sql import union_all as sa_union_all
 
 from src.core.enums import JobStatus, LibrarySort, OutputMediaType
-from src.core.library_ref import LibraryAssetSource
+from src.core.library_ref import AssetRef, LibraryAssetSource
 from src.core.uid import new_id
 from src.db.models.library import LibraryAssetMetadata
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import datetime
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
+
+# Window used by the ``expiring`` filter / ``expiring_soon`` sort (P6).
+_EXPIRING_SOON_WINDOW = timedelta(days=7)
+
+
+def _escape_like_term(term: str) -> str:
+    """Escape LIKE metacharacters so user search input is matched literally.
+
+    Order matters: the escape character itself must be escaped first, or a
+    literal backslash in the input would be mis-paired with the escaping of
+    ``%``/``_`` that follows.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class _UnsetUpdate:
@@ -86,6 +99,7 @@ class LibraryAssetRow:
     generation_type: str | None
     display_title: str | None
     is_favorite: bool
+    project_id: UUID | None
 
 
 class LibraryRepository:
@@ -109,6 +123,9 @@ class LibraryRepository:
         media_type: OutputMediaType | None = None,
         model: str | None = None,
         favorite: bool | None = None,
+        project_id: UUID | None = None,
+        expiring: bool | None = None,
+        query: str | None = None,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
         sort: LibrarySort = LibrarySort.NEWEST,
@@ -122,17 +139,26 @@ class LibraryRepository:
             user_id: Owner of the assets.
             product_id: Product scope.
             limit: Page size (fetches limit+1 internally).
-            cursor: ``(created_at, source, id)`` of the last item on the
-                previous page — see ``schemas.pagination.decode_library_cursor``.
+            cursor: ``(created_at_or_expires_at, source, id)`` of the last
+                item on the previous page — see
+                ``schemas.pagination.decode_library_cursor``. The first
+                component is ``expires_at`` when ``sort=EXPIRING_SOON``,
+                otherwise ``created_at``.
             source: Restrict to a single source table.
             media_type: Filter to image or video content types.
             model: Filter to a specific generation model. Implies
                 ``source=OUTPUT`` semantics — uploads never match a model
                 filter and are excluded from the branch set entirely.
             favorite: Filter to favorited (True) or non-favorited (False) assets.
+            project_id: Filter to assets assigned to this project.
+            expiring: Filter to assets expiring within (True) or beyond
+                (False) the ``expiring_soon`` window (P6, 7 days).
+            query: Case-insensitive substring search over display_title,
+                original_filename (uploads), and the owning job's prompt
+                (outputs). Escaped before use — never interpolated raw.
             created_from: Lower bound (inclusive) on ``created_at``.
             created_to: Upper bound (inclusive) on ``created_at``.
-            sort: ``newest`` (default) or ``oldest``.
+            sort: ``newest`` (default), ``oldest``, or ``expiring_soon``.
 
         Returns:
             Sequence of LibraryAssetRow, ordered per ``sort``.
@@ -143,6 +169,9 @@ class LibraryRepository:
         if cursor is not None:
             cursor_ts, cursor_source_raw, cursor_id = cursor
             cursor_rank = _SOURCE_RANK[LibraryAssetSource(cursor_source_raw)]
+
+        expiring_threshold = datetime.now(UTC) + _EXPIRING_SOON_WINDOW
+        search_term = _escape_like_term(query) if query else None
 
         include_upload = model is None and source in (None, LibraryAssetSource.UPLOAD)
         include_output = source in (None, LibraryAssetSource.OUTPUT)
@@ -155,6 +184,10 @@ class LibraryRepository:
                     product_id,
                     media_type=media_type,
                     favorite=favorite,
+                    project_id=project_id,
+                    expiring=expiring,
+                    expiring_threshold=expiring_threshold,
+                    search_term=search_term,
                     created_from=created_from,
                     created_to=created_to,
                     cursor_ts=cursor_ts,
@@ -171,6 +204,10 @@ class LibraryRepository:
                     media_type=media_type,
                     model=model,
                     favorite=favorite,
+                    project_id=project_id,
+                    expiring=expiring,
+                    expiring_threshold=expiring_threshold,
+                    search_term=search_term,
                     created_from=created_from,
                     created_to=created_to,
                     cursor_ts=cursor_ts,
@@ -186,11 +223,12 @@ class LibraryRepository:
         union_query = sa_union_all(*branches) if len(branches) > 1 else branches[0]
         subq = union_query.subquery()
 
-        order_cols = (
-            (subq.c.created_at.desc(), subq.c.source_rank.desc(), subq.c.id.desc())
-            if sort == LibrarySort.NEWEST
-            else (subq.c.created_at.asc(), subq.c.source_rank.asc(), subq.c.id.asc())
-        )
+        if sort == LibrarySort.NEWEST:
+            order_cols = (subq.c.created_at.desc(), subq.c.source_rank.desc(), subq.c.id.desc())
+        elif sort == LibrarySort.OLDEST:
+            order_cols = (subq.c.created_at.asc(), subq.c.source_rank.asc(), subq.c.id.asc())
+        else:
+            order_cols = (subq.c.expires_at.asc(), subq.c.source_rank.asc(), subq.c.id.asc())
         final_query = select(subq).order_by(*order_cols).limit(limit + 1)
 
         result = await self._session.execute(final_query)
@@ -212,6 +250,7 @@ class LibraryRepository:
                 generation_type=row["generation_type"],
                 display_title=row["display_title"],
                 is_favorite=bool(row["is_favorite"]),
+                project_id=row["project_id"],
             )
             for row in rows
         ]
@@ -223,6 +262,10 @@ class LibraryRepository:
         *,
         media_type: OutputMediaType | None,
         favorite: bool | None,
+        project_id: UUID | None,
+        expiring: bool | None,
+        expiring_threshold: datetime,
+        search_term: str | None,
         created_from: datetime | None,
         created_to: datetime | None,
         cursor_ts: datetime | None,
@@ -255,6 +298,7 @@ class LibraryRepository:
                 cast(null(), String(20)).label("generation_type"),
                 LibraryAssetMetadata.display_title.label("display_title"),
                 func.coalesce(LibraryAssetMetadata.is_favorite, false()).label("is_favorite"),
+                LibraryAssetMetadata.project_id.label("project_id"),
                 literal(rank).label("source_rank"),
             )
             .outerjoin(LibraryAssetMetadata, meta_join_cond)
@@ -275,17 +319,36 @@ class LibraryRepository:
         elif favorite is False:
             query = query.where(func.coalesce(LibraryAssetMetadata.is_favorite, false()).is_(False))
 
+        if project_id is not None:
+            query = query.where(LibraryAssetMetadata.project_id == project_id)
+
+        if expiring is True:
+            query = query.where(UserImage.expires_at <= expiring_threshold)
+        elif expiring is False:
+            query = query.where(UserImage.expires_at > expiring_threshold)
+
+        if search_term is not None:
+            pattern = f"%{search_term}%"
+            query = query.where(
+                or_(
+                    UserImage.original_filename.ilike(pattern, escape="\\"),
+                    LibraryAssetMetadata.display_title.ilike(pattern, escape="\\"),
+                )
+            )
+
         if created_from is not None:
             query = query.where(UserImage.created_at >= created_from)
         if created_to is not None:
             query = query.where(UserImage.created_at <= created_to)
 
         if cursor_ts is not None and cursor_rank is not None and cursor_id is not None:
-            current = tuple_(UserImage.created_at, literal(rank), UserImage.id)
-            cursor_tuple = tuple_(literal(cursor_ts), literal(cursor_rank), literal(cursor_id))
-            query = query.where(
-                current < cursor_tuple if sort == LibrarySort.NEWEST else current > cursor_tuple
+            ts_col = (
+                UserImage.expires_at if sort == LibrarySort.EXPIRING_SOON else UserImage.created_at
             )
+            ascending = sort in (LibrarySort.OLDEST, LibrarySort.EXPIRING_SOON)
+            current = tuple_(ts_col, literal(rank), UserImage.id)
+            cursor_tuple = tuple_(literal(cursor_ts), literal(cursor_rank), literal(cursor_id))
+            query = query.where(current > cursor_tuple if ascending else current < cursor_tuple)
 
         return query
 
@@ -297,6 +360,10 @@ class LibraryRepository:
         media_type: OutputMediaType | None,
         model: str | None,
         favorite: bool | None,
+        project_id: UUID | None,
+        expiring: bool | None,
+        expiring_threshold: datetime,
+        search_term: str | None,
         created_from: datetime | None,
         created_to: datetime | None,
         cursor_ts: datetime | None,
@@ -329,6 +396,7 @@ class LibraryRepository:
                 GenerationJob.generation_type.label("generation_type"),
                 LibraryAssetMetadata.display_title.label("display_title"),
                 func.coalesce(LibraryAssetMetadata.is_favorite, false()).label("is_favorite"),
+                LibraryAssetMetadata.project_id.label("project_id"),
                 literal(rank).label("source_rank"),
             )
             .join(GenerationJob, GenerationJob.id == GenerationOutput.job_id)
@@ -355,17 +423,38 @@ class LibraryRepository:
         elif favorite is False:
             query = query.where(func.coalesce(LibraryAssetMetadata.is_favorite, false()).is_(False))
 
+        if project_id is not None:
+            query = query.where(LibraryAssetMetadata.project_id == project_id)
+
+        if expiring is True:
+            query = query.where(GenerationOutput.expires_at <= expiring_threshold)
+        elif expiring is False:
+            query = query.where(GenerationOutput.expires_at > expiring_threshold)
+
+        if search_term is not None:
+            pattern = f"%{search_term}%"
+            query = query.where(
+                or_(
+                    GenerationJob.prompt.ilike(pattern, escape="\\"),
+                    LibraryAssetMetadata.display_title.ilike(pattern, escape="\\"),
+                )
+            )
+
         if created_from is not None:
             query = query.where(GenerationOutput.created_at >= created_from)
         if created_to is not None:
             query = query.where(GenerationOutput.created_at <= created_to)
 
         if cursor_ts is not None and cursor_rank is not None and cursor_id is not None:
-            current = tuple_(GenerationOutput.created_at, literal(rank), GenerationOutput.id)
-            cursor_tuple = tuple_(literal(cursor_ts), literal(cursor_rank), literal(cursor_id))
-            query = query.where(
-                current < cursor_tuple if sort == LibrarySort.NEWEST else current > cursor_tuple
+            ts_col = (
+                GenerationOutput.expires_at
+                if sort == LibrarySort.EXPIRING_SOON
+                else GenerationOutput.created_at
             )
+            ascending = sort in (LibrarySort.OLDEST, LibrarySort.EXPIRING_SOON)
+            current = tuple_(ts_col, literal(rank), GenerationOutput.id)
+            cursor_tuple = tuple_(literal(cursor_ts), literal(cursor_rank), literal(cursor_id))
+            query = query.where(current > cursor_tuple if ascending else current < cursor_tuple)
 
         return query
 
@@ -503,12 +592,15 @@ class LibraryRepository:
         *,
         is_favorite: OptionalUpdate[bool] = UNSET_UPDATE,
         display_title: OptionalUpdate[str | None] = UNSET_UPDATE,
+        project_id: OptionalUpdate[UUID | None] = UNSET_UPDATE,
     ) -> LibraryAssetMetadata:
         """Race-safe lazy create-or-update of a library_asset_metadata row.
 
         Ownership of the underlying asset must be verified by the caller
         BEFORE calling this — this method only enforces the DB-level
-        uniqueness of (product_id, user_id, asset_type, asset_id).
+        uniqueness of (product_id, user_id, asset_type, asset_id). Likewise,
+        ownership of ``project_id`` (if provided) must be verified by the
+        caller (P8) — this method does not re-check it.
 
         Args:
             user_id: Owner.
@@ -520,18 +612,24 @@ class LibraryRepository:
             display_title: New display title (``None`` clears it), or
                 ``UNSET_UPDATE`` to leave unchanged (defaults to ``None`` on
                 first insert).
+            project_id: New project assignment (``None`` unassigns), or
+                ``UNSET_UPDATE`` to leave unchanged (defaults to ``None`` on
+                first insert).
 
         Returns:
             The resulting LibraryAssetMetadata row.
         """
         insert_is_favorite = False if isinstance(is_favorite, _UnsetUpdate) else is_favorite
         insert_display_title = None if isinstance(display_title, _UnsetUpdate) else display_title
+        insert_project_id = None if isinstance(project_id, _UnsetUpdate) else project_id
 
         update_values: dict[str, object] = {"updated_at": text("CURRENT_TIMESTAMP")}
         if not isinstance(is_favorite, _UnsetUpdate):
             update_values["is_favorite"] = is_favorite
         if not isinstance(display_title, _UnsetUpdate):
             update_values["display_title"] = display_title
+        if not isinstance(project_id, _UnsetUpdate):
+            update_values["project_id"] = project_id
 
         stmt = (
             pg_insert(LibraryAssetMetadata)
@@ -543,6 +641,7 @@ class LibraryRepository:
                 asset_id=asset_id,
                 is_favorite=insert_is_favorite,
                 display_title=insert_display_title,
+                project_id=insert_project_id,
             )
             .on_conflict_do_update(
                 constraint="uq_library_asset_metadata_asset",
@@ -555,6 +654,95 @@ class LibraryRepository:
         row = result.scalar_one()
         await self._session.flush()
         return row
+
+    async def bulk_set_favorite(
+        self,
+        user_id: UUID,
+        product_id: str,
+        refs: Sequence[AssetRef],
+        value: bool,
+    ) -> None:
+        """Set the favorite flag on a batch of assets in a single statement.
+
+        Race-safe lazy create-or-update, same semantics as
+        ``upsert_metadata`` but for many assets in one round trip — a
+        single multi-row ``INSERT ... ON CONFLICT DO UPDATE``, never a
+        per-ref loop. Ownership of every ref must already be verified by
+        the caller (see LibraryService.bulk_apply / P5).
+
+        Uniqueness of ``refs`` (no duplicate (source, asset_id) pairs) must
+        also already be guaranteed by the caller — a duplicate here would
+        make the multi-row VALUES list affect the same conflict target
+        twice, which PostgreSQL rejects with a CardinalityViolationError.
+        Single source of truth for dedup is LibraryService.bulk_apply; do
+        NOT add a second dedup pass here.
+        """
+        if not refs:
+            return
+
+        rows = [
+            {
+                "id": new_id(),
+                "product_id": product_id,
+                "user_id": user_id,
+                "asset_type": ref.source.value,
+                "asset_id": ref.asset_id,
+                "is_favorite": value,
+            }
+            for ref in refs
+        ]
+        stmt = (
+            pg_insert(LibraryAssetMetadata)
+            .values(rows)
+            .on_conflict_do_update(
+                constraint="uq_library_asset_metadata_asset",
+                set_={"is_favorite": value, "updated_at": text("CURRENT_TIMESTAMP")},
+            )
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
+
+    async def bulk_set_project(
+        self,
+        user_id: UUID,
+        product_id: str,
+        refs: Sequence[AssetRef],
+        project_id: UUID | None,
+    ) -> None:
+        """Assign (or unassign, if ``project_id`` is None) a batch of assets to a project.
+
+        Same single-statement bulk-upsert shape as ``bulk_set_favorite``.
+        Existence/ownership of ``project_id`` itself must already be
+        verified by the caller (P8) — this method does not re-check it.
+
+        Uniqueness of ``refs`` must also already be guaranteed by the
+        caller, same reasoning as ``bulk_set_favorite`` — do NOT add a
+        second dedup pass here.
+        """
+        if not refs:
+            return
+
+        rows = [
+            {
+                "id": new_id(),
+                "product_id": product_id,
+                "user_id": user_id,
+                "asset_type": ref.source.value,
+                "asset_id": ref.asset_id,
+                "project_id": project_id,
+            }
+            for ref in refs
+        ]
+        stmt = (
+            pg_insert(LibraryAssetMetadata)
+            .values(rows)
+            .on_conflict_do_update(
+                constraint="uq_library_asset_metadata_asset",
+                set_={"project_id": project_id, "updated_at": text("CURRENT_TIMESTAMP")},
+            )
+        )
+        await self._session.execute(stmt)
+        await self._session.flush()
 
     async def delete_metadata_for_assets(self, pairs: Sequence[tuple[str, UUID]]) -> int:
         """Bulk-delete metadata rows matching (asset_type, asset_id) pairs.

@@ -108,6 +108,33 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         """
         return await self._get_with_optional_owner(output_id, user_id=user_id)
 
+    async def get_many(
+        self,
+        ids: Sequence[UUID],
+        *,
+        user_id: UUID,
+    ) -> dict[UUID, GenerationOutput]:
+        """Batch-fetch outputs by ID, ownership-scoped.
+
+        Args:
+            ids: Output IDs to look up.
+            user_id: Owner — rows of other users are excluded.
+
+        Returns:
+            Mapping from id to GenerationOutput for rows that exist and
+            are owned by ``user_id``. Missing/foreign ids are simply
+            absent from the result (caller decides how to handle misses).
+        """
+        if not ids:
+            return {}
+
+        result = await self._session.execute(
+            select(GenerationOutput).where(
+                GenerationOutput.id.in_(ids), GenerationOutput.user_id == user_id
+            )
+        )
+        return {output.id: output for output in result.scalars().all()}
+
     async def list_by_job(self, job_id: UUID) -> Sequence[GenerationOutput]:
         """List full (non-thumbnail) outputs for a job, ordered by output_index.
 

@@ -14,6 +14,11 @@ import msgspec
 import structlog
 
 from src.api.schemas.library import (
+    BulkDelete,
+    BulkOperationItemResult,
+    BulkOperationResult,
+    BulkSetFavorite,
+    BulkSetProject,
     LibraryAssetDetail,
     LibraryAssetItem,
     LibraryAssetPatch,
@@ -38,7 +43,8 @@ from src.core.enums import (
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.core.thumbnails import label_for_max_edge
 from src.db.repositories.job import JobRepository
-from src.db.repositories.library import LibraryRepository
+from src.db.repositories.library import UNSET_UPDATE, LibraryRepository, _UnsetUpdate
+from src.db.repositories.library_project import LibraryProjectRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
@@ -49,6 +55,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.schemas.library import BulkOperation
     from src.api.services.content_proxy import ContentProxyService
     from src.core.product import ProductConfig
     from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
@@ -59,6 +66,27 @@ logger = structlog.get_logger(__name__)
 
 class LibraryValidationError(Exception):
     """Raised when a library asset patch fails validation."""
+
+
+class LibraryProjectNotFoundError(Exception):
+    """Raised when a patch/bulk op references a project_id that doesn't exist / isn't owned. → HTTP 404"""
+
+    def __init__(self, project_id: UUID) -> None:
+        self.project_id = project_id
+        super().__init__(f"Project {project_id} not found")
+
+
+class LibraryBulkValidationError(Exception):
+    """Raised when one or more asset_refs in a bulk op are malformed/missing/unowned. → HTTP 400
+
+    Per P5, this always covers the whole batch: validation runs for every
+    ref before anything executes, so ``invalid_refs`` lists every offender
+    at once rather than failing fast on the first one.
+    """
+
+    def __init__(self, invalid_refs: Sequence[str]) -> None:
+        self.invalid_refs = list(invalid_refs)
+        super().__init__(f"{len(self.invalid_refs)} invalid asset_ref(s): {self.invalid_refs}")
 
 
 class LibraryService:
@@ -84,6 +112,9 @@ class LibraryService:
         media_type: OutputMediaType | None = None,
         model: str | None = None,
         favorite: bool | None = None,
+        project_id: UUID | None = None,
+        expiring: bool | None = None,
+        query: str | None = None,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
         sort: LibrarySort = LibrarySort.NEWEST,
@@ -101,19 +132,27 @@ class LibraryService:
             media_type: Optional media type filter.
             model: Optional model filter (implies output-only).
             favorite: Optional favorite filter.
+            project_id: Optional filter to assets assigned to this project.
+            expiring: Optional filter to assets expiring within (True) or
+                beyond (False) the expiring-soon window.
+            query: Optional case-insensitive substring search over
+                display_title / original_filename / prompt.
             created_from: Optional lower bound on created_at.
             created_to: Optional upper bound on created_at.
-            sort: newest (default) or oldest.
+            sort: newest (default), oldest, or expiring_soon.
 
         Returns:
             CursorPage of LibraryAssetItem.
 
         Raises:
-            ValueError: If ``cursor`` is malformed.
+            ValueError: If ``cursor`` is malformed or was created under a
+                different sort.
         """
         repo = LibraryRepository(session)
 
-        decoded_cursor = decode_library_cursor(cursor) if cursor is not None else None
+        decoded_cursor = (
+            decode_library_cursor(cursor, expected_sort=sort.value) if cursor is not None else None
+        )
 
         rows = await repo.list_assets(
             user_id,
@@ -124,6 +163,9 @@ class LibraryService:
             media_type=media_type,
             model=model,
             favorite=favorite,
+            project_id=project_id,
+            expiring=expiring,
+            query=query,
             created_from=created_from,
             created_to=created_to,
             sort=sort,
@@ -143,6 +185,11 @@ class LibraryService:
         job_ids = list({r.job_id for r in page_rows if r.job_id is not None})
         output_counts = await repo.batch_output_counts(job_ids)
 
+        project_ids = list({r.project_id for r in page_rows if r.project_id is not None})
+        project_names = await LibraryProjectRepository(session).batch_names(
+            project_ids, user_id=user_id, product_id=product_id
+        )
+
         items = [
             self._build_item_from_row(
                 row,
@@ -153,6 +200,7 @@ class LibraryService:
                 ),
                 output_count=(output_counts.get(row.job_id, 0) if row.job_id is not None else None),
                 product_config=product_config,
+                project_names=project_names,
             )
             for row in page_rows
         ]
@@ -160,7 +208,10 @@ class LibraryService:
         next_cursor: str | None = None
         if has_more and page_rows:
             last = page_rows[-1]
-            next_cursor = encode_library_cursor(last.created_at, last.source.value, last.id)
+            last_ts = last.expires_at if sort == LibrarySort.EXPIRING_SOON else last.created_at
+            next_cursor = encode_library_cursor(
+                last_ts, last.source.value, last.id, sort=sort.value
+            )
 
         logger.info(
             "library.list",
@@ -169,6 +220,9 @@ class LibraryService:
             count=len(items),
             has_more=has_more,
         )
+        if query is not None:
+            # Search terms are user content — never logged verbatim, length only.
+            logger.info("library.search", user_id=str(user_id), query_length=len(query))
 
         return CursorPage(items=items, limit=limit, has_more=has_more, next_cursor=next_cursor)
 
@@ -179,6 +233,7 @@ class LibraryService:
         derivatives: Sequence[GenerationOutput | UserImage],
         output_count: int | None,
         product_config: ProductConfig,
+        project_names: dict[UUID, str],
     ) -> LibraryAssetItem:
         media = _build_media_object(
             source=row.source,
@@ -213,6 +268,8 @@ class LibraryService:
             if row.generation_type is not None
             else None,
             available_actions=actions,
+            project_id=row.project_id,
+            project_name=project_names.get(row.project_id) if row.project_id is not None else None,
         )
 
     # -------------------------------------------------------------------------
@@ -253,6 +310,8 @@ class LibraryService:
 
         repo = LibraryRepository(session)
         metadata = await repo.get_metadata(user_id, product_id, LibraryAssetSource.UPLOAD, image.id)
+        project_id = metadata.project_id if metadata is not None else None
+        project_name = await self._resolve_project_name(project_id, user_id, product_id, session)
         derivatives = await image_repo.list_derivatives(image.id)
 
         media = _build_media_object(
@@ -267,7 +326,9 @@ class LibraryService:
 
         lineage: LibraryLineage | None = None
         if image.source_output_id is not None:
-            source_output = await OutputRepository(session).get(image.source_output_id)
+            source_output = await OutputRepository(session).get(
+                image.source_output_id, user_id=user_id
+            )
             source_ref = (
                 format_asset_ref(LibraryAssetSource.OUTPUT, source_output.id)
                 if source_output is not None
@@ -311,6 +372,8 @@ class LibraryService:
             model=None,
             generation_type=None,
             available_actions=actions,
+            project_id=project_id,
+            project_name=project_name,
             prompt=None,
             negative_prompt=None,
             provider=None,
@@ -342,6 +405,8 @@ class LibraryService:
         metadata = await repo.get_metadata(
             user_id, product_id, LibraryAssetSource.OUTPUT, output.id
         )
+        project_id = metadata.project_id if metadata is not None else None
+        project_name = await self._resolve_project_name(project_id, user_id, product_id, session)
         derivatives = await output_repo.list_derivatives(output.id)
 
         media = _build_media_object(
@@ -379,6 +444,8 @@ class LibraryService:
             model=job.model,
             generation_type=GenerationType(job.generation_type),
             available_actions=actions,
+            project_id=project_id,
+            project_name=project_name,
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
             provider=job.provider,
@@ -388,6 +455,21 @@ class LibraryService:
             lineage=None,
             descendants=LibraryDescendants(job_count=job_count, frame_count=frame_count),
         )
+
+    @staticmethod
+    async def _resolve_project_name(
+        project_id: UUID | None,
+        user_id: UUID,
+        product_id: str,
+        session: AsyncSession,
+    ) -> str | None:
+        """Resolve a single project's name, if assigned. None short-circuits with no query."""
+        if project_id is None:
+            return None
+        names = await LibraryProjectRepository(session).batch_names(
+            [project_id], user_id=user_id, product_id=product_id
+        )
+        return names.get(project_id)
 
     # -------------------------------------------------------------------------
     # Mutations
@@ -437,9 +519,11 @@ class LibraryService:
     ) -> LibraryAssetDetail | None:
         """Apply a partial update to an asset's mutable metadata.
 
-        Phase 1 supports ``display_title`` only (tri-state: absent = no-op,
-        ``null`` = clear, string = set — validated to <=255 chars, stripped,
-        empty string normalized to ``None``).
+        Supports ``display_title`` (tri-state: absent = no-op, ``null`` =
+        clear, string = set — validated to <=255 chars, stripped, empty
+        string normalized to ``None``) and ``project_id`` (tri-state:
+        absent = no-op, ``null`` = unassign, UUID = assign — the referenced
+        project must be owned by ``user_id`` under ``product_id``, P8).
 
         Returns:
             Updated LibraryAssetDetail, or None if the asset doesn't exist /
@@ -447,6 +531,8 @@ class LibraryService:
 
         Raises:
             LibraryValidationError: If ``display_title`` fails validation.
+            LibraryProjectNotFoundError: If ``project_id`` doesn't exist /
+                isn't owned by ``user_id``.
         """
         try:
             ref = parse_asset_ref(asset_ref)
@@ -456,10 +542,32 @@ class LibraryService:
         if not await self._asset_exists(ref, user_id, product_id, session):
             return None
 
+        # Validate-then-mutate: both tri-state fields are validated up front
+        # (may raise before any DB write) so a project_id 404 never leaves a
+        # display_title change applied — see M2. The two updates are then
+        # combined into a single upsert_metadata call / log event rather than
+        # two sequential ones.
+        display_title_update: OptionalUpdate[str | None] = UNSET_UPDATE
         if patch.display_title is not msgspec.UNSET:
-            display_title_update: OptionalUpdate[str | None] = self._normalize_display_title(
-                patch.display_title
-            )
+            display_title_update = self._normalize_display_title(patch.display_title)
+
+        project_id_update: OptionalUpdate[UUID | None] = UNSET_UPDATE
+        if patch.project_id is not msgspec.UNSET:
+            if patch.project_id is not None:
+                project = await LibraryProjectRepository(session).get(
+                    patch.project_id, user_id=user_id, product_id=product_id
+                )
+                if project is None:
+                    raise LibraryProjectNotFoundError(patch.project_id)
+            project_id_update = patch.project_id
+
+        changed_fields: list[str] = []
+        if not isinstance(display_title_update, _UnsetUpdate):
+            changed_fields.append("display_title")
+        if not isinstance(project_id_update, _UnsetUpdate):
+            changed_fields.append("project_id")
+
+        if changed_fields:
             repo = LibraryRepository(session)
             await repo.upsert_metadata(
                 user_id,
@@ -467,8 +575,14 @@ class LibraryService:
                 ref.source,
                 ref.asset_id,
                 display_title=display_title_update,
+                project_id=project_id_update,
             )
-            logger.info("library.metadata_patched", asset_ref=asset_ref, user_id=str(user_id))
+            logger.info(
+                "library.metadata_patched",
+                asset_ref=asset_ref,
+                user_id=str(user_id),
+                fields=changed_fields,
+            )
 
         return await self.get_asset_detail(
             asset_ref, user_id, product_id, product_config, session=session
@@ -492,12 +606,28 @@ class LibraryService:
         session: AsyncSession,
         content_proxy: ContentProxyService,
     ) -> bool:
-        """Delete a library asset via ContentProxyService, then purge its metadata.
+        """Purge the asset's metadata, then delete it via ContentProxyService.
 
         A typed pre-check (fetch by the ref's declared source) runs before
         delegating to ``ContentProxyService.delete_content`` — a malformed
         claim (ref says upload but the id belongs to an output) is treated
         as not-found rather than falling through to the other table.
+
+        The metadata purge is flushed BEFORE ``delete_content`` so it rides
+        in the same commit as the content-row delete — ``delete_content``
+        commits internally before its best-effort R2 cleanup, and a purge
+        issued after that commit would run in a second transaction whose
+        failure could leak the metadata row forever (mirrors
+        ``ContentRetentionService._purge_metadata``). If ``delete_content``
+        then raises ``ContentNotFoundError`` (race: asset vanished between
+        the pre-check and delegation), this method rolls the session back
+        itself before returning — ``delete_asset`` swallows the exception
+        to preserve its bool-return contract (bulk delete needs a per-ref
+        result, not an abort), so the DI session provider's own
+        rollback-on-exception never triggers here; without an explicit
+        rollback the flushed purge would ride along on the next unrelated
+        commit. The metadata row survives unless the concurrent deleter
+        already purged it too.
 
         Returns:
             True if deleted; False if not found / not owned.
@@ -510,6 +640,9 @@ class LibraryService:
         if not await self._asset_exists(ref, user_id, product_id, session):
             return False
 
+        repo = LibraryRepository(session)
+        await repo.delete_metadata_for_assets([(ref.source.value, ref.asset_id)])
+
         try:
             await content_proxy.delete_content(
                 ref.asset_id,
@@ -518,11 +651,8 @@ class LibraryService:
                 session=session,
             )
         except ContentNotFoundError:
+            await session.rollback()
             return False
-
-        repo = LibraryRepository(session)
-        await repo.delete_metadata_for_assets([(ref.source.value, ref.asset_id)])
-        await session.commit()
 
         logger.info(
             "library.asset_deleted",
@@ -544,6 +674,171 @@ class LibraryService:
             return image is not None and image.product_id == product_id and not image.is_thumbnail
         output = await OutputRepository(session).get(ref.asset_id, user_id=user_id)
         return output is not None and output.product_id == product_id and not output.is_thumbnail
+
+    # -------------------------------------------------------------------------
+    # Bulk operations (P4/P5)
+    # -------------------------------------------------------------------------
+
+    async def bulk_apply(
+        self,
+        op: BulkOperation,
+        user_id: UUID,
+        product_id: str,
+        *,
+        session: AsyncSession,
+        content_proxy: ContentProxyService,
+    ) -> BulkOperationResult:
+        """Execute a bulk operation across up to 100 asset_refs.
+
+        Per P5, every ref is parsed and ownership-validated BEFORE anything
+        executes — a single bad ref fails the whole request with
+        ``LibraryBulkValidationError`` (→ 400 listing every offender), never
+        a silent partial skip. Once validation passes, favorite/project
+        assignment run as one bulk statement each (single transaction);
+        delete reuses ``delete_asset`` per ref (O(n) R2 calls, bounded by
+        the 100-ref cap) since it already handles the DB-first/R2-best-effort
+        ordering and per-asset commit.
+
+        Idempotency: favorite/project bulk ops are naturally idempotent —
+        replaying the same request converges to the same end state, so no
+        Idempotency-Key handling is wired here. Bulk delete is idempotent up
+        to the point an asset is actually gone: retrying after a partial
+        client-side failure re-validates and, for any ref already deleted,
+        surfaces it as a 400 in ``invalid_refs`` (not silently ignored) —
+        an explicit signal rather than the ambiguous both-outcomes-look-the-same
+        behavior a shared create-once IdempotencyService is built around.
+
+        Duplicate refs (by parsed identity, so mixed-case UUID duplicates
+        collapse too) are silently collapsed to their first occurrence right
+        after parsing — this is not a P5 "skip" since the operation on that
+        asset still executes exactly once; it just preserves the advertised
+        idempotent semantics instead of hitting a multi-row ``ON CONFLICT``
+        cardinality violation. ``results`` (and the ``library.bulk_applied``
+        count) reflect unique assets only.
+
+        Raises:
+            LibraryBulkValidationError: If any asset_ref is malformed,
+                missing, not owned, or belongs to a different product.
+            LibraryProjectNotFoundError: If a ``set_project`` op's
+                ``project_id`` doesn't exist / isn't owned by ``user_id``.
+        """
+        parsed: list[AssetRef] = []
+        malformed: list[str] = []
+        for raw in op.asset_refs:
+            try:
+                parsed.append(parse_asset_ref(raw))
+            except ValueError:
+                malformed.append(raw)
+        if malformed:
+            raise LibraryBulkValidationError(malformed)
+
+        seen: set[tuple[LibraryAssetSource, UUID]] = set()
+        deduped: list[AssetRef] = []
+        for ref in parsed:
+            key = (ref.source, ref.asset_id)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(ref)
+        parsed = deduped
+
+        invalid = await self._validate_refs(parsed, user_id, product_id, session)
+        if invalid:
+            raise LibraryBulkValidationError(
+                [format_asset_ref(r.source, r.asset_id) for r in invalid]
+            )
+
+        if isinstance(op, BulkSetProject) and op.project_id is not None:
+            project = await LibraryProjectRepository(session).get(
+                op.project_id, user_id=user_id, product_id=product_id
+            )
+            if project is None:
+                raise LibraryProjectNotFoundError(op.project_id)
+
+        if isinstance(op, BulkSetFavorite):
+            op_name = "set_favorite"
+            await LibraryRepository(session).bulk_set_favorite(
+                user_id, product_id, parsed, op.value
+            )
+            results = [
+                BulkOperationItemResult(
+                    asset_ref=format_asset_ref(r.source, r.asset_id), success=True
+                )
+                for r in parsed
+            ]
+        elif isinstance(op, BulkSetProject):
+            op_name = "set_project"
+            await LibraryRepository(session).bulk_set_project(
+                user_id, product_id, parsed, op.project_id
+            )
+            results = [
+                BulkOperationItemResult(
+                    asset_ref=format_asset_ref(r.source, r.asset_id), success=True
+                )
+                for r in parsed
+            ]
+        else:
+            assert isinstance(op, BulkDelete)  # noqa: S101 — exhaustiveness over the tagged union
+            op_name = "delete"
+            results = []
+            for r in parsed:
+                ref_str = format_asset_ref(r.source, r.asset_id)
+                deleted = await self.delete_asset(
+                    ref_str, user_id, product_id, session=session, content_proxy=content_proxy
+                )
+                results.append(BulkOperationItemResult(asset_ref=ref_str, success=deleted))
+
+        succeeded = sum(1 for r in results if r.success)
+        logger.info(
+            "library.bulk_applied",
+            op=op_name,
+            user_id=str(user_id),
+            count=len(parsed),
+            succeeded=succeeded,
+        )
+        return BulkOperationResult(
+            op=op_name,
+            results=results,
+            succeeded=succeeded,
+            failed=len(results) - succeeded,
+        )
+
+    async def _validate_refs(
+        self,
+        refs: Sequence[AssetRef],
+        user_id: UUID,
+        product_id: str,
+        session: AsyncSession,
+    ) -> list[AssetRef]:
+        """Return the subset of refs that are missing / not owned / wrong product / thumbnail.
+
+        Batched by source (at most 2 queries total, regardless of how many
+        refs are in the batch) rather than one existence check per ref.
+        """
+        upload_ids = [r.asset_id for r in refs if r.source == LibraryAssetSource.UPLOAD]
+        output_ids = [r.asset_id for r in refs if r.source == LibraryAssetSource.OUTPUT]
+
+        uploads = (
+            await UserImageRepository(session).get_many(upload_ids, user_id=user_id)
+            if upload_ids
+            else {}
+        )
+        outputs = (
+            await OutputRepository(session).get_many(output_ids, user_id=user_id)
+            if output_ids
+            else {}
+        )
+
+        invalid: list[AssetRef] = []
+        for ref in refs:
+            if ref.source == LibraryAssetSource.UPLOAD:
+                image = uploads.get(ref.asset_id)
+                if image is None or image.product_id != product_id or image.is_thumbnail:
+                    invalid.append(ref)
+            else:
+                output = outputs.get(ref.asset_id)
+                if output is None or output.product_id != product_id or output.is_thumbnail:
+                    invalid.append(ref)
+        return invalid
 
     # -------------------------------------------------------------------------
     # Group detail — ported from the now-removed GalleryService.get_gallery_detail.

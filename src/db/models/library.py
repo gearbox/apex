@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.core.uid import new_id
 from src.db.models.base import Base
 
-__all__ = ["LibraryAssetMetadata"]
+__all__ = ["LibraryAssetMetadata", "LibraryProject"]
 
 
 class LibraryAssetMetadata(Base):
@@ -61,6 +62,11 @@ class LibraryAssetMetadata(Base):
         default=False,
         server_default=text("false"),
     )
+    project_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("library_projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -92,6 +98,7 @@ class LibraryAssetMetadata(Base):
             "product_id",
             postgresql_where=text("is_favorite"),
         ),
+        Index("ix_library_asset_metadata_project", "project_id"),
     )
 
     def __repr__(self) -> str:
@@ -99,3 +106,55 @@ class LibraryAssetMetadata(Base):
             f"<LibraryAssetMetadata {self.id} user={self.user_id} "
             f"asset={self.asset_type}:{self.asset_id}>"
         )
+
+
+class LibraryProject(Base):
+    """User-created grouping for library assets.
+
+    P1: one project per asset (nullable FK on ``library_asset_metadata``) —
+    many-to-many membership is deferred. No ORM relationship is declared
+    to the metadata table; project membership is resolved via explicit,
+    batched repository queries (see LibraryProjectRepository), matching
+    the rest of the library read-model's no-lazy-load convention.
+    """
+
+    __tablename__ = "library_projects"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=new_id,
+    )
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_library_projects_owner_name",
+            "product_id",
+            "user_id",
+            text("lower(name)"),
+            unique=True,
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LibraryProject {self.id} user={self.user_id} name={self.name!r}>"
