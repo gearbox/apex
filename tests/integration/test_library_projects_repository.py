@@ -91,6 +91,78 @@ async def make_output(
     return _factory
 
 
+class TestBatchLookupScoping:
+    """L1 — batch_names/batch_asset_counts must be scoped to (user_id,
+    product_id), matching the module docstring's claim that every method
+    takes both. A foreign-owner project id must never resolve."""
+
+    async def test_batch_names_excludes_foreign_owner_project(
+        self,
+        project_repo: LibraryProjectRepository,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+    ) -> None:
+        owner = await make_user(email=f"batchnameowner-{uuid4().hex[:8]}@example.com")
+        other = await make_user(email=f"batchnameother-{uuid4().hex[:8]}@example.com")
+
+        owned = await project_repo.create(
+            user_id=owner.id, product_id="vex", name="Owned", description=None
+        )
+        foreign = await project_repo.create(
+            user_id=other.id, product_id="vex", name="Foreign", description=None
+        )
+
+        names = await project_repo.batch_names(
+            [owned.id, foreign.id], user_id=owner.id, product_id="vex"
+        )
+        assert names == {owned.id: "Owned"}
+
+    async def test_batch_names_excludes_foreign_product(
+        self,
+        project_repo: LibraryProjectRepository,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+    ) -> None:
+        user = await make_user(email=f"batchnameprod-{uuid4().hex[:8]}@example.com")
+        project = await project_repo.create(
+            user_id=user.id, product_id="vex", name="Vex Project", description=None
+        )
+
+        names = await project_repo.batch_names([project.id], user_id=user.id, product_id="synthara")
+        assert names == {}
+
+    async def test_batch_asset_counts_excludes_foreign_owner_metadata(
+        self,
+        project_repo: LibraryProjectRepository,
+        library_repo: LibraryRepository,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+    ) -> None:
+        owner = await make_user(email=f"batchcntowner-{uuid4().hex[:8]}@example.com")
+        other = await make_user(email=f"batchcntother-{uuid4().hex[:8]}@example.com")
+
+        # A project owned by `owner`, with a metadata row assigned to it
+        # from another user's asset — not something that should normally
+        # happen (project ownership is checked before assignment), but the
+        # count query must be scoped by (user_id, product_id) regardless of
+        # what rows exist, per the module docstring's structural guarantee.
+        project = await project_repo.create(
+            user_id=owner.id, product_id="vex", name="Owner Project", description=None
+        )
+        other_image = await make_user_image(user=other)
+        await library_repo.upsert_metadata(
+            other.id, "vex", LibraryAssetSource.UPLOAD, other_image.id, project_id=project.id
+        )
+
+        counts = await project_repo.batch_asset_counts(
+            [project.id], user_id=owner.id, product_id="vex"
+        )
+        assert counts == {}
+
+        counts_as_other = await project_repo.batch_asset_counts(
+            [project.id], user_id=other.id, product_id="vex"
+        )
+        assert counts_as_other == {project.id: 1}
+
+
 class TestProjectCRUDIsolation:
     async def test_create_and_get(
         self,

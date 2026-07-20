@@ -156,11 +156,19 @@ class LibraryProjectRepository:
         await self._session.flush()
         return True
 
-    async def batch_asset_counts(self, project_ids: Sequence[UUID]) -> dict[UUID, int]:
+    async def batch_asset_counts(
+        self,
+        project_ids: Sequence[UUID],
+        *,
+        user_id: UUID,
+        product_id: str,
+    ) -> dict[UUID, int]:
         """Count assets assigned to each of a batch of projects — one grouped query.
 
         Args:
             project_ids: Project ids appearing in the current page.
+            user_id: Owner scope.
+            product_id: Product scope.
 
         Returns:
             Mapping from project_id to asset count. Projects with zero
@@ -171,18 +179,30 @@ class LibraryProjectRepository:
 
         result = await self._session.execute(
             select(LibraryAssetMetadata.project_id, func.count(LibraryAssetMetadata.id))
-            .where(LibraryAssetMetadata.project_id.in_(project_ids))
+            .where(
+                LibraryAssetMetadata.project_id.in_(project_ids),
+                LibraryAssetMetadata.user_id == user_id,
+                LibraryAssetMetadata.product_id == product_id,
+            )
             .group_by(LibraryAssetMetadata.project_id)
         )
         # The WHERE clause above already excludes NULL project_id rows; the
         # `if pid is not None` here is only to satisfy mypy's column typing.
         return {pid: count for pid, count in result.tuples().all() if pid is not None}
 
-    async def batch_names(self, project_ids: Sequence[UUID]) -> dict[UUID, str]:
+    async def batch_names(
+        self,
+        project_ids: Sequence[UUID],
+        *,
+        user_id: UUID,
+        product_id: str,
+    ) -> dict[UUID, str]:
         """Resolve project names for a batch of ids — one query, not per-row.
 
         Args:
             project_ids: Project ids to resolve.
+            user_id: Owner scope.
+            product_id: Product scope.
 
         Returns:
             Mapping from project_id to name. Missing/foreign ids are absent.
@@ -191,6 +211,10 @@ class LibraryProjectRepository:
             return {}
 
         result = await self._session.execute(
-            select(LibraryProject.id, LibraryProject.name).where(LibraryProject.id.in_(project_ids))
+            select(LibraryProject.id, LibraryProject.name).where(
+                LibraryProject.id.in_(project_ids),
+                LibraryProject.user_id == user_id,
+                LibraryProject.product_id == product_id,
+            )
         )
         return dict(result.tuples().all())

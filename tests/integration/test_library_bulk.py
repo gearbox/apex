@@ -306,6 +306,104 @@ class TestBulkHappyPaths:
         assert await image_repo.get(image_b.id) is None
 
 
+class TestBulkDuplicateRefDedup:
+    """H1 — duplicate refs must be deduped (first occurrence wins) before
+    reaching the multi-row ON CONFLICT statement, never a
+    CardinalityViolationError / phantom failed entry."""
+
+    async def test_set_favorite_duplicate_refs_collapse_to_one(
+        self,
+        library_service: LibraryService,
+        content_proxy: ContentProxyService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"bulkdupfav-{uuid4().hex[:8]}@example.com")
+        image = await make_user_image(user=user)
+        ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+
+        op = BulkSetFavorite(asset_refs=[ref, ref], value=True)
+        result = await library_service.bulk_apply(
+            op, user.id, "vex", session=db_session, content_proxy=content_proxy
+        )
+        assert len(result.results) == 1
+        assert result.succeeded == 1
+        assert result.failed == 0
+        assert result.results[0].success is True
+
+        repo = LibraryRepository(db_session)
+        meta = await repo.get_metadata(user.id, "vex", LibraryAssetSource.UPLOAD, image.id)
+        assert meta is not None and meta.is_favorite is True
+
+    async def test_set_project_duplicate_refs_mixed_with_unique(
+        self,
+        library_service: LibraryService,
+        project_service: LibraryProjectService,
+        content_proxy: ContentProxyService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"bulkdupproj-{uuid4().hex[:8]}@example.com")
+        image_a = await make_user_image(user=user)
+        image_b = await make_user_image(user=user)
+        project = await project_service.create(
+            user.id, "vex", "Dedup Project", None, session=db_session
+        )
+        ref_a = format_asset_ref(LibraryAssetSource.UPLOAD, image_a.id)
+        ref_b = format_asset_ref(LibraryAssetSource.UPLOAD, image_b.id)
+
+        op = BulkSetProject(asset_refs=[ref_a, ref_b, ref_a], project_id=project.id)
+        result = await library_service.bulk_apply(
+            op, user.id, "vex", session=db_session, content_proxy=content_proxy
+        )
+        assert len(result.results) == 2
+        assert result.succeeded == 2
+        assert {r.asset_ref for r in result.results} == {ref_a, ref_b}
+
+    async def test_delete_duplicate_refs_collapse_to_one(
+        self,
+        library_service: LibraryService,
+        content_proxy: ContentProxyService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"bulkdupdel-{uuid4().hex[:8]}@example.com")
+        image = await make_user_image(user=user)
+        ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+
+        op = BulkDelete(asset_refs=[ref, ref])
+        result = await library_service.bulk_apply(
+            op, user.id, "vex", session=db_session, content_proxy=content_proxy
+        )
+        assert len(result.results) == 1
+        assert result.results[0].success is True
+        assert result.succeeded == 1
+        assert result.failed == 0
+
+    async def test_mixed_case_uuid_duplicate_collapses(
+        self,
+        library_service: LibraryService,
+        content_proxy: ContentProxyService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"bulkdupcase-{uuid4().hex[:8]}@example.com")
+        image = await make_user_image(user=user)
+        lower_ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+        upper_ref = f"upload:{str(image.id).upper()}"
+
+        op = BulkSetFavorite(asset_refs=[lower_ref, upper_ref], value=True)
+        result = await library_service.bulk_apply(
+            op, user.id, "vex", session=db_session, content_proxy=content_proxy
+        )
+        assert len(result.results) == 1
+        assert result.succeeded == 1
+
+
 class TestMetadataPurgeUnaffectedByProjectColumns:
     async def test_retention_sweep_purges_metadata_with_project_assigned(
         self,

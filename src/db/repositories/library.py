@@ -669,6 +669,13 @@ class LibraryRepository:
         single multi-row ``INSERT ... ON CONFLICT DO UPDATE``, never a
         per-ref loop. Ownership of every ref must already be verified by
         the caller (see LibraryService.bulk_apply / P5).
+
+        Uniqueness of ``refs`` (no duplicate (source, asset_id) pairs) must
+        also already be guaranteed by the caller — a duplicate here would
+        make the multi-row VALUES list affect the same conflict target
+        twice, which PostgreSQL rejects with a CardinalityViolationError.
+        Single source of truth for dedup is LibraryService.bulk_apply; do
+        NOT add a second dedup pass here.
         """
         if not refs:
             return
@@ -707,6 +714,10 @@ class LibraryRepository:
         Same single-statement bulk-upsert shape as ``bulk_set_favorite``.
         Existence/ownership of ``project_id`` itself must already be
         verified by the caller (P8) — this method does not re-check it.
+
+        Uniqueness of ``refs`` must also already be guaranteed by the
+        caller, same reasoning as ``bulk_set_favorite`` — do NOT add a
+        second dedup pass here.
         """
         if not refs:
             return

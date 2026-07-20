@@ -65,7 +65,9 @@ class LibraryProjectService:
         has_more = len(rows) > limit
         page_rows = list(rows[:limit])
 
-        counts = await repo.batch_asset_counts([p.id for p in page_rows])
+        counts = await repo.batch_asset_counts(
+            [p.id for p in page_rows], user_id=user_id, product_id=product_id
+        )
         items = [
             LibraryProjectListItem(
                 id=p.id,
