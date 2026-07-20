@@ -29,13 +29,12 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.schemas.storage import (
     ImageAccessResponse,
-    ImageListItem,
     OutputListItem,
     StorageStatsResponse,
     UploadResponse,
 )
 from src.api.security import auth_guard
-from src.api.services.media import build_output_media, build_upload_media
+from src.api.services.media import build_output_media
 from src.api.services.storage.schemas import (
     ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES,
 )
@@ -283,63 +282,6 @@ class StorageController(Controller):
                 ),
                 status_code=HTTP_404_NOT_FOUND,
             )
-
-    @get("/uploads")
-    async def list_uploads(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
-        cursor: str | None = None,
-    ) -> CursorPage[ImageListItem]:
-        """List uploaded images for a user.
-
-        Returns paginated list of uploads ordered by creation date (newest first).
-
-        Query parameters:
-          - ``limit``: Page size 1-100 (default 50)
-          - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
-            field.  Pass to fetch the next page.
-        """
-        cursor_ts = None
-        cursor_id = None
-        if cursor is not None:
-            cursor_ts, cursor_id = decode_cursor(cursor)
-
-        images = await user_content.list_user_uploads(
-            current_user_id,
-            limit=limit,
-            cursor_ts=cursor_ts,
-            cursor_id=cursor_id,
-        )
-
-        has_more = len(images) > limit
-        if has_more:
-            images = images[:limit]
-
-        derivatives_map = await user_content.batch_upload_derivatives([img.id for img in images])
-        items = [
-            ImageListItem(
-                id=str(img.id),
-                filename=img.original_filename,
-                created_at=img.created_at,
-                expires_at=img.expires_at,
-                media=build_upload_media(img, derivatives_map.get(img.id, [])),
-            )
-            for img in images
-        ]
-
-        next_cursor: str | None = None
-        if has_more and images:
-            last = images[-1]
-            next_cursor = encode_cursor(last.created_at, last.id)
-
-        return CursorPage(
-            items=items,
-            limit=limit,
-            has_more=has_more,
-            next_cursor=next_cursor,
-        )
 
     # -------------------------------------------------------------------------
     # Output access endpoints

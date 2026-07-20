@@ -58,7 +58,7 @@ class TestJobStatusChanged:
         assert notification is not None
         assert notification.category == "job"
         assert notification.tag == f"job-{job_id}"
-        assert str(job_id) in notification.url
+        assert notification.url == f"/app/library/groups/{job_id}"
 
     @pytest.mark.parametrize("status", ["pending", "queued", "running", "cancelled", "moderated"])
     def test_non_terminal_status_is_ignored(self, status: str) -> None:

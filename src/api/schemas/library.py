@@ -103,10 +103,7 @@ class LibraryAssetPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
 
 
 # ---------------------------------------------------------------------------
-# Group detail — ported from schemas/gallery.py::GalleryGroupDetail (D6).
-#
-# Deliberately NOT importing from schemas/gallery.py — gallery schemas are
-# removed in prompt 03; sharing types here would block that deletion.
+# Group detail — ported from the now-removed schemas/gallery.py::GalleryGroupDetail.
 # ---------------------------------------------------------------------------
 
 
@@ -147,7 +144,7 @@ class LibraryGroupLineage(msgspec.Struct, kw_only=True):
 
 
 class LibraryGroupDetail(msgspec.Struct, kw_only=True):
-    """Full detail view of a generation group (job) — relocated from GalleryGroupDetail."""
+    """Full detail view of a generation group (job)."""
 
     job_id: UUID
 

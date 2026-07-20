@@ -180,7 +180,7 @@ class TestUserImageRepositoryListByUser:
         img = MagicMock()
         session.execute = AsyncMock(return_value=_scalars_result([img]))
 
-        results = await repo.list_by_user(uuid4(), limit=10)
+        results = await repo.list_by_user(uuid4(), product_id="vex", limit=10)
 
         assert list(results) == [img]
 
@@ -192,6 +192,7 @@ class TestUserImageRepositoryListByUser:
 
         results = await repo.list_by_user(
             uuid4(),
+            product_id="vex",
             limit=10,
             cursor_ts=datetime.now(UTC),
             cursor_id=uuid4(),
@@ -206,7 +207,7 @@ class TestUserImageRepositoryListByUser:
 
         session.execute = AsyncMock(return_value=_scalars_result([]))
 
-        results = await repo.list_by_user(uuid4())
+        results = await repo.list_by_user(uuid4(), product_id="vex")
 
         assert not list(results)
 

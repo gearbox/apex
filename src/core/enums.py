@@ -343,20 +343,6 @@ class OutputMediaType(StrEnum):
     VIDEO = "video"
 
 
-class GalleryBadge(StrEnum):
-    """Badge type for gallery grid — describes the input source."""
-
-    IMAGE = "image"
-    PROMPT = "prompt"
-
-
-class GallerySourceType(StrEnum):
-    """Type of input source for lineage display."""
-
-    UPLOAD = "upload"
-    GENERATION = "generation"
-
-
 class LibrarySort(StrEnum):
     """Sort order for the library list endpoint."""
 
@@ -365,20 +351,14 @@ class LibrarySort(StrEnum):
 
 
 class LibraryGroupSourceType(StrEnum):
-    """Type of input source for library group-detail lineage display.
-
-    Distinct from GallerySourceType (D1 — Library uses upload/output
-    vocabulary, not upload/generation)."""
+    """Type of input source for library group-detail lineage display."""
 
     UPLOAD = "upload"
     OUTPUT = "output"
 
 
 class LibraryBadge(StrEnum):
-    """Badge type for a library group detail — describes the input source.
-
-    Distinct from GalleryBadge (D1 — no cross-import between gallery and
-    library modules)."""
+    """Badge type for a library group detail — describes the input source."""
 
     IMAGE = "image"
     PROMPT = "prompt"

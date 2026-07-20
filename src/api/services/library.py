@@ -1,8 +1,8 @@
 """Library service — unified read model over uploads + generation outputs.
 
 Business logic for the library endpoints: list/detail/favorite/patch/delete
-for individual assets, plus group detail (ported from GalleryService, since
-Gallery is removed in a later phase and Library must stay independent of it).
+for individual assets, plus group detail (ported from the now-removed
+GalleryService).
 """
 
 from __future__ import annotations
@@ -546,7 +546,7 @@ class LibraryService:
         return output is not None and output.product_id == product_id and not output.is_thumbnail
 
     # -------------------------------------------------------------------------
-    # Group detail — ported from GalleryService.get_gallery_detail (D6).
+    # Group detail — ported from the now-removed GalleryService.get_gallery_detail.
     # -------------------------------------------------------------------------
 
     async def get_group_detail(

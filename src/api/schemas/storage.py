@@ -28,18 +28,6 @@ class ImageAccessResponse(msgspec.Struct, kw_only=True):
     expires_in_seconds: int
 
 
-class ImageListItem(msgspec.Struct, kw_only=True):
-    """Item in image list response."""
-
-    id: str
-    filename: str
-    created_at: datetime
-    expires_at: datetime
-
-    media: MediaObject
-    """Media envelope: original asset + sm/md WEBP preview variants."""
-
-
 class OutputListItem(msgspec.Struct, kw_only=True):
     """Item in output list response."""
 

@@ -115,7 +115,7 @@ async def test_list_by_user_paginated(
     user = await make_user(email=f"imglist-{uuid4().hex[:6]}@example.com")
     for i in range(5):
         await make_user_image(user=user, storage_key=f"users/{user.id}/uploads/{i}.png")
-    images = await user_image_repo.list_by_user(user.id, limit=3)
+    images = await user_image_repo.list_by_user(user.id, product_id="vex", limit=3)
     assert len(images) == 4  # 3+1 since 5 > 3, has_more=True
 
 
@@ -124,7 +124,20 @@ async def test_list_by_user_empty_for_new_user(
 ) -> None:
     """list_by_user returns empty list for a user with no uploads."""
     user = await make_user(email=f"imglistoff-{uuid4().hex[:6]}@example.com")
-    images = await user_image_repo.list_by_user(user.id)
+    images = await user_image_repo.list_by_user(user.id, product_id="vex")
+    assert not list(images)
+
+
+async def test_list_by_user_excludes_other_product(
+    user_image_repo: UserImageRepository, make_user, make_user_image
+) -> None:
+    """list_by_user only returns uploads scoped to the requested product_id."""
+    user = await make_user(
+        email=f"imglistprod-{uuid4().hex[:6]}@example.com", product_id="synthara"
+    )
+    await make_user_image(user=user, product_id="synthara")
+
+    images = await user_image_repo.list_by_user(user.id, product_id="vex")
     assert not list(images)
 
 

@@ -59,7 +59,7 @@ def _map_job_status_changed(raw: msgspec.Raw) -> PushNotificationPayload | None:
     return PushNotificationPayload(
         title="Generation complete" if completed else "Generation failed",
         body=f"Your {payload.generation_type} generation has {payload.status}.",
-        url=f"/gallery/{payload.job_id}",
+        url=f"/app/library/groups/{payload.job_id}",
         tag=f"job-{payload.job_id}",
         category="job",
         level="info" if completed else "warning",
