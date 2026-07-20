@@ -2269,7 +2269,7 @@ The backend maps a subset of the same real-time events used by SSE (§15) into p
 
 | SSE event | Pushed when | Notes |
 |-----------|-------------|-------|
-| `job.status_changed` | Only terminal states: `completed`, `failed` | `tag: "job-{job_id}"`, `url: "/gallery/{job_id}"` |
+| `job.status_changed` | Only terminal states: `completed`, `failed` | `tag: "job-{job_id}"`, `url: "/app/library/groups/{job_id}"` |
 | `gpu_session.credit_warning` | Every level (`warning`, `critical`) | `tag: "gpu-credit-{session_id}"` — repeated warnings coalesce instead of stacking |
 | `system.notification` | Always — broadcast to **every** subscription | `tag: "system-notification"` |
 | `balance.updated` | Only `delta > 0` **and** `transaction_type` is `credit` or `admin_adjustment` | Per-generation debits and refunds never push (avoids spam) |
