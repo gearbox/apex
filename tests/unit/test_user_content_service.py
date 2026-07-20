@@ -451,19 +451,11 @@ class TestDownloadUpload:
 
 
 # ---------------------------------------------------------------------------
-# list_user_uploads / derivatives
+# upload derivatives
 # ---------------------------------------------------------------------------
 
 
 class TestListUploads:
-    async def test_list_user_uploads_returns_images(self) -> None:
-        service, _ = _make_service()
-        imgs = [_make_db_image(), _make_db_image()]
-        service._image_repo.list_by_user = AsyncMock(return_value=imgs)
-
-        result = await service.list_user_uploads(uuid4())
-        assert result == imgs
-
     async def test_list_upload_derivatives_delegates(self) -> None:
         service, _ = _make_service()
         thumb = _make_db_image()
@@ -471,14 +463,6 @@ class TestListUploads:
 
         result = await service.list_upload_derivatives(uuid4())
         assert result == [thumb]
-
-    async def test_batch_upload_derivatives_delegates(self) -> None:
-        service, _ = _make_service()
-        parent_id = uuid4()
-        service._image_repo.batch_derivatives = AsyncMock(return_value={parent_id: []})
-
-        result = await service.batch_upload_derivatives([parent_id])
-        assert parent_id in result
 
     async def test_batch_output_derivatives_delegates(self) -> None:
         service, _ = _make_service()

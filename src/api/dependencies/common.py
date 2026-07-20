@@ -26,7 +26,6 @@ from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
 from src.api.services.frames.service import FrameExtractionService
 from src.api.services.frames.worker import FrameExtractionWorker
-from src.api.services.gallery import GalleryService
 from src.api.services.generation.service import GenerationService
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
@@ -518,11 +517,6 @@ def get_content_proxy(
 ) -> ContentProxyService:
     """Provide ContentProxyService per-request."""
     return ContentProxyService(storage=r2_storage, settings=settings)
-
-
-def get_gallery_service(session: AsyncSession) -> GalleryService:
-    """Provide GalleryService per-request."""
-    return GalleryService(session=session)
 
 
 def get_library_service(session: AsyncSession) -> LibraryService:
@@ -1350,8 +1344,6 @@ dependencies = {
     "jwt_service": Provide(get_jwt_service, sync_to_thread=False),
     # Content proxy
     "content_proxy": Provide(get_content_proxy, sync_to_thread=False),
-    # Gallery
-    "gallery_service": Provide(get_gallery_service, sync_to_thread=False),
     # Library
     "library_service": Provide(get_library_service, sync_to_thread=False),
     # Idempotency

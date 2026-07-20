@@ -514,36 +514,6 @@ class UserContentService:
             )
             raise UserContentNotFoundError(f"Image file not found: {image_id}") from e
 
-    async def list_user_uploads(
-        self,
-        user_id: UUID,
-        *,
-        limit: int = 100,
-        cursor_ts: datetime | None = None,
-        cursor_id: UUID | None = None,
-    ) -> list[UserImage]:
-        """List uploads for a user.
-
-        Uses limit+1 fetch pattern — caller checks ``len(result) > limit``
-        to determine ``has_more``.
-
-        Args:
-            user_id: User to list uploads for.
-            limit: Maximum results (fetch limit+1 for has_more).
-            cursor_ts: ``created_at`` of the last item on the previous page.
-            cursor_id: ``id`` of the last item on the previous page.
-
-        Returns:
-            List of UserImage instances.
-        """
-        images = await self._image_repo.list_by_user(
-            user_id,
-            limit=limit,
-            cursor_ts=cursor_ts,
-            cursor_id=cursor_id,
-        )
-        return list(images)
-
     async def list_upload_derivatives(self, image_id: UUID) -> list[UserImage]:
         """Return derivative (thumbnail) rows for a single upload.
 
@@ -554,17 +524,6 @@ class UserContentService:
             List of derivative UserImage rows.
         """
         return list(await self._image_repo.list_derivatives(image_id))
-
-    async def batch_upload_derivatives(self, image_ids: list[UUID]) -> dict[UUID, list[UserImage]]:
-        """Return derivative rows for a batch of uploads.
-
-        Args:
-            image_ids: Parent upload IDs.
-
-        Returns:
-            Mapping from parent_image_id to list of derivative rows.
-        """
-        return await self._image_repo.batch_derivatives(image_ids)
 
     async def batch_output_derivatives(
         self, output_ids: list[UUID]

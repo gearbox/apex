@@ -36,7 +36,6 @@ from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.billing_public import BillingPublicController
 from src.api.routes.content import ContentProxyController
 from src.api.routes.frames import FramesController
-from src.api.routes.gallery import GalleryController
 from src.api.routes.gpu_session import GpuSessionController
 from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
@@ -317,7 +316,7 @@ def _build_openapi_config(settings: Settings) -> OpenAPIConfig:
     """
     return OpenAPIConfig(
         title="Apex Generation API",
-        version="0.3.1",
+        version="0.4.0",
         description=(
             "Apex REST API for AI content generation.\n\n"
             "## Providers\n\n"
@@ -429,8 +428,6 @@ def create_app() -> Litestar:
             UnifiedJobController,
             # Real-time events (SSE)
             SSEController,
-            # Gallery
-            GalleryController,
             # Library
             LibraryController,
             # Content proxy

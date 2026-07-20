@@ -1,11 +1,4 @@
-"""Integration test: LibraryService.get_group_detail parity with GalleryService.
-
-get_group_detail was ported (not re-derived) from GalleryService.get_gallery_detail
-for the same job — this asserts the two views agree on every shared field for
-an identical GenerationJob + outputs, and that GalleryService is unaffected
-(still importable/functional, per the prompt's "leave Gallery untouched"
-requirement).
-"""
+"""Integration tests: LibraryService.get_group_detail against a real database."""
 
 from __future__ import annotations
 
@@ -16,7 +9,6 @@ from uuid import uuid4
 
 import pytest_asyncio
 
-from src.api.services.gallery import GalleryService
 from src.api.services.library import LibraryService
 from src.core.enums import LibraryBadge
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
@@ -68,13 +60,13 @@ async def make_output(
     return _factory
 
 
-async def test_group_detail_matches_gallery_detail_for_same_job(
+async def test_group_detail_for_job_with_two_outputs(
     db_session: AsyncSession,
     make_user: Callable[..., Coroutine[Any, Any, User]],
     make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
     make_output: OutputFactory,
 ) -> None:
-    user = await make_user(email=f"parity-{uuid4().hex[:8]}@example.com")
+    user = await make_user(email=f"grpdetail2-{uuid4().hex[:8]}@example.com")
     job = await make_job(
         user=user,
         status="completed",
@@ -87,48 +79,24 @@ async def test_group_detail_matches_gallery_detail_for_same_job(
     out1 = await make_output(job=job, user=user, output_index=0)
     out2 = await make_output(job=job, user=user, output_index=1)
 
-    gallery_detail = await GalleryService(session=db_session).get_gallery_detail(
-        job.id, user.id, "vex", session=db_session
-    )
-    library_detail = await LibraryService(session=db_session).get_group_detail(
+    detail = await LibraryService(session=db_session).get_group_detail(
         job.id, user.id, "vex", session=db_session
     )
 
-    assert gallery_detail is not None
-    assert library_detail is not None
+    assert detail is not None
+    assert detail.job_id == job.id
+    assert detail.prompt == "a cat wearing sunglasses"
+    assert detail.negative_prompt is None
+    assert detail.model == "grok-imagine-image"
+    assert detail.provider == "grok"
+    assert detail.badge == LibraryBadge.PROMPT
+    assert detail.lineage is None
 
-    assert library_detail.job_id == gallery_detail.job_id == job.id
-    assert library_detail.prompt == gallery_detail.prompt
-    assert library_detail.negative_prompt == gallery_detail.negative_prompt
-    assert library_detail.model == gallery_detail.model
-    assert library_detail.provider == gallery_detail.provider
-    assert library_detail.generation_type == gallery_detail.generation_type
-    assert library_detail.aspect_ratio == gallery_detail.aspect_ratio
-    assert library_detail.token_cost == gallery_detail.token_cost
-    assert library_detail.created_at == gallery_detail.created_at
-    assert library_detail.completed_at == gallery_detail.completed_at
-    assert library_detail.media_type == gallery_detail.media_type
-
-    # badge is a distinct-but-equivalent enum (D1) — same string value
-    assert library_detail.badge.value == gallery_detail.badge.value == LibraryBadge.PROMPT.value
-
-    assert len(library_detail.outputs) == len(gallery_detail.outputs) == 2
-    for lib_out, gal_out in zip(library_detail.outputs, gallery_detail.outputs, strict=True):
-        assert lib_out.id == gal_out.id
-        assert lib_out.output_index == gal_out.output_index
-        assert lib_out.media.original.url == gal_out.media.original.url
-
-    # Library-only addition: asset_ref present on each output item.
-    assert library_detail.outputs[0].asset_ref == format_asset_ref(
-        LibraryAssetSource.OUTPUT, out1.id
-    )
-    assert library_detail.outputs[1].asset_ref == format_asset_ref(
-        LibraryAssetSource.OUTPUT, out2.id
-    )
-
-    # Gallery lineage is None here (no remix source) — library group lineage too.
-    assert gallery_detail.lineage is None
-    assert library_detail.lineage is None
+    assert len(detail.outputs) == 2
+    assert detail.outputs[0].id == out1.id
+    assert detail.outputs[1].id == out2.id
+    assert detail.outputs[0].asset_ref == format_asset_ref(LibraryAssetSource.OUTPUT, out1.id)
+    assert detail.outputs[1].asset_ref == format_asset_ref(LibraryAssetSource.OUTPUT, out2.id)
 
 
 async def test_group_detail_returns_none_for_missing_job(db_session: AsyncSession) -> None:

@@ -23,7 +23,7 @@ from src.api.services.storage.r2 import R2StorageService, R2StorageSettings
 from src.core.enums import GenerationType, JobStatus
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.models.user import User
-from src.db.repositories.gallery import GalleryRepository
+from src.db.repositories.library import LibraryRepository
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -311,11 +311,11 @@ async def test_sweep_nulls_lineage_fks_on_downstream_jobs(
     assert refreshed_source.is_deleted is True
 
 
-async def test_gallery_excludes_soft_deleted_swept_jobs(
+async def test_library_excludes_soft_deleted_swept_jobs(
     retention_session_factory: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
-    """A job whose only output gets swept disappears from the gallery listing."""
+    """A job whose only output gets swept disappears from the library listing."""
     user = await _create_user(retention_session_factory)
     job = await _create_job(retention_session_factory, user=user, status=JobStatus.COMPLETED)
     await _create_output(retention_session_factory, user=user, job=job, expires_at=_past())
@@ -329,9 +329,9 @@ async def test_gallery_excludes_soft_deleted_swept_jobs(
     )
     await service.sweep()
 
-    gallery_repo = GalleryRepository(db_session)
-    jobs = await gallery_repo.list_gallery_jobs(user.id, user.product_id, limit=20)
-    assert job.id not in {j.id for j in jobs}
+    library_repo = LibraryRepository(db_session)
+    rows = await library_repo.list_assets(user.id, user.product_id, limit=20)
+    assert job.id not in {r.job_id for r in rows if r.job_id is not None}
 
 
 async def test_sweep_keeps_job_with_live_output(

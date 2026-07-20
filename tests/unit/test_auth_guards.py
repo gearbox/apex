@@ -298,7 +298,6 @@ class TestStorageControllerAuth:
         from src.api.services.user_content import UserContentService
 
         mock_content_service = AsyncMock(spec=UserContentService)
-        mock_content_service.list_user_uploads.return_value = []
         mock_content_service.list_user_outputs.return_value = []
         mock_content_service.get_user_stats.return_value = {
             "upload_count": 0,
@@ -322,12 +321,6 @@ class TestStorageControllerAuth:
             resp = client.post("/v1/storage/upload")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
-    def test_list_uploads_requires_auth(self, jwt_service: JWTService) -> None:
-        app = self._create_storage_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get("/v1/storage/uploads")
-            assert resp.status_code == HTTP_401_UNAUTHORIZED
-
     def test_list_outputs_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
@@ -345,26 +338,6 @@ class TestStorageControllerAuth:
         with TestClient(app=app) as client:
             resp = client.get(f"/v1/storage/uploads/{uuid4()}")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
-
-    def test_list_uploads_with_auth_returns_data(
-        self,
-        jwt_service: JWTService,
-        test_user_id: UUID,
-        auth_header: dict[str, str],
-    ) -> None:
-        app = self._create_storage_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get("/v1/storage/uploads", headers=auth_header)
-            assert resp.status_code == HTTP_200_OK
-            body = resp.json()
-            assert body["has_more"] is False
-            assert body["items"] == []
-
-        # Verify the service was called with the authenticated user's ID
-        mock = app.state["mock_content_service"]
-        mock.list_user_uploads.assert_called_once_with(
-            test_user_id, limit=50, cursor_ts=None, cursor_id=None
-        )
 
     def test_stats_with_auth_uses_authenticated_user_id(
         self,

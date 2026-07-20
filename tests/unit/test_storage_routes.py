@@ -345,69 +345,6 @@ class TestDownloadUploadHandler:
 
 
 # ---------------------------------------------------------------------------
-# list_uploads
-# ---------------------------------------------------------------------------
-
-
-class TestListUploadsHandler:
-    async def test_empty_list(self) -> None:
-        from src.api.routes.storage import StorageController
-
-        user_content = AsyncMock()
-        user_content.list_user_uploads = AsyncMock(return_value=[])
-        user_content.batch_upload_derivatives = AsyncMock(return_value={})
-
-        result = await StorageController.list_uploads.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            user_content=user_content,
-        )
-
-        assert result.items == []
-        assert result.has_more is False
-
-    async def test_has_more_when_extra_items_returned(self) -> None:
-        from src.api.routes.storage import StorageController
-
-        imgs = [_make_db_image() for _ in range(3)]
-        user_content = AsyncMock()
-        user_content.list_user_uploads = AsyncMock(return_value=imgs)
-        user_content.batch_upload_derivatives = AsyncMock(return_value={})
-
-        result = await StorageController.list_uploads.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            user_content=user_content,
-            limit=2,
-        )
-
-        assert result.has_more is True
-        assert len(result.items) == 2
-        assert result.next_cursor is not None
-
-    async def test_with_cursor_parameter_passes_decoded_cursor(self) -> None:
-        from src.api.routes.storage import StorageController
-        from src.api.schemas.pagination import encode_cursor
-
-        cursor = encode_cursor(datetime.now(UTC), uuid4())
-        user_content = AsyncMock()
-        user_content.list_user_uploads = AsyncMock(return_value=[])
-        user_content.batch_upload_derivatives = AsyncMock(return_value={})
-
-        result = await StorageController.list_uploads.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            user_content=user_content,
-            cursor=cursor,
-        )
-
-        assert result.items == []
-        call_kwargs = user_content.list_user_uploads.call_args.kwargs
-        assert call_kwargs["cursor_ts"] is not None
-        assert call_kwargs["cursor_id"] is not None
-
-
-# ---------------------------------------------------------------------------
 # Output endpoints
 # ---------------------------------------------------------------------------
 

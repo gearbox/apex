@@ -165,6 +165,7 @@ class UserImageRepository(BaseRepository[UserImage]):
         self,
         user_id: UUID,
         *,
+        product_id: str,
         limit: int = 100,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
@@ -176,6 +177,7 @@ class UserImageRepository(BaseRepository[UserImage]):
 
         Args:
             user_id: User to list images for.
+            product_id: Product scope.
             limit: Maximum results to return (fetch limit+1 for has_more).
             cursor_ts: ``created_at`` of the last item on the previous page.
             cursor_id: ``id`` of the last item on the previous page.
@@ -186,6 +188,7 @@ class UserImageRepository(BaseRepository[UserImage]):
         """
         query = select(UserImage).where(
             UserImage.user_id == user_id,
+            UserImage.product_id == product_id,
             UserImage.is_thumbnail.is_(False),
         )
 

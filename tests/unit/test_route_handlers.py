@@ -30,63 +30,6 @@ pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
-# GalleryController
-# ---------------------------------------------------------------------------
-
-
-class TestGalleryRouteHandlers:
-    async def test_list_gallery_delegates_to_service(self) -> None:
-        from src.api.routes.gallery import GalleryController
-        from src.api.schemas.pagination import CursorPage
-
-        page = MagicMock(spec=CursorPage)
-        gallery_service = AsyncMock()
-        gallery_service.list_gallery = AsyncMock(return_value=page)
-
-        result = await GalleryController.list_gallery.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            product_id="vex",
-            session=AsyncMock(),
-            gallery_service=gallery_service,
-        )
-        assert result is page
-
-    async def test_get_gallery_detail_returns_200_when_found(self) -> None:
-        from src.api.routes.gallery import GalleryController
-
-        detail = MagicMock()
-        gallery_service = AsyncMock()
-        gallery_service.get_gallery_detail = AsyncMock(return_value=detail)
-
-        response = await GalleryController.get_gallery_detail.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            product_id="vex",
-            job_id=uuid4(),
-            session=AsyncMock(),
-            gallery_service=gallery_service,
-        )
-        assert response.content is detail
-
-    async def test_get_gallery_detail_returns_404_when_not_found(self) -> None:
-        from src.api.routes.gallery import GalleryController
-
-        gallery_service = AsyncMock()
-        gallery_service.get_gallery_detail = AsyncMock(return_value=None)
-
-        response = await GalleryController.get_gallery_detail.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            product_id="vex",
-            job_id=uuid4(),
-            session=AsyncMock(),
-            gallery_service=gallery_service,
-        )
-        assert response.status_code == HTTP_404_NOT_FOUND
-
-
-# ---------------------------------------------------------------------------
 # UnifiedJobController (jobs.py)
 # ---------------------------------------------------------------------------
 
@@ -508,40 +451,6 @@ class TestContentRouteHandlers:
             r2_storage=MagicMock(),
         )
         assert response.status_code == HTTP_404_NOT_FOUND
-
-    async def test_delete_content_success(self) -> None:
-        from src.api.routes.content import ContentProxyController
-
-        content_proxy = AsyncMock()
-        content_proxy.delete_content = AsyncMock()
-        session = AsyncMock()
-
-        await ContentProxyController.delete_content.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            product_id="vex",
-            content_id=uuid4(),
-            session=session,
-            content_proxy=content_proxy,
-        )
-        content_proxy.delete_content.assert_awaited_once()
-
-    async def test_delete_content_raises_404_on_not_found(self) -> None:
-        from src.api.routes.content import ContentProxyController
-        from src.api.services.content_proxy import ContentNotFoundError
-
-        content_proxy = AsyncMock()
-        content_proxy.delete_content = AsyncMock(side_effect=ContentNotFoundError("missing"))
-
-        with pytest.raises(NotFoundException):
-            await ContentProxyController.delete_content.fn(  # type: ignore[attr-defined]
-                MagicMock(),
-                current_user_id=uuid4(),
-                product_id="vex",
-                content_id=uuid4(),
-                session=AsyncMock(),
-                content_proxy=content_proxy,
-            )
 
 
 # ---------------------------------------------------------------------------

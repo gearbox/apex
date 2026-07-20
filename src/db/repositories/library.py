@@ -408,9 +408,7 @@ class LibraryRepository:
     ) -> GenerationJob | None:
         """Get a single completed job with eager-loaded relationships for group detail.
 
-        Mirrors GalleryRepository.get_gallery_job byte-for-byte — copied
-        rather than imported so Library stays independent of the Gallery
-        module, which is removed in a later phase.
+        Mirrors the now-removed GalleryRepository.get_gallery_job byte-for-byte.
 
         Args:
             job_id: Job to fetch.
