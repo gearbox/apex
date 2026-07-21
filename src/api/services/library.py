@@ -643,9 +643,7 @@ class LibraryService:
                 owned_tags = await LibraryTagRepository(session).get_many(
                     deduped_tag_ids, user_id=user_id, product_id=product_id
                 )
-                if missing_tags := [
-                    tid for tid in deduped_tag_ids if tid not in owned_tags
-                ]:
+                if missing_tags := [tid for tid in deduped_tag_ids if tid not in owned_tags]:
                     raise LibraryTagNotFoundError(missing_tags)
             tag_ids_update = deduped_tag_ids
 
@@ -867,9 +865,7 @@ class LibraryService:
             owned_tags = await LibraryTagRepository(session).get_many(
                 tag_ids_deduped, user_id=user_id, product_id=product_id
             )
-            if missing_tags := [
-                tid for tid in tag_ids_deduped if tid not in owned_tags
-            ]:
+            if missing_tags := [tid for tid in tag_ids_deduped if tid not in owned_tags]:
                 raise LibraryTagNotFoundError(missing_tags)
 
         if isinstance(op, BulkSetFavorite):
@@ -927,8 +923,7 @@ class LibraryService:
                 )
                 results.append(BulkOperationItemResult(asset_ref=ref_str, success=deleted))
 
-        succeeded = sum(bool(r.success)
-                    for r in results)
+        succeeded = sum(bool(r.success) for r in results)
         logger.info(
             "library.bulk_applied",
             op=op_name,
