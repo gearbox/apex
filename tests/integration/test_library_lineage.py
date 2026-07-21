@@ -18,6 +18,7 @@ import src.api.services.library as library_module
 from src.api.services.library import LibraryService
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
+from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -275,6 +276,101 @@ class TestDescendantsCapAndTotals:
 
         assert graph.descendant_totals.job_count == 1
         assert graph.descendant_totals.frame_count == 1
+
+
+class TestDeletedJobVisibility:
+    """B1 remediation: lineage must never surface an output whose owning job
+    the list/detail path would hide (soft-deleted or not completed) —
+    neither as the focus node nor as an ancestor edge."""
+
+    async def test_focus_with_soft_deleted_job_returns_none(
+        self,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"lineagedelfocus-{uuid4().hex[:8]}@example.com")
+        service = LibraryService(session=db_session)
+
+        job = await _make_job(db_session, user=user)
+        output = await _make_output(db_session, user=user, job=job)
+        await JobRepository(db_session).soft_delete(job.id, user_id=user.id)
+
+        graph = await service.get_lineage_graph(
+            format_asset_ref(LibraryAssetSource.OUTPUT, output.id),
+            user.id,
+            "vex",
+            session=db_session,
+        )
+        assert graph is None
+
+    async def test_focus_with_non_completed_job_returns_none(
+        self,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"lineagependfocus-{uuid4().hex[:8]}@example.com")
+        service = LibraryService(session=db_session)
+
+        job = await _make_job(db_session, user=user, status="failed")
+        output = await _make_output(db_session, user=user, job=job)
+
+        graph = await service.get_lineage_graph(
+            format_asset_ref(LibraryAssetSource.OUTPUT, output.id),
+            user.id,
+            "vex",
+            session=db_session,
+        )
+        assert graph is None
+
+    async def test_ancestor_with_soft_deleted_job_is_absent_not_truncated(
+        self,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"lineagedelanc-{uuid4().hex[:8]}@example.com")
+        service = LibraryService(session=db_session)
+
+        upload_a = await _make_upload(db_session, user=user)
+        job1 = await _make_job(db_session, user=user, input_image_id=upload_a.id)
+        output_b = await _make_output(db_session, user=user, job=job1)
+        job2 = await _make_job(db_session, user=user, source_output_id=output_b.id)
+        output_c = await _make_output(db_session, user=user, job=job2)
+
+        await JobRepository(db_session).soft_delete(job1.id, user_id=user.id)
+
+        graph = await service.get_lineage_graph(
+            format_asset_ref(LibraryAssetSource.OUTPUT, output_c.id),
+            user.id,
+            "vex",
+            session=db_session,
+        )
+        assert graph is not None
+        assert graph.ancestors == ()
+        assert graph.ancestors_truncated is False
+
+    async def test_ancestor_with_non_completed_job_is_absent_not_truncated(
+        self,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"lineagependanc-{uuid4().hex[:8]}@example.com")
+        service = LibraryService(session=db_session)
+
+        upload_a = await _make_upload(db_session, user=user)
+        job1 = await _make_job(db_session, user=user, input_image_id=upload_a.id, status="pending")
+        output_b = await _make_output(db_session, user=user, job=job1)
+        job2 = await _make_job(db_session, user=user, source_output_id=output_b.id)
+        output_c = await _make_output(db_session, user=user, job=job2)
+
+        graph = await service.get_lineage_graph(
+            format_asset_ref(LibraryAssetSource.OUTPUT, output_c.id),
+            user.id,
+            "vex",
+            session=db_session,
+        )
+        assert graph is not None
+        assert graph.ancestors == ()
+        assert graph.ancestors_truncated is False
 
 
 class TestLineageNotFound:

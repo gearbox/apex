@@ -42,11 +42,13 @@ from src.api.services.library_capabilities import resolve_library_actions
 from src.api.services.media import OUTPUT_PREFIX, UPLOAD_PREFIX
 from src.core.enums import (
     GenerationType,
+    JobStatus,
     LibraryBadge,
     LibraryGroupSourceType,
     LibrarySort,
     OutputMediaType,
 )
+from src.core.library_limits import MAX_TAGS_PER_ASSET as _MAX_TAGS_PER_ASSET
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.core.thumbnails import label_for_max_edge
 from src.db.models.storage import GenerationOutput, UserImage
@@ -71,8 +73,6 @@ if TYPE_CHECKING:
     from src.db.repositories.library import LibraryAssetRow, OptionalUpdate
 
 logger = structlog.get_logger(__name__)
-
-_MAX_TAGS_PER_ASSET = 20
 
 # Lineage graph bounds (T8) — ancestor walk depth and per-relation
 # descendant cap. Deliberately small constants for an on-demand, bounded
@@ -112,6 +112,28 @@ class LibraryBulkValidationError(Exception):
     def __init__(self, invalid_refs: Sequence[str]) -> None:
         self.invalid_refs = list(invalid_refs)
         super().__init__(f"{len(self.invalid_refs)} invalid asset_ref(s): {self.invalid_refs}")
+
+
+class LibraryBulkTagCapError(Exception):
+    """Raised when a bulk ``add_tags`` op would push an asset past ``_MAX_TAGS_PER_ASSET``. → HTTP 422
+
+    Distinct from the 400 ``LibraryBulkValidationError`` (malformed/unknown
+    refs) and the 404 ``LibraryTagNotFoundError`` (unknown tags) — this is a
+    422 (unprocessable entity) since ``app.py`` already establishes that
+    status for a well-formed-but-semantically-rejected request (see
+    ``ModerationError``), so it's the existing convention rather than a new
+    one. The offending refs and the cap are carried through to the error
+    envelope's ``detail`` so the FE can point at exactly which assets are
+    over the limit.
+    """
+
+    def __init__(self, over_cap_refs: Sequence[str], cap: int) -> None:
+        self.over_cap_refs = list(over_cap_refs)
+        self.cap = cap
+        super().__init__(
+            f"{len(self.over_cap_refs)} asset(s) would exceed the {cap}-tag cap: "
+            f"{self.over_cap_refs}"
+        )
 
 
 class LibraryService:
@@ -826,6 +848,11 @@ class LibraryService:
             LibraryTagNotFoundError: If an ``add_tags``/``remove_tags`` op's
                 ``tag_ids`` contains an id that doesn't exist / isn't owned
                 by ``user_id``.
+            LibraryBulkTagCapError: If an ``add_tags`` op would push any
+                asset's tag count past ``_MAX_TAGS_PER_ASSET`` (counting the
+                dedup union of its existing tags and the new ones — an
+                idempotent re-add of an already-assigned tag never consumes
+                a slot).
         """
         parsed: list[AssetRef] = []
         malformed: list[str] = []
@@ -867,6 +894,27 @@ class LibraryService:
             )
             if missing_tags := [tid for tid in tag_ids_deduped if tid not in owned_tags]:
                 raise LibraryTagNotFoundError(missing_tags)
+
+        if isinstance(op, BulkAddTags):
+            # Cap enforcement is validate-then-mutate (M2): computed here,
+            # before any op branch executes, so a cap violation on one asset
+            # never leaves the batch partially tagged. The count is the
+            # dedup UNION of existing + new ids — a re-add of an
+            # already-assigned tag doesn't consume a slot, matching
+            # bulk_add_tags' ON CONFLICT DO NOTHING idempotency.
+            pairs = [(r.source.value, r.asset_id) for r in parsed]
+            existing = await LibraryTagRepository(session).batch_tags_for_assets(
+                pairs, user_id=user_id, product_id=product_id
+            )
+            new_ids = set(tag_ids_deduped)
+            over_cap = [
+                format_asset_ref(r.source, r.asset_id)
+                for r in parsed
+                if len({t.id for t in existing.get((r.source.value, r.asset_id), [])} | new_ids)
+                > _MAX_TAGS_PER_ASSET
+            ]
+            if over_cap:
+                raise LibraryBulkTagCapError(over_cap, _MAX_TAGS_PER_ASSET)
 
         if isinstance(op, BulkSetFavorite):
             op_name = "set_favorite"
@@ -1220,13 +1268,49 @@ class LibraryService:
         )
 
     @staticmethod
+    async def _lineage_output_visible(
+        output: GenerationOutput,
+        user_id: UUID,
+        product_id: str,
+        job_repo: JobRepository,
+    ) -> GenerationJob | None:
+        """Resolve ``output``'s owning job iff it's visible; else None.
+
+        Visible means: present, same-product, completed, and not
+        soft-deleted — the exact predicate the list/detail UNION applies
+        (``GenerationJob.status == COMPLETED AND is_deleted == False``, see
+        ``LibraryRepository._build_output_branch``). Lineage must not
+        surface an output the list path would hide, whether as the focus
+        node or as an ancestor/descendant.
+
+        Returns the job itself (not just a bool) so callers already walking
+        the ancestor chain can reuse it for parent-column resolution
+        instead of fetching it again on the next step.
+        """
+        job = await job_repo.get(output.job_id, user_id=user_id)
+        if (
+            job is None
+            or job.product_id != product_id
+            or job.status != JobStatus.COMPLETED
+            or job.is_deleted
+        ):
+            return None
+        return job
+
+    @staticmethod
     async def _fetch_lineage_row(
         ref: AssetRef,
         user_id: UUID,
         product_id: str,
         session: AsyncSession,
     ) -> GenerationOutput | UserImage | None:
-        """Typed, owner+product-scoped fetch of the lineage focus asset."""
+        """Typed, owner+product-scoped fetch of the lineage focus asset.
+
+        For an OUTPUT ref, the owning job must also be visible (completed,
+        not soft-deleted) — an invisible focus returns None here, which the
+        caller turns into an identical 404 to a missing asset (no leak of
+        *why*). The UPLOAD branch is unchanged: uploads have no owning job.
+        """
         if ref.source == LibraryAssetSource.UPLOAD:
             image = await UserImageRepository(session).get(ref.asset_id, user_id=user_id)
             if image is None or image.product_id != product_id or image.is_thumbnail:
@@ -1234,6 +1318,12 @@ class LibraryService:
             return image
         output = await OutputRepository(session).get(ref.asset_id, user_id=user_id)
         if output is None or output.product_id != product_id or output.is_thumbnail:
+            return None
+        job_repo = JobRepository(session)
+        if (
+            await LibraryService._lineage_output_visible(output, user_id, product_id, job_repo)
+            is None
+        ):
             return None
         return output
 
@@ -1250,12 +1340,19 @@ class LibraryService:
         """Iteratively resolve one parent per step, nearest-first (T8).
 
         Every fetch is owner+product scoped. Stops on: no parent column
-        set, parent row missing (SET NULL raced), a cycle (impossible by
-        construction today, cheap insurance forever), or the depth cap —
-        only the depth cap sets ``truncated=True``; every other stop is a
-        natural graph boundary. Deliberately an iterative per-table walk,
-        not a recursive CTE (T8): two polymorphic tables plus jobs make a
-        CTE unreadable and unbounded-by-default.
+        set, parent row missing (SET NULL raced), a resolved output ancestor
+        whose owning job isn't visible (not completed / soft-deleted — a
+        natural graph boundary, not truncation, matching the list/detail
+        hide rule), a cycle (impossible by construction today, cheap
+        insurance forever), or the depth cap — only the depth cap sets
+        ``truncated=True``. Deliberately an iterative per-table walk, not a
+        recursive CTE (T8): two polymorphic tables plus jobs make a CTE
+        unreadable and unbounded-by-default.
+
+        Each output node's owning job is fetched exactly once, right when
+        the node is resolved as a parent, and carried forward as
+        ``current_job`` for the next step's parent-column resolution — never
+        re-fetched, so the walk's query count stays linear in depth.
 
         Returns:
             ``(edges, truncated)`` where edges are
@@ -1276,6 +1373,7 @@ class LibraryService:
         )
         visited: set[tuple[LibraryAssetSource, UUID]] = {(focus_source, focus_row.id)}
         current_row: GenerationOutput | UserImage = focus_row
+        current_job: GenerationJob | None = None
 
         for _ in range(_LINEAGE_DEPTH_CAP):
             parent_source: LibraryAssetSource
@@ -1284,17 +1382,20 @@ class LibraryService:
             ts: int | None
 
             if isinstance(current_row, GenerationOutput):
-                job = await job_repo.get(current_row.job_id, user_id=user_id)
-                if job is None or job.product_id != product_id:
+                if current_job is None:
+                    current_job = await LibraryService._lineage_output_visible(
+                        current_row, user_id, product_id, job_repo
+                    )
+                if current_job is None:
                     break
-                if job.input_image_id is not None:
+                if current_job.input_image_id is not None:
                     parent_source = LibraryAssetSource.UPLOAD
-                    parent_id = job.input_image_id
+                    parent_id = current_job.input_image_id
                     relation = LineageRelation.GENERATED_FROM_UPLOAD
                     ts = None
-                elif job.source_output_id is not None:
+                elif current_job.source_output_id is not None:
                     parent_source = LibraryAssetSource.OUTPUT
-                    parent_id = job.source_output_id
+                    parent_id = current_job.source_output_id
                     relation = LineageRelation.GENERATED_FROM_OUTPUT
                     ts = None
                 else:
@@ -1323,9 +1424,18 @@ class LibraryService:
             if parent_row is None or parent_row.product_id != product_id or parent_row.is_thumbnail:
                 break
 
+            parent_job: GenerationJob | None = None
+            if isinstance(parent_row, GenerationOutput):
+                parent_job = await LibraryService._lineage_output_visible(
+                    parent_row, user_id, product_id, job_repo
+                )
+                if parent_job is None:
+                    break
+
             edges.append((relation, parent_source, parent_row, ts))
             visited.add((parent_source, parent_id))
             current_row = parent_row
+            current_job = parent_job
         else:
             return edges, True
 

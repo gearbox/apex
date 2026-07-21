@@ -218,12 +218,13 @@ wheels = [
 
 [[package]]
 name = "apex"
-version = "0.36.0"
+version = "0.36.1"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "annotated-types" },
     { name = "argon2-cffi" },
     { name = "asyncpg" },
     { name = "ffmpeg-python" },
@@ -278,6 +279,7 @@ requires-dist = [
     { name = "aioboto3", specifier = ">=15.5.0" },
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "alembic", specifier = ">=1.18.4" },
+    { name = "annotated-types", specifier = ">=0.7.0" },
     { name = "argon2-cffi", specifier = ">=25.1.0" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "ffmpeg-python", specifier = ">=0.2.0" },

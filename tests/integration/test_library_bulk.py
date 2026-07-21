@@ -19,14 +19,27 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.api.schemas.library import BulkDelete, BulkSetFavorite, BulkSetProject
+from src.api.schemas.library import (
+    BulkAddTags,
+    BulkDelete,
+    BulkRemoveTags,
+    BulkSetFavorite,
+    BulkSetProject,
+)
 from src.api.services.content_proxy import ContentProxyService
-from src.api.services.library import LibraryBulkValidationError, LibraryService
+from src.api.services.library import (
+    LibraryBulkTagCapError,
+    LibraryBulkValidationError,
+    LibraryService,
+)
 from src.api.services.library_project import LibraryProjectService
-from src.core.library_ref import LibraryAssetSource, format_asset_ref
+from src.api.services.library_tag import LibraryTagService
+from src.core.library_limits import MAX_TAGS_PER_ASSET
+from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.db.models.library import LibraryAssetMetadata
 from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.repositories.library import LibraryRepository
+from src.db.repositories.library_tag import LibraryTagRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -85,6 +98,11 @@ async def library_service(db_session: AsyncSession) -> LibraryService:
 @pytest_asyncio.fixture
 async def project_service(db_session: AsyncSession) -> LibraryProjectService:
     return LibraryProjectService(session=db_session)
+
+
+@pytest_asyncio.fixture
+async def tag_service(db_session: AsyncSession) -> LibraryTagService:
+    return LibraryTagService(session=db_session)
 
 
 @pytest.fixture
@@ -484,3 +502,207 @@ class TestMetadataPurgeUnaffectedByProjectColumns:
                 project.id, user_id=user.id, product_id="vex"
             )
             assert still_there is not None
+
+
+class TestBulkAddTagsCap:
+    """B2 remediation: bulk add_tags must enforce ``_MAX_TAGS_PER_ASSET``,
+    counting the dedup union of an asset's existing tags and the requested
+    ones — never the naive sum — and must reject before writing anything."""
+
+    async def test_add_over_cap_rejected_zero_side_effects(
+        self,
+        content_proxy: ContentProxyService,
+        db_engine: AsyncEngine,
+    ) -> None:
+        session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+        async with session_factory() as setup_session:
+            user = await _create_user_committed(setup_session)
+            image = await _create_upload_committed(setup_session, user=user)
+            tag_service = LibraryTagService(session=setup_session)
+            existing_tags = [
+                await tag_service.create(user.id, "vex", f"existing-{i}", session=setup_session)
+                for i in range(15)
+            ]
+            await LibraryTagRepository(setup_session).bulk_add_tags(
+                [AssetRef(source=LibraryAssetSource.UPLOAD, asset_id=image.id)],
+                [t.id for t in existing_tags],
+                user_id=user.id,
+                product_id="vex",
+            )
+            new_tags = [
+                await tag_service.create(user.id, "vex", f"new-{i}", session=setup_session)
+                for i in range(10)
+            ]
+            await setup_session.commit()
+
+        ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+
+        async with session_factory() as work_session:
+            service = LibraryService(session=work_session)
+            op = BulkAddTags(asset_refs=[ref], tag_ids=[t.id for t in new_tags])
+            with pytest.raises(LibraryBulkTagCapError) as exc_info:
+                await service.bulk_apply(
+                    op, user.id, "vex", session=work_session, content_proxy=content_proxy
+                )
+            assert ref in exc_info.value.over_cap_refs
+            assert exc_info.value.cap == MAX_TAGS_PER_ASSET
+            await work_session.rollback()
+
+        async with session_factory() as verify_session:
+            repo = LibraryTagRepository(verify_session)
+            tags_map = await repo.batch_tags_for_assets(
+                [("upload", image.id)], user_id=user.id, product_id="vex"
+            )
+            assert len(tags_map.get(("upload", image.id), [])) == 15
+
+    async def test_overlap_counts_union_allowed_at_exactly_the_cap(
+        self,
+        library_service: LibraryService,
+        tag_service: LibraryTagService,
+        content_proxy: ContentProxyService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        """15 existing + (5 overlapping no-ops + 5 new) must count as 20, not 25."""
+        user = await make_user(email=f"tagcapunionok-{uuid4().hex[:8]}@example.com")
+        image = await make_user_image(user=user)
+        ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+
+        existing_tags = [
+            await tag_service.create(user.id, "vex", f"exist-{i}", session=db_session)
+            for i in range(15)
+        ]
+        await library_service.bulk_apply(
+            BulkAddTags(asset_refs=[ref], tag_ids=[t.id for t in existing_tags[:10]]),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+        await library_service.bulk_apply(
+            BulkAddTags(asset_refs=[ref], tag_ids=[t.id for t in existing_tags[10:]]),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+
+        new_tags = [
+            await tag_service.create(user.id, "vex", f"newoverlap-{i}", session=db_session)
+            for i in range(5)
+        ]
+        request_ids = [t.id for t in existing_tags[:5]] + [t.id for t in new_tags]
+
+        result = await library_service.bulk_apply(
+            BulkAddTags(asset_refs=[ref], tag_ids=request_ids),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+        assert result.succeeded == 1
+
+        repo = LibraryTagRepository(db_session)
+        tags_map = await repo.batch_tags_for_assets(
+            [("upload", image.id)], user_id=user.id, product_id="vex"
+        )
+        assert len(tags_map[("upload", image.id)]) == MAX_TAGS_PER_ASSET
+
+    async def test_overlap_counts_union_rejected_one_over_cap(
+        self,
+        library_service: LibraryService,
+        tag_service: LibraryTagService,
+        content_proxy: ContentProxyService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        """16 existing + (5 overlapping no-ops + 5 new) unions to 21 — rejected."""
+        user = await make_user(email=f"tagcapunionbad-{uuid4().hex[:8]}@example.com")
+        image = await make_user_image(user=user)
+        ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+
+        existing_tags = [
+            await tag_service.create(user.id, "vex", f"exist-{i}", session=db_session)
+            for i in range(16)
+        ]
+        await library_service.bulk_apply(
+            BulkAddTags(asset_refs=[ref], tag_ids=[t.id for t in existing_tags[:10]]),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+        await library_service.bulk_apply(
+            BulkAddTags(asset_refs=[ref], tag_ids=[t.id for t in existing_tags[10:]]),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+
+        new_tags = [
+            await tag_service.create(user.id, "vex", f"newoverlap-{i}", session=db_session)
+            for i in range(5)
+        ]
+        request_ids = [t.id for t in existing_tags[:5]] + [t.id for t in new_tags]
+
+        with pytest.raises(LibraryBulkTagCapError) as exc_info:
+            await library_service.bulk_apply(
+                BulkAddTags(asset_refs=[ref], tag_ids=request_ids),
+                user.id,
+                "vex",
+                session=db_session,
+                content_proxy=content_proxy,
+            )
+        assert ref in exc_info.value.over_cap_refs
+
+        repo = LibraryTagRepository(db_session)
+        tags_map = await repo.batch_tags_for_assets(
+            [("upload", image.id)], user_id=user.id, product_id="vex"
+        )
+        assert len(tags_map[("upload", image.id)]) == 16
+
+    async def test_remove_tags_never_cap_blocked(
+        self,
+        library_service: LibraryService,
+        tag_service: LibraryTagService,
+        content_proxy: ContentProxyService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"tagcapremove-{uuid4().hex[:8]}@example.com")
+        image = await make_user_image(user=user)
+        ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+
+        tags = [
+            await tag_service.create(user.id, "vex", f"rm-{i}", session=db_session)
+            for i in range(20)
+        ]
+        await library_service.bulk_apply(
+            BulkAddTags(asset_refs=[ref], tag_ids=[t.id for t in tags[:10]]),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+        await library_service.bulk_apply(
+            BulkAddTags(asset_refs=[ref], tag_ids=[t.id for t in tags[10:]]),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+
+        result = await library_service.bulk_apply(
+            BulkRemoveTags(asset_refs=[ref], tag_ids=[t.id for t in tags[:10]]),
+            user.id,
+            "vex",
+            session=db_session,
+            content_proxy=content_proxy,
+        )
+        assert result.op == "remove_tags"
+        assert result.succeeded == 1

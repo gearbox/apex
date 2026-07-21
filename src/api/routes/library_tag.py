@@ -17,6 +17,7 @@ import structlog
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
 from litestar.exceptions import NotFoundException
+from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Parameter
 from litestar.status_codes import (
     HTTP_201_CREATED,
@@ -43,6 +44,13 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _TAG_NOT_FOUND = "Library tag not found"
+
+_CONFLICT_RESPONSES = {
+    409: ResponseSpec(
+        data_container=ErrorEnvelope,
+        description="A tag with this name already exists for the caller (case-insensitive).",
+    )
+}
 
 
 class LibraryTagController(Controller):
@@ -79,7 +87,7 @@ class LibraryTagController(Controller):
             )
         return Response(content=page)
 
-    @post("/", status_code=HTTP_201_CREATED)
+    @post("/", status_code=HTTP_201_CREATED, responses=_CONFLICT_RESPONSES)
     async def create_tag(
         self,
         current_user_id: UUID,
@@ -104,7 +112,7 @@ class LibraryTagController(Controller):
             )
         return Response(content=tag, status_code=HTTP_201_CREATED)
 
-    @get("/{tag_id:uuid}")
+    @get("/{tag_id:uuid}", raises=[NotFoundException])
     async def get_tag(
         self,
         current_user_id: UUID,
@@ -119,7 +127,7 @@ class LibraryTagController(Controller):
             raise NotFoundException(detail=_TAG_NOT_FOUND)
         return tag
 
-    @patch("/{tag_id:uuid}")
+    @patch("/{tag_id:uuid}", raises=[NotFoundException], responses=_CONFLICT_RESPONSES)
     async def patch_tag(
         self,
         current_user_id: UUID,
@@ -147,7 +155,7 @@ class LibraryTagController(Controller):
             raise NotFoundException(detail=_TAG_NOT_FOUND)
         return Response(content=tag)
 
-    @delete("/{tag_id:uuid}", status_code=HTTP_204_NO_CONTENT)
+    @delete("/{tag_id:uuid}", status_code=HTTP_204_NO_CONTENT, raises=[NotFoundException])
     async def delete_tag(
         self,
         current_user_id: UUID,

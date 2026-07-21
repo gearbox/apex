@@ -66,6 +66,7 @@ from src.api.services.billing_errors import (
     RefundNotEligibleError,
 )
 from src.api.services.idempotency import IdempotencyConflictError
+from src.api.services.library import LibraryBulkTagCapError
 from src.api.services.library_project import LibraryProjectNameConflictError
 from src.api.services.library_tag import LibraryTagNameConflictError
 from src.core.config import Settings, get_settings
@@ -289,6 +290,25 @@ def library_tag_name_conflict_handler(
     return _error("tag_name_conflict", str(exc), HTTP_409_CONFLICT)
 
 
+def library_bulk_tag_cap_handler(
+    request: Request[Any, Any, Any],
+    exc: LibraryBulkTagCapError,
+) -> Response[Any]:
+    _log_handler_event(
+        "library.bulk_tag_cap_exceeded",
+        request,
+        HTTP_422_UNPROCESSABLE_ENTITY,
+        cap=exc.cap,
+        offenders=exc.over_cap_refs,
+    )
+    return _error(
+        "tag_cap_exceeded",
+        str(exc),
+        HTTP_422_UNPROCESSABLE_ENTITY,
+        {"asset_refs": exc.over_cap_refs, "cap": exc.cap},
+    )
+
+
 def idempotency_conflict_handler(
     request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
@@ -472,6 +492,7 @@ def create_app() -> Litestar:
             OrganizationBalanceError: organization_balance_handler,
             LibraryProjectNameConflictError: library_project_name_conflict_handler,
             LibraryTagNameConflictError: library_tag_name_conflict_handler,
+            LibraryBulkTagCapError: library_bulk_tag_cap_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
             Exception: global_exception_handler,
         },

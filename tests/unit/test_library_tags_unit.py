@@ -19,6 +19,8 @@ from src.api.schemas.library import (
     BulkRemoveTags,
     LibraryAssetPatch,
     LibraryLineageGraph,
+    LibraryProjectPatch,
+    LibraryTagPatch,
     LineageEdge,
     LineageNode,
     LineageRelation,
@@ -28,6 +30,7 @@ from src.api.services.library_project import LibraryProjectService
 from src.api.services.library_tag import LibraryTagService, LibraryTagValidationError
 from src.api.services.owner_scoped_names import normalize_owner_scoped_name
 from src.core.enums import OutputMediaType
+from src.core.library_limits import MAX_TAGS_PER_ASSET
 from src.core.library_ref import LibraryAssetSource
 
 pytestmark = pytest.mark.unit
@@ -166,6 +169,86 @@ class TestTagIdsPatchTriState:
         """No None arm — clearing is expressed as [] (T4), not null."""
         with pytest.raises(msgspec.ValidationError):
             msgspec.json.decode(b'{"tag_ids": null}', type=LibraryAssetPatch)
+
+    def test_exactly_20_tag_ids_accepted(self) -> None:
+        """S1: the wire bound matches _MAX_TAGS_PER_ASSET exactly."""
+        ids = [uuid4() for _ in range(MAX_TAGS_PER_ASSET)]
+        raw = msgspec.json.encode({"tag_ids": [str(i) for i in ids]})
+        patch = msgspec.json.decode(raw, type=LibraryAssetPatch)
+        assert patch.tag_ids == ids
+
+    def test_21_tag_ids_rejected_at_schema_boundary(self) -> None:
+        """S1: one over the cap is rejected by msgspec, before the service
+        ever sees it — the schema bound, not just the service-layer check."""
+        ids = [uuid4() for _ in range(MAX_TAGS_PER_ASSET + 1)]
+        raw = msgspec.json.encode({"tag_ids": [str(i) for i in ids]})
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(raw, type=LibraryAssetPatch)
+
+
+def _openapi_property_schema(struct_type: type, property_name: str) -> dict[str, object]:
+    """Build the Litestar-generated OpenAPI property schema for a single
+    msgspec.Struct field, via a throwaway app — independent of the real
+    ``create_app()``/``Settings`` wiring (docs are off by default there),
+    and isolated so this test only exercises struct -> OpenAPI generation.
+    """
+    from litestar import Litestar, post
+    from litestar.openapi.config import OpenAPIConfig
+
+    async def _handler(data):  # type: ignore[no-untyped-def]
+        return data
+
+    # Set the annotations dict directly (real type objects, not strings) —
+    # this module's `from __future__ import annotations` would otherwise
+    # stringify `struct_type` in the signature, and Litestar's
+    # `get_type_hints()` can't resolve a closure variable by name.
+    _handler.__annotations__ = {"data": struct_type, "return": struct_type}
+    handler = post("/x")(_handler)
+    app = Litestar([handler], openapi_config=OpenAPIConfig(title="t", version="1"))
+    schema = app.openapi_schema.to_schema()
+    return schema["components"]["schemas"][struct_type.__name__]["properties"][property_name]  # type: ignore[no-any-return]
+
+
+class TestOpenApiSchemaBounds:
+    """S1/S2: tri-state (``X | UnsetType``) constrained fields must expose
+    their bounds in the generated OpenAPI schema — not just enforce them at
+    decode time — including on the ``oneOf`` branch a oneOf-strict
+    validator/codegen tool actually inspects, not only as a sibling of
+    ``oneOf`` on the wrapper."""
+
+    def test_asset_patch_tag_ids_declares_max_items(self) -> None:
+        prop = _openapi_property_schema(LibraryAssetPatch, "tag_ids")
+        assert prop["maxItems"] == MAX_TAGS_PER_ASSET
+        member = prop["oneOf"][0]  # type: ignore[index]
+        assert member["maxItems"] == MAX_TAGS_PER_ASSET
+
+    def test_tag_patch_name_declares_length_bounds_on_oneof_member(self) -> None:
+        prop = _openapi_property_schema(LibraryTagPatch, "name")
+        assert prop["minLength"] == 1
+        assert prop["maxLength"] == 50
+        member = prop["oneOf"][0]  # type: ignore[index]
+        assert member["type"] == "string"
+        assert member["minLength"] == 1
+        assert member["maxLength"] == 50
+
+    def test_project_patch_name_declares_length_bounds_on_oneof_member(self) -> None:
+        prop = _openapi_property_schema(LibraryProjectPatch, "name")
+        assert prop["minLength"] == 1
+        assert prop["maxLength"] == 100
+        member = prop["oneOf"][0]  # type: ignore[index]
+        assert member["type"] == "string"
+        assert member["minLength"] == 1
+        assert member["maxLength"] == 100
+
+    def test_project_patch_description_remains_nullable_oneof(self) -> None:
+        """description is a genuine nullable (str | None | UnsetType) — unlike
+        name, it must NOT carry length bounds, and its oneOf branches are
+        exactly [string, null]."""
+        prop = _openapi_property_schema(LibraryProjectPatch, "description")
+        one_of = prop["oneOf"]
+        assert isinstance(one_of, list)
+        types = {member["type"] for member in one_of}
+        assert types == {"string", "null"}
 
 
 class TestLineageSchemaShape:

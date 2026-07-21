@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.36.0"
+version = "0.36.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -9,6 +9,7 @@ dependencies = [
     "litestar>=2.24.0",
     "granian>=2.7.6",
     "msgspec>=0.21.1",
+    "annotated-types>=0.7.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.1",
     # Database

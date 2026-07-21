@@ -7,11 +7,13 @@ from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
+import annotated_types
 import msgspec
 
 from src.api.schemas.media import MediaObject
 from src.api.services.library_capabilities import LibraryAction
 from src.core.enums import GenerationType, LibraryBadge, LibraryGroupSourceType, OutputMediaType
+from src.core.library_limits import MAX_TAGS_PER_ASSET
 from src.core.library_ref import LibraryAssetSource
 
 
@@ -122,7 +124,17 @@ class LibraryAssetPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     project_id: UUID | None | msgspec.UnsetType = msgspec.UNSET
     """Absent = leave unchanged. ``null`` = unassign. UUID = assign (must be owned by caller)."""
 
-    tag_ids: list[UUID] | msgspec.UnsetType = msgspec.UNSET
+    # The redundant annotated_types.MaxLen marker gets the bound onto the
+    # oneOf branch's own schema, not just the wrapper — see the S2 comment
+    # on LibraryTagPatch.name for why msgspec.Meta alone isn't enough here.
+    tag_ids: (
+        Annotated[
+            list[UUID],
+            msgspec.Meta(max_length=MAX_TAGS_PER_ASSET),
+            annotated_types.MaxLen(MAX_TAGS_PER_ASSET),
+        ]
+        | msgspec.UnsetType
+    ) = msgspec.UNSET
     """Absent = leave unchanged. Replace-set semantics: ``[]`` clears every
     tag, a list sets the exact tag set (<=20, all must be owned by caller).
     No ``None`` arm — clearing an asset's tags is expressed as ``[]``."""
@@ -149,19 +161,32 @@ class LibraryProjectListItem(LibraryProject, kw_only=True):
     asset_count: int
 
 
+# The redundant annotated_types.MinLen/MaxLen markers are inert for msgspec
+# itself (validation is governed entirely by msgspec.Meta) but are what
+# Litestar's OpenAPI generator recognizes when building the inner member of
+# a tri-state field's `oneOf` — without them the bounds only land on the
+# wrapper schema (a sibling of `oneOf`), never on the `{"type": "string"}`
+# branch a oneOf-strict validator/codegen tool actually inspects. Shared by
+# *Create and *Patch so the bound lives in exactly one place.
+_ProjectName = Annotated[
+    str,
+    msgspec.Meta(min_length=1, max_length=100),
+    annotated_types.MinLen(1),
+    annotated_types.MaxLen(100),
+]
+
+
 class LibraryProjectCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to create a new project."""
 
-    name: Annotated[str, msgspec.Meta(min_length=1, max_length=100)]
+    name: _ProjectName
     description: str | None = None
 
 
 class LibraryProjectPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to rename/redescribe a project. Both fields are tri-state."""
 
-    name: Annotated[str, msgspec.Meta(min_length=1, max_length=100)] | msgspec.UnsetType = (
-        msgspec.UNSET
-    )
+    name: _ProjectName | msgspec.UnsetType = msgspec.UNSET
     description: str | None | msgspec.UnsetType = msgspec.UNSET
 
 
@@ -185,18 +210,27 @@ class LibraryTagListItem(LibraryTag, kw_only=True):
     asset_count: int
 
 
+# See the _ProjectName comment above for why the annotated_types markers
+# are needed alongside msgspec.Meta. Shared by LibraryTagCreate/Patch so the
+# bound lives in exactly one place.
+_TagName = Annotated[
+    str,
+    msgspec.Meta(min_length=1, max_length=50),
+    annotated_types.MinLen(1),
+    annotated_types.MaxLen(50),
+]
+
+
 class LibraryTagCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to create a new tag."""
 
-    name: Annotated[str, msgspec.Meta(min_length=1, max_length=50)]
+    name: _TagName
 
 
 class LibraryTagPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to rename a tag."""
 
-    name: Annotated[str, msgspec.Meta(min_length=1, max_length=50)] | msgspec.UnsetType = (
-        msgspec.UNSET
-    )
+    name: _TagName | msgspec.UnsetType = msgspec.UNSET
 
 
 # ---------------------------------------------------------------------------
