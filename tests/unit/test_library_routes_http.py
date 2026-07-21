@@ -19,6 +19,7 @@ signature model, and OpenAPI generation all run for real.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -59,6 +60,7 @@ _DOCUMENTED_PARAMS = {
     "model",
     "favorite",
     "project_id",
+    "tag_id",
     "expiring",
     "query",
     "created_from",
@@ -134,6 +136,18 @@ class TestListAssetsHttp:
         assert kwargs["source"] == LibraryAssetSource.UPLOAD
         assert kwargs["sort"] == LibrarySort.OLDEST
 
+    def test_tag_id_param_binds_and_forwards_to_service(
+        self, jwt_service: JWTService, auth_header: dict[str, str]
+    ) -> None:
+        service = _make_service()
+        tag_id = uuid4()
+
+        with _make_client(service, jwt_service) as client:
+            resp = client.get(f"/v1/library?tag_id={tag_id}", headers=auth_header)
+
+        assert resp.status_code == HTTP_200_OK
+        assert service.list_assets.call_args.kwargs["tag_id"] == tag_id
+
     def test_query_over_max_length_returns_400(
         self, jwt_service: JWTService, auth_header: dict[str, str]
     ) -> None:
@@ -164,3 +178,54 @@ class TestListAssetsHttp:
 
         query_param = next(p for p in parameters if p.name == "query")
         assert query_param.schema.max_length == 200
+
+
+class TestGetAssetLineageHttp:
+    """Real-request coverage for GET /v1/library/assets/{asset_ref}/lineage."""
+
+    def test_not_found_returns_404(
+        self, jwt_service: JWTService, auth_header: dict[str, str]
+    ) -> None:
+        service = _make_service()
+        service.get_lineage_graph.return_value = None
+
+        with _make_client(service, jwt_service) as client:
+            resp = client.get(f"/v1/library/assets/upload:{uuid4()}/lineage", headers=auth_header)
+
+        assert resp.status_code == 404
+
+    def test_found_returns_200(self, jwt_service: JWTService, auth_header: dict[str, str]) -> None:
+        from src.api.schemas.library import LibraryDescendants, LibraryLineageGraph, LineageNode
+        from src.api.schemas.media import MediaObject, MediaOriginal
+        from src.core.enums import OutputMediaType
+        from src.core.library_ref import LibraryAssetSource
+
+        asset_id = uuid4()
+        node = LineageNode(
+            asset_ref=f"upload:{asset_id}",
+            source=LibraryAssetSource.UPLOAD,
+            media=MediaObject(
+                media_type=OutputMediaType.IMAGE,
+                original=MediaOriginal(
+                    url=f"/v1/content/uploads/{asset_id}", content_type="image/png", size_bytes=1
+                ),
+                variants=[],
+            ),
+            created_at=datetime.now(UTC),
+        )
+        graph = LibraryLineageGraph(
+            focus=node,
+            ancestors=(),
+            descendants=(),
+            descendant_totals=LibraryDescendants(job_count=0, frame_count=0),
+            ancestors_truncated=False,
+            descendants_truncated=False,
+        )
+        service = _make_service()
+        service.get_lineage_graph.return_value = graph
+
+        with _make_client(service, jwt_service) as client:
+            resp = client.get(f"/v1/library/assets/upload:{asset_id}/lineage", headers=auth_header)
+
+        assert resp.status_code == HTTP_200_OK
+        assert resp.json()["focus"]["asset_ref"] == f"upload:{asset_id}"

@@ -22,7 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.core.uid import new_id
 from src.db.models.base import Base
 
-__all__ = ["LibraryAssetMetadata", "LibraryProject"]
+__all__ = ["LibraryAssetMetadata", "LibraryAssetTag", "LibraryProject", "LibraryTag"]
 
 
 class LibraryAssetMetadata(Base):
@@ -158,3 +158,99 @@ class LibraryProject(Base):
 
     def __repr__(self) -> str:
         return f"<LibraryProject {self.id} user={self.user_id} name={self.name!r}>"
+
+
+class LibraryTag(Base):
+    """User-created tag, many-to-many against library assets via LibraryAssetTag.
+
+    Unlike LibraryProject (one project per asset), a single asset can carry
+    multiple tags — see library_asset_tags. No ORM relationship() is declared
+    to the join table; membership is resolved via explicit, batched
+    repository queries (LibraryTagRepository), matching the rest of the
+    library read-model's no-lazy-load convention.
+    """
+
+    __tablename__ = "library_tags"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=new_id,
+    )
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_library_tags_owner_name",
+            "product_id",
+            "user_id",
+            text("lower(name)"),
+            unique=True,
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LibraryTag {self.id} user={self.user_id} name={self.name!r}>"
+
+
+class LibraryAssetTag(Base):
+    """Join row: one asset tagged with one tag. Many-to-many (T1).
+
+    Polymorphic by design (asset_type + asset_id), same rationale as
+    LibraryAssetMetadata — no FK relationship() to the content tables. T2:
+    user_id/product_id are denormalized here (not resolved via a join to
+    library_tags) so every scoped query can filter directly on this table.
+    """
+
+    __tablename__ = "library_asset_tags"
+
+    tag_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("library_tags.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    asset_type: Mapped[str] = mapped_column(String(10), primary_key=True)
+    asset_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "asset_type IN ('upload', 'output')",
+            name="ck_library_asset_tags_asset_type",
+        ),
+        Index("ix_library_asset_tags_asset", "asset_type", "asset_id"),
+        Index("ix_library_asset_tags_owner_tag", "user_id", "product_id", "tag_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LibraryAssetTag tag={self.tag_id} asset={self.asset_type}:{self.asset_id}>"

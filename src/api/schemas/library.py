@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
+import annotated_types
 import msgspec
 
 from src.api.schemas.media import MediaObject
 from src.api.services.library_capabilities import LibraryAction
 from src.core.enums import GenerationType, LibraryBadge, LibraryGroupSourceType, OutputMediaType
+from src.core.library_limits import MAX_TAGS_PER_ASSET
 from src.core.library_ref import LibraryAssetSource
+
+
+class LibraryTagRef(msgspec.Struct, kw_only=True):
+    """Minimal tag reference embedded in asset items — id + name only."""
+
+    id: UUID
+    name: str
 
 
 class LibraryAssetItem(msgspec.Struct, kw_only=True):
@@ -59,6 +69,9 @@ class LibraryAssetItem(msgspec.Struct, kw_only=True):
 
     project_name: str | None = None
     """Denormalized name of ``project_id``, resolved via a batched lookup."""
+
+    tags: tuple[LibraryTagRef, ...] = ()
+    """Tags assigned to this asset (T1: many-to-many), name-ordered."""
 
 
 class LibraryLineage(msgspec.Struct, kw_only=True):
@@ -111,6 +124,21 @@ class LibraryAssetPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     project_id: UUID | None | msgspec.UnsetType = msgspec.UNSET
     """Absent = leave unchanged. ``null`` = unassign. UUID = assign (must be owned by caller)."""
 
+    # The redundant annotated_types.MaxLen marker gets the bound onto the
+    # oneOf branch's own schema, not just the wrapper — see the S2 comment
+    # on LibraryTagPatch.name for why msgspec.Meta alone isn't enough here.
+    tag_ids: (
+        Annotated[
+            list[UUID],
+            msgspec.Meta(max_length=MAX_TAGS_PER_ASSET),
+            annotated_types.MaxLen(MAX_TAGS_PER_ASSET),
+        ]
+        | msgspec.UnsetType
+    ) = msgspec.UNSET
+    """Absent = leave unchanged. Replace-set semantics: ``[]`` clears every
+    tag, a list sets the exact tag set (<=20, all must be owned by caller).
+    No ``None`` arm — clearing an asset's tags is expressed as ``[]``."""
+
 
 # ---------------------------------------------------------------------------
 # Projects (Phase 2)
@@ -133,28 +161,87 @@ class LibraryProjectListItem(LibraryProject, kw_only=True):
     asset_count: int
 
 
+# The redundant annotated_types.MinLen/MaxLen markers are inert for msgspec
+# itself (validation is governed entirely by msgspec.Meta) but are what
+# Litestar's OpenAPI generator recognizes when building the inner member of
+# a tri-state field's `oneOf` — without them the bounds only land on the
+# wrapper schema (a sibling of `oneOf`), never on the `{"type": "string"}`
+# branch a oneOf-strict validator/codegen tool actually inspects. Shared by
+# *Create and *Patch so the bound lives in exactly one place.
+_ProjectName = Annotated[
+    str,
+    msgspec.Meta(min_length=1, max_length=100),
+    annotated_types.MinLen(1),
+    annotated_types.MaxLen(100),
+]
+
+
 class LibraryProjectCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to create a new project."""
 
-    name: Annotated[str, msgspec.Meta(min_length=1, max_length=100)]
+    name: _ProjectName
     description: str | None = None
 
 
 class LibraryProjectPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to rename/redescribe a project. Both fields are tri-state."""
 
-    name: Annotated[str, msgspec.Meta(min_length=1, max_length=100)] | msgspec.UnsetType = (
-        msgspec.UNSET
-    )
+    name: _ProjectName | msgspec.UnsetType = msgspec.UNSET
     description: str | None | msgspec.UnsetType = msgspec.UNSET
 
 
 # ---------------------------------------------------------------------------
-# Bulk operations (Phase 2)
+# Tags (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class LibraryTag(msgspec.Struct, kw_only=True):
+    """A user-created tag, assignable to many assets (T1: many-to-many)."""
+
+    id: UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class LibraryTagListItem(LibraryTag, kw_only=True):
+    """Single row in the tag list view — adds the batched asset count."""
+
+    asset_count: int
+
+
+# See the _ProjectName comment above for why the annotated_types markers
+# are needed alongside msgspec.Meta. Shared by LibraryTagCreate/Patch so the
+# bound lives in exactly one place.
+_TagName = Annotated[
+    str,
+    msgspec.Meta(min_length=1, max_length=50),
+    annotated_types.MinLen(1),
+    annotated_types.MaxLen(50),
+]
+
+
+class LibraryTagCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Request to create a new tag."""
+
+    name: _TagName
+
+
+class LibraryTagPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Request to rename a tag."""
+
+    name: _TagName | msgspec.UnsetType = msgspec.UNSET
+
+
+# ---------------------------------------------------------------------------
+# Bulk operations (Phase 2/3)
 # ---------------------------------------------------------------------------
 
 _BulkAssetRefs = Annotated[list[str], msgspec.Meta(min_length=1, max_length=100)]
 """Shared bound for every bulk op's asset_refs — never more than 100 (P4)."""
+
+_BulkTagIds = Annotated[list[UUID], msgspec.Meta(min_length=1, max_length=10)]
+"""Shared bound for bulk tag ops' tag_ids — never more than 10 (T5)."""
 
 
 class BulkSetFavorite(msgspec.Struct, tag="set_favorite", kw_only=True):
@@ -177,7 +264,21 @@ class BulkDelete(msgspec.Struct, tag="delete", kw_only=True):
     asset_refs: _BulkAssetRefs
 
 
-BulkOperation = BulkSetFavorite | BulkSetProject | BulkDelete
+class BulkAddTags(msgspec.Struct, tag="add_tags", kw_only=True):
+    """Bulk-add a batch of tags to a batch of assets."""
+
+    asset_refs: _BulkAssetRefs
+    tag_ids: _BulkTagIds
+
+
+class BulkRemoveTags(msgspec.Struct, tag="remove_tags", kw_only=True):
+    """Bulk-remove a batch of tags from a batch of assets."""
+
+    asset_refs: _BulkAssetRefs
+    tag_ids: _BulkTagIds
+
+
+BulkOperation = BulkSetFavorite | BulkSetProject | BulkDelete | BulkAddTags | BulkRemoveTags
 """Tagged union decoded from the ``op`` discriminant field — see P4."""
 
 
@@ -271,3 +372,68 @@ class LibraryGroupDetail(msgspec.Struct, kw_only=True):
     completed_at: datetime | None = None
 
     lineage: LibraryGroupLineage | None = None
+
+
+# ---------------------------------------------------------------------------
+# Lineage graph (Phase 3) — GET /v1/library/assets/{asset_ref}/lineage
+# ---------------------------------------------------------------------------
+
+
+class LineageRelation(StrEnum):
+    """How a lineage edge's node relates to the node it's attached to."""
+
+    GENERATED_FROM_UPLOAD = "generated_from_upload"
+    """Ancestor edge: an output's job used this upload as its input image."""
+
+    GENERATED_FROM_OUTPUT = "generated_from_output"
+    """Ancestor/descendant edge: a job remixed this output as its source."""
+
+    FRAME_OF_OUTPUT = "frame_of_output"
+    """Ancestor/descendant edge: an upload is a frame extracted from this output."""
+
+    FRAME_OF_UPLOAD = "frame_of_upload"
+    """Ancestor/descendant edge: an upload is a frame extracted from this upload."""
+
+
+class LineageNode(msgspec.Struct, kw_only=True):
+    """Single asset in a lineage graph — enough to render a thumbnail + link."""
+
+    asset_ref: str
+    source: LibraryAssetSource
+    media: MediaObject
+    created_at: datetime
+    model: str | None = None
+    """Output-only: generation model."""
+
+    generation_type: GenerationType | None = None
+    """Output-only."""
+
+
+class LineageEdge(msgspec.Struct, kw_only=True):
+    """One hop in the lineage graph: the relation plus the node it leads to."""
+
+    relation: LineageRelation
+    node: LineageNode
+    source_timestamp_ms: int | None = None
+    """Frame edges only: timestamp within the source video this frame was extracted at."""
+
+
+class LibraryLineageGraph(msgspec.Struct, kw_only=True):
+    """Bounded ancestor/descendant graph for a single library asset (T8)."""
+
+    focus: LineageNode
+
+    ancestors: tuple[LineageEdge, ...]
+    """Nearest-first chain, one parent per step, depth-capped."""
+
+    descendants: tuple[LineageEdge, ...]
+    """Immediate descendants only (not recursive), per-relation capped."""
+
+    descendant_totals: LibraryDescendants
+    """Full descendant counts, independent of the capped ``descendants`` list."""
+
+    ancestors_truncated: bool
+    """True if the ancestor walk stopped at the depth cap rather than a real root."""
+
+    descendants_truncated: bool
+    """True if either descendant relation was clipped by its per-relation cap."""

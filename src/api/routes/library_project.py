@@ -17,6 +17,7 @@ import structlog
 from litestar import Controller, Response, delete, get, patch, post
 from litestar.di import Provide
 from litestar.exceptions import NotFoundException
+from litestar.openapi.datastructures import ResponseSpec
 from litestar.params import Parameter
 from litestar.status_codes import (
     HTTP_201_CREATED,
@@ -43,6 +44,13 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _PROJECT_NOT_FOUND = "Library project not found"
+
+_CONFLICT_RESPONSES = {
+    409: ResponseSpec(
+        data_container=ErrorEnvelope,
+        description="A project with this name already exists for the caller (case-insensitive).",
+    )
+}
 
 
 class LibraryProjectController(Controller):
@@ -79,7 +87,7 @@ class LibraryProjectController(Controller):
             )
         return Response(content=page)
 
-    @post("/", status_code=HTTP_201_CREATED)
+    @post("/", status_code=HTTP_201_CREATED, responses=_CONFLICT_RESPONSES)
     async def create_project(
         self,
         current_user_id: UUID,
@@ -104,7 +112,7 @@ class LibraryProjectController(Controller):
             )
         return Response(content=project, status_code=HTTP_201_CREATED)
 
-    @get("/{project_id:uuid}")
+    @get("/{project_id:uuid}", raises=[NotFoundException])
     async def get_project(
         self,
         current_user_id: UUID,
@@ -121,7 +129,7 @@ class LibraryProjectController(Controller):
             raise NotFoundException(detail=_PROJECT_NOT_FOUND)
         return project
 
-    @patch("/{project_id:uuid}")
+    @patch("/{project_id:uuid}", raises=[NotFoundException], responses=_CONFLICT_RESPONSES)
     async def patch_project(
         self,
         current_user_id: UUID,
@@ -149,7 +157,7 @@ class LibraryProjectController(Controller):
             raise NotFoundException(detail=_PROJECT_NOT_FOUND)
         return Response(content=project)
 
-    @delete("/{project_id:uuid}", status_code=HTTP_204_NO_CONTENT)
+    @delete("/{project_id:uuid}", status_code=HTTP_204_NO_CONTENT, raises=[NotFoundException])
     async def delete_project(
         self,
         current_user_id: UUID,
