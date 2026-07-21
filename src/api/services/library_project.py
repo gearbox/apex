@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.library import LibraryProject, LibraryProjectListItem, LibraryProjectPatch
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
+from src.api.services.owner_scoped_names import normalize_owner_scoped_name
 from src.db.repositories.library import UNSET_UPDATE, OptionalUpdate
 from src.db.repositories.library_project import LibraryProjectRepository
 
@@ -223,15 +224,8 @@ class LibraryProjectService:
 
     @staticmethod
     def _normalize_name(raw: str) -> str:
-        """Trim + collapse inner whitespace; re-validate length post-normalization.
-
-        msgspec's ``min_length=1``/``max_length=100`` constraints validate
-        the raw wire value — a string of all whitespace passes that check
-        but normalizes to empty, so length is re-checked here.
-        """
-        normalized = " ".join(raw.split())
-        if not (1 <= len(normalized) <= 100):
-            raise LibraryProjectValidationError(
-                "name must be 1-100 characters after trimming whitespace"
-            )
-        return normalized
+        """Trim + collapse inner whitespace; re-validate length post-normalization."""
+        try:
+            return normalize_owner_scoped_name(raw, max_length=100)
+        except ValueError as exc:
+            raise LibraryProjectValidationError(str(exc)) from exc

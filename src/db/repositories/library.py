@@ -19,6 +19,7 @@ from sqlalchemy import (
     and_,
     cast,
     delete,
+    exists,
     false,
     func,
     literal,
@@ -37,7 +38,7 @@ from sqlalchemy.sql import union_all as sa_union_all
 from src.core.enums import JobStatus, LibrarySort, OutputMediaType
 from src.core.library_ref import AssetRef, LibraryAssetSource
 from src.core.uid import new_id
-from src.db.models.library import LibraryAssetMetadata
+from src.db.models.library import LibraryAssetMetadata, LibraryAssetTag
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 
 if TYPE_CHECKING:
@@ -124,6 +125,7 @@ class LibraryRepository:
         model: str | None = None,
         favorite: bool | None = None,
         project_id: UUID | None = None,
+        tag_id: UUID | None = None,
         expiring: bool | None = None,
         query: str | None = None,
         created_from: datetime | None = None,
@@ -151,6 +153,7 @@ class LibraryRepository:
                 filter and are excluded from the branch set entirely.
             favorite: Filter to favorited (True) or non-favorited (False) assets.
             project_id: Filter to assets assigned to this project.
+            tag_id: Filter to assets tagged with this tag (T6: single tag only).
             expiring: Filter to assets expiring within (True) or beyond
                 (False) the ``expiring_soon`` window (P6, 7 days).
             query: Case-insensitive substring search over display_title,
@@ -185,6 +188,7 @@ class LibraryRepository:
                     media_type=media_type,
                     favorite=favorite,
                     project_id=project_id,
+                    tag_id=tag_id,
                     expiring=expiring,
                     expiring_threshold=expiring_threshold,
                     search_term=search_term,
@@ -205,6 +209,7 @@ class LibraryRepository:
                     model=model,
                     favorite=favorite,
                     project_id=project_id,
+                    tag_id=tag_id,
                     expiring=expiring,
                     expiring_threshold=expiring_threshold,
                     search_term=search_term,
@@ -263,6 +268,7 @@ class LibraryRepository:
         media_type: OutputMediaType | None,
         favorite: bool | None,
         project_id: UUID | None,
+        tag_id: UUID | None,
         expiring: bool | None,
         expiring_threshold: datetime,
         search_term: str | None,
@@ -322,6 +328,19 @@ class LibraryRepository:
         if project_id is not None:
             query = query.where(LibraryAssetMetadata.project_id == project_id)
 
+        if tag_id is not None:
+            query = query.where(
+                exists(
+                    select(LibraryAssetTag.tag_id).where(
+                        LibraryAssetTag.asset_type == LibraryAssetSource.UPLOAD.value,
+                        LibraryAssetTag.asset_id == UserImage.id,
+                        LibraryAssetTag.tag_id == tag_id,
+                        LibraryAssetTag.user_id == user_id,
+                        LibraryAssetTag.product_id == product_id,
+                    )
+                )
+            )
+
         if expiring is True:
             query = query.where(UserImage.expires_at <= expiring_threshold)
         elif expiring is False:
@@ -361,6 +380,7 @@ class LibraryRepository:
         model: str | None,
         favorite: bool | None,
         project_id: UUID | None,
+        tag_id: UUID | None,
         expiring: bool | None,
         expiring_threshold: datetime,
         search_term: str | None,
@@ -425,6 +445,19 @@ class LibraryRepository:
 
         if project_id is not None:
             query = query.where(LibraryAssetMetadata.project_id == project_id)
+
+        if tag_id is not None:
+            query = query.where(
+                exists(
+                    select(LibraryAssetTag.tag_id).where(
+                        LibraryAssetTag.asset_type == LibraryAssetSource.OUTPUT.value,
+                        LibraryAssetTag.asset_id == GenerationOutput.id,
+                        LibraryAssetTag.tag_id == tag_id,
+                        LibraryAssetTag.user_id == user_id,
+                        LibraryAssetTag.product_id == product_id,
+                    )
+                )
+            )
 
         if expiring is True:
             query = query.where(GenerationOutput.expires_at <= expiring_threshold)
@@ -560,6 +593,91 @@ class LibraryRepository:
         job_count = (await self._session.execute(job_count_query)).scalar_one()
         frame_count = (await self._session.execute(frame_count_query)).scalar_one()
         return job_count, frame_count
+
+    # -------------------------------------------------------------------------
+    # Lineage graph (Phase 3, T8) — immediate descendants only
+    # -------------------------------------------------------------------------
+
+    async def list_output_descendants(
+        self,
+        source: LibraryAssetSource,
+        asset_id: UUID,
+        *,
+        user_id: UUID,
+        product_id: str,
+        limit: int,
+    ) -> Sequence[GenerationOutput]:
+        """Immediate output descendants: outputs of completed jobs remixing this asset.
+
+        Args:
+            source: Which table ``asset_id`` belongs to.
+            asset_id: The asset's primary key.
+            user_id: Owner scope.
+            product_id: Product scope.
+            limit: Row cap — caller fetches limit+1 to detect truncation.
+
+        Returns:
+            Non-thumbnail GenerationOutput rows, newest first.
+        """
+        job_filter = (
+            GenerationJob.input_image_id == asset_id
+            if source == LibraryAssetSource.UPLOAD
+            else GenerationJob.source_output_id == asset_id
+        )
+        result = await self._session.execute(
+            select(GenerationOutput)
+            .join(GenerationJob, GenerationJob.id == GenerationOutput.job_id)
+            .where(
+                job_filter,
+                GenerationJob.status == JobStatus.COMPLETED,
+                GenerationJob.is_deleted.is_(False),
+                GenerationOutput.user_id == user_id,
+                GenerationOutput.product_id == product_id,
+                GenerationOutput.is_thumbnail.is_(False),
+            )
+            .order_by(GenerationOutput.created_at.desc())
+            .limit(limit)
+        )
+        return result.scalars().all()
+
+    async def list_frame_descendants(
+        self,
+        source: LibraryAssetSource,
+        asset_id: UUID,
+        *,
+        user_id: UUID,
+        product_id: str,
+        limit: int,
+    ) -> Sequence[UserImage]:
+        """Immediate frame descendants: uploads extracted from this asset.
+
+        Args:
+            source: Which table ``asset_id`` belongs to.
+            asset_id: The asset's primary key.
+            user_id: Owner scope.
+            product_id: Product scope.
+            limit: Row cap — caller fetches limit+1 to detect truncation.
+
+        Returns:
+            Non-thumbnail UserImage rows, newest first.
+        """
+        frame_filter = (
+            UserImage.source_upload_id == asset_id
+            if source == LibraryAssetSource.UPLOAD
+            else UserImage.source_output_id == asset_id
+        )
+        result = await self._session.execute(
+            select(UserImage)
+            .where(
+                frame_filter,
+                UserImage.user_id == user_id,
+                UserImage.product_id == product_id,
+                UserImage.is_thumbnail.is_(False),
+            )
+            .order_by(UserImage.created_at.desc())
+            .limit(limit)
+        )
+        return result.scalars().all()
 
     # -------------------------------------------------------------------------
     # Metadata

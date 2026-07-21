@@ -127,6 +127,35 @@ class JobRepository(BaseRepository[GenerationJob]):
         )
         return result.scalar_one_or_none()
 
+    async def get_many(
+        self,
+        ids: Sequence[UUID],
+        *,
+        user_id: UUID,
+    ) -> dict[UUID, GenerationJob]:
+        """Batch-fetch jobs by ID, ownership-scoped (soft-deleted excluded).
+
+        Args:
+            ids: Job IDs to look up.
+            user_id: Owner — rows of other users are excluded.
+
+        Returns:
+            Mapping from id to GenerationJob for rows that exist, are owned
+            by ``user_id``, and are not soft-deleted. Missing/foreign ids
+            are simply absent from the result.
+        """
+        if not ids:
+            return {}
+
+        result = await self._session.execute(
+            select(GenerationJob).where(
+                GenerationJob.id.in_(ids),
+                GenerationJob.user_id == user_id,
+                GenerationJob.is_deleted.is_(False),
+            )
+        )
+        return {job.id: job for job in result.scalars().all()}
+
     async def update_status(
         self,
         job_id: UUID,

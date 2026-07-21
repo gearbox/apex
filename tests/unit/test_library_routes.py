@@ -21,14 +21,21 @@ from src.api.schemas.library import (
     BulkOperationResult,
     LibraryAssetDetail,
     LibraryAssetPatch,
+    LibraryDescendants,
     LibraryGroupDetail,
+    LibraryLineageGraph,
+    LineageNode,
 )
+from src.api.schemas.media import MediaObject, MediaOriginal
 from src.api.schemas.pagination import CursorPage
 from src.api.services.library import (
     LibraryBulkValidationError,
     LibraryProjectNotFoundError,
+    LibraryTagNotFoundError,
     LibraryValidationError,
 )
+from src.core.enums import OutputMediaType
+from src.core.library_ref import LibraryAssetSource
 from src.core.product_registry import VEX_CONFIG
 
 pytestmark = pytest.mark.unit
@@ -225,6 +232,23 @@ class TestPatchAsset:
         assert response.status_code == HTTP_404_NOT_FOUND
         assert response.content.error == "not_found"
 
+    async def test_unknown_tag_id_returns_404(self) -> None:
+        service = AsyncMock()
+        service.patch_asset.side_effect = LibraryTagNotFoundError([uuid4()])
+
+        response = await LibraryController.patch_asset.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            product_config=VEX_CONFIG,
+            asset_ref="upload:x",
+            data=LibraryAssetPatch(tag_ids=[uuid4()]),
+            session=MagicMock(),
+            library_service=service,
+        )
+        assert response.status_code == HTTP_404_NOT_FOUND
+        assert response.content.error == "not_found"
+
     async def test_success_returns_detail(self) -> None:
         detail = _detail(display_title="New Title")
         service = AsyncMock()
@@ -298,6 +322,73 @@ class TestBulkApply:
         )
         assert response.status_code == HTTP_404_NOT_FOUND
         assert response.content.error == "not_found"
+
+    async def test_unknown_tag_id_returns_404(self) -> None:
+        service = AsyncMock()
+        service.bulk_apply.side_effect = LibraryTagNotFoundError([uuid4()])
+
+        response = await LibraryController.bulk_apply.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            data=BulkDelete(asset_refs=["upload:x"]),
+            session=MagicMock(),
+            library_service=service,
+            content_proxy=MagicMock(),
+        )
+        assert response.status_code == HTTP_404_NOT_FOUND
+        assert response.content.error == "not_found"
+
+
+class TestGetAssetLineage:
+    async def test_none_returns_404(self) -> None:
+        service = AsyncMock()
+        service.get_lineage_graph.return_value = None
+
+        response = await LibraryController.get_asset_lineage.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            asset_ref="upload:bogus",
+            session=MagicMock(),
+            library_service=service,
+        )
+        assert response.status_code == HTTP_404_NOT_FOUND
+        assert response.content.error == "not_found"
+
+    async def test_found_returns_graph(self) -> None:
+        node = LineageNode(
+            asset_ref=f"upload:{uuid4()}",
+            source=LibraryAssetSource.UPLOAD,
+            media=MediaObject(
+                media_type=OutputMediaType.IMAGE,
+                original=MediaOriginal(
+                    url="/v1/content/uploads/x", content_type="image/png", size_bytes=1
+                ),
+                variants=[],
+            ),
+            created_at=MagicMock(),
+        )
+        graph = LibraryLineageGraph(
+            focus=node,
+            ancestors=(),
+            descendants=(),
+            descendant_totals=LibraryDescendants(job_count=0, frame_count=0),
+            ancestors_truncated=False,
+            descendants_truncated=False,
+        )
+        service = AsyncMock()
+        service.get_lineage_graph.return_value = graph
+
+        response = await LibraryController.get_asset_lineage.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            product_id="vex",
+            asset_ref=node.asset_ref,
+            session=MagicMock(),
+            library_service=service,
+        )
+        assert response.content is graph
 
 
 class TestFavoriteIdempotency:

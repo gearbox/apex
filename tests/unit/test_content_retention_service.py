@@ -125,8 +125,10 @@ async def test_sweep_deletes_expired_outputs_and_collects_r2_keys() -> None:
     derivative = MagicMock(storage_key="users/u/outputs/j/out_sm.webp")
 
     session = _make_session()
-    # delete, soft-delete UPDATE, metadata purge DELETE (D14)
-    session.execute = AsyncMock(side_effect=[_exec_result(1), _exec_result(0), _exec_result(0)])
+    # delete, soft-delete UPDATE, metadata purge DELETE (D14), tags purge DELETE
+    session.execute = AsyncMock(
+        side_effect=[_exec_result(1), _exec_result(0), _exec_result(0), _exec_result(0)]
+    )
     uploads_session = _make_session()
 
     storage = AsyncMock()
@@ -155,8 +157,10 @@ async def test_sweep_soft_deletes_jobs_with_no_remaining_outputs() -> None:
 
     session = _make_session()
     # delete rowcount=1, soft-delete UPDATE rowcount=1 -> job had no remaining outputs,
-    # metadata purge DELETE (D14)
-    session.execute = AsyncMock(side_effect=[_exec_result(1), _exec_result(1), _exec_result(0)])
+    # metadata purge DELETE (D14), tags purge DELETE
+    session.execute = AsyncMock(
+        side_effect=[_exec_result(1), _exec_result(1), _exec_result(0), _exec_result(0)]
+    )
     uploads_session = _make_session()
     factory = _make_session_factory([session, uploads_session])
 
@@ -180,7 +184,9 @@ async def test_sweep_keeps_jobs_with_remaining_outputs() -> None:
     parent = MagicMock(id=output_id, job_id=job_id, storage_key="users/u/outputs/j/out.png")
 
     session = _make_session()
-    session.execute = AsyncMock(side_effect=[_exec_result(1), _exec_result(0), _exec_result(0)])
+    session.execute = AsyncMock(
+        side_effect=[_exec_result(1), _exec_result(0), _exec_result(0), _exec_result(0)]
+    )
     uploads_session = _make_session()
     factory = _make_session_factory([session, uploads_session])
 
@@ -226,7 +232,9 @@ async def test_sweep_r2_failure_does_not_raise() -> None:
     parent = MagicMock(id=output_id, job_id=job_id, storage_key="users/u/outputs/j/out.png")
 
     session = _make_session()
-    session.execute = AsyncMock(side_effect=[_exec_result(1), _exec_result(0), _exec_result(0)])
+    session.execute = AsyncMock(
+        side_effect=[_exec_result(1), _exec_result(0), _exec_result(0), _exec_result(0)]
+    )
     uploads_session = _make_session()
     factory = _make_session_factory([session, uploads_session])
 

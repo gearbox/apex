@@ -3,12 +3,13 @@
 Endpoints:
   GET    /v1/library                          — paginated library grid
   GET    /v1/library/assets/{asset_ref}        — asset detail
+  GET    /v1/library/assets/{asset_ref}/lineage — bounded ancestor/descendant lineage graph
   GET    /v1/library/groups/{job_id}           — generation group detail
   PATCH  /v1/library/assets/{asset_ref}        — update mutable metadata
   PUT    /v1/library/assets/{asset_ref}/favorite    — mark favorite
   DELETE /v1/library/assets/{asset_ref}/favorite    — unmark favorite
   DELETE /v1/library/assets/{asset_ref}        — delete asset
-  POST   /v1/library/assets/bulk               — bulk favorite/project/delete
+  POST   /v1/library/assets/bulk               — bulk favorite/project/tags/delete
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from src.api.schemas.library import (
     LibraryAssetItem,
     LibraryAssetPatch,
     LibraryGroupDetail,
+    LibraryLineageGraph,
 )
 from src.api.schemas.pagination import CursorPage
 from src.api.security import auth_guard
@@ -46,6 +48,7 @@ from src.api.services.library import (
     LibraryBulkValidationError,
     LibraryProjectNotFoundError,
     LibraryService,
+    LibraryTagNotFoundError,
     LibraryValidationError,
 )
 from src.core.enums import LibrarySort, OutputMediaType
@@ -60,6 +63,7 @@ logger = structlog.get_logger(__name__)
 _ASSET_NOT_FOUND = "Library asset not found"
 _GROUP_NOT_FOUND = "Generation group not found"
 _PROJECT_NOT_FOUND = "Library project not found"
+_TAG_NOT_FOUND = "Library tag not found"
 
 
 class LibraryController(Controller):
@@ -85,6 +89,7 @@ class LibraryController(Controller):
         model: str | None = None,
         favorite: bool | None = None,
         project_id: UUID | None = None,
+        tag_id: UUID | None = None,
         expiring: bool | None = None,
         search: Annotated[str | None, Parameter(query="query", max_length=200)] = None,
         created_from: datetime | None = None,
@@ -105,6 +110,7 @@ class LibraryController(Controller):
                 model=model,
                 favorite=favorite,
                 project_id=project_id,
+                tag_id=tag_id,
                 expiring=expiring,
                 query=search,
                 created_from=created_from,
@@ -151,6 +157,39 @@ class LibraryController(Controller):
             )
         return Response(content=detail)
 
+    @get("/assets/{asset_ref:str}/lineage")
+    async def get_asset_lineage(
+        self,
+        current_user_id: UUID,
+        product_id: str,
+        asset_ref: str,
+        session: AsyncSession,
+        library_service: LibraryService,
+    ) -> Response[LibraryLineageGraph | ErrorEnvelope]:
+        """Bounded ancestor/descendant lineage graph for a single library asset.
+
+        Ancestor walk is depth-capped at 10 hops; descendants are immediate
+        only (not recursive), capped at 50 per relation. Bounded total query
+        count — see LibraryService.get_lineage_graph docstring — acceptable
+        for this on-demand, not-list-hot-path endpoint.
+        """
+        graph = await library_service.get_lineage_graph(
+            asset_ref,
+            current_user_id,
+            product_id,
+            session=session,
+        )
+        if graph is None:
+            return Response(
+                content=ErrorEnvelope(
+                    error="not_found",
+                    message=_ASSET_NOT_FOUND,
+                    status_code=HTTP_404_NOT_FOUND,
+                ),
+                status_code=HTTP_404_NOT_FOUND,
+            )
+        return Response(content=graph)
+
     @get("/groups/{job_id:uuid}")
     async def get_group_detail(
         self,
@@ -189,7 +228,7 @@ class LibraryController(Controller):
         session: AsyncSession,
         library_service: LibraryService,
     ) -> Response[LibraryAssetDetail | ErrorEnvelope]:
-        """Update mutable metadata (display_title, project_id)."""
+        """Update mutable metadata (display_title, project_id, tag_ids)."""
         try:
             detail = await library_service.patch_asset(
                 asset_ref,
@@ -213,6 +252,15 @@ class LibraryController(Controller):
                 content=ErrorEnvelope(
                     error="not_found",
                     message=_PROJECT_NOT_FOUND,
+                    status_code=HTTP_404_NOT_FOUND,
+                ),
+                status_code=HTTP_404_NOT_FOUND,
+            )
+        except LibraryTagNotFoundError:
+            return Response(
+                content=ErrorEnvelope(
+                    error="not_found",
+                    message=_TAG_NOT_FOUND,
                     status_code=HTTP_404_NOT_FOUND,
                 ),
                 status_code=HTTP_404_NOT_FOUND,
@@ -270,7 +318,7 @@ class LibraryController(Controller):
         library_service: LibraryService,
         content_proxy: ContentProxyService,
     ) -> Response[BulkOperationResult | ErrorEnvelope]:
-        """Bulk favorite/project-assign/delete up to 100 assets in one request.
+        """Bulk favorite/project-assign/tag/delete up to 100 assets in one request.
 
         Validates every asset_ref before executing anything — a single bad
         ref fails the whole request with a 400 listing every offender
@@ -299,6 +347,15 @@ class LibraryController(Controller):
                 content=ErrorEnvelope(
                     error="not_found",
                     message=_PROJECT_NOT_FOUND,
+                    status_code=HTTP_404_NOT_FOUND,
+                ),
+                status_code=HTTP_404_NOT_FOUND,
+            )
+        except LibraryTagNotFoundError:
+            return Response(
+                content=ErrorEnvelope(
+                    error="not_found",
+                    message=_TAG_NOT_FOUND,
                     status_code=HTTP_404_NOT_FOUND,
                 ),
                 status_code=HTTP_404_NOT_FOUND,

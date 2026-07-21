@@ -19,6 +19,7 @@ from src.api.services.storage.exceptions import StorageDeleteError
 from src.core.library_ref import LibraryAssetSource
 from src.db.models.library import LibraryAssetMetadata
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
+from src.db.repositories.library_tag import LibraryTagRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
@@ -155,12 +156,16 @@ class ContentRetentionService:
                 metadata_purged = await self._purge_metadata(
                     session, LibraryAssetSource.OUTPUT, expired_ids
                 )
+                tags_purged = await self._purge_tags(
+                    session, LibraryAssetSource.OUTPUT, expired_ids
+                )
 
                 await session.commit()
 
             rows_deleted += batch_rows_deleted
             jobs_soft_deleted += batch_jobs_soft_deleted
             logger.info("content_retention.metadata_purged", count=metadata_purged)
+            logger.info("content_retention.tags_purged", count=tags_purged)
 
             deleted, failed = await self._delete_r2_keys(keys)
             r2_keys_deleted += deleted
@@ -215,11 +220,15 @@ class ContentRetentionService:
                 metadata_purged = await self._purge_metadata(
                     session, LibraryAssetSource.UPLOAD, expired_ids
                 )
+                tags_purged = await self._purge_tags(
+                    session, LibraryAssetSource.UPLOAD, expired_ids
+                )
 
                 await session.commit()
 
             rows_deleted += batch_rows_deleted
             logger.info("content_retention.metadata_purged", count=metadata_purged)
+            logger.info("content_retention.tags_purged", count=tags_purged)
 
             deleted, failed = await self._delete_r2_keys(keys)
             r2_keys_deleted += deleted
@@ -267,6 +276,24 @@ class ContentRetentionService:
             )
         )
         return result.rowcount or 0  # type: ignore[attr-defined]
+
+    async def _purge_tags(
+        self,
+        session: AsyncSession,
+        source: LibraryAssetSource,
+        asset_ids: list[UUID],
+    ) -> int:
+        """Purge library_asset_tags rows for a just-deleted batch.
+
+        Same rationale and same-transaction placement as ``_purge_metadata``
+        — a polymorphic FK is impossible here, so this explicit purge is the
+        only way to keep library_asset_tags from accumulating orphans.
+        """
+        if not asset_ids:
+            return 0
+        return await LibraryTagRepository(session).delete_tags_for_assets(
+            [(source.value, asset_id) for asset_id in asset_ids]
+        )
 
     async def _delete_r2_keys(self, keys: list[str]) -> tuple[int, bool]:
         """Best-effort R2 cleanup after the DB rows are already committed gone.

@@ -14,9 +14,11 @@ import msgspec
 import structlog
 
 from src.api.schemas.library import (
+    BulkAddTags,
     BulkDelete,
     BulkOperationItemResult,
     BulkOperationResult,
+    BulkRemoveTags,
     BulkSetFavorite,
     BulkSetProject,
     LibraryAssetDetail,
@@ -26,7 +28,12 @@ from src.api.schemas.library import (
     LibraryGroupDetail,
     LibraryGroupLineage,
     LibraryLineage,
+    LibraryLineageGraph,
     LibraryOutputItem,
+    LibraryTagRef,
+    LineageEdge,
+    LineageNode,
+    LineageRelation,
 )
 from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
 from src.api.schemas.pagination import CursorPage, decode_library_cursor, encode_library_cursor
@@ -42,14 +49,16 @@ from src.core.enums import (
 )
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.core.thumbnails import label_for_max_edge
+from src.db.models.storage import GenerationOutput, UserImage
 from src.db.repositories.job import JobRepository
 from src.db.repositories.library import UNSET_UPDATE, LibraryRepository, _UnsetUpdate
 from src.db.repositories.library_project import LibraryProjectRepository
+from src.db.repositories.library_tag import LibraryTagRepository, TagRef
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
     from uuid import UUID
 
@@ -58,10 +67,18 @@ if TYPE_CHECKING:
     from src.api.schemas.library import BulkOperation
     from src.api.services.content_proxy import ContentProxyService
     from src.core.product import ProductConfig
-    from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
+    from src.db.models.storage import GenerationJob
     from src.db.repositories.library import LibraryAssetRow, OptionalUpdate
 
 logger = structlog.get_logger(__name__)
+
+_MAX_TAGS_PER_ASSET = 20
+
+# Lineage graph bounds (T8) — ancestor walk depth and per-relation
+# descendant cap. Deliberately small constants for an on-demand, bounded
+# read; see LibraryService.get_lineage_graph.
+_LINEAGE_DEPTH_CAP = 10
+_LINEAGE_DESCENDANTS_CAP = 50
 
 
 class LibraryValidationError(Exception):
@@ -74,6 +91,14 @@ class LibraryProjectNotFoundError(Exception):
     def __init__(self, project_id: UUID) -> None:
         self.project_id = project_id
         super().__init__(f"Project {project_id} not found")
+
+
+class LibraryTagNotFoundError(Exception):
+    """Raised when a patch/bulk op references tag_id(s) that don't exist / aren't owned. → HTTP 404"""
+
+    def __init__(self, tag_ids: Sequence[UUID]) -> None:
+        self.tag_ids = list(tag_ids)
+        super().__init__(f"{len(self.tag_ids)} tag id(s) not found: {self.tag_ids}")
 
 
 class LibraryBulkValidationError(Exception):
@@ -113,6 +138,7 @@ class LibraryService:
         model: str | None = None,
         favorite: bool | None = None,
         project_id: UUID | None = None,
+        tag_id: UUID | None = None,
         expiring: bool | None = None,
         query: str | None = None,
         created_from: datetime | None = None,
@@ -133,6 +159,7 @@ class LibraryService:
             model: Optional model filter (implies output-only).
             favorite: Optional favorite filter.
             project_id: Optional filter to assets assigned to this project.
+            tag_id: Optional filter to assets tagged with this tag.
             expiring: Optional filter to assets expiring within (True) or
                 beyond (False) the expiring-soon window.
             query: Optional case-insensitive substring search over
@@ -164,6 +191,7 @@ class LibraryService:
             model=model,
             favorite=favorite,
             project_id=project_id,
+            tag_id=tag_id,
             expiring=expiring,
             query=query,
             created_from=created_from,
@@ -190,6 +218,11 @@ class LibraryService:
             project_ids, user_id=user_id, product_id=product_id
         )
 
+        tag_pairs = [(row.source.value, row.id) for row in page_rows]
+        asset_tags = await LibraryTagRepository(session).batch_tags_for_assets(
+            tag_pairs, user_id=user_id, product_id=product_id
+        )
+
         items = [
             self._build_item_from_row(
                 row,
@@ -201,6 +234,7 @@ class LibraryService:
                 output_count=(output_counts.get(row.job_id, 0) if row.job_id is not None else None),
                 product_config=product_config,
                 project_names=project_names,
+                asset_tags=asset_tags,
             )
             for row in page_rows
         ]
@@ -234,6 +268,7 @@ class LibraryService:
         output_count: int | None,
         product_config: ProductConfig,
         project_names: dict[UUID, str],
+        asset_tags: Mapping[tuple[str, UUID], list[TagRef]],
     ) -> LibraryAssetItem:
         media = _build_media_object(
             source=row.source,
@@ -270,6 +305,10 @@ class LibraryService:
             available_actions=actions,
             project_id=row.project_id,
             project_name=project_names.get(row.project_id) if row.project_id is not None else None,
+            tags=tuple(
+                LibraryTagRef(id=t.id, name=t.name)
+                for t in asset_tags.get((row.source.value, row.id), [])
+            ),
         )
 
     # -------------------------------------------------------------------------
@@ -312,6 +351,9 @@ class LibraryService:
         metadata = await repo.get_metadata(user_id, product_id, LibraryAssetSource.UPLOAD, image.id)
         project_id = metadata.project_id if metadata is not None else None
         project_name = await self._resolve_project_name(project_id, user_id, product_id, session)
+        tags = await self._resolve_asset_tags(
+            LibraryAssetSource.UPLOAD, image.id, user_id, product_id, session
+        )
         derivatives = await image_repo.list_derivatives(image.id)
 
         media = _build_media_object(
@@ -374,6 +416,7 @@ class LibraryService:
             available_actions=actions,
             project_id=project_id,
             project_name=project_name,
+            tags=tags,
             prompt=None,
             negative_prompt=None,
             provider=None,
@@ -407,6 +450,9 @@ class LibraryService:
         )
         project_id = metadata.project_id if metadata is not None else None
         project_name = await self._resolve_project_name(project_id, user_id, product_id, session)
+        tags = await self._resolve_asset_tags(
+            LibraryAssetSource.OUTPUT, output.id, user_id, product_id, session
+        )
         derivatives = await output_repo.list_derivatives(output.id)
 
         media = _build_media_object(
@@ -446,6 +492,7 @@ class LibraryService:
             available_actions=actions,
             project_id=project_id,
             project_name=project_name,
+            tags=tags,
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
             provider=job.provider,
@@ -470,6 +517,22 @@ class LibraryService:
             [project_id], user_id=user_id, product_id=product_id
         )
         return names.get(project_id)
+
+    @staticmethod
+    async def _resolve_asset_tags(
+        source: LibraryAssetSource,
+        asset_id: UUID,
+        user_id: UUID,
+        product_id: str,
+        session: AsyncSession,
+    ) -> tuple[LibraryTagRef, ...]:
+        """Resolve a single asset's tags for detail views — one query, not per-row."""
+        tag_map = await LibraryTagRepository(session).batch_tags_for_assets(
+            [(source.value, asset_id)], user_id=user_id, product_id=product_id
+        )
+        return tuple(
+            LibraryTagRef(id=t.id, name=t.name) for t in tag_map.get((source.value, asset_id), [])
+        )
 
     # -------------------------------------------------------------------------
     # Mutations
@@ -521,17 +584,24 @@ class LibraryService:
 
         Supports ``display_title`` (tri-state: absent = no-op, ``null`` =
         clear, string = set — validated to <=255 chars, stripped, empty
-        string normalized to ``None``) and ``project_id`` (tri-state:
-        absent = no-op, ``null`` = unassign, UUID = assign — the referenced
-        project must be owned by ``user_id`` under ``product_id``, P8).
+        string normalized to ``None``), ``project_id`` (tri-state: absent =
+        no-op, ``null`` = unassign, UUID = assign — the referenced project
+        must be owned by ``user_id`` under ``product_id``, P8), and
+        ``tag_ids`` (tri-state: absent = no-op, list = replace-set — every
+        id deduped order-preservingly, capped at 20, and must be owned by
+        ``user_id`` under ``product_id``; no ``null`` arm, clearing is
+        ``[]``, T4).
 
         Returns:
             Updated LibraryAssetDetail, or None if the asset doesn't exist /
             isn't owned by ``user_id``.
 
         Raises:
-            LibraryValidationError: If ``display_title`` fails validation.
+            LibraryValidationError: If ``display_title`` fails validation or
+                ``tag_ids`` has more than 20 entries.
             LibraryProjectNotFoundError: If ``project_id`` doesn't exist /
+                isn't owned by ``user_id``.
+            LibraryTagNotFoundError: If any ``tag_ids`` entry doesn't exist /
                 isn't owned by ``user_id``.
         """
         try:
@@ -542,11 +612,12 @@ class LibraryService:
         if not await self._asset_exists(ref, user_id, product_id, session):
             return None
 
-        # Validate-then-mutate: both tri-state fields are validated up front
-        # (may raise before any DB write) so a project_id 404 never leaves a
-        # display_title change applied — see M2. The two updates are then
-        # combined into a single upsert_metadata call / log event rather than
-        # two sequential ones.
+        # Validate-then-mutate: every tri-state field is validated up front
+        # (may raise before any DB write) so e.g. a project_id 404 never
+        # leaves a display_title change applied — see M2. display_title and
+        # project_id are then combined into a single upsert_metadata call;
+        # tag_ids applies via a separate set_asset_tags call against a
+        # different table, same transaction, same log event.
         display_title_update: OptionalUpdate[str | None] = UNSET_UPDATE
         if patch.display_title is not msgspec.UNSET:
             display_title_update = self._normalize_display_title(patch.display_title)
@@ -561,22 +632,52 @@ class LibraryService:
                     raise LibraryProjectNotFoundError(patch.project_id)
             project_id_update = patch.project_id
 
+        tag_ids_update: OptionalUpdate[list[UUID]] = UNSET_UPDATE
+        if patch.tag_ids is not msgspec.UNSET:
+            deduped_tag_ids = list(dict.fromkeys(patch.tag_ids))
+            if len(deduped_tag_ids) > _MAX_TAGS_PER_ASSET:
+                raise LibraryValidationError(
+                    f"tag_ids must contain at most {_MAX_TAGS_PER_ASSET} tags"
+                )
+            if deduped_tag_ids:
+                owned_tags = await LibraryTagRepository(session).get_many(
+                    deduped_tag_ids, user_id=user_id, product_id=product_id
+                )
+                if missing_tags := [
+                    tid for tid in deduped_tag_ids if tid not in owned_tags
+                ]:
+                    raise LibraryTagNotFoundError(missing_tags)
+            tag_ids_update = deduped_tag_ids
+
         changed_fields: list[str] = []
         if not isinstance(display_title_update, _UnsetUpdate):
             changed_fields.append("display_title")
         if not isinstance(project_id_update, _UnsetUpdate):
             changed_fields.append("project_id")
+        if not isinstance(tag_ids_update, _UnsetUpdate):
+            changed_fields.append("tag_ids")
 
         if changed_fields:
-            repo = LibraryRepository(session)
-            await repo.upsert_metadata(
-                user_id,
-                product_id,
-                ref.source,
-                ref.asset_id,
-                display_title=display_title_update,
-                project_id=project_id_update,
-            )
+            if not isinstance(display_title_update, _UnsetUpdate) or not isinstance(
+                project_id_update, _UnsetUpdate
+            ):
+                repo = LibraryRepository(session)
+                await repo.upsert_metadata(
+                    user_id,
+                    product_id,
+                    ref.source,
+                    ref.asset_id,
+                    display_title=display_title_update,
+                    project_id=project_id_update,
+                )
+            if not isinstance(tag_ids_update, _UnsetUpdate):
+                await LibraryTagRepository(session).set_asset_tags(
+                    ref.source.value,
+                    ref.asset_id,
+                    tag_ids_update,
+                    user_id=user_id,
+                    product_id=product_id,
+                )
             logger.info(
                 "library.metadata_patched",
                 asset_ref=asset_ref,
@@ -606,28 +707,28 @@ class LibraryService:
         session: AsyncSession,
         content_proxy: ContentProxyService,
     ) -> bool:
-        """Purge the asset's metadata, then delete it via ContentProxyService.
+        """Purge the asset's metadata and tag rows, then delete it via ContentProxyService.
 
         A typed pre-check (fetch by the ref's declared source) runs before
         delegating to ``ContentProxyService.delete_content`` — a malformed
         claim (ref says upload but the id belongs to an output) is treated
         as not-found rather than falling through to the other table.
 
-        The metadata purge is flushed BEFORE ``delete_content`` so it rides
-        in the same commit as the content-row delete — ``delete_content``
-        commits internally before its best-effort R2 cleanup, and a purge
-        issued after that commit would run in a second transaction whose
-        failure could leak the metadata row forever (mirrors
-        ``ContentRetentionService._purge_metadata``). If ``delete_content``
-        then raises ``ContentNotFoundError`` (race: asset vanished between
-        the pre-check and delegation), this method rolls the session back
-        itself before returning — ``delete_asset`` swallows the exception
-        to preserve its bool-return contract (bulk delete needs a per-ref
-        result, not an abort), so the DI session provider's own
-        rollback-on-exception never triggers here; without an explicit
-        rollback the flushed purge would ride along on the next unrelated
-        commit. The metadata row survives unless the concurrent deleter
-        already purged it too.
+        The metadata and tag purges are flushed BEFORE ``delete_content`` so
+        they ride in the same commit as the content-row delete —
+        ``delete_content`` commits internally before its best-effort R2
+        cleanup, and a purge issued after that commit would run in a second
+        transaction whose failure could leak the metadata/tag rows forever
+        (mirrors ``ContentRetentionService._purge_metadata``). If
+        ``delete_content`` then raises ``ContentNotFoundError`` (race: asset
+        vanished between the pre-check and delegation), this method rolls
+        the session back itself before returning — ``delete_asset`` swallows
+        the exception to preserve its bool-return contract (bulk delete
+        needs a per-ref result, not an abort), so the DI session provider's
+        own rollback-on-exception never triggers here; without an explicit
+        rollback the flushed purges would ride along on the next unrelated
+        commit. The metadata/tag rows survive unless the concurrent deleter
+        already purged them too.
 
         Returns:
             True if deleted; False if not found / not owned.
@@ -642,6 +743,9 @@ class LibraryService:
 
         repo = LibraryRepository(session)
         await repo.delete_metadata_for_assets([(ref.source.value, ref.asset_id)])
+        await LibraryTagRepository(session).delete_tags_for_assets(
+            [(ref.source.value, ref.asset_id)]
+        )
 
         try:
             await content_proxy.delete_content(
@@ -721,6 +825,9 @@ class LibraryService:
                 missing, not owned, or belongs to a different product.
             LibraryProjectNotFoundError: If a ``set_project`` op's
                 ``project_id`` doesn't exist / isn't owned by ``user_id``.
+            LibraryTagNotFoundError: If an ``add_tags``/``remove_tags`` op's
+                ``tag_ids`` contains an id that doesn't exist / isn't owned
+                by ``user_id``.
         """
         parsed: list[AssetRef] = []
         malformed: list[str] = []
@@ -754,6 +861,17 @@ class LibraryService:
             if project is None:
                 raise LibraryProjectNotFoundError(op.project_id)
 
+        tag_ids_deduped: list[UUID] = []
+        if isinstance(op, BulkAddTags | BulkRemoveTags):
+            tag_ids_deduped = list(dict.fromkeys(op.tag_ids))
+            owned_tags = await LibraryTagRepository(session).get_many(
+                tag_ids_deduped, user_id=user_id, product_id=product_id
+            )
+            if missing_tags := [
+                tid for tid in tag_ids_deduped if tid not in owned_tags
+            ]:
+                raise LibraryTagNotFoundError(missing_tags)
+
         if isinstance(op, BulkSetFavorite):
             op_name = "set_favorite"
             await LibraryRepository(session).bulk_set_favorite(
@@ -776,6 +894,28 @@ class LibraryService:
                 )
                 for r in parsed
             ]
+        elif isinstance(op, BulkAddTags):
+            op_name = "add_tags"
+            await LibraryTagRepository(session).bulk_add_tags(
+                parsed, tag_ids_deduped, user_id=user_id, product_id=product_id
+            )
+            results = [
+                BulkOperationItemResult(
+                    asset_ref=format_asset_ref(r.source, r.asset_id), success=True
+                )
+                for r in parsed
+            ]
+        elif isinstance(op, BulkRemoveTags):
+            op_name = "remove_tags"
+            await LibraryTagRepository(session).bulk_remove_tags(
+                parsed, tag_ids_deduped, user_id=user_id, product_id=product_id
+            )
+            results = [
+                BulkOperationItemResult(
+                    asset_ref=format_asset_ref(r.source, r.asset_id), success=True
+                )
+                for r in parsed
+            ]
         else:
             assert isinstance(op, BulkDelete)  # noqa: S101 — exhaustiveness over the tagged union
             op_name = "delete"
@@ -787,7 +927,8 @@ class LibraryService:
                 )
                 results.append(BulkOperationItemResult(asset_ref=ref_str, success=deleted))
 
-        succeeded = sum(1 for r in results if r.success)
+        succeeded = sum(bool(r.success)
+                    for r in results)
         logger.info(
             "library.bulk_applied",
             op=op_name,
@@ -933,6 +1074,267 @@ class LibraryService:
                 source_upload_id=job.input_image_id,
             )
         return None
+
+    # -------------------------------------------------------------------------
+    # Lineage graph (Phase 3, T8) — GET /v1/library/assets/{asset_ref}/lineage
+    # -------------------------------------------------------------------------
+
+    async def get_lineage_graph(
+        self,
+        asset_ref: str,
+        user_id: UUID,
+        product_id: str,
+        *,
+        session: AsyncSession,
+    ) -> LibraryLineageGraph | None:
+        """Return a bounded ancestor/descendant lineage graph for a single asset.
+
+        Total queries: <= depth-cap single-row lookups for the ancestor walk
+        (one job lookup + one parent lookup per output-type hop, one lookup
+        per upload-type hop) + 2 descendant queries + 2 count queries +
+        <=2 derivative batch calls + 1 job batch call. Acceptable for an
+        on-demand endpoint — this is not the list hot path.
+
+        Returns:
+            LibraryLineageGraph, or None if the asset doesn't exist / isn't
+            owned by ``user_id`` (identical 404 semantics to asset detail).
+        """
+        try:
+            ref = parse_asset_ref(asset_ref)
+        except ValueError:
+            return None
+
+        focus_row = await self._fetch_lineage_row(ref, user_id, product_id, session)
+        if focus_row is None:
+            return None
+
+        ancestor_edges, ancestors_truncated = await self._walk_ancestors(
+            focus_row, user_id, product_id, session
+        )
+
+        library_repo = LibraryRepository(session)
+
+        raw_outputs = await library_repo.list_output_descendants(
+            ref.source,
+            ref.asset_id,
+            user_id=user_id,
+            product_id=product_id,
+            limit=_LINEAGE_DESCENDANTS_CAP + 1,
+        )
+        outputs_truncated = len(raw_outputs) > _LINEAGE_DESCENDANTS_CAP
+        descendant_outputs = list(raw_outputs[:_LINEAGE_DESCENDANTS_CAP])
+
+        raw_frames = await library_repo.list_frame_descendants(
+            ref.source,
+            ref.asset_id,
+            user_id=user_id,
+            product_id=product_id,
+            limit=_LINEAGE_DESCENDANTS_CAP + 1,
+        )
+        frames_truncated = len(raw_frames) > _LINEAGE_DESCENDANTS_CAP
+        descendant_frames = list(raw_frames[:_LINEAGE_DESCENDANTS_CAP])
+
+        job_count, frame_count = await library_repo.count_descendants(ref.source, ref.asset_id)
+
+        # Batch-hydrate media + job info for every node in the graph — a
+        # fixed handful of batch calls total, never per-node (T8).
+        all_output_rows: list[GenerationOutput] = list(descendant_outputs)
+        all_upload_rows: list[UserImage] = list(descendant_frames)
+        if isinstance(focus_row, GenerationOutput):
+            all_output_rows.append(focus_row)
+        else:
+            all_upload_rows.append(focus_row)
+        for _relation, _source, row, _ts in ancestor_edges:
+            if isinstance(row, GenerationOutput):
+                all_output_rows.append(row)
+            else:
+                all_upload_rows.append(row)
+
+        output_repo = OutputRepository(session)
+        image_repo = UserImageRepository(session)
+        output_derivatives = await output_repo.batch_derivatives([o.id for o in all_output_rows])
+        upload_derivatives = await image_repo.batch_derivatives([u.id for u in all_upload_rows])
+
+        job_ids = list({o.job_id for o in all_output_rows})
+        jobs = await JobRepository(session).get_many(job_ids, user_id=user_id)
+
+        def build_node(
+            source: LibraryAssetSource, row: GenerationOutput | UserImage
+        ) -> LineageNode:
+            derivatives = (
+                output_derivatives.get(row.id, [])
+                if isinstance(row, GenerationOutput)
+                else upload_derivatives.get(row.id, [])
+            )
+            job = jobs.get(row.job_id) if isinstance(row, GenerationOutput) else None
+            return LineageNode(
+                asset_ref=format_asset_ref(source, row.id),
+                source=source,
+                media=_build_media_object(
+                    source=source,
+                    asset_id=row.id,
+                    width=row.width,
+                    height=row.height,
+                    content_type=row.content_type,
+                    size_bytes=row.size_bytes,
+                    derivatives=derivatives,
+                ),
+                created_at=row.created_at,
+                model=job.model if job is not None else None,
+                generation_type=(GenerationType(job.generation_type) if job is not None else None),
+            )
+
+        ancestors = tuple(
+            LineageEdge(relation=relation, node=build_node(source, row), source_timestamp_ms=ts)
+            for relation, source, row, ts in ancestor_edges
+        )
+
+        descendant_output_relation = (
+            LineageRelation.GENERATED_FROM_UPLOAD
+            if ref.source == LibraryAssetSource.UPLOAD
+            else LineageRelation.GENERATED_FROM_OUTPUT
+        )
+        descendant_frame_relation = (
+            LineageRelation.FRAME_OF_UPLOAD
+            if ref.source == LibraryAssetSource.UPLOAD
+            else LineageRelation.FRAME_OF_OUTPUT
+        )
+        descendants = tuple(
+            LineageEdge(
+                relation=descendant_output_relation,
+                node=build_node(LibraryAssetSource.OUTPUT, o),
+                source_timestamp_ms=None,
+            )
+            for o in descendant_outputs
+        ) + tuple(
+            LineageEdge(
+                relation=descendant_frame_relation,
+                node=build_node(LibraryAssetSource.UPLOAD, f),
+                source_timestamp_ms=f.source_timestamp_ms,
+            )
+            for f in descendant_frames
+        )
+
+        return LibraryLineageGraph(
+            focus=build_node(ref.source, focus_row),
+            ancestors=ancestors,
+            descendants=descendants,
+            descendant_totals=LibraryDescendants(job_count=job_count, frame_count=frame_count),
+            ancestors_truncated=ancestors_truncated,
+            descendants_truncated=outputs_truncated or frames_truncated,
+        )
+
+    @staticmethod
+    async def _fetch_lineage_row(
+        ref: AssetRef,
+        user_id: UUID,
+        product_id: str,
+        session: AsyncSession,
+    ) -> GenerationOutput | UserImage | None:
+        """Typed, owner+product-scoped fetch of the lineage focus asset."""
+        if ref.source == LibraryAssetSource.UPLOAD:
+            image = await UserImageRepository(session).get(ref.asset_id, user_id=user_id)
+            if image is None or image.product_id != product_id or image.is_thumbnail:
+                return None
+            return image
+        output = await OutputRepository(session).get(ref.asset_id, user_id=user_id)
+        if output is None or output.product_id != product_id or output.is_thumbnail:
+            return None
+        return output
+
+    @staticmethod
+    async def _walk_ancestors(
+        focus_row: GenerationOutput | UserImage,
+        user_id: UUID,
+        product_id: str,
+        session: AsyncSession,
+    ) -> tuple[
+        list[tuple[LineageRelation, LibraryAssetSource, GenerationOutput | UserImage, int | None]],
+        bool,
+    ]:
+        """Iteratively resolve one parent per step, nearest-first (T8).
+
+        Every fetch is owner+product scoped. Stops on: no parent column
+        set, parent row missing (SET NULL raced), a cycle (impossible by
+        construction today, cheap insurance forever), or the depth cap —
+        only the depth cap sets ``truncated=True``; every other stop is a
+        natural graph boundary. Deliberately an iterative per-table walk,
+        not a recursive CTE (T8): two polymorphic tables plus jobs make a
+        CTE unreadable and unbounded-by-default.
+
+        Returns:
+            ``(edges, truncated)`` where edges are
+            ``(relation, source, row, source_timestamp_ms)`` in
+            nearest-first order.
+        """
+        output_repo = OutputRepository(session)
+        image_repo = UserImageRepository(session)
+        job_repo = JobRepository(session)
+
+        edges: list[
+            tuple[LineageRelation, LibraryAssetSource, GenerationOutput | UserImage, int | None]
+        ] = []
+        focus_source = (
+            LibraryAssetSource.OUTPUT
+            if isinstance(focus_row, GenerationOutput)
+            else LibraryAssetSource.UPLOAD
+        )
+        visited: set[tuple[LibraryAssetSource, UUID]] = {(focus_source, focus_row.id)}
+        current_row: GenerationOutput | UserImage = focus_row
+
+        for _ in range(_LINEAGE_DEPTH_CAP):
+            parent_source: LibraryAssetSource
+            parent_id: UUID
+            relation: LineageRelation
+            ts: int | None
+
+            if isinstance(current_row, GenerationOutput):
+                job = await job_repo.get(current_row.job_id, user_id=user_id)
+                if job is None or job.product_id != product_id:
+                    break
+                if job.input_image_id is not None:
+                    parent_source = LibraryAssetSource.UPLOAD
+                    parent_id = job.input_image_id
+                    relation = LineageRelation.GENERATED_FROM_UPLOAD
+                    ts = None
+                elif job.source_output_id is not None:
+                    parent_source = LibraryAssetSource.OUTPUT
+                    parent_id = job.source_output_id
+                    relation = LineageRelation.GENERATED_FROM_OUTPUT
+                    ts = None
+                else:
+                    break
+            elif current_row.source_output_id is not None:
+                parent_source = LibraryAssetSource.OUTPUT
+                parent_id = current_row.source_output_id
+                relation = LineageRelation.FRAME_OF_OUTPUT
+                ts = current_row.source_timestamp_ms
+            elif current_row.source_upload_id is not None:
+                parent_source = LibraryAssetSource.UPLOAD
+                parent_id = current_row.source_upload_id
+                relation = LineageRelation.FRAME_OF_UPLOAD
+                ts = current_row.source_timestamp_ms
+            else:
+                break
+
+            if (parent_source, parent_id) in visited:
+                break
+
+            parent_row: GenerationOutput | UserImage | None
+            if parent_source == LibraryAssetSource.UPLOAD:
+                parent_row = await image_repo.get(parent_id, user_id=user_id)
+            else:
+                parent_row = await output_repo.get(parent_id, user_id=user_id)
+            if parent_row is None or parent_row.product_id != product_id or parent_row.is_thumbnail:
+                break
+
+            edges.append((relation, parent_source, parent_row, ts))
+            visited.add((parent_source, parent_id))
+            current_row = parent_row
+        else:
+            return edges, True
+
+        return edges, False
 
     @staticmethod
     def _build_group_output_item(
