@@ -219,6 +219,45 @@ class TestListCatalog:
 
         repo.list_pricing_rules.assert_awaited_once_with(active_only=False)
 
+    async def test_no_product_config_returns_unfiltered_rules(self) -> None:
+        rules = [
+            _make_rule(model="grok-imagine-image"),
+            _make_rule(model=None),
+        ]
+        repo = _make_repo(rules=rules)
+        session = AsyncMock()
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            svc = PricingService()
+            result = await svc.list_catalog(session=session)
+
+        assert list(result) == rules
+
+    async def test_product_config_drops_rules_for_disabled_or_blocked_models(self) -> None:
+        enabled_rule = _make_rule(model="grok-imagine-image")
+        disabled_rule = _make_rule(model="grok-2-image-1212")
+        wildcard_rule = _make_rule(model=None)
+        unknown_model_rule = _make_rule(model="some-unregistered-model")
+        rules = [enabled_rule, disabled_rule, wildcard_rule, unknown_model_rule]
+        repo = _make_repo(rules=rules)
+        session = AsyncMock()
+
+        enabled_record = MagicMock()
+        enabled_record.model_key = "grok-imagine-image"
+        model_repo = AsyncMock()
+        model_repo.list_enabled_for_product = AsyncMock(return_value=[enabled_record])
+        product_config = MagicMock()
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            mp.setattr("src.api.services.pricing.GenerationModelRepository", lambda _: model_repo)
+            svc = PricingService()
+            result = await svc.list_catalog(product_config=product_config, session=session)
+
+        assert list(result) == [enabled_rule, wildcard_rule, unknown_model_rule]
+        model_repo.list_enabled_for_product.assert_awaited_once_with(product_config)
+
 
 class TestCreateRule:
     async def test_creates_and_returns_rule(self) -> None:
