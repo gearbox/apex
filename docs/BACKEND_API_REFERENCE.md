@@ -1,6 +1,27 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-17 — Added **Admin Ops Notifications (Telegram)** (new §15c): admins/superadmins can subscribe to operational events — `user.registered`, `generation.created`, `gpu_node.started`, `generation.failed` (product-scoped) and `health.degraded`/`health.restored` (platform-scoped) — and receive them as Telegram messages via a one-time `t.me` deep-link flow. New endpoints under `/v1/admin/notifications/*`: `GET /classes` (catalog), `GET`/`PUT /preferences` (per-class subscribe + optional `min_interval_seconds` throttle, full-set replace), `GET /preferences/{user_id}` (superadmin-only read of another admin's set), `GET`/`POST /telegram`/`DELETE /telegram` (link status, create/rotate deep link, unlink). Backend-only — no frontend/consumer-facing surface changes. New `NotificationClass` enum (§17). `AuditLogEntry.action` (§14) gained `notification_prefs.update`, `telegram.link_requested`, `telegram.unlinked`. Requires `TELEGRAM_BOT_TOKEN` + `REDIS_URL` server-side to actually deliver; preference endpoints work regardless._
+> _Last updated: 2026-07-22 — **Breaking change:** replaced **Gallery** (§10) and the uploads-list
+> endpoint with a unified **Library** API (new §10) — one paginated, cursor-based read model over
+> `user_images` + `generation_outputs`, addressed by a typed `asset_ref` (`"upload:<uuid>"` /
+> `"output:<uuid>"`). `GET /v1/gallery/`, `GET /v1/gallery/{job_id}`, `GET /v1/storage/uploads`, and
+> `DELETE /v1/content/{content_id}` are all **removed** — no redirects, no deprecation window
+> (pre-prod). New surface: `GET /v1/library/` (grid, with `source`/`media_type`/`model`/`favorite`/
+> `project_id`/`tag_id`/`expiring`/`query`/`created_from`/`created_to` filters and
+> `newest`/`oldest`/`expiring_soon` sort), `GET /v1/library/assets/{asset_ref}` (detail),
+> `GET /v1/library/assets/{asset_ref}/lineage` (bounded ancestor/descendant graph),
+> `GET /v1/library/groups/{job_id}` (generation-group detail — the old `GalleryGroupDetail`, ported
+> as-is), `PATCH`/`PUT favorite`/`DELETE favorite`/`DELETE` on a single asset, `POST
+> /v1/library/assets/bulk` (favorite/project/tags/delete up to 100 refs in one call), and full CRUD
+> for `/v1/library/projects` and `/v1/library/tags`. Every grid item carries a server-resolved
+> `available_actions: LibraryAction[]` — no more inferring allowed actions from `source`/media type
+> on the client. Favorites and display titles are per-asset (`library_asset_metadata`, migration
+> `025`); projects (one per asset, migration `026`) and tags (many-to-many, migration `027`) are
+> user-created groupings layered on top. Frontend must regenerate types (`gen:api`), drop all
+> `/app/gallery` and `/app/uploads` routes/references, and switch to `/app/library`. See new §10 for
+> the full contract; `GalleryBadge`/`GallerySourceType` (§17) are replaced by `LibraryBadge`/
+> `LibraryGroupSourceType`/`LibrarySort`/`LibraryAssetSource`/`LibraryAction`._
+>
+> _Prior (2026-07-17 — Added **Admin Ops Notifications (Telegram)** (new §15c): admins/superadmins can subscribe to operational events — `user.registered`, `generation.created`, `gpu_node.started`, `generation.failed` (product-scoped) and `health.degraded`/`health.restored` (platform-scoped) — and receive them as Telegram messages via a one-time `t.me` deep-link flow. New endpoints under `/v1/admin/notifications/*`: `GET /classes` (catalog), `GET`/`PUT /preferences` (per-class subscribe + optional `min_interval_seconds` throttle, full-set replace), `GET /preferences/{user_id}` (superadmin-only read of another admin's set), `GET`/`POST /telegram`/`DELETE /telegram` (link status, create/rotate deep link, unlink). Backend-only — no frontend/consumer-facing surface changes. New `NotificationClass` enum (§17). `AuditLogEntry.action` (§14) gained `notification_prefs.update`, `telegram.link_requested`, `telegram.unlinked`. Requires `TELEGRAM_BOT_TOKEN` + `REDIS_URL` server-side to actually deliver; preference endpoints work regardless._
 >
 > _Prior (2026-07-17): Added **Currency Suppression**: a superadmin deny-list for provider-side "zombie" tickers (NowPayments confirmed a data bug where `merchant/coins` can report currencies they've effectively delisted and won't fix). New `PATCH /v1/admin/payments/currencies/{provider}/{ticker}` (§14) toggles `is_suppressed` on a catalog row — suppressed tickers are immediately excluded from `GET /v1/billing/currencies` (§11), which now gained `AdminCurrency.is_suppressed` on the admin GET, and pinning a suppressed ticker on `POST /v1/billing/topup/nowpayments` (§11) now returns `400 { "code": "pay_currency_suppressed", "pay_currency": "<TICKER>" }`. Suppression survives every catalog sync (the sync code never reads/writes the flag) and requires an already-seen ticker (404 otherwise — no pre-emptive/pattern suppression). See the "Provider-side zombie currencies" ops note under §14. Frontend should regenerate types (`gen:api`) and handle the new 400 by re-fetching `/currencies` and re-prompting the user._
 >
@@ -370,7 +391,7 @@ Response: JobCreatedResponse
 Status:   201 Created
 Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
-Note:     source_output_id enables "remix from gallery" — the backend resolves lineage automatically
+Note:     source_output_id enables "remix from Library" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
           source_images is storage-reference based (1–4 items); clients send upload/output IDs, not public URLs.
           If source_images contains output references and no top-level source_output_id is set,
@@ -881,13 +902,19 @@ Errors:   401 unauthorized (missing / empty / invalid Bearer token),
 
 ## 8. Storage *(authenticated)*
 
+> **Library is the primary read surface.** `GET /v1/library/` (§10) supersedes both the removed
+> `GET /v1/storage/uploads` list and, for most UI purposes, `GET /v1/storage/outputs` below —
+> it's the single paginated grid over uploads + outputs with favorites/projects/tags/filters.
+> The endpoints in this section remain for upload creation, single-item presigned access, raw
+> byte download, and storage stats — none of that is replaced by Library.
+
 > **Retention:** every upload and output row carries `expires_at`, set at creation to `now +
 > RETENTION_DAYS` (default 7 days). A periodic background sweeper (`ContentRetentionWorker`)
 > deletes expired rows and their R2 objects on a fixed interval. Once swept: the item drops out
-> of Storage/Gallery list responses, and `GET /v1/content/...` (§9) for that ID returns `404`.
+> of Storage/Library list responses, and `GET /v1/content/...` (§9) for that ID returns `404`.
 > `expires_at` is a plain timestamp (not a countdown) so the frontend can derive and tick a
 > "Delete in N days/hours/minutes" badge client-side — see `ImageListItem`/`OutputListItem`
-> below and `GalleryGridItem`/`GalleryOutputItem` (§10).
+> below and `LibraryAssetItem` (§10).
 
 ### Uploads
 
@@ -924,20 +951,8 @@ Note:     Returns image id used for I2I/I2V generation requests, or (for
           preview job (§9b) to learn frame timestamps within the clip.
 ```
 
-#### `GET /v1/storage/uploads`
-
-```
-Query:    limit? (1–100, default 50), cursor? (opaque token)
-Response: CursorPage<ImageListItem>
-
-ImageListItem: {
-  id: UUID,
-  filename: string,
-  created_at: datetime,
-  expires_at: datetime,
-  media: MediaObject    // original + sm/md WEBP variants
-}
-```
+> **Removed (2026-07-22):** `GET /v1/storage/uploads` (list, and its `ImageListItem` response
+> schema) — use `GET /v1/library/?source=upload` (§10) instead.
 
 #### `GET /v1/storage/uploads/{image_id}`
 
@@ -1020,7 +1035,7 @@ Response: {
 
 Provides stable, non-expiring authenticated URLs for user content. The server resolves ownership, checks product scoping, then streams bytes directly from R2. **No presigned URLs are exposed** — the client only ever sees `/v1/content/...` paths.
 
-> **Why use this instead of presigned URLs?** Content proxy URLs are permanent (for the lifetime of the resource), cacheable with `Cache-Control: private, max-age=<ttl>, immutable`, and enforce per-request authorization. They are the preferred URL format for Gallery and any UI that persists content references.
+> **Why use this instead of presigned URLs?** Content proxy URLs are permanent (for the lifetime of the resource), cacheable with `Cache-Control: private, max-age=<ttl>, immutable`, and enforce per-request authorization. They are the preferred URL format for Library and any UI that persists content references.
 
 ### Response Headers
 
@@ -1053,16 +1068,10 @@ Errors:   404 not_found (ownership check failed or wrong product),
 Note:     Only returns uploads owned by the authenticated user and matching the current product.
 ```
 
-#### `DELETE /v1/content/{content_id}`
-
-```
-Path:     content_id (UUID) — can be a generation output ID or upload ID
-Response: 204 No Content
-Errors:   404 not_found (content does not exist, not owned, or wrong product)
-Note:     Permanently deletes the file from R2 and removes the DB record.
-          Checks generation_outputs first, then user_images.
-          Lineage references (source_output_id, input_image_id) are SET NULL automatically.
-```
+> **Removed (2026-07-22):** `DELETE /v1/content/{content_id}` — deletion is now typed via
+> `DELETE /v1/library/assets/{asset_ref}` (§10), which delegates to the same
+> `ContentProxyService.delete_content` logic (R2 removal + DB record removal + lineage
+> `SET NULL`) but resolves the target table from the `asset_ref` prefix instead of trying both.
 
 ---
 
@@ -1137,115 +1146,351 @@ Note:     preview.frames[].url is a presigned R2 URL generated FRESH on every
           (§5b) — its urls are stable /v1/content/uploads/{id} proxy paths,
           cacheable indefinitely, same as any other upload. Once an extract
           job completes its frames are ordinary uploads: same download (§8),
-          same delete (DELETE /v1/content/{id}, §9), same retention/expiry.
-          Deleting the source video does NOT delete frames already extracted
-          from it.
+          same delete (DELETE /v1/library/assets/upload:{id}, §10), same
+          retention/expiry. Deleting the source video does NOT delete
+          frames already extracted from it.
 ```
 
 ---
 
-## 10. Gallery *(authenticated)*
+## 10. Library *(authenticated)*
 
-Gallery presents completed generation jobs as a visual grid. Each **gallery item** is one `GenerationJob` (a "group") with its cover image/video, metadata, and output list.
+Library is the unified, asset-oriented replacement for the old Gallery + My Uploads split: one
+paginated read model over `user_images` + `generation_outputs` (the tables themselves stay
+separate — Library is a query-time UNION, not a new content table). Every asset is addressed by a
+typed **asset reference**: `"upload:<uuid>"` or `"output:<uuid>"` (`LibraryAssetSource` = `upload` |
+`output`). Parsing is strict — malformed refs, unknown sources, or bad UUID segments are rejected,
+never silently truncated.
 
-- Only `completed` jobs are returned.
-- Results are ordered by `created_at DESC` (newest first).
-- Uses the same **cursor pagination** as all other list endpoints.
+- Uses the same **cursor pagination** as all other list endpoints, but with a 3-part cursor
+  (`created_at`/`expires_at`, source rank, id) that gives a strict total order across the
+  upload/output UNION — a cursor encoded under one `sort` is rejected if replayed under another.
+- Every grid item carries a server-resolved `available_actions: LibraryAction[]` — a pure,
+  table-driven function of media type, source, and whether the asset has generation metadata (see
+  `LibraryAction` below). Do not infer allowed actions from `source`/media type client-side.
 - Content URLs in responses are always `/v1/content/...` paths (permanent, auth-gated).
+- Favorites and display titles (`library_asset_metadata`) are lazily created on first mutation —
+  an asset with no favorite/title/project/tags has no metadata row at all until you set one.
+- **Projects**: at most one per asset (nullable FK, `ON DELETE SET NULL` — deleting a project
+  unassigns its assets rather than touching them). **Tags**: many-to-many (join table, `ON DELETE
+  CASCADE` — deleting a tag removes its assignments). Both are user-scoped, name-unique
+  case-insensitively per owner (`409` on conflict), and independently CRUD'd below.
+- Deleting an asset or letting it expire via the retention sweeper also purges its
+  `library_asset_metadata` and `library_asset_tags` rows (both are polymorphic — no FK exists to
+  cascade the delete automatically).
 
-#### `GET /v1/gallery/`
+#### `GET /v1/library/`
 
 ```
-Query:    limit? (1–25, default 20),
+Query:    limit? (1–50, default 30),
           cursor? (opaque token),
+          source? ("upload" | "output"),
           media_type? ("image" | "video"),
-          generation_type? (GenerationType value),
-          model? (string — model key)
-Response: CursorPage<GalleryGridItem>
+          model? (string — model key; implies output-only),
+          favorite? (bool),
+          project_id? (UUID),
+          tag_id? (UUID),
+          expiring? (bool — true: expires_at within 7 days; false: beyond),
+          query? (string, ≤200 chars — case-insensitive substring match over
+                  display_title / original_filename / prompt),
+          created_from? (datetime), created_to? (datetime),
+          sort? ("newest" | "oldest" | "expiring_soon", default "newest")
+Response: CursorPage<LibraryAssetItem>
+Errors:   400 invalid_cursor
 ```
 
-#### `GET /v1/gallery/{job_id}`
+#### `GET /v1/library/assets/{asset_ref}`
+
+```
+Path:     asset_ref (string, e.g. "upload:<uuid>" or "output:<uuid>")
+Response: LibraryAssetDetail
+Errors:   404 not_found (malformed ref, not owned, or wrong product)
+```
+
+#### `GET /v1/library/assets/{asset_ref}/lineage`
+
+```
+Path:     asset_ref (string)
+Response: LibraryLineageGraph
+Errors:   404 not_found
+Note:     Ancestor walk is depth-capped at 10 hops (nearest-first, one parent
+          per step); descendants are immediate only (not recursive), capped
+          at 50 per relation (job outputs / extracted frames, counted
+          separately). `ancestors_truncated` / `descendants_truncated` flag
+          when a cap clipped the real graph. `descendant_totals` gives the
+          full (uncapped) counts regardless of the capped `descendants` list.
+          Bounded total query count — acceptable for this on-demand detail
+          endpoint, not the list hot path.
+```
+
+#### `GET /v1/library/groups/{job_id}`
 
 ```
 Path:     job_id (UUID)
-Response: GalleryGroupDetail
+Response: LibraryGroupDetail
 Errors:   404 not_found (job not completed, wrong user, or wrong product)
+Note:     Generation-group detail — one GenerationJob with its full output
+          list. This is the old GalleryGroupDetail, relocated as-is (D6):
+          the grid is per-asset, but a job's outputs still stack into one
+          detail view reachable from any of its LibraryAssetItem rows via
+          `job_id` + `output_count`.
 ```
 
-### Gallery Schemas
+#### `PATCH /v1/library/assets/{asset_ref}`
+
+```
+Request:  LibraryAssetPatch — every field is tri-state (absent = leave
+          unchanged); see schema below for per-field null/set semantics
+Response: LibraryAssetDetail
+Errors:   400 validation_error, 404 not_found (asset, project, or tag)
+```
+
+#### `PUT /v1/library/assets/{asset_ref}/favorite`
+
+```
+Response: 204 No Content
+Errors:   404 not_found
+Note:     Idempotent — marks favorite=true.
+```
+
+#### `DELETE /v1/library/assets/{asset_ref}/favorite`
+
+```
+Response: 204 No Content
+Errors:   404 not_found
+Note:     Idempotent — clears favorite.
+```
+
+#### `DELETE /v1/library/assets/{asset_ref}`
+
+```
+Response: 204 No Content
+Errors:   404 not_found
+Note:     Permanently deletes the file from R2 and the DB record (via the
+          same ContentProxyService.delete_content used by the old
+          DELETE /v1/content/{id}, §9), purges library_asset_metadata /
+          library_asset_tags rows, and SETs NULL any lineage references.
+```
+
+#### `POST /v1/library/assets/bulk`
+
+```
+Request:  BulkOperation — a tagged union discriminated by "type":
+  { type: "set_favorite", asset_refs: string[1-100], value: bool }
+  { type: "set_project",  asset_refs: string[1-100], project_id: UUID | null }
+  { type: "add_tags",     asset_refs: string[1-100], tag_ids: UUID[1-10] }
+  { type: "remove_tags",  asset_refs: string[1-100], tag_ids: UUID[1-10] }
+  { type: "delete",       asset_refs: string[1-100] }
+Response: BulkOperationResult
+Errors:   400 invalid_asset_refs (detail.invalid_refs lists every offending
+            ref — malformed, missing, not owned, or wrong product),
+          404 not_found (set_project's project_id, or any add/remove_tags
+            tag_id, doesn't exist / isn't owned by the caller),
+          422 tag_cap_exceeded (an add_tags op would push an asset past 20
+            tags; detail.asset_refs lists the offenders, detail.cap = 20)
+Note:     Every ref is validated BEFORE anything executes — a single bad
+          ref fails the whole request, never a silent partial skip.
+          Duplicate refs (including mixed-case UUID duplicates) collapse
+          to one occurrence. All ops except delete are naturally
+          idempotent; delete is idempotent up to "already gone" — a retry
+          on an already-deleted ref surfaces it in invalid_refs rather
+          than silently succeeding twice.
+```
+
+#### `GET /v1/library/projects/`  •  `POST /v1/library/projects/`
+
+```
+GET  Query:    limit? (1–50, default 30), cursor? (opaque token)
+     Response: CursorPage<LibraryProjectListItem>
+POST Request:  LibraryProjectCreate { name: string(1-100), description?: string }
+     Response: LibraryProject
+     Status:   201 Created
+     Errors:   400 validation_error, 409 project_name_conflict
+```
+
+#### `GET /v1/library/projects/{id}`  •  `PATCH /v1/library/projects/{id}`  •  `DELETE /v1/library/projects/{id}`
+
+```
+GET    Response: LibraryProject                          Errors: 404 not_found
+PATCH  Request:  LibraryProjectPatch (tri-state name/description)
+       Response: LibraryProject
+       Errors:   400 validation_error, 404 not_found, 409 project_name_conflict
+DELETE Response: 204 No Content                           Errors: 404 not_found
+       Note:     Assigned assets are unassigned (project_id → null via
+                 ON DELETE SET NULL), never deleted.
+```
+
+#### `GET /v1/library/tags/`  •  `POST /v1/library/tags/`
+
+```
+GET  Query:    limit? (1–50, default 30), cursor? (opaque token)
+     Response: CursorPage<LibraryTagListItem>
+POST Request:  LibraryTagCreate { name: string(1-50) }
+     Response: LibraryTag
+     Status:   201 Created
+     Errors:   400 validation_error, 409 tag_name_conflict
+```
+
+#### `GET /v1/library/tags/{id}`  •  `PATCH /v1/library/tags/{id}`  •  `DELETE /v1/library/tags/{id}`
+
+```
+GET    Response: LibraryTag                               Errors: 404 not_found
+PATCH  Request:  LibraryTagPatch (tri-state name)
+       Response: LibraryTag
+       Errors:   400 validation_error, 404 not_found, 409 tag_name_conflict
+DELETE Response: 204 No Content                           Errors: 404 not_found
+       Note:     Asset tag assignments cascade-delete (ON DELETE CASCADE).
+```
+
+### Library Schemas
 
 ```typescript
-interface GalleryGridItem {
-  job_id: string;           // UUID
-  cover: MediaObject;       // always the job's own primary output + sm/md WEBP variants
-                            // for video: original is the MP4; variants are poster frames
-  badge: GalleryBadge;      // "prompt" (t2i/t2v) or "image" (i2i/i2v/flf2v/v2v)
-  output_count: number;     // non-thumbnail outputs in this group
-  generation_type: GenerationType;
-  model: string | null;
-  aspect_ratio: string | null; // e.g. "16:9"; null ⇒ i2i job that followed the source image's aspect
-  prompt_snippet: string;   // first 100 chars of the prompt
-  created_at: string;       // ISO datetime
-  expires_at: string;       // ISO datetime — sourced from the cover output; all outputs in a
-                            // group share the same retention window. Drive a "Delete in N
-                            // days/hours/minutes" badge from this client-side (server sends a
-                            // timestamp, not a countdown, so it survives caching and ticks live).
+interface LibraryAssetItem {
+  asset_ref: string;              // "upload:<uuid>" | "output:<uuid>"
+  source: LibraryAssetSource;
+  media: MediaObject;             // original + sm/md variants
+  created_at: string;
+  expires_at: string;             // retention-cleanup deletion timestamp
+  display_title: string | null;
+  original_filename: string | null;  // upload-only
+  is_favorite: boolean;
+  duration_ms: number | null;     // upload-only, video
+  job_id: string | null;          // output-only
+  output_count: number | null;    // output-only: non-thumbnail outputs in the same job
+  model: string | null;           // output-only
+  generation_type: GenerationType | null; // output-only
+  available_actions: LibraryAction[];
+  project_id: string | null;
+  project_name: string | null;    // denormalized, batched lookup
+  tags: { id: string; name: string }[];
 }
 
-interface GalleryGroupDetail {
-  job_id: string;           // UUID
-  // Header
-  badge: GalleryBadge;
-  input_media: MediaObject | null; // source input envelope when badge == "image"
-                                   // (remixed output or uploaded input image + variants)
+interface LibraryAssetDetail extends LibraryAssetItem {
+  prompt: string | null;
+  negative_prompt: string | null;
+  provider: string | null;
+  aspect_ratio: string | null;
+  token_cost: number | null;
+  completed_at: string | null;
+  lineage: LibraryLineage | null;      // single-level frame-extraction lineage
+  descendants: { job_count: number; frame_count: number };
+}
+
+interface LibraryLineage {
+  source_asset_ref: string | null;
+  source_job_id: string | null;        // set when the source was a generation output
+  source_timestamp_ms: number | null;  // frame-extraction timestamp within the source video
+}
+
+interface LibraryAssetPatch {
+  display_title?: string | null;  // absent=unchanged, null=clear, string=set (max 255)
+  project_id?: string | null;     // absent=unchanged, null=unassign, UUID=assign (must be owned)
+  tag_ids?: string[];             // absent=unchanged; replace-set semantics — [] clears all
+                                   // tags, a list sets the exact set (max 20, all must be owned)
+}
+
+interface LibraryGroupDetail {
+  job_id: string;
+  badge: LibraryBadge;             // "prompt" (t2i/t2v) or "image" (i2i/i2v/flf2v/v2v)
+  input_media: MediaObject | null; // present when badge == "image"
   prompt: string;
   negative_prompt: string | null;
-  // Outputs
-  outputs: GalleryOutputItem[];    // non-thumbnail outputs, ordered by output_index
-  // Metadata
-  media_type: OutputMediaType;     // "image" or "video"
+  outputs: LibraryOutputItem[];    // non-thumbnail outputs, ordered by output_index
+  media_type: OutputMediaType;
   model: string | null;
   provider: string;
   generation_type: GenerationType;
-  aspect_ratio: string | null;  // null ⇒ i2i job that followed the source image's aspect
+  aspect_ratio: string | null;     // null ⇒ i2i job that followed the source image's aspect
   token_cost: number | null;
   created_at: string;
   completed_at: string | null;
-  // Lineage
-  lineage: GalleryLineage | null;
+  lineage: LibraryGroupLineage | null;
 }
 
-interface GalleryOutputItem {
-  id: string;               // UUID
-  output_index: number;     // 0-based
+interface LibraryOutputItem {
+  id: string;
+  asset_ref: string;               // always "output:<id>"
+  output_index: number;
   created_at: string;
-  expires_at: string;       // ISO datetime — this output's own retention deletion timestamp
-  media: MediaObject;       // original asset + sm/md WEBP variants
+  expires_at: string;
+  media: MediaObject;
 }
 
-interface GalleryLineage {
-  source_type: GallerySourceType;    // "upload" or "generation"
-  source_upload_id: string | null;   // UUID; set when source_type == "upload"
-  source_job_id: string | null;      // UUID; set when source_type == "generation"
-  source_job_name: string | null;    // human-readable name of the source job
-  source_output_id: string | null;   // UUID; specific output used as input
+interface LibraryGroupLineage {
+  source_type: LibraryGroupSourceType;  // "upload" or "output"
+  source_upload_id: string | null;
+  source_job_id: string | null;
+  source_job_name: string | null;
+  source_output_id: string | null;
+}
+
+interface LibraryLineageGraph {
+  focus: LineageNode;
+  ancestors: LineageEdge[];         // nearest-first, depth-capped at 10
+  descendants: LineageEdge[];       // immediate only, capped at 50 per relation
+  descendant_totals: { job_count: number; frame_count: number }; // uncapped
+  ancestors_truncated: boolean;
+  descendants_truncated: boolean;
+}
+
+interface LineageNode {
+  asset_ref: string;
+  source: LibraryAssetSource;
+  media: MediaObject;
+  created_at: string;
+  model: string | null;
+  generation_type: GenerationType | null;
+}
+
+interface LineageEdge {
+  relation: "generated_from_upload" | "generated_from_output"
+          | "frame_of_output" | "frame_of_upload";
+  node: LineageNode;
+  source_timestamp_ms: number | null;  // frame edges only
+}
+
+interface LibraryProject {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LibraryProjectListItem extends LibraryProject {
+  asset_count: number;   // batched, not per-row
+}
+
+interface LibraryTag {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LibraryTagListItem extends LibraryTag {
+  asset_count: number;   // batched, not per-row
+}
+
+interface BulkOperationResult {
+  op: string;            // "set_favorite" | "set_project" | "add_tags" | "remove_tags" | "delete"
+  results: { asset_ref: string; success: boolean }[];
+  succeeded: number;
+  failed: number;
 }
 ```
 
-> **Breaking change (2026-06-27):** `GalleryGridItem` no longer has `cover_url`, `video_url`,
-> or `media_type` — use `cover: MediaObject` instead. The cover is now always the job's own
-> primary output (stops N near-identical tiles for N generations from one input).
-> `GalleryGroupDetail.input_image_url` → `input_media: MediaObject | null`.
-> `GalleryOutputItem` drops `url`, `thumbnail_url`, `content_type`, `media_type`, `format`,
-> `size_bytes` — all in `media: MediaObject`.
+### Library Action Resolution
 
-> **New field (2026-07-12, additive):** `expires_at` on `GalleryGridItem` and
-> `GalleryOutputItem` — brings the gallery contract to parity with `ImageListItem`/
-> `OutputListItem` (§8), which have exposed `expires_at` all along. `DELETE
-> /v1/content/{content_id}` (§9) already supported uploads before this change — no new
-> delete endpoint was added for the uploads-delete UI; reuse the existing one.
+`available_actions` on every `LibraryAssetItem`/`LibraryAssetDetail` is resolved server-side by a
+pure, table-driven function of media type + whether the asset has generation metadata (i.e. is an
+output) — never inferred from `source` on the client:
 
-### Gallery Badge Logic
+| Always | Image-only | Video-only | Has generation metadata (output) |
+|--------|-----------|------------|-----------------------------------|
+| `favorite`, `rename`, `download`, `delete` | `remix`, `create_variation`, `animate`, `use_as_reference`, `use_as_first_frame`, `use_as_last_frame` | `remix`, `extend`, `extract_frame` | `view_settings`, `reproduce` |
+
+### Library Badge Logic
 
 | Badge value | Generation types |
 |-------------|-----------------|
@@ -2602,7 +2847,7 @@ ComfyUI scheduler names accepted on `POST /v1/generate` (`scheduler`, Aisha imag
 
 Values: `"png"`, `"jpeg"`, `"webp"` (images), `"mp4"`, `"webm"`, `"mov"` (video)
 
-> Surfaced as the `format` field on job/gallery outputs. Generated image thumbnails are `webp`. `"webm"`/`"mov"` apply only to user-uploaded videos (§8/§9b) — generated video outputs are always `"mp4"`.
+> Surfaced as the `format` field on job/library outputs. Generated image thumbnails are `webp`. `"webm"`/`"mov"` apply only to user-uploaded videos (§8/§9b) — generated video outputs are always `"mp4"`.
 
 ### AccountType
 
@@ -2665,21 +2910,45 @@ Values: `"en"` (English), `"ru"` (Russian), `"sr"` (Serbian Latin)
 
 Values: `"image"`, `"video"`
 
-Used in Gallery to distinguish image vs. video generation groups and outputs.
+Used in Library to distinguish image vs. video assets and generation groups.
 
-### GalleryBadge
+### LibraryAssetSource
+
+Values: `"upload"`, `"output"`
+
+Which table a Library asset lives in (`user_images` vs. `generation_outputs`). Prefixes every
+`asset_ref` on the wire (`"upload:<uuid>"` / `"output:<uuid>"`) and is the `source=` filter value
+on `GET /v1/library/`.
+
+### LibrarySort
+
+Values: `"newest"` (default), `"oldest"`, `"expiring_soon"`
+
+Sort order for `GET /v1/library/`. `expiring_soon` orders ascending by `expires_at` (soonest first)
+and is also the axis the `expiring` filter checks against (7-day fixed window).
+
+### LibraryAction
+
+Values: `"remix"`, `"create_variation"`, `"animate"`, `"extend"`, `"extract_frame"`,
+`"use_as_reference"`, `"use_as_first_frame"`, `"use_as_last_frame"`, `"view_settings"`,
+`"reproduce"`, `"favorite"`, `"rename"`, `"download"`, `"delete"`
+
+Server-resolved per-asset action set — see the "Library Action Resolution" table in §10.
+
+### LibraryBadge
 
 Values: `"prompt"`, `"image"`
 
-Indicates the primary input type for a gallery item:
+Indicates the primary input type for a library group:
 - `"prompt"` — text-to-image or text-to-video (no image input)
 - `"image"` — image/video input types (i2i, i2v, flf2v, v2v)
 
-### GallerySourceType
+### LibraryGroupSourceType
 
-Values: `"upload"`, `"generation"`
+Values: `"upload"`, `"output"`
 
-Used in `GalleryLineage.source_type` to indicate whether the input came from a direct upload or a previous generation output.
+Used in `LibraryGroupLineage.source_type` (§10) to indicate whether a generation job's input came
+from a direct upload or a previous generation output.
 
 ### FrameExtractionKind
 
@@ -2767,9 +3036,9 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 ## 19. Content URLs
 
-### Content Proxy URLs (preferred for Gallery / persistent UI)
+### Content Proxy URLs (preferred for Library / persistent UI)
 
-Gallery responses and the `/v1/content/` endpoints return **content proxy URLs** — permanent, auth-gated paths:
+Library responses and the `/v1/content/` endpoints return **content proxy URLs** — permanent, auth-gated paths:
 
 - `GET /v1/content/outputs/{output_id}` — streams a generated output
 - `GET /v1/content/uploads/{image_id}` — streams an uploaded image
