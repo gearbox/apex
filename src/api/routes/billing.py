@@ -161,9 +161,12 @@ class BillingController(Controller):
         self,
         session: AsyncSession,
         pricing_service: PricingService,
+        product_config: ProductConfig,
     ) -> list[PricingRuleResponse]:
-        """Get active pricing rules."""
-        rules = await pricing_service.list_catalog(active_only=True, session=session)
+        """Get active pricing rules, excluding models disabled or blocked for this product."""
+        rules = await pricing_service.list_catalog(
+            active_only=True, product_config=product_config, session=session
+        )
         return [
             PricingRuleResponse(
                 id=r.id,

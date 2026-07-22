@@ -15,6 +15,7 @@ from src.api.routes.billing import BillingController
 from src.api.schemas.billing import TopUpOptionsResponse, TopUpStripeRequest
 from src.api.services.idempotency import IdempotencyConflictError, IdempotencyService
 from src.core.config import Settings
+from src.core.product_registry import VEX_CONFIG
 
 pytestmark = pytest.mark.unit
 
@@ -77,10 +78,11 @@ class TestGetPricing:
         pricing_service = AsyncMock()
         pricing_service.list_catalog = AsyncMock(return_value=[rule])
 
-        result = await BillingController.get_pricing.fn(  # type: ignore[attr-defined]
+        result = await BillingController.get_pricing.fn(
             MagicMock(),
             session=AsyncMock(),
             pricing_service=pricing_service,
+            product_config=VEX_CONFIG,
         )
 
         assert result[0].token_cost == 20

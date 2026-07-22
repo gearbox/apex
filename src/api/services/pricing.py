@@ -7,12 +7,14 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.services.billing_errors import PriceNotFoundError
+from src.core.enums import ModelType
 from src.core.uid import new_id
 from src.db.repositories.billing import (
     UNSET_OPTIONAL_UPDATE,
     BillingRepository,
     OptionalUpdate,
 )
+from src.db.repositories.generation_model import GenerationModelRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.core.product import ProductConfig
     from src.db.models.billing import PricingRule
 
 logger = structlog.get_logger(__name__)
@@ -87,10 +90,39 @@ class PricingService:
         self,
         *,
         active_only: bool = True,
+        product_config: ProductConfig | None = None,
         session: AsyncSession,
     ) -> Sequence[PricingRule]:
+        """List pricing rules.
+
+        Args:
+            active_only: Restrict to currently-active, in-effect rules.
+            product_config: If given, also drop rules pinned to a specific model
+                (`model` is not None) that is disabled or not allowed for this
+                product. Rules with `model=None` (provider/generation_type-wide)
+                are always kept since they aren't tied to one model. Pass None
+                (admin management views) to see the unfiltered catalog.
+        """
         repo = BillingRepository(session)
-        return await repo.list_pricing_rules(active_only=active_only)
+        rules = await repo.list_pricing_rules(active_only=active_only)
+        if product_config is None:
+            return rules
+
+        model_repo = GenerationModelRepository(session)
+        allowed_model_keys = {
+            m.model_key for m in await model_repo.list_enabled_for_product(product_config)
+        }
+
+        def _rule_allowed(rule: PricingRule) -> bool:
+            if rule.model is None:
+                return True
+            try:
+                ModelType(rule.model)
+            except ValueError:
+                return True
+            return rule.model in allowed_model_keys
+
+        return [r for r in rules if _rule_allowed(r)]
 
     async def create_rule(
         self,
