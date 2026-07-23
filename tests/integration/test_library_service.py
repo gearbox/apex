@@ -678,3 +678,117 @@ class TestGetUploadDetailLineage:
         assert result.lineage.source_asset_ref is None
         assert result.lineage.source_job_id is None
         assert result.lineage.source_timestamp_ms == 1500
+
+
+class TestGetOutputDetailLineage:
+    """Remediation for the lineage-remediation prompt: _get_output_detail
+    previously hardcoded lineage=None for every generated output, hiding
+    provenance for i2i/i2v/v2v outputs. Mirrors TestGetUploadDetailLineage."""
+
+    async def test_output_with_input_image_returns_upload_lineage(
+        self,
+        library_service: LibraryService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
+        make_output: Callable[..., Coroutine[Any, Any, GenerationOutput]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"outlineage1-{uuid4().hex[:8]}@example.com")
+        input_image = await make_user_image(user=user)
+        job = await make_job(user=user, status="completed", generation_type="i2i")
+        job.input_image_id = input_image.id
+        db_session.add(job)
+        await db_session.flush()
+        output = await make_output(user=user, job=job)
+
+        ref = format_asset_ref(LibraryAssetSource.OUTPUT, output.id)
+        result = await library_service.get_asset_detail(
+            ref, user.id, "vex", VEX_CONFIG, session=db_session
+        )
+        assert result is not None
+        assert result.lineage is not None
+        assert result.lineage.source_asset_ref == format_asset_ref(
+            LibraryAssetSource.UPLOAD, input_image.id
+        )
+        assert result.lineage.source_job_id is None
+        assert result.lineage.source_timestamp_ms is None
+
+    async def test_output_with_source_output_returns_output_lineage(
+        self,
+        library_service: LibraryService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
+        make_output: Callable[..., Coroutine[Any, Any, GenerationOutput]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"outlineage2-{uuid4().hex[:8]}@example.com")
+        source_output = await make_output(user=user)
+        job = await make_job(user=user, status="completed", generation_type="i2i")
+        job.source_output_id = source_output.id
+        db_session.add(job)
+        await db_session.flush()
+        output = await make_output(user=user, job=job)
+
+        ref = format_asset_ref(LibraryAssetSource.OUTPUT, output.id)
+        result = await library_service.get_asset_detail(
+            ref, user.id, "vex", VEX_CONFIG, session=db_session
+        )
+        assert result is not None
+        assert result.lineage is not None
+        assert result.lineage.source_asset_ref == format_asset_ref(
+            LibraryAssetSource.OUTPUT, source_output.id
+        )
+        assert result.lineage.source_job_id == source_output.job_id
+        assert result.lineage.source_timestamp_ms is None
+
+    async def test_source_output_owned_by_other_user_degrades_to_none(
+        self,
+        library_service: LibraryService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
+        make_output: Callable[..., Coroutine[Any, Any, GenerationOutput]],
+        db_session: AsyncSession,
+    ) -> None:
+        """L2 — mirrors TestGetUploadDetailLineage's cross-user test: a
+        foreign-owned source_output_id must degrade to source_asset_ref=None
+        and source_job_id=None rather than leaking cross-user lineage, and
+        must never fall back to job.source_job_id."""
+        owner = await make_user(email=f"outlineage3owner-{uuid4().hex[:8]}@example.com")
+        other = await make_user(email=f"outlineage3other-{uuid4().hex[:8]}@example.com")
+        foreign_output = await make_output(user=other)
+        job = await make_job(user=owner, status="completed", generation_type="i2i")
+        job.source_output_id = foreign_output.id
+        db_session.add(job)
+        await db_session.flush()
+        output = await make_output(user=owner, job=job)
+
+        ref = format_asset_ref(LibraryAssetSource.OUTPUT, output.id)
+        result = await library_service.get_asset_detail(
+            ref, owner.id, "vex", VEX_CONFIG, session=db_session
+        )
+        assert result is not None
+        assert result.lineage is not None
+        assert result.lineage.source_asset_ref is None
+        assert result.lineage.source_job_id is None
+
+    async def test_t2i_output_returns_none_lineage(
+        self,
+        library_service: LibraryService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
+        make_output: Callable[..., Coroutine[Any, Any, GenerationOutput]],
+        db_session: AsyncSession,
+    ) -> None:
+        """Regression guard: a plain t2i/t2v job has neither input_image_id
+        nor source_output_id, so lineage must stay None."""
+        user = await make_user(email=f"outlineage4-{uuid4().hex[:8]}@example.com")
+        job = await make_job(user=user, status="completed", generation_type="t2i")
+        output = await make_output(user=user, job=job)
+
+        ref = format_asset_ref(LibraryAssetSource.OUTPUT, output.id)
+        result = await library_service.get_asset_detail(
+            ref, user.id, "vex", VEX_CONFIG, session=db_session
+        )
+        assert result is not None
+        assert result.lineage is None

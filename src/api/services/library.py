@@ -390,17 +390,12 @@ class LibraryService:
 
         lineage: LibraryLineage | None = None
         if image.source_output_id is not None:
-            source_output = await OutputRepository(session).get(
-                image.source_output_id, user_id=user_id
-            )
-            source_ref = (
-                format_asset_ref(LibraryAssetSource.OUTPUT, source_output.id)
-                if source_output is not None
-                else None
+            source_ref, source_job_id = await self._resolve_output_lineage_source(
+                image.source_output_id, user_id, session
             )
             lineage = LibraryLineage(
                 source_asset_ref=source_ref,
-                source_job_id=source_output.job_id if source_output is not None else None,
+                source_job_id=source_job_id,
                 source_timestamp_ms=image.source_timestamp_ms,
             )
         elif image.source_upload_id is not None:
@@ -490,6 +485,23 @@ class LibraryService:
         job_count, frame_count = await repo.count_descendants(LibraryAssetSource.OUTPUT, output.id)
         output_counts = await repo.batch_output_counts([job.id])
 
+        lineage: LibraryLineage | None = None
+        if job.source_output_id is not None:
+            source_ref, source_job_id = await self._resolve_output_lineage_source(
+                job.source_output_id, user_id, session
+            )
+            lineage = LibraryLineage(
+                source_asset_ref=source_ref,
+                source_job_id=source_job_id,
+                source_timestamp_ms=None,
+            )
+        elif job.input_image_id is not None:
+            lineage = LibraryLineage(
+                source_asset_ref=format_asset_ref(LibraryAssetSource.UPLOAD, job.input_image_id),
+                source_job_id=None,
+                source_timestamp_ms=None,
+            )
+
         actions = resolve_library_actions(
             media_type=media.media_type,
             source=LibraryAssetSource.OUTPUT,
@@ -521,9 +533,27 @@ class LibraryService:
             aspect_ratio=job.aspect_ratio,
             token_cost=job.token_cost,
             completed_at=job.completed_at,
-            lineage=None,
+            lineage=lineage,
             descendants=LibraryDescendants(job_count=job_count, frame_count=frame_count),
         )
+
+    @staticmethod
+    async def _resolve_output_lineage_source(
+        source_output_id: UUID,
+        user_id: UUID,
+        session: AsyncSession,
+    ) -> tuple[str | None, UUID | None]:
+        """Resolve a ``source_output_id`` to ``(source_asset_ref, source_job_id)``, user-scoped.
+
+        Shared by the upload and output detail paths. Returns ``(None, None)``
+        when the source output isn't visible to ``user_id`` (cross-user or
+        deleted) — never falls back to a caller-supplied job id, to preserve
+        the no-leak invariant covered by the L2 cross-user lineage test.
+        """
+        source_output = await OutputRepository(session).get(source_output_id, user_id=user_id)
+        if source_output is None:
+            return None, None
+        return format_asset_ref(LibraryAssetSource.OUTPUT, source_output.id), source_output.job_id
 
     @staticmethod
     async def _resolve_project_name(
