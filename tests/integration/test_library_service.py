@@ -679,6 +679,49 @@ class TestGetUploadDetailLineage:
         assert result.lineage.source_job_id is None
         assert result.lineage.source_timestamp_ms == 1500
 
+    async def test_source_upload_owned_by_other_user_degrades_to_none(
+        self,
+        library_service: LibraryService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        """L2 — mirrors the source_output_id cross-user test: a foreign-owned
+        source_upload_id must degrade to source_asset_ref=None rather than
+        leaking a reference to an upload the caller can't access."""
+        from src.db.models.storage import UserImage as UserImageModel
+
+        owner = await make_user(email=f"lineageowner2-{uuid4().hex[:8]}@example.com")
+        other = await make_user(email=f"lineageother2-{uuid4().hex[:8]}@example.com")
+        foreign_upload = await make_user_image(user=other)
+
+        img_id = uuid4()
+        image = UserImageModel(
+            id=img_id,
+            user_id=owner.id,
+            product_id=owner.product_id,
+            storage_key=f"users/{owner.id}/uploads/{img_id}.png",
+            original_filename="frame.png",
+            content_type="image/png",
+            size_bytes=100,
+            format="png",
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+            source_upload_id=foreign_upload.id,
+            source_timestamp_ms=1500,
+        )
+        db_session.add(image)
+        await db_session.flush()
+
+        ref = format_asset_ref(LibraryAssetSource.UPLOAD, image.id)
+        result = await library_service.get_asset_detail(
+            ref, owner.id, "vex", VEX_CONFIG, session=db_session
+        )
+        assert result is not None
+        assert result.lineage is not None
+        assert result.lineage.source_asset_ref is None
+        assert result.lineage.source_job_id is None
+        assert result.lineage.source_timestamp_ms == 1500
+
 
 class TestGetOutputDetailLineage:
     """Remediation for the lineage-remediation prompt: _get_output_detail
@@ -759,6 +802,37 @@ class TestGetOutputDetailLineage:
         foreign_output = await make_output(user=other)
         job = await make_job(user=owner, status="completed", generation_type="i2i")
         job.source_output_id = foreign_output.id
+        db_session.add(job)
+        await db_session.flush()
+        output = await make_output(user=owner, job=job)
+
+        ref = format_asset_ref(LibraryAssetSource.OUTPUT, output.id)
+        result = await library_service.get_asset_detail(
+            ref, owner.id, "vex", VEX_CONFIG, session=db_session
+        )
+        assert result is not None
+        assert result.lineage is not None
+        assert result.lineage.source_asset_ref is None
+        assert result.lineage.source_job_id is None
+
+    async def test_input_image_owned_by_other_user_degrades_to_none(
+        self,
+        library_service: LibraryService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        make_job: Callable[..., Coroutine[Any, Any, GenerationJob]],
+        make_output: Callable[..., Coroutine[Any, Any, GenerationOutput]],
+        db_session: AsyncSession,
+    ) -> None:
+        """L2 — mirrors test_source_output_owned_by_other_user_degrades_to_none
+        for the input_image_id branch: a foreign-owned input_image_id must
+        degrade to source_asset_ref=None rather than leaking a reference to
+        an upload the caller can't access."""
+        owner = await make_user(email=f"outlineage5owner-{uuid4().hex[:8]}@example.com")
+        other = await make_user(email=f"outlineage5other-{uuid4().hex[:8]}@example.com")
+        foreign_upload = await make_user_image(user=other)
+        job = await make_job(user=owner, status="completed", generation_type="i2i")
+        job.input_image_id = foreign_upload.id
         db_session.add(job)
         await db_session.flush()
         output = await make_output(user=owner, job=job)

@@ -391,7 +391,7 @@ class LibraryService:
         lineage: LibraryLineage | None = None
         if image.source_output_id is not None:
             source_ref, source_job_id = await self._resolve_output_lineage_source(
-                image.source_output_id, user_id, session
+                image.source_output_id, user_id, OutputRepository(session)
             )
             lineage = LibraryLineage(
                 source_asset_ref=source_ref,
@@ -399,10 +399,11 @@ class LibraryService:
                 source_timestamp_ms=image.source_timestamp_ms,
             )
         elif image.source_upload_id is not None:
+            source_ref = await self._resolve_upload_lineage_source(
+                image.source_upload_id, user_id, image_repo
+            )
             lineage = LibraryLineage(
-                source_asset_ref=format_asset_ref(
-                    LibraryAssetSource.UPLOAD, image.source_upload_id
-                ),
+                source_asset_ref=source_ref,
                 source_job_id=None,
                 source_timestamp_ms=image.source_timestamp_ms,
             )
@@ -488,7 +489,7 @@ class LibraryService:
         lineage: LibraryLineage | None = None
         if job.source_output_id is not None:
             source_ref, source_job_id = await self._resolve_output_lineage_source(
-                job.source_output_id, user_id, session
+                job.source_output_id, user_id, output_repo
             )
             lineage = LibraryLineage(
                 source_asset_ref=source_ref,
@@ -496,8 +497,11 @@ class LibraryService:
                 source_timestamp_ms=None,
             )
         elif job.input_image_id is not None:
+            source_ref = await self._resolve_upload_lineage_source(
+                job.input_image_id, user_id, UserImageRepository(session)
+            )
             lineage = LibraryLineage(
-                source_asset_ref=format_asset_ref(LibraryAssetSource.UPLOAD, job.input_image_id),
+                source_asset_ref=source_ref,
                 source_job_id=None,
                 source_timestamp_ms=None,
             )
@@ -541,7 +545,7 @@ class LibraryService:
     async def _resolve_output_lineage_source(
         source_output_id: UUID,
         user_id: UUID,
-        session: AsyncSession,
+        output_repo: OutputRepository,
     ) -> tuple[str | None, UUID | None]:
         """Resolve a ``source_output_id`` to ``(source_asset_ref, source_job_id)``, user-scoped.
 
@@ -549,11 +553,33 @@ class LibraryService:
         when the source output isn't visible to ``user_id`` (cross-user or
         deleted) — never falls back to a caller-supplied job id, to preserve
         the no-leak invariant covered by the L2 cross-user lineage test.
+
+        Takes a repo instance rather than a session so callers that already
+        hold one (e.g. the output-detail path, which needs it to fetch the
+        output itself) can reuse it instead of paying for a second one.
         """
-        source_output = await OutputRepository(session).get(source_output_id, user_id=user_id)
+        source_output = await output_repo.get(source_output_id, user_id=user_id)
         if source_output is None:
             return None, None
         return format_asset_ref(LibraryAssetSource.OUTPUT, source_output.id), source_output.job_id
+
+    @staticmethod
+    async def _resolve_upload_lineage_source(
+        source_upload_id: UUID,
+        user_id: UUID,
+        image_repo: UserImageRepository,
+    ) -> str | None:
+        """Resolve a ``source_upload_id``/``input_image_id`` to a ``source_asset_ref``, user-scoped.
+
+        Mirrors ``_resolve_output_lineage_source`` for the upload-as-source case:
+        returns None when the source upload isn't visible to ``user_id`` (cross-user
+        or deleted) instead of leaking a reference to an asset the caller can't
+        actually access.
+        """
+        source_image = await image_repo.get(source_upload_id, user_id=user_id)
+        if source_image is None:
+            return None
+        return format_asset_ref(LibraryAssetSource.UPLOAD, source_image.id)
 
     @staticmethod
     async def _resolve_project_name(
