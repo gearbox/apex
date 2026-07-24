@@ -48,7 +48,7 @@ class ContentProxyService:
         user_id: UUID,
         product_id: str,
         session: AsyncSession,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, int]:
         """Resolve an output ID to its storage_key after ownership check.
 
         Args:
@@ -58,7 +58,9 @@ class ContentProxyService:
             session: Database session.
 
         Returns:
-            (storage_key, etag)
+            (storage_key, etag, size_bytes). size_bytes is the DB-recorded
+            size — reliable because outputs are immutable once written —
+            used to pre-validate Range requests without an R2 round-trip.
 
         Raises:
             ContentNotFoundError: Output not found or not owned.
@@ -67,7 +69,7 @@ class ContentProxyService:
         output = await output_repo.get(output_id, user_id=user_id)
         if output is None or output.product_id != product_id:
             raise ContentNotFoundError(f"Output not found: {output_id}")
-        return output.storage_key, str(output.id)
+        return output.storage_key, str(output.id), output.size_bytes
 
     async def resolve_upload(
         self,
@@ -76,7 +78,7 @@ class ContentProxyService:
         user_id: UUID,
         product_id: str,
         session: AsyncSession,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, int]:
         """Resolve an upload ID to its storage_key after ownership check.
 
         Args:
@@ -86,7 +88,9 @@ class ContentProxyService:
             session: Database session.
 
         Returns:
-            (storage_key, etag)
+            (storage_key, etag, size_bytes). size_bytes is the DB-recorded
+            size — reliable because uploads are immutable once written —
+            used to pre-validate Range requests without an R2 round-trip.
 
         Raises:
             ContentNotFoundError: Upload not found or not owned.
@@ -95,7 +99,7 @@ class ContentProxyService:
         image = await image_repo.get(image_id, user_id=user_id)
         if image is None or image.product_id != product_id:
             raise ContentNotFoundError(f"Upload not found: {image_id}")
-        return image.storage_key, str(image.id)
+        return image.storage_key, str(image.id), image.size_bytes
 
     async def delete_content(
         self,

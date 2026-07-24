@@ -486,6 +486,183 @@ class TestAuthControllerCookies:
         assert cookie.secure is False
 
 
+class TestRemintContentCookieHandler:
+    """POST /v1/auth/content-cookie (D4) — direct handler tests, no DB."""
+
+    async def test_remint_sets_content_cookie_204(
+        self, jwt_service: JWTService, settings: Settings
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from src.api.routes.auth import AuthController
+
+        user_id = uuid4()
+
+        response = await AuthController.remint_content_cookie.fn(
+            MagicMock(),
+            current_user_id=user_id,
+            jwt_service=jwt_service,
+            product_id=PRODUCT_ID,
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        assert response.status_code == HTTP_204_NO_CONTENT
+        assert response.content is None
+        assert len(response.cookies) == 1
+        cookie = response.cookies[0]
+        assert cookie.key == COOKIE_NAME
+        assert cookie.httponly is True
+        assert cookie.samesite == "lax"
+        assert cookie.path == "/v1/content"
+        assert cookie.domain == COOKIE_DOMAIN
+        assert cookie.max_age == settings.content_cookie_ttl_hours * 3600
+        assert cookie.secure == settings.content_cookie_secure
+
+    async def test_remint_cookie_attributes_match_login(
+        self, jwt_service: JWTService, settings: Settings
+    ) -> None:
+        """The cookie D4 mints has identical attributes to login's — same helper, same call shape."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.api.routes.auth import AuthController
+
+        user_id = uuid4()
+
+        remint_response = await AuthController.remint_content_cookie.fn(
+            MagicMock(),
+            current_user_id=user_id,
+            jwt_service=jwt_service,
+            product_id=PRODUCT_ID,
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        mock_auth = AsyncMock()
+        user = MagicMock()
+        user.id = user_id
+        mock_auth.login = AsyncMock(return_value=(user, _make_token_pair()))
+        mock_request = MagicMock()
+        mock_request.headers.get.return_value = None
+        mock_request.client = None
+
+        from src.api.schemas.auth import LoginRequest
+
+        login_response = await AuthController.login.fn(
+            MagicMock(),
+            request=mock_request,
+            data=LoginRequest(email="a@b.com", password="pass1234"),
+            auth_service=mock_auth,
+            jwt_service=jwt_service,
+            product_id=PRODUCT_ID,
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        remint_cookie = remint_response.cookies[0]
+        login_cookie = login_response.cookies[0]
+        assert remint_cookie.httponly == login_cookie.httponly
+        assert remint_cookie.secure == login_cookie.secure
+        assert remint_cookie.samesite == login_cookie.samesite
+        assert remint_cookie.path == login_cookie.path
+        assert remint_cookie.domain == login_cookie.domain
+        assert remint_cookie.max_age == login_cookie.max_age
+
+        # And the minted token really does authenticate this user/product.
+        svc = JWTService(JWTConfig(secret_key=TEST_SECRET))
+        payload = svc.decode_content_token(remint_cookie.value)
+        assert payload is not None
+        assert UUID(payload.sub) == user_id
+        assert payload.product_id == PRODUCT_ID
+
+    async def test_remint_scoped_to_requesting_users_product(
+        self, jwt_service: JWTService, settings: Settings
+    ) -> None:
+        """The minted cookie is scoped to the product_id resolved for the request."""
+        from unittest.mock import MagicMock
+
+        from src.api.routes.auth import AuthController
+
+        user_id = uuid4()
+
+        response = await AuthController.remint_content_cookie.fn(
+            MagicMock(),
+            current_user_id=user_id,
+            jwt_service=jwt_service,
+            product_id="synthara",
+            product_config=_make_product_config(),
+            settings=settings,
+        )
+
+        cookie = response.cookies[0]
+        svc = JWTService(JWTConfig(secret_key=TEST_SECRET))
+        payload = svc.decode_content_token(cookie.value)
+        assert payload is not None
+        assert payload.product_id == "synthara"
+
+
+class TestRemintContentCookieHTTP:
+    """POST /v1/auth/content-cookie over real HTTP — guard behavior (bearer-only)."""
+
+    @staticmethod
+    def _make_app(jwt_service: JWTService, settings: Settings) -> Litestar:
+        from src.api.routes.auth import AuthController
+        from src.core.product_registry import resolve_product_by_slug
+
+        # A real ProductConfig (not a MagicMock) — Litestar's signature model
+        # validates injected DI values by isinstance, which a bare mock fails.
+        product_config = resolve_product_by_slug(PRODUCT_ID)
+        assert product_config is not None
+
+        app = Litestar(
+            route_handlers=[AuthController],
+            dependencies={
+                "product_id": Provide(lambda: PRODUCT_ID, sync_to_thread=False),
+                "product_config": Provide(lambda: product_config, sync_to_thread=False),
+                "settings": Provide(lambda: settings, sync_to_thread=False),
+                "jwt_service": Provide(lambda: jwt_service, sync_to_thread=False),
+            },
+        )
+        app.state["jwt_service"] = jwt_service
+        return app
+
+    def test_no_bearer_returns_401(self, jwt_service: JWTService, settings: Settings) -> None:
+        app = self._make_app(jwt_service, settings)
+        with TestClient(app=app) as client:
+            resp = client.post("/v1/auth/content-cookie")
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+    def test_valid_bearer_returns_204_with_cookie(
+        self, jwt_service: JWTService, settings: Settings, test_user_id: UUID
+    ) -> None:
+        token, _ = jwt_service.create_access_token(test_user_id, product_id=PRODUCT_ID)
+        app = self._make_app(jwt_service, settings)
+        with TestClient(app=app) as client:
+            resp = client.post(
+                "/v1/auth/content-cookie", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert resp.status_code == HTTP_204_NO_CONTENT
+        # httpx's parsed cookie jar drops this (Domain=vex.pics, Secure, over a
+        # plain-http testserver request) — assert on the raw header instead.
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert set_cookie.startswith(f"{COOKIE_NAME}=")
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+        assert "Path=/v1/content" in set_cookie
+
+    def test_content_cookie_alone_cannot_authorize_remint(
+        self, jwt_service: JWTService, settings: Settings, test_user_id: UUID
+    ) -> None:
+        """The content cookie itself must not authorize minting a fresh one — bearer-only."""
+        token, _ = jwt_service.create_content_token(
+            test_user_id, product_id=PRODUCT_ID, ttl=timedelta(hours=1)
+        )
+        app = self._make_app(jwt_service, settings)
+        with TestClient(app=app) as client:
+            resp = client.post("/v1/auth/content-cookie", cookies={COOKIE_NAME: token})
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+
 # ---------------------------------------------------------------------------
 # effective_cookie_domain unit tests
 # ---------------------------------------------------------------------------

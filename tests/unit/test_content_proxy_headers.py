@@ -1,49 +1,69 @@
-"""Content-proxy response header hardening (M2).
+"""Content-proxy response header hardening (M2) + D1/D2/D3 streaming behavior.
 
 Covers ``ContentProxyController._stream_from_r2``: inline-safe content types
 are served inline, everything else is forced to download as
 application/octet-stream, and X-Content-Type-Options/Content-Disposition are
-always present. Reuses the R2 mocking pattern from
-``tests/unit/test_route_handlers.py::TestContentStreamFromR2`` — a MagicMock
-R2 client whose ``_get_client()`` is an async context manager yielding a mock
-with ``head_object``.
+always present. Since D2, metadata comes from a single ``stream_object``
+GetObject call (no more ``head_object``) — the stub below mirrors that
+contract by yielding an ``ObjectStream``.
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from litestar.response import Stream
 
 from src.api.routes.content import ContentProxyController
+from src.api.services.storage.r2 import ObjectStream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 pytestmark = pytest.mark.unit
 
+CACHE_TTL = 3600
+SIZE_BYTES = 1234
+ETAG = "etag123"
+
 
 def _make_r2_mock(
     content_type: str | None,
-    content_length: int = 1234,
+    *,
+    content_length: int = SIZE_BYTES,
+    content_range: str | None = None,
+    chunks: tuple[bytes, ...] = (b"chunk",),
 ) -> MagicMock:
-    head: dict[str, object] = {"ContentLength": content_length}
-    if content_type is not None:
-        head["ContentType"] = content_type
-    client_mock = AsyncMock()
-    client_mock.head_object = AsyncMock(return_value=head)
+    """Stub R2StorageService.stream_object as an async context manager.
 
-    r2_mock = MagicMock()
-    r2_mock._settings.bucket_name = "test-bucket"
+    Mirrors the real ``stream_object`` contract post-D2: a single call
+    yields an ``ObjectStream`` carrying content_type/content_length/
+    content_range straight from the (stubbed) GetObject response.
+    """
+    resolved_content_type = content_type or "application/octet-stream"
 
     @asynccontextmanager
-    async def _fake_get_client() -> AsyncIterator[AsyncMock]:
-        yield client_mock
+    async def _stream_object(
+        _storage_key: str, *, range_header: str | None = None
+    ) -> AsyncIterator[ObjectStream]:
+        del range_header
 
-    r2_mock._get_client = _fake_get_client
+        async def _chunks() -> AsyncIterator[bytes]:
+            for chunk in chunks:
+                yield chunk
+
+        yield ObjectStream(
+            chunks=_chunks(),
+            content_type=resolved_content_type,
+            content_length=content_length,
+            content_range=content_range,
+        )
+
+    r2_mock = MagicMock()
+    r2_mock.stream_object = _stream_object
     return r2_mock
 
 
@@ -52,7 +72,13 @@ class TestInlineSafeContentTypes:
         r2_mock = _make_r2_mock("image/png")
 
         result = await ContentProxyController._stream_from_r2(
-            r2_mock, "users/abc/outputs/img.png", "etag123", 3600
+            r2_mock,
+            "users/abc/outputs/img.png",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=None,
         )
 
         assert isinstance(result, Stream)
@@ -64,7 +90,13 @@ class TestInlineSafeContentTypes:
         r2_mock = _make_r2_mock("video/mp4")
 
         result = await ContentProxyController._stream_from_r2(
-            r2_mock, "users/abc/outputs/vid.mp4", "etag123", 3600
+            r2_mock,
+            "users/abc/outputs/vid.mp4",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=None,
         )
 
         assert isinstance(result, Stream)
@@ -78,7 +110,13 @@ class TestHostileContentTypesForceDownload:
         r2_mock = _make_r2_mock(stored_content_type)
 
         result = await ContentProxyController._stream_from_r2(
-            r2_mock, "users/abc/outputs/file", "etag123", 3600
+            r2_mock,
+            "users/abc/outputs/file",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=None,
         )
 
         assert isinstance(result, Stream)
@@ -90,7 +128,13 @@ class TestHostileContentTypesForceDownload:
         r2_mock = _make_r2_mock("application/octet-stream")
 
         result = await ContentProxyController._stream_from_r2(
-            r2_mock, "users/abc/outputs/file", "etag123", 3600
+            r2_mock,
+            "users/abc/outputs/file",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=None,
         )
 
         assert isinstance(result, Stream)
@@ -103,24 +147,55 @@ class TestNosniffAlwaysPresent:
         for content_type in ("image/jpeg", "image/webp", "text/html"):
             r2_mock = _make_r2_mock(content_type)
             result = await ContentProxyController._stream_from_r2(
-                r2_mock, "users/abc/outputs/file", "etag123", 3600
+                r2_mock,
+                "users/abc/outputs/file",
+                ETAG,
+                SIZE_BYTES,
+                CACHE_TTL,
+                range_header=None,
+                if_none_match=None,
             )
             assert isinstance(result, Stream)
             assert result.headers["X-Content-Type-Options"] == "nosniff"
 
 
 class TestMissingContentTypeFallsBackToDownload:
-    async def test_head_without_content_type_defaults_to_octet_stream_attachment(self) -> None:
+    async def test_missing_content_type_defaults_to_octet_stream_attachment(self) -> None:
         r2_mock = _make_r2_mock(content_type=None)
 
         result = await ContentProxyController._stream_from_r2(
-            r2_mock, "users/abc/outputs/file", "etag123", 3600
+            r2_mock,
+            "users/abc/outputs/file",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=None,
         )
 
         assert isinstance(result, Stream)
         assert result.media_type == "application/octet-stream"
         assert result.headers["X-Content-Type-Options"] == "nosniff"
         assert result.headers["Content-Disposition"] == "attachment"
+
+
+class TestAcceptRangesAlwaysPresent:
+    async def test_full_200_response_advertises_accept_ranges(self) -> None:
+        r2_mock = _make_r2_mock("image/png")
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "users/abc/outputs/img.png",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=None,
+        )
+
+        assert isinstance(result, Stream)
+        assert result.headers["Accept-Ranges"] == "bytes"
+        assert result.headers["Content-Length"] == str(SIZE_BYTES)
 
 
 class TestInlineSafeSetDerivation:
