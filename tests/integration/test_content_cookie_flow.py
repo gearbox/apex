@@ -15,7 +15,7 @@ AuthService (no DB required). Guard tests build a minimal Litestar app.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -245,12 +245,20 @@ class TestCookieAttributes:
         assert cookie.secure is False
         assert cookie.domain is None
 
-    def test_default_cookie_ttl_is_1_hour(self) -> None:
+    def test_default_cookie_ttl_is_24_hours(self) -> None:
         s = Settings(
             jwt_secret_key=TEST_SECRET,
             database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
         )
-        assert s.content_cookie_ttl_hours == 1
+        assert s.content_cookie_ttl_hours == 24
+
+    def test_cookie_ttl_up_to_168_hours_accepted(self) -> None:
+        s = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            content_cookie_ttl_hours=168,
+        )
+        assert s.content_cookie_ttl_hours == 168
 
     def test_cookie_ttl_above_max_rejected(self) -> None:
         from pydantic import ValidationError
@@ -259,7 +267,7 @@ class TestCookieAttributes:
             Settings(
                 jwt_secret_key=TEST_SECRET,
                 database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
-                content_cookie_ttl_hours=25,
+                content_cookie_ttl_hours=169,
             )
 
     def test_cookie_ttl_below_min_rejected(self) -> None:
@@ -271,6 +279,63 @@ class TestCookieAttributes:
                 database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
                 content_cookie_ttl_hours=0,
             )
+
+
+# ---------------------------------------------------------------------------
+# content_cookie_lifetime — single source of truth for max_age / expires_at (D3)
+# ---------------------------------------------------------------------------
+
+
+class TestContentCookieLifetimeHelper:
+    """A cookie built via build_content_cookie and the advertised expires_at must agree."""
+
+    def test_max_age_and_expires_at_agree_to_the_second(self) -> None:
+        from src.api.security.content_cookie import content_cookie_lifetime
+
+        s = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            content_cookie_ttl_hours=48,
+        )
+        max_age, expires_at = content_cookie_lifetime(s)
+        assert max_age == 48 * 3600
+
+        cookie = build_content_cookie("token", domain=None, secure=True, max_age=max_age)
+        assert cookie.max_age == max_age
+        derived_expiry = datetime.now(UTC) + timedelta(seconds=max_age)
+        assert abs((expires_at - derived_expiry).total_seconds()) < 1
+
+    def test_mint_content_cookie_returns_matching_max_age_and_expiry(
+        self, jwt_service: JWTService
+    ) -> None:
+        from src.api.security.content_cookie import mint_content_cookie
+        from src.core.product_registry import resolve_product_by_slug
+
+        s = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            content_cookie_ttl_hours=24,
+        )
+        product_config = resolve_product_by_slug(PRODUCT_ID)
+        assert product_config is not None
+
+        cookie, expires_at = mint_content_cookie(
+            user_id=uuid4(),
+            product_id=PRODUCT_ID,
+            jwt_service=jwt_service,
+            settings=s,
+            product_config=product_config,
+        )
+        assert cookie.max_age == 24 * 3600
+        derived_expiry = datetime.now(UTC) + timedelta(seconds=24 * 3600)
+        assert abs((expires_at - derived_expiry).total_seconds()) < 1
+
+        # The JWT's own exp claim (the actual revocation authority) agrees too.
+        assert isinstance(cookie.value, str)
+        payload = jwt_service.decode_content_token(cookie.value)
+        assert payload is not None
+        token_expiry = datetime.fromtimestamp(payload.exp, tz=UTC)
+        assert abs((expires_at - token_expiry).total_seconds()) < 1
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +400,14 @@ class TestAuthControllerCookies:
         assert cookie.max_age == settings.content_cookie_ttl_hours * 3600
         assert cookie.secure == settings.content_cookie_secure
 
+        assert response.content is not None
+        expected_expiry = datetime.now(UTC) + timedelta(
+            seconds=settings.content_cookie_ttl_hours * 3600
+        )
+        assert (
+            abs((response.content.content_cookie_expires_at - expected_expiry).total_seconds()) < 2
+        )
+
     async def test_login_sets_content_cookie(
         self, jwt_service: JWTService, settings: Settings
     ) -> None:
@@ -374,6 +447,14 @@ class TestAuthControllerCookies:
         assert cookie.samesite == "lax"
         assert cookie.path == "/v1/content"
         assert cookie.domain == COOKIE_DOMAIN
+
+        assert response.content is not None
+        expected_expiry = datetime.now(UTC) + timedelta(
+            seconds=settings.content_cookie_ttl_hours * 3600
+        )
+        assert (
+            abs((response.content.content_cookie_expires_at - expected_expiry).total_seconds()) < 2
+        )
 
     async def test_refresh_sets_content_cookie_without_decoding(
         self, jwt_service: JWTService, settings: Settings
@@ -423,6 +504,14 @@ class TestAuthControllerCookies:
         from uuid import UUID as _UUID
 
         assert _UUID(payload.sub) == user_id
+
+        assert response.content is not None
+        expected_expiry = datetime.now(UTC) + timedelta(
+            seconds=settings.content_cookie_ttl_hours * 3600
+        )
+        assert (
+            abs((response.content.content_cookie_expires_at - expected_expiry).total_seconds()) < 2
+        )
 
     async def test_logout_clears_content_cookie(
         self,
@@ -489,7 +578,7 @@ class TestAuthControllerCookies:
 class TestRemintContentCookieHandler:
     """POST /v1/auth/content-cookie (D4) — direct handler tests, no DB."""
 
-    async def test_remint_sets_content_cookie_204(
+    async def test_remint_sets_content_cookie_200(
         self, jwt_service: JWTService, settings: Settings
     ) -> None:
         from unittest.mock import MagicMock
@@ -507,8 +596,8 @@ class TestRemintContentCookieHandler:
             settings=settings,
         )
 
-        assert response.status_code == HTTP_204_NO_CONTENT
-        assert response.content is None
+        assert response.status_code == HTTP_200_OK
+        assert response.content is not None
         assert len(response.cookies) == 1
         cookie = response.cookies[0]
         assert cookie.key == COOKIE_NAME
@@ -518,6 +607,11 @@ class TestRemintContentCookieHandler:
         assert cookie.domain == COOKIE_DOMAIN
         assert cookie.max_age == settings.content_cookie_ttl_hours * 3600
         assert cookie.secure == settings.content_cookie_secure
+
+        expected_expiry = datetime.now(UTC) + timedelta(
+            seconds=settings.content_cookie_ttl_hours * 3600
+        )
+        assert abs((response.content.expires_at - expected_expiry).total_seconds()) < 2
 
     async def test_remint_cookie_attributes_match_login(
         self, jwt_service: JWTService, settings: Settings
@@ -632,7 +726,7 @@ class TestRemintContentCookieHTTP:
             resp = client.post("/v1/auth/content-cookie")
         assert resp.status_code == HTTP_401_UNAUTHORIZED
 
-    def test_valid_bearer_returns_204_with_cookie(
+    def test_valid_bearer_returns_200_with_cookie_and_body(
         self, jwt_service: JWTService, settings: Settings, test_user_id: UUID
     ) -> None:
         token, _ = jwt_service.create_access_token(test_user_id, product_id=PRODUCT_ID)
@@ -641,7 +735,9 @@ class TestRemintContentCookieHTTP:
             resp = client.post(
                 "/v1/auth/content-cookie", headers={"Authorization": f"Bearer {token}"}
             )
-        assert resp.status_code == HTTP_204_NO_CONTENT
+        assert resp.status_code == HTTP_200_OK
+        body = resp.json()
+        assert "expires_at" in body
         # httpx's parsed cookie jar drops this (Domain=vex.pics, Secure, over a
         # plain-http testserver request) — assert on the raw header instead.
         set_cookie = resp.headers.get("set-cookie", "")

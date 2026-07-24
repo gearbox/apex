@@ -83,6 +83,13 @@ class TokenResponse(msgspec.Struct, kw_only=True):
     token_type: str = "bearer"  # noqa: S105
     expires_in: int  # Seconds until access token expires
     expires_at: datetime  # Absolute expiration time
+    content_cookie_expires_at: datetime  # Absolute expiry of the apex_content cookie just set
+
+
+class ContentCookieResponse(msgspec.Struct, kw_only=True):
+    """Response for POST /v1/auth/content-cookie — the Set-Cookie itself carries the token."""
+
+    expires_at: datetime  # Absolute expiry (UTC) of the apex_content cookie just set
 
 
 class AccessTokenResponse(msgspec.Struct, kw_only=True):
