@@ -376,11 +376,17 @@ class TestUserRouteHandlers:
 
 
 class TestContentRouteHandlers:
+    @staticmethod
+    def _make_request() -> MagicMock:
+        request = MagicMock()
+        request.headers.get.return_value = None
+        return request
+
     async def test_proxy_output_success(self) -> None:
         from src.api.routes.content import ContentProxyController
 
         content_proxy = AsyncMock()
-        content_proxy.resolve_output = AsyncMock(return_value=("key/file.png", "etag123"))
+        content_proxy.resolve_output = AsyncMock(return_value=("key/file.png", "etag123", 1234))
         content_proxy.ttl = 3600
 
         self_mock = MagicMock()
@@ -388,6 +394,7 @@ class TestContentRouteHandlers:
 
         await ContentProxyController.proxy_output.fn(  # type: ignore[attr-defined]
             self_mock,
+            request=self._make_request(),
             current_user_id=uuid4(),
             product_id="vex",
             output_id=uuid4(),
@@ -405,6 +412,7 @@ class TestContentRouteHandlers:
 
         response = await ContentProxyController.proxy_output.fn(  # type: ignore[attr-defined]
             MagicMock(),
+            request=self._make_request(),
             current_user_id=uuid4(),
             product_id="vex",
             output_id=uuid4(),
@@ -418,7 +426,7 @@ class TestContentRouteHandlers:
         from src.api.routes.content import ContentProxyController
 
         content_proxy = AsyncMock()
-        content_proxy.resolve_upload = AsyncMock(return_value=("key/img.jpg", "etag456"))
+        content_proxy.resolve_upload = AsyncMock(return_value=("key/img.jpg", "etag456", 5678))
         content_proxy.ttl = 3600
 
         self_mock = MagicMock()
@@ -426,6 +434,7 @@ class TestContentRouteHandlers:
 
         await ContentProxyController.proxy_upload.fn(  # type: ignore[attr-defined]
             self_mock,
+            request=self._make_request(),
             current_user_id=uuid4(),
             product_id="vex",
             image_id=uuid4(),
@@ -443,6 +452,7 @@ class TestContentRouteHandlers:
 
         response = await ContentProxyController.proxy_upload.fn(  # type: ignore[attr-defined]
             MagicMock(),
+            request=self._make_request(),
             current_user_id=uuid4(),
             product_id="vex",
             image_id=uuid4(),
@@ -2644,27 +2654,50 @@ class TestSSERouteHandlers:
 
 
 class TestContentStreamFromR2:
+    @staticmethod
+    def _make_r2_mock(
+        content_type: str = "image/jpeg",
+        content_length: int = 1234,
+        content_range: str | None = None,
+    ) -> MagicMock:
+        from src.api.services.storage.r2 import ObjectStream
+
+        @asynccontextmanager
+        async def _stream_object(
+            _storage_key: str, *, range_header: str | None = None
+        ) -> AsyncIterator[ObjectStream]:
+            del range_header
+
+            async def _chunks() -> AsyncIterator[bytes]:
+                yield b"chunk"
+
+            yield ObjectStream(
+                chunks=_chunks(),
+                content_type=content_type,
+                content_length=content_length,
+                content_range=content_range,
+            )
+
+        r2_mock = MagicMock()
+        r2_mock.stream_object = _stream_object
+        return r2_mock
+
     async def test_stream_from_r2_success(self) -> None:
         from src.api.routes.content import ContentProxyController
 
-        client_mock = AsyncMock()
-        client_mock.head_object = AsyncMock(
-            return_value={"ContentType": "image/jpeg", "ContentLength": 1234}
-        )
-
-        r2_mock = MagicMock()
-        r2_mock._settings.bucket_name = "test-bucket"
-
-        @asynccontextmanager
-        async def _fake_get_client() -> AsyncIterator[AsyncMock]:
-            yield client_mock
-
-        r2_mock._get_client = _fake_get_client
+        r2_mock = self._make_r2_mock(content_type="image/jpeg", content_length=1234)
 
         result = await ContentProxyController._stream_from_r2(
-            r2_mock, "users/abc/outputs/img.jpg", "etag123", 3600
+            r2_mock,
+            "users/abc/outputs/img.jpg",
+            "etag123",
+            1234,
+            3600,
+            range_header=None,
+            if_none_match=None,
         )
         assert isinstance(result, Stream)
+        assert result.headers["Accept-Ranges"] == "bytes"
 
     async def test_stream_from_r2_storage_error_returns_502(self) -> None:
         from src.api.routes.content import ContentProxyController
@@ -2673,12 +2706,90 @@ class TestContentStreamFromR2:
         r2_mock = MagicMock()
 
         @asynccontextmanager
-        async def _failing_get_client() -> AsyncIterator[None]:
+        async def _failing_stream_object(
+            _storage_key: str, *, range_header: str | None = None
+        ) -> AsyncIterator[None]:
+            del range_header
             raise StorageError("r2 unreachable")
-            yield
+            yield  # pragma: no cover — unreachable, satisfies generator typing
 
-        r2_mock._get_client = _failing_get_client
+        r2_mock.stream_object = _failing_stream_object
 
-        result = await ContentProxyController._stream_from_r2(r2_mock, "some/key", "etag123", 3600)
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock, "some/key", "etag123", 1234, 3600, range_header=None, if_none_match=None
+        )
         assert isinstance(result, Response)
         assert result.status_code == 502
+
+    async def test_stream_from_r2_serves_206_for_valid_range(self) -> None:
+        from src.api.routes.content import ContentProxyController
+
+        r2_mock = self._make_r2_mock(
+            content_type="video/mp4", content_length=500, content_range="bytes 0-499/1234"
+        )
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "users/abc/outputs/vid.mp4",
+            "etag123",
+            1234,
+            3600,
+            range_header="bytes=0-499",
+            if_none_match=None,
+        )
+        assert isinstance(result, Stream)
+        assert result.status_code == 206
+        assert result.headers["Content-Range"] == "bytes 0-499/1234"
+        assert result.headers["Content-Length"] == "500"
+
+    async def test_stream_from_r2_returns_416_for_out_of_bounds_range(self) -> None:
+        from src.api.routes.content import ContentProxyController
+
+        r2_mock = MagicMock()  # never called — rejected before any R2 round-trip
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "users/abc/outputs/vid.mp4",
+            "etag123",
+            1234,
+            3600,
+            range_header="bytes=9999-10999",
+            if_none_match=None,
+        )
+        assert isinstance(result, Response)
+        assert result.status_code == 416
+        assert result.headers["Content-Range"] == "bytes */1234"
+
+    async def test_stream_from_r2_returns_304_on_matching_etag(self) -> None:
+        from src.api.routes.content import ContentProxyController
+
+        r2_mock = MagicMock()  # never called — 304 short-circuits before R2
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "users/abc/outputs/img.jpg",
+            "etag123",
+            1234,
+            3600,
+            range_header=None,
+            if_none_match='"etag123"',
+        )
+        assert isinstance(result, Response)
+        assert result.status_code == 304
+        assert result.headers["ETag"] == '"etag123"'
+
+    async def test_stream_from_r2_non_matching_etag_proceeds_to_200(self) -> None:
+        from src.api.routes.content import ContentProxyController
+
+        r2_mock = self._make_r2_mock()
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "users/abc/outputs/img.jpg",
+            "etag123",
+            1234,
+            3600,
+            range_header=None,
+            if_none_match='"some-other-etag"',
+        )
+        assert isinstance(result, Stream)

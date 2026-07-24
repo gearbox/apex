@@ -31,5 +31,15 @@ class StorageNotFoundError(StorageError):
     """Raised when requested object doesn't exist."""
 
 
+class StorageRangeNotSatisfiableError(StorageError):
+    """Raised when a forwarded byte-range GetObject falls outside the object's bounds.
+
+    Only raised when R2 itself rejects the range (e.g. the DB-recorded
+    ``size_bytes`` used for pre-flight validation was stale) — the common
+    "range is invalid" path is caught before any R2 call via
+    ``parse_range``.
+    """
+
+
 class StorageValidationError(StorageError):
     """Raised when file validation fails (size, type, etc.)."""

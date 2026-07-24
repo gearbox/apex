@@ -1,7 +1,8 @@
 """Tests for R2 storage service."""
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -14,7 +15,12 @@ from src.api.services.storage import (
     StorageType,
     StorageValidationError,
 )
-from src.api.services.storage.exceptions import StorageUploadError
+from src.api.services.storage.exceptions import (
+    StorageDownloadError,
+    StorageNotFoundError,
+    StorageRangeNotSatisfiableError,
+    StorageUploadError,
+)
 
 
 @pytest.fixture
@@ -318,3 +324,168 @@ class TestPutRaw:
             pytest.raises(StorageUploadError),
         ):
             await r2_service.put_raw("some/key", b"data", content_type="image/webp")
+
+
+class TestStreamObject:
+    """Tests for R2StorageService.stream_object (D2: single round-trip, D1: Range).
+
+    Response metadata (content_type/content_length/content_range) comes
+    entirely from the stubbed GetObject response — no separate head_object
+    call is made or expected.
+    """
+
+    @staticmethod
+    def _make_get_object_response(
+        *,
+        content_type: str = "image/png",
+        content_length: int = 1234,
+        content_range: str | None = None,
+        body_chunks: tuple[bytes, ...] = (b"hello", b"world"),
+    ) -> dict[str, object]:
+        body_mock = MagicMock()
+
+        async def _iter_chunks(chunk_size: int = 65536) -> object:
+            del chunk_size
+            for chunk in body_chunks:
+                yield chunk
+
+        body_mock.iter_chunks = _iter_chunks
+
+        response: dict[str, object] = {
+            "ContentType": content_type,
+            "ContentLength": content_length,
+            "Body": body_mock,
+        }
+        if content_range is not None:
+            response["ContentRange"] = content_range
+        return response
+
+    async def test_full_object_single_get_object_call_no_head(
+        self, r2_service: R2StorageService
+    ) -> None:
+        """A full-body stream issues exactly one get_object call and no head_object."""
+        mock_client = AsyncMock()
+        mock_client.get_object = AsyncMock(return_value=self._make_get_object_response())
+
+        @asynccontextmanager
+        async def _fake_get_client() -> AsyncIterator[AsyncMock]:
+            yield mock_client
+
+        with patch.object(r2_service, "_get_client", _fake_get_client):
+            async with r2_service.stream_object("users/u/outputs/j/f.png") as obj:
+                chunks = [c async for c in obj.chunks]
+
+        assert chunks == [b"hello", b"world"]
+        assert obj.content_type == "image/png"
+        assert obj.content_length == 1234
+        assert obj.content_range is None
+        mock_client.get_object.assert_awaited_once_with(
+            Bucket=r2_service._settings.bucket_name,
+            Key="users/u/outputs/j/f.png",
+        )
+        mock_client.head_object.assert_not_awaited()
+
+    async def test_ranged_request_forwards_range_param(self, r2_service: R2StorageService) -> None:
+        """A range_header is forwarded verbatim as the GetObject Range param."""
+        mock_client = AsyncMock()
+        mock_client.get_object = AsyncMock(
+            return_value=self._make_get_object_response(
+                content_type="video/mp4",
+                content_length=500,
+                content_range="bytes 0-499/1234",
+                body_chunks=(b"partial",),
+            )
+        )
+
+        @asynccontextmanager
+        async def _fake_get_client() -> AsyncIterator[AsyncMock]:
+            yield mock_client
+
+        with patch.object(r2_service, "_get_client", _fake_get_client):
+            async with r2_service.stream_object(
+                "users/u/outputs/j/v.mp4", range_header="bytes=0-499"
+            ) as obj:
+                chunks = [c async for c in obj.chunks]
+
+        assert chunks == [b"partial"]
+        assert obj.content_length == 500
+        assert obj.content_range == "bytes 0-499/1234"
+        mock_client.get_object.assert_awaited_once_with(
+            Bucket=r2_service._settings.bucket_name,
+            Key="users/u/outputs/j/v.mp4",
+            Range="bytes=0-499",
+        )
+
+    async def test_no_such_key_raises_storage_not_found_error(
+        self, r2_service: R2StorageService
+    ) -> None:
+        mock_client = AsyncMock()
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
+
+        @asynccontextmanager
+        async def _fake_get_client() -> AsyncIterator[AsyncMock]:
+            yield mock_client
+
+        with (
+            patch.object(r2_service, "_get_client", _fake_get_client),
+            pytest.raises(StorageNotFoundError),
+        ):
+            async with r2_service.stream_object("missing/key"):
+                pass
+
+    async def test_invalid_range_raises_storage_range_not_satisfiable_error(
+        self, r2_service: R2StorageService
+    ) -> None:
+        """R2 rejecting a forwarded range surfaces as a dedicated exception (416 path)."""
+        mock_client = AsyncMock()
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "InvalidRange"}}, "GetObject")
+        )
+
+        @asynccontextmanager
+        async def _fake_get_client() -> AsyncIterator[AsyncMock]:
+            yield mock_client
+
+        with (
+            patch.object(r2_service, "_get_client", _fake_get_client),
+            pytest.raises(StorageRangeNotSatisfiableError),
+        ):
+            async with r2_service.stream_object("some/key", range_header="bytes=9999-19999"):
+                pass
+
+    async def test_other_client_error_raises_storage_download_error(
+        self, r2_service: R2StorageService
+    ) -> None:
+        mock_client = AsyncMock()
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "500", "Message": "boom"}}, "GetObject")
+        )
+
+        @asynccontextmanager
+        async def _fake_get_client() -> AsyncIterator[AsyncMock]:
+            yield mock_client
+
+        with (
+            patch.object(r2_service, "_get_client", _fake_get_client),
+            pytest.raises(StorageDownloadError),
+        ):
+            async with r2_service.stream_object("some/key"):
+                pass
+
+    async def test_missing_content_type_defaults_to_octet_stream(
+        self, r2_service: R2StorageService
+    ) -> None:
+        mock_client = AsyncMock()
+        response = self._make_get_object_response()
+        del response["ContentType"]
+        mock_client.get_object = AsyncMock(return_value=response)
+
+        @asynccontextmanager
+        async def _fake_get_client() -> AsyncIterator[AsyncMock]:
+            yield mock_client
+
+        with patch.object(r2_service, "_get_client", _fake_get_client):
+            async with r2_service.stream_object("some/key") as obj:
+                assert obj.content_type == "application/octet-stream"

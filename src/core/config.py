@@ -757,6 +757,15 @@ class Settings(BaseSettings):
         default="3/hour",
         description="Resend-verification endpoint rate limit.",
     )
+    rate_limit_content_cookie: str = Field(
+        default="20/minute",
+        description=(
+            "Content cookie re-mint endpoint rate limit (POST /v1/auth/content-cookie). "
+            "Authenticated (Bearer-only) so the limit can be looser than the "
+            "unauthenticated auth endpoints — it exists to bound abuse of repeated "
+            "cookie minting, not to gate a sensitive credential-issuing operation."
+        ),
+    )
 
     # --------------------------------------------------------------------------
     # Storage & External Services

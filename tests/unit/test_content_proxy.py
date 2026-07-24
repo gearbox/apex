@@ -39,6 +39,7 @@ class TestResolveOutput:
         mock_output.id = output_id
         mock_output.storage_key = "users/x/outputs/job/file.jpeg"
         mock_output.product_id = product_id
+        mock_output.size_bytes = 54321
 
         mock_repo = AsyncMock()
         mock_repo.get.return_value = mock_output
@@ -47,12 +48,13 @@ class TestResolveOutput:
         session = AsyncMock()
 
         with patch("src.api.services.content_proxy.OutputRepository", return_value=mock_repo):
-            storage_key, etag = await service.resolve_output(
+            storage_key, etag, size_bytes = await service.resolve_output(
                 output_id, user_id=user_id, product_id=product_id, session=session
             )
 
         assert storage_key == "users/x/outputs/job/file.jpeg"
         assert etag == str(output_id)
+        assert size_bytes == 54321
 
     async def test_wrong_user_raises(self) -> None:
         output_id = uuid4()
@@ -106,6 +108,7 @@ class TestResolveUpload:
         mock_image.id = image_id
         mock_image.storage_key = "users/x/uploads/file.png"
         mock_image.product_id = product_id
+        mock_image.size_bytes = 12345
 
         mock_repo = AsyncMock()
         mock_repo.get.return_value = mock_image
@@ -114,12 +117,13 @@ class TestResolveUpload:
         session = AsyncMock()
 
         with patch("src.api.services.content_proxy.UserImageRepository", return_value=mock_repo):
-            storage_key, etag = await service.resolve_upload(
+            storage_key, etag, size_bytes = await service.resolve_upload(
                 image_id, user_id=user_id, product_id=product_id, session=session
             )
 
         assert storage_key == "users/x/uploads/file.png"
         assert etag == str(image_id)
+        assert size_bytes == 12345
 
     async def test_wrong_user_raises(self) -> None:
         image_id = uuid4()

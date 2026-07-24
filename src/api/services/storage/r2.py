@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -19,6 +20,7 @@ from .exceptions import (
     StorageDeleteError,
     StorageDownloadError,
     StorageNotFoundError,
+    StorageRangeNotSatisfiableError,
     StorageUploadError,
     StorageValidationError,
 )
@@ -54,6 +56,23 @@ MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 # Re-exported for backward compatibility — routes/content.py imports this name.
 ALLOWED_CONTENT_TYPES = ALLOWED_UPLOAD_CONTENT_TYPES
 DEFAULT_RETENTION_DAYS = 7
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectStream:
+    """Result of `R2StorageService.stream_object` — chunks plus response metadata.
+
+    All fields come from the single GetObject response (see stream_object's
+    docstring) — no separate head_object call is made.
+    """
+
+    chunks: AsyncIterator[bytes]
+    content_type: str
+    content_length: int
+    """Bytes in this response body — the served range length, or full object size."""
+    content_range: str | None
+    """Raw `Content-Range` response header (e.g. "bytes 0-499/1234"), present iff
+    a satisfiable range was served (206); None for a full-body (200) response."""
 
 
 class R2StorageSettings:
@@ -566,39 +585,71 @@ class R2StorageService:
     async def stream_object(
         self,
         storage_key: str,
-    ) -> AsyncIterator[tuple[AsyncIterator[bytes], str, int]]:
-        """Context-managed R2 object stream.
+        *,
+        range_header: str | None = None,
+    ) -> AsyncIterator[ObjectStream]:
+        """Context-managed R2 object stream — the only R2 round-trip per request.
+
+        A single GetObject call carries everything the caller needs:
+        Content-Type/Content-Length come back on the response regardless of
+        whether a range was requested (no separate head_object call), and
+        Content-Range comes back too when ``range_header`` is forwarded and
+        satisfiable. The client connection stays open for the lifetime of
+        the context so the body can be streamed lazily.
+
+        Args:
+            storage_key: R2 object key.
+            range_header: Raw `bytes=start-end` value to forward as the
+                GetObject `Range` parameter, or None for the full object.
+                Callers are expected to have already validated this against
+                a known size (see `src.api.utils.http_range.parse_range`) —
+                this is a thin forwarding layer, not a validator.
 
         Yields:
-            (byte_iterator, content_type, size_bytes)
-            The client connection stays open for the lifetime of the context.
+            ObjectStream with the byte iterator plus response metadata.
 
         Raises:
             StorageNotFoundError: If the key doesn't exist.
-            StorageDownloadError: If the stream fails.
+            StorageRangeNotSatisfiableError: If R2 rejects the forwarded range.
+            StorageDownloadError: If the stream fails for any other reason.
         """
         async with self._get_client() as client:
+            params: dict[str, Any] = {
+                "Bucket": self._settings.bucket_name,
+                "Key": storage_key,
+            }
+            if range_header is not None:
+                params["Range"] = range_header
+
             try:
-                response = await client.get_object(
-                    Bucket=self._settings.bucket_name,
-                    Key=storage_key,
-                )
+                response = await client.get_object(**params)
             except ClientError as e:
-                if _get_error_code(e) in ("NoSuchKey", "404"):
+                error_code = _get_error_code(e)
+                if error_code in ("NoSuchKey", "404"):
                     raise StorageNotFoundError(f"File not found: {storage_key}") from e
+                if error_code == "InvalidRange":
+                    raise StorageRangeNotSatisfiableError(
+                        f"Range not satisfiable: {storage_key}"
+                    ) from e
                 raise StorageDownloadError(
                     f"Stream failed: {_get_error_message(e)}",
                     cause=e,
                 ) from e
 
             content_type = response.get("ContentType", "application/octet-stream")
-            size_bytes = response.get("ContentLength", 0)
+            content_length = response.get("ContentLength", 0)
+            content_range = response.get("ContentRange")
 
             async def _iter_chunks() -> AsyncIterator[bytes]:
                 async for chunk in response["Body"].iter_chunks(chunk_size=65536):
                     yield chunk
 
-            yield _iter_chunks(), content_type, size_bytes
+            yield ObjectStream(
+                chunks=_iter_chunks(),
+                content_type=content_type,
+                content_length=content_length,
+                content_range=content_range,
+            )
 
     async def health_check(self) -> bool:
         """Check if R2 storage is accessible."""

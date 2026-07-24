@@ -1,6 +1,18 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-22 — **Breaking change:** replaced **Gallery** (§10) and the uploads-list
+> _Last updated: 2026-07-24 — **Content Proxy performance & streaming** (§9): `GET /v1/content/outputs/{id}`
+> and `GET /v1/content/uploads/{id}` now support single-range `Range` requests (`206 Partial Content` /
+> `416 Range Not Satisfiable`, `Accept-Ranges: bytes` on every 200/206 — multipart ranges are treated as a
+> full 200) and honor `If-None-Match` for `304 Not Modified` (checked after ownership, before any R2
+> traffic). Every request now makes at most one R2 round-trip — the standalone `head_object` call is gone;
+> `Content-Type`/`Content-Length`/`Content-Range` all come from the single GetObject response, and an
+> out-of-range request is rejected using the DB-recorded size before R2 is ever touched. New endpoint
+> `POST /v1/auth/content-cookie` (§2, Bearer-only, 204, rate-limited 20/minute) re-mints the `apex_content`
+> cookie without a full token refresh — frontend should prefer it over `silentRefresh` for recovering
+> image/video auth. No response body contracts changed; frontend should regenerate types (`gen:api`) to
+> pick up the new endpoint._
+>
+> _Prior (2026-07-22): **Breaking change:** replaced **Gallery** (§10) and the uploads-list
 > endpoint with a unified **Library** API (new §10) — one paginated, cursor-based read model over
 > `user_images` + `generation_outputs`, addressed by a typed `asset_ref` (`"upload:<uuid>"` /
 > `"output:<uuid>"`). `GET /v1/gallery/`, `GET /v1/gallery/{job_id}`, `GET /v1/storage/uploads`, and
@@ -245,6 +257,22 @@ Errors:   400 (invalid_token | expired)
 ```
 Response: { message: string }
 Rate:     3/hour
+```
+
+#### `POST /v1/auth/content-cookie` *(authenticated, Bearer-only)*
+
+```
+Response: (empty)
+Status:   204 No Content
+Errors:   401 (missing/invalid/expired Bearer token)
+Rate:     20/minute
+Note:     Re-mints the apex_content cookie (same attributes login/register/refresh set —
+          see §9) for the caller's user_id + the current request's product, without
+          rotating the refresh token. Prefer this over a full silentRefresh purely to
+          recover image/video auth after the content cookie's shorter TTL lapses — a full
+          refresh needlessly rotates the refresh token just to restore image auth. The
+          content cookie itself does NOT authorize this endpoint — only a valid Bearer
+          access token does.
 ```
 
 ---
@@ -1039,21 +1067,36 @@ Provides stable, non-expiring authenticated URLs for user content. The server re
 
 ### Response Headers
 
-All successful responses include:
+All successful (200/206) responses include:
 - `Content-Type` — the stored R2 `ContentType` **only if it's on the inline-safe allowlist** (`image/png`, `image/jpeg`, `image/webp`, `video/mp4`, `video/webm`, `video/quicktime`); otherwise `application/octet-stream`
-- `Content-Length` — from R2 object metadata
+- `Content-Length` — bytes in *this* response body (the full object size on 200, the served range's length on 206)
 - `Cache-Control: private, max-age=10800, immutable` — 3-hour client cache (default; configurable via `CONTENT_URL_TTL`)
 - `ETag: "<content_id>"` — the output/upload UUID, for conditional requests
 - `X-Content-Id: <content_id>` — same UUID, without quotes
 - `X-Content-Type-Options: nosniff` — always present, blocks MIME-sniffing
 - `Content-Disposition: inline` for inline-safe content types, `attachment` otherwise — a stored content-type outside the allowlist (e.g. `text/html`, `image/svg+xml`) is forced to download rather than rendered inline, even though it streams with a coerced `Content-Type`
+- `Accept-Ranges: bytes` — advertised on every 200 and 206, so clients know range requests are supported before issuing one
+
+#### Range requests (single range only)
+
+Both endpoints below honor a `Range: bytes=<start>-<end>` request header — the mechanism `<video>`/`<audio>` elements use for seeking and resumable playback:
+- A satisfiable range → `206 Partial Content`, body is just that byte slice, `Content-Range: bytes <start>-<end>/<size>`, `Content-Length` is the slice length. Open-ended (`bytes=500-`) and suffix (`bytes=-500`) forms are supported; an end beyond the object's size is clamped to the last byte rather than rejected.
+- A range whose start is at or beyond the object's size → `416 Range Not Satisfiable`, `Content-Range: bytes */<size>`, no body.
+- **Multipart ranges are out of scope** — a comma-separated `Range` header (multiple ranges in one request) is treated as if no `Range` header were sent: a normal full `200`.
+- No `Range` header, or a malformed one → full body, `200 OK`.
+
+#### Conditional GET
+
+Both endpoints honor `If-None-Match` against the resource's `ETag`. A match (including the `*` wildcard) short-circuits to `304 Not Modified` with the `ETag` and `Cache-Control` headers and no body — this happens *after* the ownership/product check (a 304 never leaks whether foreign content exists) and *before* any R2 traffic.
 
 #### `GET /v1/content/outputs/{output_id}`
 
 ```
 Path:     output_id (UUID)
-Response: 200 Raw bytes (chunked streaming, appropriate Content-Type)
+Headers:  Range?: bytes=<start>-<end>, If-None-Match?: "<etag>"
+Response: 200 Raw bytes | 206 Partial Content | 304 Not Modified (no body)
 Errors:   404 not_found (ownership check failed or wrong product),
+          416 range_not_satisfiable (Range start at/beyond object size),
           502 upstream_error (R2 fetch failed)
 Note:     Only returns outputs owned by the authenticated user and matching the current product.
 ```
@@ -1062,8 +1105,10 @@ Note:     Only returns outputs owned by the authenticated user and matching the 
 
 ```
 Path:     image_id (UUID)
-Response: 200 Raw bytes (chunked streaming, appropriate Content-Type)
+Headers:  Range?: bytes=<start>-<end>, If-None-Match?: "<etag>"
+Response: 200 Raw bytes | 206 Partial Content | 304 Not Modified (no body)
 Errors:   404 not_found (ownership check failed or wrong product),
+          416 range_not_satisfiable (Range start at/beyond object size),
           502 upstream_error (R2 fetch failed)
 Note:     Only returns uploads owned by the authenticated user and matching the current product.
 ```

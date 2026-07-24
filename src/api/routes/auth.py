@@ -13,6 +13,7 @@ from litestar.params import Body
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_201_CREATED,
+    HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
 )
@@ -224,6 +225,38 @@ class AuthController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
+
+    @post(
+        "/content-cookie",
+        status_code=HTTP_204_NO_CONTENT,
+        guards=[auth_guard],
+        dependencies={"current_user_id": Provide(get_current_user_id)},
+    )
+    async def remint_content_cookie(
+        self,
+        current_user_id: UUID,
+        jwt_service: JWTService,
+        product_id: str,
+        product_config: ProductConfig,
+        settings: Settings,
+    ) -> Response[None]:
+        """Re-mint the content authentication cookie (apex_content).
+
+        Bearer-only — requires a valid, unexpired access token. Lets the
+        frontend recover image/video auth once the shorter-lived content
+        cookie expires without a full silentRefresh, which would needlessly
+        rotate the refresh token just to restore image auth.
+        """
+        response: Response[None] = Response(content=None, status_code=HTTP_204_NO_CONTENT)
+        attach_content_cookie(
+            response,
+            user_id=current_user_id,
+            product_id=product_id,
+            jwt_service=jwt_service,
+            settings=settings,
+            product_config=product_config,
+        )
+        return response
 
     @post("/login")
     async def login(
