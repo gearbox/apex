@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.email import EmailService
+    from src.api.services.token_revocation import TokenRevocationService
     from src.db.models.user import User
 
 logger = structlog.get_logger(__name__)
@@ -60,6 +61,7 @@ class EmailVerificationService:
         *,
         email_service: EmailService,
         app_url: str,
+        token_revocation_service: TokenRevocationService,
         app_name: str = "Apex",
     ) -> None:
         """Initialise the service.
@@ -68,11 +70,23 @@ class EmailVerificationService:
             email_service: Provider that actually sends emails.
             app_url: Base URL of the frontend app, e.g. ``https://app.apex.ai``.
                      Used to build verification/reset links.
+            token_revocation_service: Bulk-revokes access tokens/content
+                cookies on password reset (see
+                src.api.services.token_revocation) — the account-recovery
+                path a user reaches because they believe their account is
+                compromised, so it must invalidate live credentials, not
+                just refresh tokens. Required — callers that intentionally
+                want revocation to no-op (tests, older call sites) must pass
+                an explicit
+                ``TokenRevocationService(None, max_token_ttl_seconds=0)`` so
+                the choice is visible rather than a silent default (issue
+                #142 A1).
             app_name: Public-facing product name for email branding.
         """
         self._email = email_service
         self._app_url = app_url.rstrip("/")
         self._app_name = app_name
+        self._token_revocation = token_revocation_service
 
     # -------------------------------------------------------------------------
     # Email verification
@@ -208,7 +222,12 @@ class EmailVerificationService:
     ) -> User:
         """Consume a reset token and update the user's password.
 
-        Also revokes all active refresh tokens (forces re-login everywhere).
+        Also revokes all active refresh tokens and all live access
+        tokens/content cookies (issue #142) — forces re-authentication
+        everywhere. This is the account-recovery path a user reaches
+        *because* they believe their account is compromised, so an
+        attacker holding a stolen access token or content cookie must not
+        keep it for its remaining lifetime after the reset.
 
         Args:
             raw_token: Token from the reset URL query parameter.
@@ -241,6 +260,10 @@ class EmailVerificationService:
 
         # Revoke all refresh tokens — forces re-authentication on all devices
         revoked = await user_repo.revoke_all_refresh_tokens(user_id)
+        # Bulk-revoke live access tokens/content cookies too (issue #142) —
+        # otherwise a stolen access token or content cookie survives a
+        # password reset for its full remaining lifetime.
+        await self._token_revocation.revoke_user_sessions(user_id)
         logger.info(
             "email.password_reset_done",
             user_id=str(user_id),

@@ -12,6 +12,7 @@ from src.api.services.email_verification import (
     InvalidTokenError,
     UserNotFoundError,
 )
+from src.api.services.token_revocation import TokenRevocationService
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -25,7 +26,7 @@ def _make_user(user_id=None, email="user@example.com", display_name="Alice", loc
     return user
 
 
-def _make_svc(email_service=None):
+def _make_svc(email_service=None, token_revocation_service=None):
     if email_service is None:
         email_service = AsyncMock()
         email_service.send_verification_email = AsyncMock()
@@ -34,6 +35,11 @@ def _make_svc(email_service=None):
         email_service=email_service,
         app_url="https://app.example.com",
         app_name="TestApp",
+        token_revocation_service=(
+            token_revocation_service
+            if token_revocation_service is not None
+            else TokenRevocationService(None, max_token_ttl_seconds=0)
+        ),
     )
 
 
@@ -201,6 +207,39 @@ class TestResetPassword:
 
         assert result is user
         user_repo.revoke_all_refresh_tokens.assert_awaited_once()
+
+    async def test_bulk_revokes_access_tokens(self) -> None:
+        """R1 (issue #142) — the highest-impact bulk-revocation gap: password
+        reset is the account-recovery flow a user reaches *because* they
+        believe their account is compromised, so it must also kill live
+        access tokens/content cookies, not just refresh tokens."""
+        user = _make_user()
+        session = AsyncMock()
+        mock_token_revocation = AsyncMock()
+        svc = _make_svc(token_revocation_service=mock_token_revocation)
+
+        with (
+            patch("src.api.services.email_verification.UserRepository") as user_repo_cls,
+            patch("src.api.services.email_verification.AuthTokenRepository") as token_repo_cls,
+            patch("src.api.security.PasswordService") as pwd_cls,
+        ):
+            token_repo = AsyncMock()
+            token_repo.consume_reset_token = AsyncMock(return_value=user.id)
+            token_repo_cls.return_value = token_repo
+
+            user_repo = AsyncMock()
+            user_repo.update_user = AsyncMock(return_value=user)
+            user_repo.revoke_all_refresh_tokens = AsyncMock(return_value=3)
+            user_repo_cls.return_value = user_repo
+
+            pwd_instance = MagicMock()
+            pwd_instance.hash.return_value = "hashed_pw"
+            pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
+            pwd_cls.return_value = pwd_instance
+
+            await svc.reset_password("token", "new_password", session=session)
+
+        mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user.id)
 
     async def test_raises_invalid_token_on_bad_token(self) -> None:
         session = AsyncMock()

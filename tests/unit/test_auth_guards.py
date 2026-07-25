@@ -739,6 +739,9 @@ class TestAuthGuardRevocation:
             await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 
 
+_UNSET = object()
+
+
 class TestOptionalAuthGuard:
     """Tests for optional_auth_guard."""
 
@@ -747,6 +750,7 @@ class TestOptionalAuthGuard:
         jwt_service: JWTService | None = None,
         authorization: str | None = None,
         product_id: str | None = None,
+        token_revocation: Any = _UNSET,
     ) -> Any:
         from unittest.mock import MagicMock
 
@@ -759,7 +763,15 @@ class TestOptionalAuthGuard:
         conn.state.__getitem__ = lambda self, k: state[k]  # noqa: ARG005
         conn.state.get = state.get
 
-        conn.app.state.get.return_value = jwt_service
+        # Default: a no-op revocation service, mirroring pre-#142 behavior
+        # for tests that don't exercise revocation. Pass token_revocation=None
+        # explicitly to simulate the service being entirely absent from
+        # app.state (the A2 contract — must not raise).
+        resolved_token_revocation = (
+            _no_op_token_revocation() if token_revocation is _UNSET else token_revocation
+        )
+        app_state = {"jwt_service": jwt_service, "token_revocation": resolved_token_revocation}
+        conn.app.state.get = app_state.get
         return conn
 
     @pytest.mark.asyncio
@@ -880,3 +892,83 @@ class TestOptionalAuthGuard:
 
         assert conn.state.get("user_id") is None
         assert conn.state.get("auth_user") is None
+
+    @pytest.mark.asyncio
+    async def test_degrades_to_anonymous_when_token_is_revoked(
+        self, jwt_service: JWTService
+    ) -> None:
+        """R3 (issue #142) — a revoked token (logout-all, password
+        change/reset, deactivation, reuse detection) must degrade to
+        anonymous on this guard too, exactly like a product mismatch does.
+        Previously only auth_guard/content_auth_guard checked revocation,
+        so a revoked token still authenticated on GET /v1/providers."""
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid, product_id="vex")
+        token_revocation = AsyncMock()
+        token_revocation.is_revoked.return_value = True
+        conn = self._make_connection(
+            jwt_service=jwt_service,
+            authorization=f"Bearer {token}",
+            product_id="vex",
+            token_revocation=token_revocation,
+        )
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert conn.state.get("user_id") is None
+        assert conn.state.get("auth_user") is None
+        token_revocation.is_revoked.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sets_user_id_when_token_not_revoked(self, jwt_service: JWTService) -> None:
+        """A non-revoked, product-matching token still authenticates normally."""
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid, product_id="vex")
+        token_revocation = AsyncMock()
+        token_revocation.is_revoked.return_value = False
+        conn = self._make_connection(
+            jwt_service=jwt_service,
+            authorization=f"Bearer {token}",
+            product_id="vex",
+            token_revocation=token_revocation,
+        )
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert conn.state.get("user_id") == uid
+        token_revocation.is_revoked.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_succeeds_when_token_revocation_service_absent(
+        self, jwt_service: JWTService
+    ) -> None:
+        """A2 contract — unlike auth_guard's _get_token_revocation(), a
+        missing token_revocation in app.state must NOT raise here. It
+        degrades the revocation check to a no-op, so a valid token still
+        authenticates normally rather than 500ing an anonymous-capable
+        route."""
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import optional_auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid, product_id="vex")
+        conn = self._make_connection(
+            jwt_service=jwt_service,
+            authorization=f"Bearer {token}",
+            product_id="vex",
+            token_revocation=None,
+        )
+
+        await optional_auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert conn.state.get("user_id") == uid
+        assert conn.state.get("auth_user").user_id == uid

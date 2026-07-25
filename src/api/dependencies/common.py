@@ -852,11 +852,19 @@ async def init_services(settings: Settings) -> JWTService:
         _services.email_service = LogEmailService()
         logger.info("email.initialized", provider="log")
 
-    # Initialize email verification service
+    # Initialize email verification service. Depends on token_revocation_service
+    # (issue #142 R1/A4) — must be constructed after it, which it already is
+    # (see the token_revocation_service.initialized log above); the assertion
+    # below guards against a future reordering silently reintroducing that bug.
+    if _services.token_revocation_service is None:
+        raise RuntimeError(
+            "token_revocation_service must be initialized before email_verification_service"
+        )
     _services.email_verification_service = EmailVerificationService(
         email_service=_services.email_service,
         app_url=settings.app_url,
         app_name=settings.app_name,
+        token_revocation_service=_services.token_revocation_service,
     )
 
     # Initialize and start Aisha job poller

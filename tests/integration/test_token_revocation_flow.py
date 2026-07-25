@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -27,11 +27,12 @@ from litestar.di import Provide
 from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED
 from litestar.testing import TestClient
 
-from src.api.dependencies.auth import get_current_user_id
+from src.api.dependencies.auth import get_current_user_id, get_optional_user_id
 from src.api.routes.auth import AuthController
-from src.api.security import auth_guard, content_auth_guard
+from src.api.security import auth_guard, content_auth_guard, optional_auth_guard
 from src.api.security.jwt import JWTConfig, JWTService
-from src.api.services.auth import AuthService
+from src.api.services.auth import AuthService, TokenReuseDetectedError
+from src.api.services.email_verification import EmailVerificationService
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 
@@ -92,8 +93,12 @@ def _make_password_service() -> MagicMock:
 
 
 def _make_app(jwt_service: JWTService, token_revocation: TokenRevocationService) -> Litestar:
-    """A minimal app exposing one auth_guard route and one content_auth_guard
-    route — the two guards that consult TokenRevocationService."""
+    """A minimal app exposing an auth_guard route, a content_auth_guard
+    route, and an optional_auth_guard route — every guard that consults
+    TokenRevocationService. The optional-auth route stands in for
+    GET /v1/providers (issue #142 R3): it never 401s, so the only way to
+    observe revocation is whether it returns user_id or degrades to
+    anonymous."""
 
     @get(
         "/ping",
@@ -111,7 +116,15 @@ def _make_app(jwt_service: JWTService, token_revocation: TokenRevocationService)
     async def content_ping(current_user_id: UUID) -> dict[str, str]:
         return {"user_id": str(current_user_id)}
 
-    app = Litestar(route_handlers=[ping, content_ping])
+    @get(
+        "/optional-ping",
+        guards=[optional_auth_guard],
+        dependencies={"current_user_id": Provide(get_optional_user_id)},
+    )
+    async def optional_ping(current_user_id: UUID | None) -> dict[str, str | None]:
+        return {"user_id": str(current_user_id) if current_user_id is not None else None}
+
+    app = Litestar(route_handlers=[ping, content_ping, optional_ping])
     app.state["jwt_service"] = jwt_service
     app.state["token_revocation"] = token_revocation
     return app
@@ -344,3 +357,215 @@ class TestContentCookieRevokedByLogoutAll:
         with TestClient(app=app) as client:
             resp = client.get("/content-ping", cookies={"apex_content": content_token})
         assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+
+def _make_email_verification_service(
+    token_revocation: TokenRevocationService,
+) -> EmailVerificationService:
+    email_service = AsyncMock()
+    return EmailVerificationService(
+        email_service=email_service,
+        app_url="https://app.example.com",
+        token_revocation_service=token_revocation,
+    )
+
+
+class TestResetPasswordRevokesAccessTokens:
+    """R1 (issue #142) — the account-recovery path a user reaches *because*
+    they believe their account is compromised must bulk-revoke live access
+    tokens/content cookies, not just refresh tokens."""
+
+    async def test_token_401s_after_reset_password(
+        self,
+        jwt_service: JWTService,
+        token_revocation: TokenRevocationService,
+        app: Litestar,
+    ) -> None:
+        user_id = uuid4()
+        token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == HTTP_200_OK
+
+        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
+        svc = _make_email_verification_service(token_revocation)
+        user = MagicMock()
+        user.id = user_id
+        session = AsyncMock()
+
+        with (
+            patch("src.api.services.email_verification.UserRepository") as user_repo_cls,
+            patch("src.api.services.email_verification.AuthTokenRepository") as token_repo_cls,
+            patch("src.api.security.PasswordService") as pwd_cls,
+        ):
+            token_repo = AsyncMock()
+            token_repo.consume_reset_token = AsyncMock(return_value=user_id)
+            token_repo_cls.return_value = token_repo
+
+            user_repo = AsyncMock()
+            user_repo.update_user = AsyncMock(return_value=user)
+            user_repo.revoke_all_refresh_tokens = AsyncMock(return_value=2)
+            user_repo_cls.return_value = user_repo
+
+            pwd_instance = MagicMock()
+            pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
+            pwd_cls.return_value = pwd_instance
+
+            await svc.reset_password("raw-reset-token", "new_password", session=session)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+    async def test_relogin_immediately_after_reset_password_yields_working_token(
+        self,
+        jwt_service: JWTService,
+        token_revocation: TokenRevocationService,
+        app: Litestar,
+    ) -> None:
+        """D2 regression, extended to the reset-password path — a token
+        minted in the same wall-clock second as the revocation epoch must
+        survive (strict `<`, not `<=`)."""
+        user_id = uuid4()
+        svc = _make_email_verification_service(token_revocation)
+        user = MagicMock()
+        user.id = user_id
+        session = AsyncMock()
+
+        with (
+            patch("src.api.services.email_verification.UserRepository") as user_repo_cls,
+            patch("src.api.services.email_verification.AuthTokenRepository") as token_repo_cls,
+            patch("src.api.security.PasswordService") as pwd_cls,
+        ):
+            token_repo = AsyncMock()
+            token_repo.consume_reset_token = AsyncMock(return_value=user_id)
+            token_repo_cls.return_value = token_repo
+
+            user_repo = AsyncMock()
+            user_repo.update_user = AsyncMock(return_value=user)
+            user_repo.revoke_all_refresh_tokens = AsyncMock(return_value=2)
+            user_repo_cls.return_value = user_repo
+
+            pwd_instance = MagicMock()
+            pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
+            pwd_cls.return_value = pwd_instance
+
+            await svc.reset_password("raw-reset-token", "new_password", session=session)
+
+        fresh_token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/ping", headers={"Authorization": f"Bearer {fresh_token}"})
+        assert resp.status_code == HTTP_200_OK
+
+
+class TestTokenReuseDetectionRevokesAccessTokens:
+    """R2 (issue #142) — reuse detection must bulk-revoke live access
+    tokens/content cookies before raising, so its "All sessions have been
+    invalidated" message is accurate rather than aspirational."""
+
+    async def test_token_401s_after_reuse_detected(
+        self,
+        jwt_service: JWTService,
+        token_revocation: TokenRevocationService,
+        app: Litestar,
+    ) -> None:
+        user_id = uuid4()
+        access_token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/ping", headers={"Authorization": f"Bearer {access_token}"})
+        assert resp.status_code == HTTP_200_OK
+
+        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
+        repo = _make_repo()
+        stored_token = MagicMock()
+        stored_token.is_revoked = True
+        stored_token.user_id = user_id
+        stored_token.family_id = uuid4()
+        repo.get_refresh_token_by_hash.return_value = stored_token
+        repo.revoke_token_family = AsyncMock(return_value=3)
+
+        auth_service = AuthService(
+            repository=repo,
+            jwt_service=jwt_service,
+            password_service=_make_password_service(),
+            token_revocation_service=token_revocation,
+        )
+
+        with pytest.raises(TokenReuseDetectedError):
+            await auth_service.refresh_tokens("stolen-refresh-token")
+
+        with TestClient(app=app) as client:
+            resp = client.get("/ping", headers={"Authorization": f"Bearer {access_token}"})
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+    async def test_relogin_immediately_after_reuse_detected_yields_working_token(
+        self,
+        jwt_service: JWTService,
+        token_revocation: TokenRevocationService,
+        app: Litestar,
+    ) -> None:
+        """D2 regression, extended to the reuse-detection path."""
+        user_id = uuid4()
+        repo = _make_repo()
+        stored_token = MagicMock()
+        stored_token.is_revoked = True
+        stored_token.user_id = user_id
+        stored_token.family_id = uuid4()
+        repo.get_refresh_token_by_hash.return_value = stored_token
+        repo.revoke_token_family = AsyncMock(return_value=3)
+
+        auth_service = AuthService(
+            repository=repo,
+            jwt_service=jwt_service,
+            password_service=_make_password_service(),
+            token_revocation_service=token_revocation,
+        )
+
+        with pytest.raises(TokenReuseDetectedError):
+            await auth_service.refresh_tokens("stolen-refresh-token")
+
+        fresh_token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/ping", headers={"Authorization": f"Bearer {fresh_token}"})
+        assert resp.status_code == HTTP_200_OK
+
+
+class TestOptionalAuthGuardRevocation:
+    """R3 (issue #142) — GET /v1/providers uses optional_auth_guard, which
+    previously never consulted TokenRevocationService: a revoked token kept
+    authenticating (and thus kept receiving user_context/session_state)
+    instead of degrading to anonymous like auth_guard/content_auth_guard
+    already did. /optional-ping stands in for that route."""
+
+    async def test_revoked_token_yields_anonymous_response_not_401(
+        self,
+        jwt_service: JWTService,
+        token_revocation: TokenRevocationService,
+        app: Litestar,
+    ) -> None:
+        user_id = uuid4()
+        token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/optional-ping", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == HTTP_200_OK
+        assert resp.json()["user_id"] == str(user_id)
+
+        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
+        auth_service = AuthService(
+            repository=_make_repo(),
+            jwt_service=jwt_service,
+            password_service=_make_password_service(),
+            token_revocation_service=token_revocation,
+        )
+        await auth_service.logout_all(user_id)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/optional-ping", headers={"Authorization": f"Bearer {token}"})
+        # Never 401s — degrades to anonymous instead, per the guard's contract.
+        assert resp.status_code == HTTP_200_OK
+        assert resp.json()["user_id"] is None

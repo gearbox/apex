@@ -249,6 +249,15 @@ async def optional_auth_guard(
             a security bug: an anonymous caller could get the same response
             by omitting the token, so the "optional" auth buys nothing and
             the route silently depends on callers behaving honestly.
+        (d) A revoked token (logout-all, password change/reset, deactivation,
+            or refresh-token reuse detection — issue #142) also degrades to
+            anonymous here, never raises. Unlike ``auth_guard``/
+            ``content_auth_guard``, this guard tolerates a missing
+            ``token_revocation`` app-state entry (treats it as "not
+            revoked") rather than raising — see A2: reusing
+            ``_get_token_revocation()``'s raise-on-missing behavior here
+            would break this guard's degrade-to-anonymous contract on an
+            anonymous-capable route.
         Routes using this guard are enumerated and pinned in
         ``tests/unit/security/test_optional_auth_guard_usage.py`` — adding a
         new route requires updating that allowlist, forcing a conscious
@@ -272,6 +281,18 @@ async def optional_auth_guard(
             _enforce_product(connection, payload.product_id)
         except NotAuthorizedException:
             logger.debug("optional_auth.product_mismatch_treated_as_anonymous")
+            identity = None
+
+    if identity is not None:
+        # Tolerant lookup (A2) — unlike auth_guard/content_auth_guard's
+        # _get_token_revocation(), a missing service here must not raise:
+        # this guard's whole contract is to degrade to anonymous, never
+        # 500 an anonymous-capable route.
+        token_revocation: TokenRevocationService | None = connection.app.state.get(
+            "token_revocation"
+        )
+        if token_revocation is not None and await token_revocation.is_revoked(identity[1]):
+            logger.debug("optional_auth.revoked_treated_as_anonymous")
             identity = None
 
     if identity is not None:

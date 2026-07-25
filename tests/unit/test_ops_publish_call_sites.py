@@ -19,6 +19,7 @@ from src.api.services.auth import AuthService
 from src.api.services.gpu_session._events import publish_status_event
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import GpuSessionStatus, JobStatus
 from src.db.models import RefreshToken, User
 
@@ -88,6 +89,7 @@ class TestAuthRegisterPublishesUserRegistered:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=PasswordService(),
+            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
             ops_event_bus=ops_bus,
         )
 

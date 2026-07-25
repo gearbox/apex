@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
+from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import (
     EmailAlreadyExistsError,
     InvalidPasswordError,
@@ -66,7 +67,11 @@ def _make_service(
         repository=repo,
         password_service=pwd,
         age_verification_service=age_svc,
-        token_revocation_service=token_revocation_service,
+        token_revocation_service=(
+            token_revocation_service
+            if token_revocation_service is not None
+            else TokenRevocationService(None, max_token_ttl_seconds=0)
+        ),
     )
     return svc, repo, pwd
 

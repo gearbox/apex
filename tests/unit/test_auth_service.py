@@ -16,7 +16,14 @@ from src.api.services.auth import (
     InvalidRefreshTokenError,
     TokenReuseDetectedError,
 )
+from src.api.services.token_revocation import TokenRevocationService
 from src.db.models import RefreshToken, User
+
+
+def _noop_token_revocation() -> TokenRevocationService:
+    """A TokenRevocationService with no Redis client — a visible no-op choice
+    for tests that don't exercise revocation (issue #142 A1)."""
+    return TokenRevocationService(None, max_token_ttl_seconds=0)
 
 
 @pytest.fixture
@@ -53,6 +60,7 @@ def auth_service(
         repository=mock_repository,
         jwt_service=jwt_service,
         password_service=password_service,
+        token_revocation_service=_noop_token_revocation(),
     )
 
 
@@ -362,6 +370,41 @@ class TestAuthServiceRefresh:
         mock_repository.revoke_token_family.assert_called_once_with(family_id)
 
     @pytest.mark.asyncio
+    async def test_refresh_revoked_token_bulk_revokes_access_tokens(
+        self,
+        jwt_service: JWTService,
+        password_service: PasswordService,
+        mock_repository: AsyncMock,
+    ) -> None:
+        """R2 (issue #142) — reuse detection must also bulk-revoke live
+        access tokens/content cookies, not just the refresh-token family.
+        Otherwise the "All sessions have been invalidated" message it
+        raises is false: a stolen access token/content cookie the attacker
+        already holds would keep working."""
+        user_id = uuid4()
+        family_id = uuid4()
+
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.user_id = user_id
+        mock_token.family_id = family_id
+        mock_token.is_revoked = True
+        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.revoke_token_family.return_value = 3
+
+        mock_token_revocation = AsyncMock()
+        service = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            token_revocation_service=mock_token_revocation,
+        )
+
+        with pytest.raises(TokenReuseDetectedError):
+            await service.refresh_tokens("reused_token")
+
+        mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user_id)
+
+    @pytest.mark.asyncio
     async def test_refresh_expired_token(
         self,
         auth_service: AuthService,
@@ -473,6 +516,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
             session=session,
         )
 
@@ -506,6 +550,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
             session=session,
             email_verification_service=email_verification,
         )
@@ -537,6 +582,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
             session=session,
             email_verification_service=email_verification,
         )
@@ -564,6 +610,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
         )
 
         # Make needs_rehash return True
@@ -585,6 +632,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
         )
 
         with pytest.raises(InvalidRefreshTokenError, match="Invalid refresh token"):
@@ -609,6 +657,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
         )
 
         with pytest.raises(UserInactiveError):

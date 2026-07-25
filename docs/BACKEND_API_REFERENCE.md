@@ -1,6 +1,26 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-25 — **Access-token revocation** (§2, §3): closes
+> _Last updated: 2026-07-26 — **Access-token revocation, remediation pass** (§2, §3): closes the
+> remaining gaps in [#142](https://github.com/gearbox/apex/issues/142) found in review. Three fixes,
+> no request/response shape changes:
+> (1) `POST /v1/auth/reset-password` now also bulk-revokes live access tokens/content cookies via
+> `TokenRevocationService.revoke_user_sessions`, matching the authenticated change-password path —
+> previously the account-recovery flow a user reaches *because* they suspect compromise left a
+> stolen access token or content cookie live for its full remaining lifetime.
+> (2) Refresh-token reuse detection (`AuthService.refresh_tokens`'s theft-detection branch) now
+> bulk-revokes the same way before raising, so its "All sessions have been invalidated" message is
+> now accurate rather than aspirational.
+> (3) `optional_auth_guard` (used by `GET /v1/providers`) now also consults `TokenRevocationService`
+> — a revoked token previously still authenticated on this route, since only `auth_guard` and
+> `content_auth_guard` checked revocation. It degrades a revoked token to anonymous, exactly like it
+> already does for a product-mismatched token, and — unlike the two guards above — tolerates a
+> missing revocation service (treats as not-revoked) rather than raising, preserving its
+> never-401 contract for an anonymous-capable route. Also documented: single-device
+> `POST /v1/auth/logout` cannot revoke that device's `apex_content` cookie server-side (see the
+> endpoint note below) — a pre-existing limitation, not a regression, now made explicit. No frontend
+> action required for any of this.
+>
+> _Prior (2026-07-25): **Access-token revocation** (§2, §3): closes
 > [#142](https://github.com/gearbox/apex/issues/142). `POST /v1/auth/logout`,
 > `POST /v1/users/me/logout-all`, `POST /v1/users/me/password`, and `DELETE /v1/users/me` now invalidate
 > live access tokens and the `apex_content` cookie **immediately**, not just refresh tokens — previously a
@@ -249,6 +269,13 @@ Note:     Revokes the specific refresh token. If an Authorization: Bearer header
           (optional — this route isn't guarded, since the access token may already be expired),
           its jti is denylisted for its remaining lifetime (issue #142), so that specific access
           token 401s on its next use while any other device's token is unaffected.
+Limitation: this device's apex_content cookie is cleared client-side only — it is scoped
+          Path=/v1/content (never sent to this endpoint) and carries a different jti than the
+          access token, so it cannot be revoked server-side here. A stolen cookie survives
+          single-device logout until it expires (up to CONTENT_COOKIE_TTL_HOURS) or until a
+          bulk-revocation event (logout-all, password change/reset, deactivation). Users who
+          suspect theft should use logout-all or change/reset their password, not rely on
+          single-device logout.
 ```
 
 #### `POST /v1/auth/verify-email`

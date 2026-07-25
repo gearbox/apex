@@ -442,6 +442,20 @@ class AuthController(Controller):
         its jti is denylisted for its remaining lifetime; when absent,
         expired, or otherwise undecodable, only the refresh token is revoked
         (identical to pre-#142 behavior).
+
+        Known limitation: this device's `apex_content` cookie is cleared
+        client-side (via the Set-Cookie below) but is **not** revoked
+        server-side — the cookie is scoped `Path=/v1/content`, so it's never
+        sent to this endpoint, and it carries a different `jti` than the
+        access token being denylisted above. For an honest logout this is
+        harmless (the cookie is gone from the browser); for a *stolen*
+        cookie it means the credential keeps working until it expires (up to
+        `CONTENT_COOKIE_TTL_HOURS`) or until a bulk revocation occurs
+        (logout-all, password change/reset, deactivation). Do not "fix" this
+        by calling `revoke_user_sessions` here — that would log the user out
+        of every other device, which single-device logout must not do. Users
+        who suspect theft should use logout-all or change/reset their
+        password.
         """
         await auth_service.logout(data.refresh_token)
 

@@ -12,13 +12,13 @@ from src.api.schemas.user import (
     UserStatsResponse,
 )
 from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
-from src.api.services.token_revocation import TokenRevocationService
 
 if TYPE_CHECKING:
     from uuid import UUID
 
     from src.api.security import PasswordService
     from src.api.services.storage import R2StorageService
+    from src.api.services.token_revocation import TokenRevocationService
     from src.core.product import ProductConfig
     from src.db.models import User
     from src.db.repositories import UserRepository
@@ -53,8 +53,9 @@ class UserService:
         repository: UserRepository,
         password_service: PasswordService,
         age_verification_service: AgeVerificationService,
+        *,
+        token_revocation_service: TokenRevocationService,
         r2_storage: R2StorageService | None = None,
-        token_revocation_service: TokenRevocationService | None = None,
     ) -> None:
         """Initialize user service.
 
@@ -62,22 +63,21 @@ class UserService:
             repository: User repository.
             password_service: Password hashing service.
             age_verification_service: Age gate claim validator.
-            r2_storage: R2 storage service for presigned URL generation (optional).
             token_revocation_service: Bulk-revokes access tokens issued
                 before a password change or account deactivation (see
-                src.api.services.token_revocation). Defaults to a no-op
-                instance so callers that don't wire one (tests, older call
-                sites) simply skip revocation.
+                src.api.services.token_revocation). Required — callers that
+                intentionally want revocation to no-op (tests, older call
+                sites) must pass an explicit
+                ``TokenRevocationService(None, max_token_ttl_seconds=0)`` so
+                the choice is visible rather than a silent default (issue
+                #142 A1).
+            r2_storage: R2 storage service for presigned URL generation (optional).
         """
         self._repo = repository
         self._password = password_service
         self._age_verification = age_verification_service
         self._r2 = r2_storage
-        self._token_revocation = (
-            token_revocation_service
-            if token_revocation_service is not None
-            else TokenRevocationService(None, max_token_ttl_seconds=0)
-        )
+        self._token_revocation = token_revocation_service
 
     async def get_profile(self, user_id: UUID) -> UserProfileResponse:
         """Get user profile.
