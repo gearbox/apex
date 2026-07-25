@@ -54,6 +54,20 @@ Refresh tokens are stored in the database (not as JWTs); only access tokens are 
 
 ---
 
+### Content Authentication Cookie
+
+Controls `apex_content`, the HttpOnly cookie that authorizes `GET /v1/content/*` (media reads)
+without a `Bearer` header — separate from and much longer-lived than the JWT access token above.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `CONTENT_COOKIE_TTL_HOURS` | `24` | `int (1–168)` | Lifetime of the content cookie / its underlying `type: "content"` JWT. Deliberately **not** symmetric with `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` — see `Settings.content_cookie_ttl_hours`'s docstring in `src/core/config.py` for why raising this is safe while raising the access token TTL is not. |
+| `CONTENT_COOKIE_NAME` | `apex_content` | `str` | Name of the Set-Cookie key. |
+
+The `Secure` attribute is not independently configurable — it's derived from `debug` (`Settings.content_cookie_secure`), off only in local dev so the cookie is still stored over plain `http://localhost`.
+
+---
+
 ### ComfyUI Connection
 
 Controls how Apex connects to the ComfyUI backend that executes generation workflows.

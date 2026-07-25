@@ -601,8 +601,8 @@ class Settings(BaseSettings):
             "account capability (spend tokens, delete assets, change email). 15 minutes is "
             "the containment window for a credential that cannot be killed. A `jti` denylist "
             "(Redis, TTL = token lifetime) checked in auth_guard is the prerequisite for "
-            "ever safely raising this — tracked in the D5 follow-up "
-            "(see agent_prompts/content-cookie-lifetime-backend.md); not implemented yet."
+            "ever safely raising this — tracked in "
+            "https://github.com/gearbox/apex/issues/142; not implemented yet."
         ),
     )
     jwt_refresh_token_expire_days: int = Field(

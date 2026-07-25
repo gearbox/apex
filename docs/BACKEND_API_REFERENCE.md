@@ -10,8 +10,11 @@
 > `Set-Cookie` — this endpoint is days old with exactly one consumer, so the status change is safe. Every
 > `TokenResponse` (register/login/refresh) now also carries `content_cookie_expires_at: datetime`, so a
 > client learns the cookie's absolute expiry from its existing auth response with no extra request. Both
-> values are computed by one helper (`content_cookie_lifetime` in `src/api/security/content_cookie.py`),
-> so the `Set-Cookie` `Max-Age` and the advertised `expires_at` can never diverge. Frontend should
+> values come from one call: `mint_content_cookie` (`src/api/security/content_cookie.py`) derives
+> `max_age` from `content_cookie_max_age` and mints the token via `JWTService.create_content_token`,
+> whose returned `exp` *is* the advertised `expires_at` — not a parallel `now()` computation — so the
+> `Set-Cookie` `Max-Age` and the advertised `expires_at` can never diverge from the value that actually
+> governs the guard. Frontend should
 > regenerate types (`gen:api`) to pick up `ContentCookieResponse` and the new `TokenResponse` field, and
 > schedule its proactive re-mint from the real remaining lifetime rather than a hard-coded constant._
 >

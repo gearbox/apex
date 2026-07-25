@@ -2,40 +2,37 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from litestar.datastructures import Cookie
 
 from src.core.config import get_settings
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from uuid import UUID
-
-    from litestar import Response
 
     from src.api.security.jwt import JWTService
     from src.core.config import Settings
     from src.core.product import ProductConfig
 
 
-def content_cookie_lifetime(settings: Settings) -> tuple[int, datetime]:
-    """Single source of truth for the content cookie's lifetime.
+def content_cookie_max_age(settings: Settings) -> int:
+    """Content cookie Set-Cookie Max-Age, in seconds.
 
-    Returns both the Set-Cookie Max-Age (seconds) and the absolute expiry
-    (UTC) derived from the same instant, so build_content_cookie's Max-Age
-    and any advertised expiry (ContentCookieResponse.expires_at,
-    TokenResponse.content_cookie_expires_at) can never diverge.
+    Just the configured TTL converted to seconds — the advertised absolute
+    expiry is no longer computed here. See mint_content_cookie for why: it
+    comes from create_content_token's returned `exp` instead, so there is
+    one clock read for the value that actually governs auth, not two.
 
     Args:
         settings: Application settings supplying the configured TTL.
 
     Returns:
-        Tuple of (max_age_seconds, expires_at).
+        Max-Age in seconds.
     """
-    max_age = settings.content_cookie_ttl_hours * 3600
-    expires_at = datetime.now(UTC) + timedelta(seconds=max_age)
-    return max_age, expires_at
+    return settings.content_cookie_ttl_hours * 3600
 
 
 def effective_cookie_domain(settings: Settings, product_config: ProductConfig) -> str | None:
@@ -117,6 +114,12 @@ def mint_content_cookie(
     to populate TokenResponse.content_cookie_expires_at / ContentCookieResponse.expires_at
     in the same struct literal, rather than mutating a response after the fact).
 
+    Truth flow: config → max_age → JWT `exp` → advertised `expires_at`. The
+    returned expires_at *is* jwt_service.create_content_token's returned
+    expiry — the same object, not a parallel `now() + max_age` computation —
+    so the advertised value can never diverge from the `exp` that actually
+    governs the guard.
+
     Args:
         user_id: Authenticated user's UUID.
         product_id: Product slug for the token scope.
@@ -125,12 +128,10 @@ def mint_content_cookie(
         product_config: Product config supplying the cookie domain.
 
     Returns:
-        Tuple of (cookie, expires_at) — expires_at is the cookie's absolute
-        expiry (UTC), derived from the same content_cookie_lifetime() call
-        used to build the cookie's Max-Age.
+        Tuple of (cookie, expires_at) — expires_at is the token's `exp` claim.
     """
-    max_age, expires_at = content_cookie_lifetime(settings)
-    content_token, _ = jwt_service.create_content_token(
+    max_age = content_cookie_max_age(settings)
+    content_token, expires_at = jwt_service.create_content_token(
         user_id,
         product_id=product_id,
         ttl=timedelta(seconds=max_age),
@@ -142,37 +143,3 @@ def mint_content_cookie(
         max_age=max_age,
     )
     return cookie, expires_at
-
-
-def attach_content_cookie(
-    response: Response[Any],
-    *,
-    user_id: UUID,
-    product_id: str,
-    jwt_service: JWTService,
-    settings: Settings,
-    product_config: ProductConfig,
-) -> datetime:
-    """Mint a content token and append the Set-Cookie to the response.
-
-    Args:
-        response: Litestar Response to append the cookie to.
-        user_id: Authenticated user's UUID.
-        product_id: Product slug for the token scope.
-        jwt_service: JWT service used to sign the token.
-        settings: Application settings (TTL, secure flag, cookie name).
-        product_config: Product config supplying the cookie domain.
-
-    Returns:
-        The cookie's absolute expiry (UTC) — callers advertise this via
-        ContentCookieResponse.expires_at / TokenResponse.content_cookie_expires_at.
-    """
-    cookie, expires_at = mint_content_cookie(
-        user_id=user_id,
-        product_id=product_id,
-        jwt_service=jwt_service,
-        settings=settings,
-        product_config=product_config,
-    )
-    response.cookies.append(cookie)
-    return expires_at
