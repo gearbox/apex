@@ -3,20 +3,36 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from litestar.datastructures import Cookie
 
 from src.core.config import get_settings
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from uuid import UUID
-
-    from litestar import Response
 
     from src.api.security.jwt import JWTService
     from src.core.config import Settings
     from src.core.product import ProductConfig
+
+
+def content_cookie_max_age(settings: Settings) -> int:
+    """Content cookie Set-Cookie Max-Age, in seconds.
+
+    Just the configured TTL converted to seconds — the advertised absolute
+    expiry is no longer computed here. See mint_content_cookie for why: it
+    comes from create_content_token's returned `exp` instead, so there is
+    one clock read for the value that actually governs auth, not two.
+
+    Args:
+        settings: Application settings supplying the configured TTL.
+
+    Returns:
+        Max-Age in seconds.
+    """
+    return settings.content_cookie_ttl_hours * 3600
 
 
 def effective_cookie_domain(settings: Settings, product_config: ProductConfig) -> str | None:
@@ -84,35 +100,46 @@ def clear_content_cookie(*, domain: str | None, secure: bool) -> Cookie:
     )
 
 
-def attach_content_cookie(
-    response: Response[Any],
+def mint_content_cookie(
     *,
     user_id: UUID,
     product_id: str,
     jwt_service: JWTService,
     settings: Settings,
     product_config: ProductConfig,
-) -> None:
-    """Mint a content token and append the Set-Cookie to the response.
+) -> tuple[Cookie, datetime]:
+    """Mint a content token and its Set-Cookie, independent of any Response.
+
+    Lets callers know the expiry *before* constructing a response body (e.g.
+    to populate TokenResponse.content_cookie_expires_at / ContentCookieResponse.expires_at
+    in the same struct literal, rather than mutating a response after the fact).
+
+    Truth flow: config → max_age → JWT `exp` → advertised `expires_at`. The
+    returned expires_at *is* jwt_service.create_content_token's returned
+    expiry — the same object, not a parallel `now() + max_age` computation —
+    so the advertised value can never diverge from the `exp` that actually
+    governs the guard.
 
     Args:
-        response: Litestar Response to append the cookie to.
         user_id: Authenticated user's UUID.
         product_id: Product slug for the token scope.
         jwt_service: JWT service used to sign the token.
         settings: Application settings (TTL, secure flag, cookie name).
         product_config: Product config supplying the cookie domain.
+
+    Returns:
+        Tuple of (cookie, expires_at) — expires_at is the token's `exp` claim.
     """
-    content_token, _ = jwt_service.create_content_token(
+    max_age = content_cookie_max_age(settings)
+    content_token, expires_at = jwt_service.create_content_token(
         user_id,
         product_id=product_id,
-        ttl=timedelta(hours=settings.content_cookie_ttl_hours),
+        ttl=timedelta(seconds=max_age),
     )
-    response.cookies.append(
-        build_content_cookie(
-            content_token,
-            domain=effective_cookie_domain(settings, product_config),
-            secure=settings.content_cookie_secure,
-            max_age=settings.content_cookie_ttl_hours * 3600,
-        )
+    cookie = build_content_cookie(
+        content_token,
+        domain=effective_cookie_domain(settings, product_config),
+        secure=settings.content_cookie_secure,
+        max_age=max_age,
     )
+    return cookie, expires_at

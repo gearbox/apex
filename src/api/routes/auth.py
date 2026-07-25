@@ -13,7 +13,6 @@ from litestar.params import Body
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_201_CREATED,
-    HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
 )
@@ -21,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.auth import (
+    ContentCookieResponse,
     ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
@@ -33,9 +33,9 @@ from src.api.schemas.auth import (
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.security import auth_guard
 from src.api.security.content_cookie import (
-    attach_content_cookie,
     clear_content_cookie,
     effective_cookie_domain,
+    mint_content_cookie,
 )
 from src.api.security.jwt import JWTService
 from src.api.services.auth import (
@@ -111,22 +111,23 @@ class AuthController(Controller):
                 display_name=data.display_name,
             )
 
+            content_cookie, content_cookie_expires_at = mint_content_cookie(
+                user_id=user.id,
+                product_id=product_id,
+                jwt_service=jwt_service,
+                settings=settings,
+                product_config=product_config,
+            )
             response: Response[TokenResponse | ErrorEnvelope] = Response(
                 content=TokenResponse(
                     access_token=tokens.access_token,
                     refresh_token=tokens.refresh_token,
                     expires_in=tokens.expires_in,
                     expires_at=tokens.expires_at,
+                    content_cookie_expires_at=content_cookie_expires_at,
                 ),
                 status_code=HTTP_201_CREATED,
-            )
-            attach_content_cookie(
-                response,
-                user_id=user.id,
-                product_id=product_id,
-                jwt_service=jwt_service,
-                settings=settings,
-                product_config=product_config,
+                cookies=[content_cookie],
             )
 
         except EmailAlreadyExistsError as e:
@@ -228,7 +229,7 @@ class AuthController(Controller):
 
     @post(
         "/content-cookie",
-        status_code=HTTP_204_NO_CONTENT,
+        status_code=HTTP_200_OK,
         guards=[auth_guard],
         dependencies={"current_user_id": Provide(get_current_user_id)},
     )
@@ -239,24 +240,29 @@ class AuthController(Controller):
         product_id: str,
         product_config: ProductConfig,
         settings: Settings,
-    ) -> Response[None]:
+    ) -> Response[ContentCookieResponse]:
         """Re-mint the content authentication cookie (apex_content).
 
-        Bearer-only — requires a valid, unexpired access token. Lets the
-        frontend recover image/video auth once the shorter-lived content
-        cookie expires without a full silentRefresh, which would needlessly
-        rotate the refresh token just to restore image auth.
+        Bearer-only — requires a valid, unexpired access token. With the
+        content cookie's TTL now measured in days (see
+        Settings.content_cookie_ttl_hours), this endpoint's role has shifted:
+        it no longer exists mainly to dodge a refresh-token rotation, but is
+        the *proactive* keep-alive path — clients schedule a re-mint from the
+        `expires_at` this returns (or from TokenResponse.content_cookie_expires_at)
+        well before the cookie actually lapses, rather than waiting for a 401.
         """
-        response: Response[None] = Response(content=None, status_code=HTTP_204_NO_CONTENT)
-        attach_content_cookie(
-            response,
+        content_cookie, expires_at = mint_content_cookie(
             user_id=current_user_id,
             product_id=product_id,
             jwt_service=jwt_service,
             settings=settings,
             product_config=product_config,
         )
-        return response
+        return Response(
+            content=ContentCookieResponse(expires_at=expires_at),
+            status_code=HTTP_200_OK,
+            cookies=[content_cookie],
+        )
 
     @post("/login")
     async def login(
@@ -291,22 +297,23 @@ class AuthController(Controller):
                 ip_address=ip_address,
             )
 
+            content_cookie, content_cookie_expires_at = mint_content_cookie(
+                user_id=user.id,
+                product_id=product_id,
+                jwt_service=jwt_service,
+                settings=settings,
+                product_config=product_config,
+            )
             response: Response[TokenResponse | ErrorEnvelope] = Response(
                 content=TokenResponse(
                     access_token=tokens.access_token,
                     refresh_token=tokens.refresh_token,
                     expires_in=tokens.expires_in,
                     expires_at=tokens.expires_at,
+                    content_cookie_expires_at=content_cookie_expires_at,
                 ),
                 status_code=HTTP_200_OK,
-            )
-            attach_content_cookie(
-                response,
-                user_id=user.id,
-                product_id=product_id,
-                jwt_service=jwt_service,
-                settings=settings,
-                product_config=product_config,
+                cookies=[content_cookie],
             )
 
         except InvalidCredentialsError:
@@ -362,22 +369,23 @@ class AuthController(Controller):
                 ip_address=ip_address,
             )
 
+            content_cookie, content_cookie_expires_at = mint_content_cookie(
+                user_id=user_id,
+                product_id=product_id,
+                jwt_service=jwt_service,
+                settings=settings,
+                product_config=product_config,
+            )
             response: Response[TokenResponse | ErrorEnvelope] = Response(
                 content=TokenResponse(
                     access_token=tokens.access_token,
                     refresh_token=tokens.refresh_token,
                     expires_in=tokens.expires_in,
                     expires_at=tokens.expires_at,
+                    content_cookie_expires_at=content_cookie_expires_at,
                 ),
                 status_code=HTTP_200_OK,
-            )
-            attach_content_cookie(
-                response,
-                user_id=user_id,
-                product_id=product_id,
-                jwt_service=jwt_service,
-                settings=settings,
-                product_config=product_config,
+                cookies=[content_cookie],
             )
 
         except InvalidRefreshTokenError:

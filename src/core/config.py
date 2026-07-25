@@ -592,7 +592,18 @@ class Settings(BaseSettings):
         default=15,
         ge=1,
         le=60,
-        description="Access token expiration in minutes",
+        description=(
+            "Access token expiration in minutes. Deliberately NOT raised to make media "
+            "auth cheaper (see content_cookie_ttl_hours) — access tokens are irrevocable: "
+            "a `jti` is minted but no guard consults a denylist, and logout_all invalidates "
+            "only refresh tokens, so a stolen access token survives an explicit "
+            "'log out everywhere' for its full remaining lifetime. It also carries full "
+            "account capability (spend tokens, delete assets, change email). 15 minutes is "
+            "the containment window for a credential that cannot be killed. A `jti` denylist "
+            "(Redis, TTL = token lifetime) checked in auth_guard is the prerequisite for "
+            "ever safely raising this — tracked in "
+            "https://github.com/gearbox/apex/issues/142; not implemented yet."
+        ),
     )
     jwt_refresh_token_expire_days: int = Field(
         default=7,
@@ -607,14 +618,22 @@ class Settings(BaseSettings):
 
     # Content cookie
     content_cookie_ttl_hours: int = Field(
-        default=1,
+        default=24,
         ge=1,
-        le=24,
+        le=168,
         description=(
-            "TTL in hours for the content authentication cookie (apex_content). "
-            "Kept short so a stateless token's post-revocation window is small; "
-            "the cookie is refreshed on every login/token refresh, so this never "
-            "expires mid-session."
+            "TTL in hours for the content authentication cookie (apex_content). Default "
+            "raised to 24h (bound raised to 168h = 7d, the refresh-token window) to survive "
+            "a suspended PWA: with no API traffic there's no /v1/auth/refresh call to "
+            "re-attach the cookie, so a short TTL ages out during suspension and every "
+            "<img> the client fires on resume 401s before recovery can kick in. Unlike "
+            "jwt_access_token_expire_minutes (see its docstring for why THAT stays short), "
+            "raising this is safe: the content token is `type: 'content'` (structurally "
+            "rejected by the access-token decoder), product-scoped, HttpOnly/Secure/"
+            "SameSite=Lax/Path=/v1/content, and the content proxy still performs a full "
+            "ownership check on every request — its blast radius is read access to the "
+            "bearer's own media on one product. clear_content_cookie on logout remains the "
+            "revocation path."
         ),
     )
     content_cookie_name: str = Field(

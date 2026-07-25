@@ -1,6 +1,24 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-24 — **Content Proxy performance & streaming** (§9): `GET /v1/content/outputs/{id}`
+> _Last updated: 2026-07-25 — **Content cookie lifetime & expiry advertisement** (§2, §9):
+> `content_cookie_ttl_hours` default raised from 1h to **24h** (bound raised from 24h to **168h**/7d) so
+> the `apex_content` cookie survives a suspended PWA — no API traffic means no `/v1/auth/refresh` to
+> re-attach it, so a short-lived cookie previously aged out during suspension and every `<img>` the client
+> fired on resume 401'd before recovery could kick in. `jwt_access_token_expire_minutes` is unchanged at
+> 15 — deliberately not raised; see its config docstring. `POST /v1/auth/content-cookie` now returns
+> **`200`** (was `204`) with a body, `ContentCookieResponse { expires_at: datetime }`, alongside the
+> `Set-Cookie` — this endpoint is days old with exactly one consumer, so the status change is safe. Every
+> `TokenResponse` (register/login/refresh) now also carries `content_cookie_expires_at: datetime`, so a
+> client learns the cookie's absolute expiry from its existing auth response with no extra request. Both
+> values come from one call: `mint_content_cookie` (`src/api/security/content_cookie.py`) derives
+> `max_age` from `content_cookie_max_age` and mints the token via `JWTService.create_content_token`,
+> whose returned `exp` *is* the advertised `expires_at` — not a parallel `now()` computation — so the
+> `Set-Cookie` `Max-Age` and the advertised `expires_at` can never diverge from the value that actually
+> governs the guard. Frontend should
+> regenerate types (`gen:api`) to pick up `ContentCookieResponse` and the new `TokenResponse` field, and
+> schedule its proactive re-mint from the real remaining lifetime rather than a hard-coded constant._
+>
+> _Prior (2026-07-24): **Content Proxy performance & streaming** (§9): `GET /v1/content/outputs/{id}`
 > and `GET /v1/content/uploads/{id}` now support single-range `Range` requests (`206 Partial Content` /
 > `416 Range Not Satisfiable`, `Accept-Ranges: bytes` on every 200/206 — multipart ranges are treated as a
 > full 200) and honor `If-None-Match` for `304 Not Modified` (checked after ownership, before any R2
@@ -193,7 +211,8 @@ Note:     Public endpoint — no auth needed. Frontend calls this on load.
 
 ```
 Request:  { email: string, password: string, display_name?: string }
-Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime }
+Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime,
+            content_cookie_expires_at: datetime }
 Status:   201 Created
 Errors:   400 (validation_error | email_exists)
 Note:     The request body no longer carries age fields — `age_confirmed` / `date_of_birth`
@@ -208,7 +227,8 @@ Note:     The request body no longer carries age fields — `age_confirmed` / `d
 
 ```
 Request:  { email: string, password: string }
-Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime }
+Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime,
+            content_cookie_expires_at: datetime }
 Errors:   401 (invalid_credentials | account_inactive)
 ```
 
@@ -216,7 +236,8 @@ Errors:   401 (invalid_credentials | account_inactive)
 
 ```
 Request:  { refresh_token: string }
-Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime }
+Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime,
+            content_cookie_expires_at: datetime }
 Errors:   401 (token revoked/expired/invalid | token_reuse_detected | account_inactive)
 ```
 
@@ -262,17 +283,20 @@ Rate:     3/hour
 #### `POST /v1/auth/content-cookie` *(authenticated, Bearer-only)*
 
 ```
-Response: (empty)
-Status:   204 No Content
+Response: { expires_at: datetime }   // ContentCookieResponse — UTC, ISO-8601
+Status:   200 OK
 Errors:   401 (missing/invalid/expired Bearer token)
 Rate:     20/minute
 Note:     Re-mints the apex_content cookie (same attributes login/register/refresh set —
           see §9) for the caller's user_id + the current request's product, without
-          rotating the refresh token. Prefer this over a full silentRefresh purely to
-          recover image/video auth after the content cookie's shorter TTL lapses — a full
-          refresh needlessly rotates the refresh token just to restore image auth. The
-          content cookie itself does NOT authorize this endpoint — only a valid Bearer
-          access token does.
+          rotating the refresh token. `expires_at` is the cookie's absolute expiry —
+          derived from the same helper as the Set-Cookie `Max-Age`, so the two can never
+          diverge. With the cookie's TTL now measured in days (§9), this endpoint's role
+          has shifted: it's no longer mainly about dodging a refresh-token rotation, but is
+          the *proactive* keep-alive path — clients should schedule their next re-mint from
+          `expires_at` (or from TokenResponse.content_cookie_expires_at) well before the
+          cookie actually lapses, rather than waiting for a 401. The content cookie itself
+          does NOT authorize this endpoint — only a valid Bearer access token does.
 ```
 
 ---
@@ -1064,6 +1088,10 @@ Response: {
 Provides stable, non-expiring authenticated URLs for user content. The server resolves ownership, checks product scoping, then streams bytes directly from R2. **No presigned URLs are exposed** — the client only ever sees `/v1/content/...` paths.
 
 > **Why use this instead of presigned URLs?** Content proxy URLs are permanent (for the lifetime of the resource), cacheable with `Cache-Control: private, max-age=<ttl>, immutable`, and enforce per-request authorization. They are the preferred URL format for Library and any UI that persists content references.
+
+### Auth: the `apex_content` cookie
+
+Requests here accept either a Bearer access token or the `apex_content` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/v1/content`) — see §2 for how it's minted/re-minted. Its lifetime is `content_cookie_ttl_hours` (default **24h**, configurable up to **168h**/7d) — raised from a 1h default specifically so the cookie survives a suspended PWA: with no API traffic there's no `/v1/auth/refresh` to re-attach it, so a short TTL ages out during suspension and the first batch of `<img>` requests on resume all 401 before any JSON call can trigger recovery. This is deliberately asymmetric with the 15-minute access token (§2.1) — the content token is `type: "content"` (structurally rejected by the access-token decoder), product-scoped, and every request here still performs the full ownership check below regardless of which credential was presented; its blast radius is read access to the bearer's own media on one product. `POST /v1/auth/logout` (§2) clears the cookie — that remains the revocation path, since access/content tokens themselves are not denylisted.
 
 ### Response Headers
 

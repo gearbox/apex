@@ -245,12 +245,20 @@ class TestCookieAttributes:
         assert cookie.secure is False
         assert cookie.domain is None
 
-    def test_default_cookie_ttl_is_1_hour(self) -> None:
+    def test_default_cookie_ttl_is_24_hours(self) -> None:
         s = Settings(
             jwt_secret_key=TEST_SECRET,
             database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
         )
-        assert s.content_cookie_ttl_hours == 1
+        assert s.content_cookie_ttl_hours == 24
+
+    def test_cookie_ttl_up_to_168_hours_accepted(self) -> None:
+        s = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            content_cookie_ttl_hours=168,
+        )
+        assert s.content_cookie_ttl_hours == 168
 
     def test_cookie_ttl_above_max_rejected(self) -> None:
         from pydantic import ValidationError
@@ -259,7 +267,7 @@ class TestCookieAttributes:
             Settings(
                 jwt_secret_key=TEST_SECRET,
                 database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
-                content_cookie_ttl_hours=25,
+                content_cookie_ttl_hours=169,
             )
 
     def test_cookie_ttl_below_min_rejected(self) -> None:
@@ -271,6 +279,55 @@ class TestCookieAttributes:
                 database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
                 content_cookie_ttl_hours=0,
             )
+
+
+# ---------------------------------------------------------------------------
+# content_cookie_max_age / mint_content_cookie — one instant, not two (A1)
+# ---------------------------------------------------------------------------
+
+
+class TestContentCookieMaxAge:
+    """content_cookie_max_age is a pure TTL-hours-to-seconds conversion — no wall clock."""
+
+    def test_max_age_matches_configured_ttl(self) -> None:
+        from src.api.security.content_cookie import content_cookie_max_age
+
+        s = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            content_cookie_ttl_hours=48,
+        )
+        assert content_cookie_max_age(s) == 48 * 3600
+
+        cookie = build_content_cookie("token", domain=None, secure=True, max_age=48 * 3600)
+        assert cookie.max_age == 48 * 3600
+
+    def test_mint_content_cookie_expires_at_is_the_jwt_exp(self, jwt_service: JWTService) -> None:
+        """expires_at isn't a parallel now()+ttl computation — it IS the token's exp claim."""
+        from src.api.security.content_cookie import mint_content_cookie
+        from src.core.product_registry import resolve_product_by_slug
+
+        s = Settings(
+            jwt_secret_key=TEST_SECRET,
+            database_url="postgresql+asyncpg://apex:apex@localhost:5432/apex",
+            content_cookie_ttl_hours=24,
+        )
+        product_config = resolve_product_by_slug(PRODUCT_ID)
+        assert product_config is not None
+
+        cookie, expires_at = mint_content_cookie(
+            user_id=uuid4(),
+            product_id=PRODUCT_ID,
+            jwt_service=jwt_service,
+            settings=s,
+            product_config=product_config,
+        )
+        assert cookie.max_age == 24 * 3600
+
+        assert isinstance(cookie.value, str)
+        payload = jwt_service.decode_content_token(cookie.value)
+        assert payload is not None
+        assert int(expires_at.timestamp()) == payload.exp
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +392,12 @@ class TestAuthControllerCookies:
         assert cookie.max_age == settings.content_cookie_ttl_hours * 3600
         assert cookie.secure == settings.content_cookie_secure
 
+        assert response.content is not None
+        assert isinstance(cookie.value, str)
+        payload = jwt_service.decode_content_token(cookie.value)
+        assert payload is not None
+        assert int(response.content.content_cookie_expires_at.timestamp()) == payload.exp
+
     async def test_login_sets_content_cookie(
         self, jwt_service: JWTService, settings: Settings
     ) -> None:
@@ -374,6 +437,12 @@ class TestAuthControllerCookies:
         assert cookie.samesite == "lax"
         assert cookie.path == "/v1/content"
         assert cookie.domain == COOKIE_DOMAIN
+
+        assert response.content is not None
+        assert isinstance(cookie.value, str)
+        payload = jwt_service.decode_content_token(cookie.value)
+        assert payload is not None
+        assert int(response.content.content_cookie_expires_at.timestamp()) == payload.exp
 
     async def test_refresh_sets_content_cookie_without_decoding(
         self, jwt_service: JWTService, settings: Settings
@@ -423,6 +492,9 @@ class TestAuthControllerCookies:
         from uuid import UUID as _UUID
 
         assert _UUID(payload.sub) == user_id
+
+        assert response.content is not None
+        assert int(response.content.content_cookie_expires_at.timestamp()) == payload.exp
 
     async def test_logout_clears_content_cookie(
         self,
@@ -489,7 +561,7 @@ class TestAuthControllerCookies:
 class TestRemintContentCookieHandler:
     """POST /v1/auth/content-cookie (D4) — direct handler tests, no DB."""
 
-    async def test_remint_sets_content_cookie_204(
+    async def test_remint_sets_content_cookie_200(
         self, jwt_service: JWTService, settings: Settings
     ) -> None:
         from unittest.mock import MagicMock
@@ -507,8 +579,8 @@ class TestRemintContentCookieHandler:
             settings=settings,
         )
 
-        assert response.status_code == HTTP_204_NO_CONTENT
-        assert response.content is None
+        assert response.status_code == HTTP_200_OK
+        assert response.content is not None
         assert len(response.cookies) == 1
         cookie = response.cookies[0]
         assert cookie.key == COOKIE_NAME
@@ -518,6 +590,11 @@ class TestRemintContentCookieHandler:
         assert cookie.domain == COOKIE_DOMAIN
         assert cookie.max_age == settings.content_cookie_ttl_hours * 3600
         assert cookie.secure == settings.content_cookie_secure
+
+        assert isinstance(cookie.value, str)
+        payload = jwt_service.decode_content_token(cookie.value)
+        assert payload is not None
+        assert int(response.content.expires_at.timestamp()) == payload.exp
 
     async def test_remint_cookie_attributes_match_login(
         self, jwt_service: JWTService, settings: Settings
@@ -632,7 +709,7 @@ class TestRemintContentCookieHTTP:
             resp = client.post("/v1/auth/content-cookie")
         assert resp.status_code == HTTP_401_UNAUTHORIZED
 
-    def test_valid_bearer_returns_204_with_cookie(
+    def test_valid_bearer_returns_200_with_cookie_and_body(
         self, jwt_service: JWTService, settings: Settings, test_user_id: UUID
     ) -> None:
         token, _ = jwt_service.create_access_token(test_user_id, product_id=PRODUCT_ID)
@@ -641,7 +718,9 @@ class TestRemintContentCookieHTTP:
             resp = client.post(
                 "/v1/auth/content-cookie", headers={"Authorization": f"Bearer {token}"}
             )
-        assert resp.status_code == HTTP_204_NO_CONTENT
+        assert resp.status_code == HTTP_200_OK
+        body = resp.json()
+        assert "expires_at" in body
         # httpx's parsed cookie jar drops this (Domain=vex.pics, Secure, over a
         # plain-http testserver request) — assert on the raw header instead.
         set_cookie = resp.headers.get("set-cookie", "")
@@ -697,15 +776,13 @@ class TestEffectiveCookieDomain:
 
 
 # ---------------------------------------------------------------------------
-# attach_content_cookie domain behaviour
+# mint_content_cookie domain behaviour
 # ---------------------------------------------------------------------------
 
 
-class TestAttachContentCookieDomain:
-    async def test_host_only_in_dev(self, jwt_service: JWTService) -> None:
-        from litestar import Response
-
-        from src.api.security.content_cookie import attach_content_cookie
+class TestMintContentCookieDomain:
+    def test_host_only_in_dev(self, jwt_service: JWTService) -> None:
+        from src.api.security.content_cookie import mint_content_cookie
 
         debug_settings = Settings(
             jwt_secret_key=TEST_SECRET,
@@ -713,36 +790,26 @@ class TestAttachContentCookieDomain:
             debug=True,
         )
         product_config = _make_product_config(domain=COOKIE_DOMAIN)
-        response: Response[dict[str, str]] = Response(content={"ok": "true"})
-        attach_content_cookie(
-            response,
+        cookie, _ = mint_content_cookie(
             user_id=uuid4(),
             product_id=PRODUCT_ID,
             jwt_service=jwt_service,
             settings=debug_settings,
             product_config=product_config,
         )
-        assert len(response.cookies) == 1
-        cookie = response.cookies[0]
         assert cookie.domain is None
         assert cookie.secure is False
 
-    async def test_domain_set_in_prod(self, jwt_service: JWTService, settings: Settings) -> None:
-        from litestar import Response
-
-        from src.api.security.content_cookie import attach_content_cookie
+    def test_domain_set_in_prod(self, jwt_service: JWTService, settings: Settings) -> None:
+        from src.api.security.content_cookie import mint_content_cookie
 
         product_config = _make_product_config(domain=COOKIE_DOMAIN)
-        response: Response[dict[str, str]] = Response(content={"ok": "true"})
-        attach_content_cookie(
-            response,
+        cookie, _ = mint_content_cookie(
             user_id=uuid4(),
             product_id=PRODUCT_ID,
             jwt_service=jwt_service,
             settings=settings,
             product_config=product_config,
         )
-        assert len(response.cookies) == 1
-        cookie = response.cookies[0]
         assert cookie.domain == COOKIE_DOMAIN
         assert cookie.secure is True
