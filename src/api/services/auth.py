@@ -16,6 +16,7 @@ from src.api.security import (
     hash_token,
 )
 from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
@@ -85,6 +86,7 @@ class AuthService:
         session: AsyncSession | None = None,
         email_verification_service: EmailVerificationService | None = None,
         ops_event_bus: OpsEventBus | None = None,
+        token_revocation_service: TokenRevocationService | None = None,
     ) -> None:
         """Initialize auth service.
 
@@ -99,6 +101,10 @@ class AuthService:
             ops_event_bus: Publishes admin ops notifications (Telegram).
                 Defaults to a disabled bus so callers that don't wire one
                 (tests, older call sites) simply skip publishing.
+            token_revocation_service: Bulk-revokes access tokens issued
+                before logout_all (see src.api.services.token_revocation).
+                Defaults to a no-op instance so callers that don't wire one
+                (tests, older call sites) simply skip revocation.
         """
         self._repo = repository
         self._jwt = jwt_service
@@ -107,6 +113,11 @@ class AuthService:
         self._email_verification = email_verification_service
         self._ops_event_bus = (
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
+        )
+        self._token_revocation = (
+            token_revocation_service
+            if token_revocation_service is not None
+            else TokenRevocationService(None, max_token_ttl_seconds=0)
         )
 
     async def register(
@@ -334,6 +345,7 @@ class AuthService:
             Number of tokens revoked.
         """
         count = await self._repo.revoke_all_user_tokens(user_id)
+        await self._token_revocation.revoke_user_sessions(user_id)
         logger.info("auth.tokens_revoked", user_id=str(user_id), count=count)
         return count
 

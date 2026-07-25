@@ -12,6 +12,7 @@ from src.api.schemas.user import (
     UserStatsResponse,
 )
 from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
+from src.api.services.token_revocation import TokenRevocationService
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -53,6 +54,7 @@ class UserService:
         password_service: PasswordService,
         age_verification_service: AgeVerificationService,
         r2_storage: R2StorageService | None = None,
+        token_revocation_service: TokenRevocationService | None = None,
     ) -> None:
         """Initialize user service.
 
@@ -61,11 +63,21 @@ class UserService:
             password_service: Password hashing service.
             age_verification_service: Age gate claim validator.
             r2_storage: R2 storage service for presigned URL generation (optional).
+            token_revocation_service: Bulk-revokes access tokens issued
+                before a password change or account deactivation (see
+                src.api.services.token_revocation). Defaults to a no-op
+                instance so callers that don't wire one (tests, older call
+                sites) simply skip revocation.
         """
         self._repo = repository
         self._password = password_service
         self._age_verification = age_verification_service
         self._r2 = r2_storage
+        self._token_revocation = (
+            token_revocation_service
+            if token_revocation_service is not None
+            else TokenRevocationService(None, max_token_ttl_seconds=0)
+        )
 
     async def get_profile(self, user_id: UUID) -> UserProfileResponse:
         """Get user profile.
@@ -172,7 +184,10 @@ class UserService:
     ) -> None:
         """Change user password.
 
-        Revokes all refresh tokens after password change.
+        Revokes all refresh tokens and all live access tokens/content
+        cookies after password change — the most security-sensitive of the
+        three bulk-revocation sites (issue #142), since a password change is
+        often a reaction to suspected compromise.
 
         Args:
             user_id: User ID.
@@ -197,12 +212,17 @@ class UserService:
 
         # Revoke all refresh tokens (force re-login on all devices)
         revoked = await self._repo.revoke_all_user_tokens(user_id)
+        # Bulk-revoke live access tokens/content cookies too (issue #142) —
+        # otherwise a stolen access token survives a password change for its
+        # full remaining lifetime.
+        await self._token_revocation.revoke_user_sessions(user_id)
         logger.info("user.password_changed", user_id=str(user_id), revoked_tokens=revoked)
 
     async def deactivate_account(self, user_id: UUID) -> datetime:
         """Soft delete user account.
 
-        Sets is_active to False and revokes all tokens.
+        Sets is_active to False and revokes all refresh tokens plus any
+        live access tokens/content cookies (issue #142).
 
         Args:
             user_id: User ID.
@@ -219,6 +239,8 @@ class UserService:
 
         # Revoke all tokens
         await self._repo.revoke_all_user_tokens(user_id)
+        # Bulk-revoke live access tokens/content cookies too (issue #142).
+        await self._token_revocation.revoke_user_sessions(user_id)
 
         deactivated_at = datetime.now(UTC)
         logger.info("user.deactivated", user_id=str(user_id))

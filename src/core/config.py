@@ -593,16 +593,21 @@ class Settings(BaseSettings):
         ge=1,
         le=60,
         description=(
-            "Access token expiration in minutes. Deliberately NOT raised to make media "
-            "auth cheaper (see content_cookie_ttl_hours) — access tokens are irrevocable: "
-            "a `jti` is minted but no guard consults a denylist, and logout_all invalidates "
-            "only refresh tokens, so a stolen access token survives an explicit "
-            "'log out everywhere' for its full remaining lifetime. It also carries full "
-            "account capability (spend tokens, delete assets, change email). 15 minutes is "
-            "the containment window for a credential that cannot be killed. A `jti` denylist "
-            "(Redis, TTL = token lifetime) checked in auth_guard is the prerequisite for "
-            "ever safely raising this — tracked in "
-            "https://github.com/gearbox/apex/issues/142; not implemented yet."
+            "Access token expiration in minutes. Still NOT raised in this release even "
+            "though revocation now exists (issue #142, TokenRevocationService) — landing "
+            "revocation makes a future raise defensible, but it's a separate decision with "
+            "its own review. What revocation actually covers: auth_guard and "
+            "content_auth_guard now reject a token whose `iat` predates the caller's most "
+            "recent 'revoke all sessions' event (logout_all, change_password, "
+            "deactivate_account — a Redis epoch key, TTL = max(this, content_cookie_ttl_hours)) "
+            "or whose specific `jti` was denylisted by a single-device POST /v1/auth/logout "
+            "(TTL = remaining token lifetime). This is fail-open: on Redis being unset or "
+            "transiently unavailable, revocation silently degrades to the old refresh-token-"
+            "only behavior rather than failing every request closed — see "
+            "TokenRevocationService's docstring for why. It also carries full account "
+            "capability (spend tokens, delete assets, change email). 15 minutes remains the "
+            "containment window for a credential compromised between revocation checks — "
+            "e.g. Redis down at the moment of theft."
         ),
     )
     jwt_refresh_token_expire_days: int = Field(

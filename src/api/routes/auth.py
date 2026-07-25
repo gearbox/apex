@@ -31,7 +31,7 @@ from src.api.schemas.auth import (
     VerifyEmailRequest,
 )
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.security import auth_guard
+from src.api.security import auth_guard, extract_token_from_header
 from src.api.security.content_cookie import (
     clear_content_cookie,
     effective_cookie_domain,
@@ -51,6 +51,7 @@ from src.api.services.email_verification import (
     InvalidTokenError,
     UserNotFoundError,
 )
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import Settings
 from src.core.product import ProductConfig
 from src.db.repositories.user import UserRepository
@@ -424,16 +425,30 @@ class AuthController(Controller):
     @post("/logout")
     async def logout(
         self,
+        request: Request[Any, Any, Any],
         data: Annotated[RefreshTokenRequest, Body()],
         auth_service: AuthService,
+        jwt_service: JWTService,
+        token_revocation_service: TokenRevocationService,
         product_config: ProductConfig,
         settings: Settings,
     ) -> Response[MessageResponse]:
-        """Logout by invalidating refresh token.
+        """Logout by invalidating the refresh token and denylisting the
+        presenting access token's own jti (issue #142).
 
-        The access token will remain valid until expiration.
+        This route is intentionally unguarded — the Authorization header is
+        optional here (the access token may already be expired), so it's
+        decoded manually rather than via auth_guard. When present and valid,
+        its jti is denylisted for its remaining lifetime; when absent,
+        expired, or otherwise undecodable, only the refresh token is revoked
+        (identical to pre-#142 behavior).
         """
         await auth_service.logout(data.refresh_token)
+
+        if raw_bearer := extract_token_from_header(request.headers.get("authorization")):
+            payload = jwt_service.decode_access_token(raw_bearer)
+            if payload is not None:
+                await token_revocation_service.revoke_token(payload.jti, payload.exp)
 
         return Response(
             content=MessageResponse(message="Successfully logged out"),

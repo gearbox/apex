@@ -8,7 +8,7 @@ including guards, dependency injection, and route handlers.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -24,12 +24,22 @@ from litestar.testing import TestClient
 from src.api.dependencies.auth import get_current_user_id
 from src.api.security import JWTConfig, JWTService, auth_guard
 from src.api.security.guards import AuthenticatedUser, extract_token_from_header
+from src.api.services.token_revocation import TokenRevocationService
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
+
+
+def _no_op_token_revocation() -> TokenRevocationService:
+    """A TokenRevocationService with no Redis client — never reports revoked.
+
+    Used to wire app.state["token_revocation"] in guard tests that don't
+    exercise revocation itself, mirroring pre-#142 behavior.
+    """
+    return TokenRevocationService(None, max_token_ttl_seconds=0)
 
 
 @pytest.fixture
@@ -185,6 +195,7 @@ def _create_test_app(jwt_service: JWTService) -> Litestar:
         dependencies={"current_user_id": Provide(get_current_user_id)},
     )
     app.state["jwt_service"] = jwt_service
+    app.state["token_revocation"] = _no_op_token_revocation()
     return app
 
 
@@ -312,6 +323,7 @@ class TestStorageControllerAuth:
             },
         )
         app.state["jwt_service"] = jwt_service
+        app.state["token_revocation"] = _no_op_token_revocation()
         app.state["mock_content_service"] = mock_content_service
         return app
 
@@ -603,6 +615,127 @@ class TestAuthGuardUncoveredBranches:
             state_product_id="synthara",
         )
         with pytest.raises(NotAuthorizedException, match="different product"):
+            await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+
+class TestAuthGuardRevocation:
+    """auth_guard's revocation integration (D5): ordering and state-on-reject."""
+
+    def _make_connection(
+        self,
+        jwt_service: JWTService,
+        token_revocation: Any,
+        authorization: str,
+        state_product_id: str | None = None,
+    ) -> Any:
+        from unittest.mock import MagicMock
+
+        state: dict[str, Any] = {}
+        if state_product_id is not None:
+            state["product_id"] = state_product_id
+
+        conn = MagicMock()
+        conn.headers.get.return_value = authorization
+        conn.state.__getitem__ = lambda self, k: state[k]  # noqa: ARG005
+        conn.state.__setitem__ = lambda self, k, v: state.update({k: v})  # noqa: ARG005
+        conn.state.get = state.get
+
+        app_state = {"jwt_service": jwt_service, "token_revocation": token_revocation}
+        conn.app.state.get = app_state.get
+        return conn, state
+
+    @pytest.mark.asyncio
+    async def test_product_mismatch_short_circuits_before_revocation_check(
+        self, jwt_service: JWTService
+    ) -> None:
+        """_enforce_product is a cheap local check — it must run before the
+        Redis round-trip in is_revoked(), not after."""
+        from litestar.exceptions import NotAuthorizedException
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        token, _ = jwt_service.create_access_token(uuid4(), product_id="vex")
+        token_revocation = AsyncMock()
+        conn, _state = self._make_connection(
+            jwt_service,
+            token_revocation,
+            authorization=f"Bearer {token}",
+            state_product_id="synthara",
+        )
+
+        with pytest.raises(NotAuthorizedException, match="different product"):
+            await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        token_revocation.is_revoked.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_revoked_token_rejected_and_state_never_set(
+        self, jwt_service: JWTService
+    ) -> None:
+        from litestar.exceptions import NotAuthorizedException
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        token, _ = jwt_service.create_access_token(uuid4(), product_id="vex")
+        token_revocation = AsyncMock()
+        token_revocation.is_revoked.return_value = True
+        conn, state = self._make_connection(
+            jwt_service,
+            token_revocation,
+            authorization=f"Bearer {token}",
+            state_product_id="vex",
+        )
+
+        with pytest.raises(NotAuthorizedException, match="Invalid or expired token"):
+            await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        token_revocation.is_revoked.assert_awaited_once()
+        assert "user_id" not in state
+        assert "auth_user" not in state
+
+    @pytest.mark.asyncio
+    async def test_non_revoked_token_sets_state(self, jwt_service: JWTService) -> None:
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        uid = uuid4()
+        token, _ = jwt_service.create_access_token(uid, product_id="vex")
+        token_revocation = AsyncMock()
+        token_revocation.is_revoked.return_value = False
+        conn, state = self._make_connection(
+            jwt_service,
+            token_revocation,
+            authorization=f"Bearer {token}",
+            state_product_id="vex",
+        )
+
+        await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
+
+        assert state["user_id"] == uid
+        token_revocation.is_revoked.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_token_revocation_service_raises_runtime_error(
+        self, jwt_service: JWTService
+    ) -> None:
+        """Mirrors the jwt_service-missing case — a misconfigured app.state,
+        not a runtime condition to degrade on."""
+        from litestar.handlers import BaseRouteHandler
+
+        from src.api.security.guards import auth_guard
+
+        token, _ = jwt_service.create_access_token(uuid4(), product_id="vex")
+        conn, _state = self._make_connection(
+            jwt_service,
+            token_revocation=None,
+            authorization=f"Bearer {token}",
+            state_product_id="vex",
+        )
+
+        with pytest.raises(RuntimeError, match="Token revocation service not configured"):
             await auth_guard(conn, MagicMock(spec=BaseRouteHandler))
 
 

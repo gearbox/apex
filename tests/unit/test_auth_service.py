@@ -426,6 +426,30 @@ class TestAuthServiceLogout:
         assert count == 5
         mock_repository.revoke_all_user_tokens.assert_called_once_with(user_id)
 
+    @pytest.mark.asyncio
+    async def test_logout_all_bulk_revokes_access_tokens(
+        self,
+        mock_repository: AsyncMock,
+        jwt_service: JWTService,
+        password_service: PasswordService,
+    ) -> None:
+        """logout_all (issue #142) must also write the user's revocation
+        epoch, not just revoke refresh tokens — otherwise a stolen access
+        token survives 'log out everywhere' for its full remaining lifetime."""
+        mock_token_revocation = AsyncMock()
+        service = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            token_revocation_service=mock_token_revocation,
+        )
+        user_id = uuid4()
+        mock_repository.revoke_all_user_tokens.return_value = 2
+
+        await service.logout_all(user_id)
+
+        mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user_id)
+
 
 class TestAuthServiceMissingBranches:
     """Cover remaining uncovered branches."""

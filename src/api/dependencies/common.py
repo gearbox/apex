@@ -62,6 +62,7 @@ from src.api.services.push import PushService, PywebpushSender
 from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings, StorageError
 from src.api.services.telegram.sender import HttpxTelegramSender
+from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
@@ -104,6 +105,7 @@ class ServiceContainer:
     r2_public_assets_storage: R2StorageService | None = None
     db_manager: DatabaseManager | None = None
     jwt_service: JWTService | None = None
+    token_revocation_service: TokenRevocationService | None = None
     password_service: PasswordService | None = None
     billing_service: BillingService | None = None
     payment_provider_state_service: PaymentProviderStateService | None = None
@@ -268,6 +270,21 @@ def get_jwt_service() -> JWTService:
     return _services.jwt_service
 
 
+def get_token_revocation_service() -> TokenRevocationService:
+    """Provide TokenRevocationService singleton.
+
+    Returns:
+        TokenRevocationService instance (a working no-op if redis_url is
+        unset — see the service docstring for the fail-open posture).
+
+    Raises:
+        RuntimeError: If not initialized.
+    """
+    if _services.token_revocation_service is None:
+        raise RuntimeError("TokenRevocationService not initialized")
+    return _services.token_revocation_service
+
+
 def get_password_service() -> PasswordService:
     """Provide password service singleton.
 
@@ -299,6 +316,7 @@ def get_auth_service(session: AsyncSession) -> AuthService:
         session=session,
         email_verification_service=get_email_verification_service(),
         ops_event_bus=get_ops_event_bus(),
+        token_revocation_service=get_token_revocation_service(),
     )
 
 
@@ -317,6 +335,7 @@ def get_user_service(session: AsyncSession) -> UserService:
         password_service=get_password_service(),
         age_verification_service=AgeVerificationService(),
         r2_storage=_services.r2_storage,
+        token_revocation_service=get_token_revocation_service(),
     )
 
 
@@ -619,7 +638,7 @@ async def init_services(settings: Settings) -> JWTService:
     logger.info("provisioning_callback_service.initialized")
 
     # Initialize Redis (required for pub/sub and rate limiting)
-    from src.core.redis import init_redis_pool
+    from src.core.redis import get_redis_client, init_redis_pool
 
     if settings.redis_url:
         init_redis_pool(settings.redis_url)
@@ -634,6 +653,18 @@ async def init_services(settings: Settings) -> JWTService:
 
     _services.ops_event_bus = OpsEventBus(enabled=settings.redis_url is not None)
     logger.info("ops_event_bus.initialized", enabled=settings.redis_url is not None)
+
+    # Token revocation (issue #142) — a working no-op when Redis isn't
+    # configured, so call sites never branch on availability. TTL for the
+    # bulk-revocation epoch key must outlive every token type it protects.
+    _services.token_revocation_service = TokenRevocationService(
+        get_redis_client() if settings.redis_url else None,
+        max_token_ttl_seconds=max(
+            settings.jwt_access_token_expire_minutes * 60,
+            settings.content_cookie_ttl_hours * 3600,
+        ),
+    )
+    logger.info("token_revocation_service.initialized", enabled=settings.redis_url is not None)
 
     # Single BillingService singleton for the whole process — it is stateless
     # (a pure event-builder; publishing is the caller's job via
@@ -1354,6 +1385,8 @@ dependencies = {
     "product_id": Provide(get_product_id, sync_to_thread=False),
     # JWT service (needed by auth routes to mint content tokens)
     "jwt_service": Provide(get_jwt_service, sync_to_thread=False),
+    # Token revocation (needed by the logout route to denylist its own jti)
+    "token_revocation_service": Provide(get_token_revocation_service, sync_to_thread=False),
     # Content proxy
     "content_proxy": Provide(get_content_proxy, sync_to_thread=False),
     # Library

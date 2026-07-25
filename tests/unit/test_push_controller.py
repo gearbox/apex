@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.routes.push import PushController
 from src.api.security import JWTConfig, JWTService
 from src.api.services.push import PushService
+from src.api.services.token_revocation import TokenRevocationService
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
 
@@ -71,6 +72,7 @@ def _create_app(
         },
     )
     app.state["jwt_service"] = jwt_service
+    app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
     app.state["mock_session"] = mock_session
     return app
 

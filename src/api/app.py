@@ -23,7 +23,12 @@ from litestar.status_codes import (
     HTTP_500_INTERNAL_SERVER_ERROR,
 )
 
-from src.api.dependencies.common import dependencies, init_services, shutdown_services
+from src.api.dependencies.common import (
+    dependencies,
+    get_token_revocation_service,
+    init_services,
+    shutdown_services,
+)
 from src.api.middleware.logging import RequestLoggingMiddleware
 from src.api.middleware.product import ProductMiddleware
 from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_config
@@ -391,6 +396,8 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:
 
     # Store JWT service in app state for auth guards
     app.state["jwt_service"] = jwt_service
+    # Store token revocation service in app state for auth guards (issue #142)
+    app.state["token_revocation"] = get_token_revocation_service()
 
     try:
         yield

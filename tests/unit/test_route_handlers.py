@@ -1550,15 +1550,107 @@ class TestAuthRouteHandlers:
         product_config.cookie_domain = "example.com"
         settings = MagicMock()
         settings.content_cookie_secure = True
+        request = MagicMock()
+        request.headers.get.return_value = None
+        jwt_service = MagicMock()
+        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
+            request=request,
             data=data,
             auth_service=auth_service,
+            jwt_service=jwt_service,
+            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
         assert response.status_code == 200
+        # No Authorization header presented — nothing to denylist.
+        jwt_service.decode_access_token.assert_not_called()
+        token_revocation_service.revoke_token.assert_not_called()
+
+    async def test_logout_with_bearer_denylists_presenting_token_jti(self) -> None:
+        """issue #142 — POST /v1/auth/logout denylists the presenting access
+        token's own jti alongside the existing refresh-token revocation."""
+        from src.api.routes.auth import AuthController
+        from src.api.security.jwt import JWTConfig, JWTService
+
+        real_jwt_service = JWTService(
+            JWTConfig(secret_key="test_secret_key_for_testing_only_256bits_long")
+        )
+        token, expires_at = real_jwt_service.create_access_token(uuid4(), product_id="vex")
+        payload = real_jwt_service.decode_access_token(token)
+        assert payload is not None
+
+        auth_service = AsyncMock()
+        auth_service.logout = AsyncMock()
+        data = MagicMock()
+        data.refresh_token = "ref"
+        product_config = MagicMock()
+        product_config.cookie_domain = "example.com"
+        settings = MagicMock()
+        settings.content_cookie_secure = True
+        request = MagicMock()
+        request.headers.get.return_value = f"Bearer {token}"
+        token_revocation_service = AsyncMock()
+
+        response = await AuthController.logout.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            request=request,
+            data=data,
+            auth_service=auth_service,
+            jwt_service=real_jwt_service,
+            token_revocation_service=token_revocation_service,
+            product_config=product_config,
+            settings=settings,
+        )
+
+        assert response.status_code == 200
+        auth_service.logout.assert_awaited_once_with("ref")
+        token_revocation_service.revoke_token.assert_awaited_once_with(
+            payload.jti, int(expires_at.timestamp())
+        )
+
+    async def test_logout_with_expired_bearer_skips_jti_denylist(self) -> None:
+        """An already-expired presenting token decodes to None — nothing to
+        denylist, only the refresh token is revoked (pre-#142 behavior)."""
+        from src.api.routes.auth import AuthController
+        from src.api.security.jwt import JWTConfig, JWTService
+
+        expired_jwt_service = JWTService(
+            JWTConfig(
+                secret_key="test_secret_key_for_testing_only_256bits_long",
+                access_token_expire_minutes=-1,
+            )
+        )
+        token, _ = expired_jwt_service.create_access_token(uuid4(), product_id="vex")
+
+        auth_service = AsyncMock()
+        auth_service.logout = AsyncMock()
+        data = MagicMock()
+        data.refresh_token = "ref"
+        product_config = MagicMock()
+        product_config.cookie_domain = "example.com"
+        settings = MagicMock()
+        settings.content_cookie_secure = True
+        request = MagicMock()
+        request.headers.get.return_value = f"Bearer {token}"
+        token_revocation_service = AsyncMock()
+
+        response = await AuthController.logout.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            request=request,
+            data=data,
+            auth_service=auth_service,
+            jwt_service=expired_jwt_service,
+            token_revocation_service=token_revocation_service,
+            product_config=product_config,
+            settings=settings,
+        )
+
+        assert response.status_code == 200
+        token_revocation_service.revoke_token.assert_not_called()
 
     async def test_forgot_password_always_200(self) -> None:
         from src.api.routes.auth import AuthController

@@ -44,13 +44,20 @@ Refresh tokens are stored in the database (not as JWTs); only access tokens are 
 |----------|---------|------|-------------|
 | `JWT_SECRET_KEY` | `"CHANGE_ME_..."` | `str` | **⚠️ Must be changed.** HMAC secret for signing access tokens. Any change immediately invalidates all existing tokens. |
 | `JWT_ALGORITHM` | `HS256` | `str` | JWT signing algorithm. `HS256` is standard; `RS256` requires key pair setup. |
-| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | `int (1–60)` | Lifetime of access tokens. Short values improve security; clients must refresh more often. |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | `int (1–60)` | Lifetime of access tokens. Short values improve security; clients must refresh more often. Still deliberately not raised even though revocation now exists (see the field's docstring in `src/core/config.py`) — 15 minutes remains the containment window for a credential compromised between revocation checks (e.g. Redis down at the moment of theft). |
 | `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `7` | `int (1–30)` | Lifetime of refresh tokens. Stored in the database; revoked on logout. |
 | `JWT_ISSUER` | `apex-api` | `str \| None` | Optional `iss` claim embedded in tokens. Validated on decode. Set to `None` to disable. |
 
 > **⚠️ docker-compose.yml gap:** The `JWT_*` environment variables are currently **missing** from
 > `docker-compose.yml`. Add them to the `apex-api` service environment section alongside the
 > other settings, or the containerised service will use the insecure placeholder default.
+
+> **Access-token revocation (issue #142):** access tokens are stateless JWTs, but `auth_guard` /
+> `content_auth_guard` now also reject a token if `REDIS_URL` is configured and `TokenRevocationService`
+> (`src/api/services/token_revocation.py`) says so — either its `iat` predates the caller's most recent
+> bulk "revoke all sessions" event (`logout-all`, password change, deactivation), or its specific `jti` was
+> denylisted by a single-device `POST /v1/auth/logout`. See `REDIS_URL` below for the fail-open behavior
+> when Redis is unset or unavailable.
 
 ---
 
@@ -181,7 +188,7 @@ Controls rate limits for authentication endpoints using Redis sliding-window cou
 
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
-| `REDIS_URL` | `None` | `str \| None` | Redis URL (e.g., `redis://localhost:6379/0`). If missing, falls back to single-process in-memory limits. |
+| `REDIS_URL` | `None` | `str \| None` | Redis URL (e.g., `redis://localhost:6379/0`). If missing, falls back to single-process in-memory limits. Also backs `TokenRevocationService` (issue #142, access-token revocation — see the JWT Authentication section above): without it, `logout`/`logout-all`/password-change/deactivation still revoke refresh tokens as before, but live access tokens and content cookies are not denylisted until they expire naturally. A Redis outage after startup degrades the same way (fail-open, logged as `authrev.backend_unavailable`) rather than rejecting authenticated requests. |
 | `RATE_LIMIT_REGISTER` | `5/hour` | `str` | Limit on register endpoint per IP. |
 | `RATE_LIMIT_LOGIN` | `10/minute` | `str` | Limit on login endpoint per IP. |
 | `RATE_LIMIT_FORGOT_PASSWORD` | `3/hour` | `str` | Limit on forgot-password endpoint per IP. |

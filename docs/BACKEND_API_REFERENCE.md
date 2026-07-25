@@ -1,22 +1,21 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-25 — **Content cookie lifetime & expiry advertisement** (§2, §9):
-> `content_cookie_ttl_hours` default raised from 1h to **24h** (bound raised from 24h to **168h**/7d) so
-> the `apex_content` cookie survives a suspended PWA — no API traffic means no `/v1/auth/refresh` to
-> re-attach it, so a short-lived cookie previously aged out during suspension and every `<img>` the client
-> fired on resume 401'd before recovery could kick in. `jwt_access_token_expire_minutes` is unchanged at
-> 15 — deliberately not raised; see its config docstring. `POST /v1/auth/content-cookie` now returns
-> **`200`** (was `204`) with a body, `ContentCookieResponse { expires_at: datetime }`, alongside the
-> `Set-Cookie` — this endpoint is days old with exactly one consumer, so the status change is safe. Every
-> `TokenResponse` (register/login/refresh) now also carries `content_cookie_expires_at: datetime`, so a
-> client learns the cookie's absolute expiry from its existing auth response with no extra request. Both
-> values come from one call: `mint_content_cookie` (`src/api/security/content_cookie.py`) derives
-> `max_age` from `content_cookie_max_age` and mints the token via `JWTService.create_content_token`,
-> whose returned `exp` *is* the advertised `expires_at` — not a parallel `now()` computation — so the
-> `Set-Cookie` `Max-Age` and the advertised `expires_at` can never diverge from the value that actually
-> governs the guard. Frontend should
-> regenerate types (`gen:api`) to pick up `ContentCookieResponse` and the new `TokenResponse` field, and
-> schedule its proactive re-mint from the real remaining lifetime rather than a hard-coded constant._
+> _Last updated: 2026-07-25 — **Access-token revocation** (§2, §3): closes
+> [#142](https://github.com/gearbox/apex/issues/142). `POST /v1/auth/logout`,
+> `POST /v1/users/me/logout-all`, `POST /v1/users/me/password`, and `DELETE /v1/users/me` now invalidate
+> live access tokens and the `apex_content` cookie **immediately**, not just refresh tokens — previously a
+> stolen access token (or a cookie minted before the 24h TTL raise) survived an explicit "log out
+> everywhere" for its full remaining lifetime. Two mechanisms, both backed by Redis (`TokenRevocationService`,
+> `src/api/services/token_revocation.py`): a per-user "revoke all sessions" epoch (bulk sites — logout-all,
+> password change, deactivation) and a per-token denylist keyed by the token's own `jti` (single-device
+> logout only, from the `Authorization` header presented to that call). Both `auth_guard` and
+> `content_auth_guard` now consult this on every request — one Redis round-trip, after the (free) product
+> check and before setting connection state. **Redis dependency, fail-open**: this is a deliberate security
+> posture, not a gap — with `REDIS_URL` unset, or Redis transiently down, revocation silently degrades to
+> the pre-#142 refresh-token-only behavior (logged once at startup / on each backend error as
+> `authrev.backend_unavailable`) rather than 401ing every authenticated request. No response shapes, request
+> shapes, or status codes changed — this is a behind-the-scenes tightening of what "logged out" means.
+> No frontend action required.
 >
 > _Prior (2026-07-24): **Content Proxy performance & streaming** (§9): `GET /v1/content/outputs/{id}`
 > and `GET /v1/content/uploads/{id}` now support single-range `Range` requests (`206 Partial Content` /
@@ -246,7 +245,10 @@ Errors:   401 (token revoked/expired/invalid | token_reuse_detected | account_in
 ```
 Request:  { refresh_token: string }
 Response: { message: string }
-Note:     Revokes the specific refresh token
+Note:     Revokes the specific refresh token. If an Authorization: Bearer header is also present
+          (optional — this route isn't guarded, since the access token may already be expired),
+          its jti is denylisted for its remaining lifetime (issue #142), so that specific access
+          token 401s on its next use while any other device's token is unaffected.
 ```
 
 #### `POST /v1/auth/verify-email`
@@ -354,14 +356,17 @@ Note:     Age capture is policy-driven by the active product's age_gate (see GET
 Request:  { current_password: string, new_password: string }
 Response: { message: string }
 Errors:   400 invalid_password
-Note:     Revokes ALL refresh tokens
+Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
+          (issue #142) — the most security-sensitive of the three bulk-revocation sites,
+          since a password change is often a reaction to suspected compromise.
 ```
 
 #### `DELETE /v1/users/me`
 
 ```
 Response: { message: string, deactivated_at: datetime }
-Note:     Soft delete — account can be recovered
+Note:     Soft delete — account can be recovered. Revokes ALL refresh tokens, plus all live
+          access tokens and the content cookie (issue #142).
 ```
 
 #### `GET /v1/users/me/stats`
@@ -385,6 +390,11 @@ Response: {
 
 ```
 Response: { message: string }
+Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
+          (issue #142) — the access token used to make this very call also stops working
+          from the next request onward. See the module docstring on TokenRevocationService
+          (src/api/services/token_revocation.py) for the Redis-backed epoch mechanism and its
+          fail-open posture when Redis is unset or transiently unavailable.
 ```
 
 ---
@@ -1091,7 +1101,7 @@ Provides stable, non-expiring authenticated URLs for user content. The server re
 
 ### Auth: the `apex_content` cookie
 
-Requests here accept either a Bearer access token or the `apex_content` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/v1/content`) — see §2 for how it's minted/re-minted. Its lifetime is `content_cookie_ttl_hours` (default **24h**, configurable up to **168h**/7d) — raised from a 1h default specifically so the cookie survives a suspended PWA: with no API traffic there's no `/v1/auth/refresh` to re-attach it, so a short TTL ages out during suspension and the first batch of `<img>` requests on resume all 401 before any JSON call can trigger recovery. This is deliberately asymmetric with the 15-minute access token (§2.1) — the content token is `type: "content"` (structurally rejected by the access-token decoder), product-scoped, and every request here still performs the full ownership check below regardless of which credential was presented; its blast radius is read access to the bearer's own media on one product. `POST /v1/auth/logout` (§2) clears the cookie — that remains the revocation path, since access/content tokens themselves are not denylisted.
+Requests here accept either a Bearer access token or the `apex_content` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/v1/content`) — see §2 for how it's minted/re-minted. Its lifetime is `content_cookie_ttl_hours` (default **24h**, configurable up to **168h**/7d) — raised from a 1h default specifically so the cookie survives a suspended PWA: with no API traffic there's no `/v1/auth/refresh` to re-attach it, so a short TTL ages out during suspension and the first batch of `<img>` requests on resume all 401 before any JSON call can trigger recovery. This is deliberately asymmetric with the 15-minute access token (§2.1) — the content token is `type: "content"` (structurally rejected by the access-token decoder), product-scoped, and every request here still performs the full ownership check below regardless of which credential was presented; its blast radius is read access to the bearer's own media on one product. As of issue #142, `content_auth_guard` also consults `TokenRevocationService`: `POST /v1/auth/logout` clears the cookie client-side *and* denylists a presenting access token's own jti, while `logout-all`/password-change/deactivation (§3) reject any token — access or content — issued before that event, closing the exposure window the 24h TTL raise opened.
 
 ### Response Headers
 

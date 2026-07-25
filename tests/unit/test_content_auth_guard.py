@@ -18,6 +18,7 @@ from src.api.dependencies.auth import get_current_user_id
 from src.api.security import content_auth_guard
 from src.api.security.guards import AuthenticatedUser
 from src.api.security.jwt import JWTConfig, JWTService
+from src.api.services.token_revocation import TokenRevocationService
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
 PRODUCT_ID = "vex"
@@ -38,6 +39,11 @@ def test_user_id() -> UUID:
     return uuid4()
 
 
+def _no_op_token_revocation() -> TokenRevocationService:
+    """A TokenRevocationService with no Redis client — never reports revoked."""
+    return TokenRevocationService(None, max_token_ttl_seconds=0)
+
+
 def _make_app(jwt_service: JWTService, product_id: str = PRODUCT_ID) -> Litestar:
     """Minimal app wiring content_auth_guard on a test route."""
 
@@ -50,6 +56,7 @@ def _make_app(jwt_service: JWTService, product_id: str = PRODUCT_ID) -> Litestar
         dependencies={"current_user_id": Provide(get_current_user_id)},
     )
     app.state["jwt_service"] = jwt_service
+    app.state["token_revocation"] = _no_op_token_revocation()
     # Simulate ProductMiddleware setting product_id in state via middleware
     # For guard tests we inject it via a custom middleware-like fixture
     app.state["_test_product_id"] = product_id
@@ -223,10 +230,74 @@ class TestContentAuthGuardProductCheck:
         mock_connection.headers.get.return_value = None
         mock_connection.cookies.get.return_value = token
         mock_connection.state = state
-        mock_connection.app.state.get.return_value = jwt_service
+        app_state = {"jwt_service": jwt_service, "token_revocation": _no_op_token_revocation()}
+        mock_connection.app.state.get = app_state.get
 
         import asyncio
 
         asyncio.run(content_auth_guard(mock_connection, MagicMock()))
         assert state["user_id"] == uid
         assert isinstance(state["auth_user"], AuthenticatedUser)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: revocation integration (D5) — ordering and state-on-reject
+# ---------------------------------------------------------------------------
+
+
+class TestContentAuthGuardRevocation:
+    """content_auth_guard's revocation integration mirrors auth_guard's."""
+
+    def test_product_mismatch_short_circuits_before_revocation_check(
+        self, jwt_service: JWTService
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        token, _ = jwt_service.create_content_token(
+            uuid4(), product_id="synthara", ttl=timedelta(hours=1)
+        )
+        token_revocation = AsyncMock()
+
+        state: dict[str, Any] = {"product_id": "vex"}
+        mock_connection = MagicMock()
+        mock_connection.headers.get.return_value = None
+        mock_connection.cookies.get.return_value = token
+        mock_connection.state = state
+        app_state = {"jwt_service": jwt_service, "token_revocation": token_revocation}
+        mock_connection.app.state.get = app_state.get
+
+        import asyncio
+
+        with pytest.raises(NotAuthorizedException, match="different product"):
+            asyncio.run(content_auth_guard(mock_connection, MagicMock()))
+
+        token_revocation.is_revoked.assert_not_awaited()
+
+    def test_revoked_cookie_rejected_and_state_never_set(self, jwt_service: JWTService) -> None:
+        from unittest.mock import AsyncMock
+
+        token, _ = jwt_service.create_content_token(
+            uuid4(), product_id="vex", ttl=timedelta(hours=1)
+        )
+        token_revocation = AsyncMock()
+        token_revocation.is_revoked.return_value = True
+
+        class DictState(dict):  # type: ignore[type-arg]
+            pass
+
+        state = DictState({"product_id": "vex"})
+        mock_connection = MagicMock()
+        mock_connection.headers.get.return_value = None
+        mock_connection.cookies.get.return_value = token
+        mock_connection.state = state
+        app_state = {"jwt_service": jwt_service, "token_revocation": token_revocation}
+        mock_connection.app.state.get = app_state.get
+
+        import asyncio
+
+        with pytest.raises(NotAuthorizedException, match="Missing or invalid credentials"):
+            asyncio.run(content_auth_guard(mock_connection, MagicMock()))
+
+        token_revocation.is_revoked.assert_awaited_once()
+        assert "user_id" not in state
+        assert "auth_user" not in state

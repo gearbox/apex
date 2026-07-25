@@ -47,6 +47,7 @@ def _make_service(
     user: MagicMock | None = None,
     password_verify: bool = True,
     age_verification_service: AgeVerificationService | None = None,
+    token_revocation_service: AsyncMock | None = None,
 ) -> tuple[UserService, AsyncMock, MagicMock]:
     repo = AsyncMock()
     pwd = MagicMock()
@@ -61,7 +62,12 @@ def _make_service(
         repo.get_user = AsyncMock(return_value=None)
 
     age_svc = age_verification_service or AgeVerificationService()
-    svc = UserService(repository=repo, password_service=pwd, age_verification_service=age_svc)
+    svc = UserService(
+        repository=repo,
+        password_service=pwd,
+        age_verification_service=age_svc,
+        token_revocation_service=token_revocation_service,
+    )
     return svc, repo, pwd
 
 
@@ -343,6 +349,20 @@ class TestChangePassword:
         with pytest.raises(InvalidPasswordError):
             await svc.change_password(user.id, current_password="wrong", new_password="new")
 
+    async def test_bulk_revokes_access_tokens(self) -> None:
+        """issue #142 — the most security-sensitive of the three bulk sites:
+        a password change should kill live access tokens/content cookies,
+        not just refresh tokens."""
+        user = _make_user()
+        mock_token_revocation = AsyncMock()
+        svc, repo, _ = _make_service(user, token_revocation_service=mock_token_revocation)
+        repo.update_user = AsyncMock(return_value=user)
+        repo.revoke_all_user_tokens = AsyncMock(return_value=3)
+
+        await svc.change_password(user.id, current_password="old", new_password="new")
+
+        mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user.id)
+
 
 class TestDeactivateAccount:
     async def test_deactivates_and_returns_timestamp(self) -> None:
@@ -361,6 +381,19 @@ class TestDeactivateAccount:
 
         with pytest.raises(UserNotFoundError):
             await svc.deactivate_account(uuid4())
+
+    async def test_bulk_revokes_access_tokens(self) -> None:
+        """issue #142 — deactivation should also kill live access
+        tokens/content cookies, not just refresh tokens."""
+        user = _make_user()
+        mock_token_revocation = AsyncMock()
+        svc, repo, _ = _make_service(user, token_revocation_service=mock_token_revocation)
+        repo.soft_delete_user = AsyncMock(return_value=user)
+        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+
+        await svc.deactivate_account(user.id)
+
+        mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user.id)
 
 
 class TestGetStats:

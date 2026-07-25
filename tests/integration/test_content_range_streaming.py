@@ -32,6 +32,7 @@ from src.api.routes.content import ContentProxyController
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.content_proxy import ContentNotFoundError, ContentProxyService
 from src.api.services.storage.r2 import ObjectStream, R2StorageService
+from src.api.services.token_revocation import TokenRevocationService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -156,6 +157,7 @@ def _make_app(content_proxy: Any, r2_storage: Any, jwt_service: JWTService) -> L
         },
     )
     app.state["jwt_service"] = jwt_service
+    app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
     return app
 
 
