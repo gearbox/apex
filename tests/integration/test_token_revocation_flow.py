@@ -29,14 +29,14 @@ from litestar.di import Provide
 from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED
 from litestar.testing import TestClient
 from redis.exceptions import NoScriptError
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id, get_optional_user_id
 from src.api.routes.auth import AuthController
-from src.api.security import auth_guard, content_auth_guard, optional_auth_guard
+from src.api.security import auth_guard, content_auth_guard, hash_token, optional_auth_guard
 from src.api.security.jwt import JWTConfig, JWTService
-from src.api.services.auth import AuthService, TokenReuseDetectedError
+from src.api.services.auth import AuthService, InvalidRefreshTokenError, TokenReuseDetectedError
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
@@ -112,6 +112,7 @@ def _make_repo() -> AsyncMock:
     repo = AsyncMock()
     repo.revoke_all_user_tokens.return_value = 1
     repo.get_refresh_token_by_hash.return_value = None
+    repo.get_refresh_token_owner.return_value = None
     repo.get_refresh_token_by_hash_for_update.return_value = None
     return repo
 
@@ -507,6 +508,10 @@ class TestTokenReuseDetectionRevokesAccessTokens:
         stored_token.is_revoked = True
         stored_token.user_id = user_id
         stored_token.family_id = uuid4()
+        # revoked_reason is an unconfigured MagicMock attribute here, not
+        # RefreshTokenRevocationReason.BULK_REVOCATION.value — correctly
+        # takes the theft-detection path, not the B2 benign-race path.
+        repo.get_refresh_token_owner.return_value = user_id
         repo.get_refresh_token_by_hash_for_update.return_value = stored_token
         repo.revoke_token_family = AsyncMock(return_value=3)
 
@@ -619,10 +624,17 @@ async def _attempt_refresh(
         )
         try:
             tokens, _uid = await auth_service.refresh_tokens(raw_refresh_token)
-        except TokenReuseDetectedError:
+        except (TokenReuseDetectedError, InvalidRefreshTokenError):
+            # TokenReuseDetectedError: refresh observed the row already
+            # revoked with a non-bulk_revocation reason (shouldn't happen
+            # in this race, but tolerated). InvalidRefreshTokenError: the
+            # expected outcome when logout-all won the user-row lock first
+            # — G1's lock means refresh then observes
+            # revoked_reason=bulk_revocation and takes the benign B2 path.
             outcome["refresh"] = "rejected"
         else:
             outcome["refresh"] = tokens.access_token
+            outcome["new_refresh_token"] = tokens.refresh_token
 
 
 async def _attempt_logout_all(
@@ -716,6 +728,26 @@ class TestRefreshVsLogoutAllRace:
                     assert await token_revocation.is_revoked(payload) is True, (
                         "a refresh that raced logout-all minted an access token "
                         "that survives revocation"
+                    )
+
+                    # G1 — the new refresh-token row itself must also be
+                    # dead in the DB; the epoch check above only proves the
+                    # paired access token is dead, not that the credential
+                    # chain terminates (a live, unrevoked refresh token
+                    # would let the client mint indefinitely many more
+                    # post-epoch access tokens).
+                    new_refresh_token = outcome["new_refresh_token"]
+                    async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+                        result = await session.execute(
+                            select(RefreshToken).where(
+                                RefreshToken.token_hash == hash_token(new_refresh_token)
+                            )
+                        )
+                        new_token_row = result.scalar_one()
+                    assert new_token_row.is_revoked is True, (
+                        "a refresh that raced logout-all minted a refresh token "
+                        "row that survives un-revoked in the DB, allowing "
+                        "indefinite further rotation"
                     )
             finally:
                 await _cleanup_user(db_engine, user_id)

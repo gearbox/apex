@@ -26,6 +26,17 @@ class TokenRevocationChecker:
     name = "token_revocation"
     category = ComponentCategory.infrastructure
     product_id = None
+    # issue #142 G2 — this checker's entire purpose is to report a
+    # degraded-but-functioning state (Redis unset, or the breaker open).
+    # Without Redis, the checker reports `inactive` and would otherwise
+    # 503 GET /health/ready permanently on every deployment that doesn't
+    # set REDIS_URL. With Redis down, the breaker opens and the checker
+    # reports `unhealthy` — gating readiness on that would pull the entire
+    # API fleet from rotation, reintroducing exactly the total-outage
+    # scenario the fail-open posture (see token_revocation.py's module
+    # docstring, D3) exists to prevent. Stays visible in detailed()/GET
+    # /v1/admin/health unchanged (A2).
+    gates_readiness = False
 
     def __init__(self, service: TokenRevocationService) -> None:
         self._service = service

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import CursorResult, case, delete, func, literal, select, tuple_, update
 
-from src.core.enums import JobStatus, SubscriptionTier, UserRole
+from src.core.enums import JobStatus, RefreshTokenRevocationReason, SubscriptionTier, UserRole
 from src.db.models import GenerationJob, GenerationOutput, RefreshToken, User, UserImage
 
 if TYPE_CHECKING:
@@ -236,10 +236,44 @@ class UserRepository:
         await self._session.flush()
         return await self.get_active_user(user_id)
 
+    async def lock_user_for_session_change(self, user_id: UUID) -> None:
+        """Acquire an exclusive row lock on the user row (issue #142 G1).
+
+        Serializes a bulk session revocation (logout-all, password change,
+        deactivation, password reset, refresh-token reuse detection) against
+        a concurrent refresh-token rotation for the same user. Without this,
+        a rotation can read the pre-revocation epoch, mint a fresh
+        refresh-token row, and commit before a bulk revocation's UPDATE
+        (blocked only on the *old* row) takes its snapshot — that snapshot
+        never sees the new row, so it survives a revocation meant to kill
+        it.
+
+        **Lock ordering is user row -> refresh-token row in every path that
+        acquires both.** ``revoke_all_user_tokens``/``revoke_all_refresh_tokens``
+        below acquire this lock before their bulk UPDATE, and
+        ``AuthService.refresh_tokens`` acquires it before
+        ``get_refresh_token_by_hash_for_update``. Reversing the order in
+        either path deadlocks against the other.
+
+        Callers must hold this lock for the remainder of the transaction —
+        it is released at commit/rollback, same as any other Postgres row
+        lock. Returns nothing; the lock itself is the effect.
+
+        Args:
+            user_id: User whose row to lock.
+        """
+        await self._session.execute(select(User.id).where(User.id == user_id).with_for_update())
+
     async def revoke_all_refresh_tokens(self, user_id: UUID) -> int:
         """Revoke all active refresh tokens for a user.
 
-        Used after a password reset to force re-authentication on all devices.
+        Used after a password reset to force re-authentication on all
+        devices. Acquires ``lock_user_for_session_change`` first (issue
+        #142 G1) so this bulk UPDATE is serialized against a concurrent
+        refresh-token rotation for the same user — see that method's
+        docstring for the lock-ordering rule. Every revoked row is stamped
+        ``revoked_reason=bulk_revocation`` (issue #142 B2) so a refresh that
+        loses the race is reported as an ended session, not theft.
 
         Args:
             user_id: User whose tokens to revoke.
@@ -247,13 +281,17 @@ class UserRepository:
         Returns:
             Number of tokens revoked.
         """
+        await self.lock_user_for_session_change(user_id)
         result = cast(
             "CursorResult[tuple[()]]",
             await self._session.execute(
                 update(RefreshToken)
                 .where(RefreshToken.user_id == user_id)
                 .where(RefreshToken.is_revoked == False)  # noqa: E712
-                .values(is_revoked=True)
+                .values(
+                    is_revoked=True,
+                    revoked_reason=RefreshTokenRevocationReason.BULK_REVOCATION.value,
+                )
             ),
         )
         await self._session.flush()
@@ -318,21 +356,50 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_refresh_token_owner(self, token_hash: str) -> UUID | None:
+        """Look up only the owning user_id for a refresh-token hash (issue #142 G1).
+
+        Deliberately a scalar Core column select (``RefreshToken.user_id``),
+        not a full ORM entity load. Loading a full ``RefreshToken`` here
+        would populate the session's identity map with an object for this
+        row; a later locked re-read
+        (``get_refresh_token_by_hash_for_update``) would then return that
+        *same, already-loaded* Python object rather than re-populating it
+        from the freshly locked row — SQLAlchemy does not overwrite an
+        already-identity-mapped object's attributes from a subsequent
+        SELECT by default. That silently reintroduces a stale read exactly
+        where G1 needs a fresh one: ``AuthService.refresh_tokens`` calls
+        this to learn which user row to lock via
+        ``lock_user_for_session_change`` *before* acquiring the
+        refresh-token row lock, and must see the row's true state
+        (possibly just revoked by a bulk revocation that won the lock
+        race) once it does acquire it.
+
+        Returns:
+            The owning user_id, or None if no row matches this hash.
+        """
+        result = await self._session.execute(
+            select(RefreshToken.user_id).where(RefreshToken.token_hash == token_hash)
+        )
+        return result.scalar_one_or_none()
+
     async def get_refresh_token_by_hash_for_update(self, token_hash: str) -> RefreshToken | None:
-        """Same lookup as get_refresh_token_by_hash, but row-locked (issue #142 F2).
+        """Same lookup as get_refresh_token_by_hash, but row-locked (issue #142 F2, G1).
 
         Only for the refresh-token *rotation* path (AuthService.refresh_tokens)
         — do not reuse for read-only lookups such as single-device logout,
         which don't need the lock and would pay unnecessary row-lock
-        contention for no benefit. Locking this row serializes rotation
-        against revoke_all_user_tokens's bulk UPDATE: a concurrent bulk
-        revocation either commits before this lock is acquired (so the
-        caller observes is_revoked=True on the freshly locked row and takes
-        the reuse-detection branch) or blocks until this transaction
-        commits/rolls back (so it revokes the row only if this transaction
-        did not already revoke it first). The row is intentionally read and
-        re-checked from the same locked SELECT — no separate re-read query
-        is needed.
+        contention for no benefit. The caller must acquire
+        ``lock_user_for_session_change`` for this token's owner *before*
+        calling this method (lock ordering: user row -> refresh-token row —
+        see that method's docstring); with that in place, this row-lock
+        serializes rotation against revoke_all_user_tokens's bulk UPDATE: a
+        concurrent bulk revocation either commits before this lock is
+        acquired (so the caller observes is_revoked=True on the freshly
+        locked row and takes the reuse-detection branch) or blocks until
+        this transaction commits/rolls back. The row is intentionally read
+        and re-checked from the same locked SELECT — no separate re-read
+        query is needed.
 
         Args:
             token_hash: SHA-256 hash of token.
@@ -364,11 +431,19 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
-    async def revoke_refresh_token(self, token_id: UUID) -> bool:
-        """Revoke a refresh token.
+    async def revoke_refresh_token(
+        self, token_id: UUID, *, reason: RefreshTokenRevocationReason
+    ) -> bool:
+        """Revoke a single refresh token, recording why (issue #142 B2).
 
         Args:
             token_id: Token ID to revoke.
+            reason: Why this token is being revoked. Read by
+                AuthService.refresh_tokens to distinguish a benign lost race
+                against a bulk revocation
+                (``RefreshTokenRevocationReason.BULK_REVOCATION``) from
+                every other cause, which still triggers reuse-detection
+                theft reporting.
 
         Returns:
             True if revoked, False if not found.
@@ -378,7 +453,11 @@ class UserRepository:
             await self._session.execute(
                 update(RefreshToken)
                 .where(RefreshToken.id == token_id)
-                .values(is_revoked=True, revoked_at=datetime.now(UTC))
+                .values(
+                    is_revoked=True,
+                    revoked_at=datetime.now(UTC),
+                    revoked_reason=reason.value,
+                )
             ),
         )
         return (result.rowcount or 0) > 0
@@ -386,7 +465,10 @@ class UserRepository:
     async def revoke_token_family(self, family_id: UUID) -> int:
         """Revoke all tokens in a family.
 
-        Used when detecting potential token theft (reuse of revoked token).
+        Used when detecting potential token theft (reuse of revoked token)
+        — the only caller of this method, so every row it touches is
+        stamped ``revoked_reason=reuse_detected`` (issue #142 B2)
+        unconditionally.
 
         Args:
             family_id: Token family ID.
@@ -402,7 +484,11 @@ class UserRepository:
                     RefreshToken.family_id == family_id,
                     RefreshToken.is_revoked == False,  # noqa: E712
                 )
-                .values(is_revoked=True, revoked_at=datetime.now(UTC))
+                .values(
+                    is_revoked=True,
+                    revoked_at=datetime.now(UTC),
+                    revoked_reason=RefreshTokenRevocationReason.REUSE_DETECTED.value,
+                )
             ),
         )
         return result.rowcount or 0
@@ -410,7 +496,13 @@ class UserRepository:
     async def revoke_all_user_tokens(self, user_id: UUID) -> int:
         """Revoke all refresh tokens for a user.
 
-        Used on password change or logout-all.
+        Used on password change, deactivation, or logout-all. Acquires
+        ``lock_user_for_session_change`` first (issue #142 G1) so this bulk
+        UPDATE is serialized against a concurrent refresh-token rotation
+        for the same user — see that method's docstring for the
+        lock-ordering rule. Every revoked row is stamped
+        ``revoked_reason=bulk_revocation`` (issue #142 B2) so a refresh
+        that loses the race is reported as an ended session, not theft.
 
         Args:
             user_id: User ID.
@@ -418,6 +510,7 @@ class UserRepository:
         Returns:
             Number of tokens revoked.
         """
+        await self.lock_user_for_session_change(user_id)
         result = cast(
             "CursorResult[tuple[()]]",
             await self._session.execute(
@@ -426,7 +519,11 @@ class UserRepository:
                     RefreshToken.user_id == user_id,
                     RefreshToken.is_revoked == False,  # noqa: E712
                 )
-                .values(is_revoked=True, revoked_at=datetime.now(UTC))
+                .values(
+                    is_revoked=True,
+                    revoked_at=datetime.now(UTC),
+                    revoked_reason=RefreshTokenRevocationReason.BULK_REVOCATION.value,
+                )
             ),
         )
         return result.rowcount or 0

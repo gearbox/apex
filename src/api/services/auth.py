@@ -21,6 +21,7 @@ from src.api.security import (
     hash_token,
 )
 from src.api.services.ops_event_bus import OpsEventBus
+from src.core.enums import RefreshTokenRevocationReason
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
@@ -296,22 +297,71 @@ class AuthService:
             New TokenPair.
 
         Raises:
-            InvalidRefreshTokenError: If token is invalid/expired/revoked.
-            TokenReuseDetectedError: If revoked token was reused.
+            InvalidRefreshTokenError: If token is invalid/expired, or was
+                revoked by a bulk revocation that won the race against this
+                refresh (issue #142 B2 — reported as an ended session, not
+                theft).
+            TokenReuseDetectedError: If revoked token was reused for any
+                other reason (including legacy rows with no recorded
+                reason).
         """
         token_hash = hash_token(refresh_token)
-        # F2 — row-locked lookup serializes rotation against
-        # revoke_all_user_tokens's bulk UPDATE. See
-        # UserRepository.get_refresh_token_by_hash_for_update's docstring:
-        # is_revoked below is read from this same locked row, so it is
-        # already a re-read under the lock, not a stale pre-lock value.
+
+        # G1 — look up the owning user_id first via a scalar (non-ORM-entity)
+        # read so the user-row lock below can be acquired *before* the row
+        # lock on the refresh-token row itself, without loading a
+        # RefreshToken object into the session's identity map ahead of the
+        # locked read further down. See
+        # UserRepository.get_refresh_token_owner's docstring: doing this
+        # via a full-entity read (e.g. get_refresh_token_by_hash) would
+        # cause the later get_refresh_token_by_hash_for_update call to
+        # return that same, already-loaded (and now stale) Python object
+        # instead of one reflecting the freshly locked row — silently
+        # reintroducing exactly the stale read G1 exists to close.
+        # token_hash is immutable once a token is created, so this
+        # preliminary read cannot race with anything that would change
+        # which user owns this hash; the actual decision below is made
+        # from the locked re-read, not this one.
+        owner_user_id = await self._repo.get_refresh_token_owner(token_hash)
+        if owner_user_id is None:
+            raise InvalidRefreshTokenError("Invalid refresh token")
+
+        # G1 — lock ordering is user row -> refresh-token row in every path
+        # that acquires both: this method and every bulk-revocation method
+        # (UserRepository.revoke_all_user_tokens/revoke_all_refresh_tokens)
+        # acquire the user row first. Reversing the order in either path
+        # deadlocks against the other — see
+        # UserRepository.lock_user_for_session_change's docstring. With
+        # this lock held, a concurrent bulk revocation either already
+        # committed (so is_revoked/revoked_reason below reflect it) or
+        # blocks until this transaction commits/rolls back — the new
+        # refresh-token row minted further down is never invisible to it.
+        await self._repo.lock_user_for_session_change(owner_user_id)
+
+        # Re-read row-locked (issue #142 F2, G1): is_revoked/revoked_reason
+        # below are read from this same locked row, already a re-read under
+        # both locks, not a stale pre-lock value.
         stored_token = await self._repo.get_refresh_token_by_hash_for_update(token_hash)
 
         if stored_token is None:
             raise InvalidRefreshTokenError("Invalid refresh token")
 
-        # Check if token was already revoked (potential theft)
+        # Check if token was already revoked (potential theft, or a benign
+        # lost race against a bulk revocation — issue #142 B2)
         if stored_token.is_revoked:
+            if stored_token.revoked_reason == RefreshTokenRevocationReason.BULK_REVOCATION.value:
+                # B2 — this token lost the user-row lock race to a bulk
+                # revocation (logout-all/password-change/deactivation/
+                # password-reset). That is an ordinary, benign outcome, not
+                # theft: no ops alert, no warning log. Every other value —
+                # including NULL, for rows revoked before this column
+                # existed — falls through to the theft path below.
+                logger.info(
+                    "auth.refresh_lost_bulk_revocation_race",
+                    user_id=str(stored_token.user_id),
+                )
+                raise InvalidRefreshTokenError("Your session has ended. Please sign in again.")
+
             # Revoke entire token family as precaution
             revoked_count = await self._repo.revoke_token_family(stored_token.family_id)
             # Bulk-revoke live access tokens/content cookies too (issue #142)
@@ -346,16 +396,18 @@ class AuthService:
         if user is None:
             raise UserInactiveError("User account is deactivated")
 
-        # F2 — read the epoch before minting so a bulk revocation that lands
-        # mid-request (e.g. logout-all on another connection, now unblocked
-        # by our row lock only once we commit) can be detected below. The DB
-        # row lock above cannot protect this: it only serializes against the
-        # *old* row, and a bulk revocation's Redis epoch write is entirely
-        # independent of Postgres locking.
+        # F2 — now a backstop, not the primary guarantee (G1's
+        # lock_user_for_session_change above is): it covers a revocation
+        # arriving via a path that somehow bypasses the lock. Read the
+        # epoch before minting so such a revocation can be detected below —
+        # this is Redis-backed and entirely independent of the Postgres
+        # locking above, so it isn't made redundant by it.
         epoch_before = await self._token_revocation.get_current_epoch(stored_token.user_id)
 
-        # Revoke current token
-        await self._repo.revoke_refresh_token(stored_token.id)
+        # Revoke current token (rotation)
+        await self._repo.revoke_refresh_token(
+            stored_token.id, reason=RefreshTokenRevocationReason.ROTATED
+        )
 
         # Issue new token pair in same family
         tokens, new_refresh_token_id = await self._create_token_pair(
@@ -368,13 +420,15 @@ class AuthService:
 
         epoch_after = await self._token_revocation.get_current_epoch(stored_token.user_id)
         if epoch_after is not None and epoch_after != epoch_before:
-            # A bulk revocation landed between our epoch read and the mint
-            # above — the pair we just issued is already supposed to be
-            # dead. Refuse deterministically rather than trusting the race:
-            # revoke what we just minted (both the new refresh-token row and
-            # the new access token's jti) and raise the same error the
-            # reuse-detection path raises above.
-            await self._repo.revoke_refresh_token(new_refresh_token_id)
+            # F2 backstop tripped — a bulk revocation landed between our
+            # epoch read and the mint above via a path that bypassed the
+            # G1 lock. Refuse deterministically rather than trusting the
+            # race: revoke what we just minted (both the new refresh-token
+            # row and the new access token's jti) and raise the same error
+            # the reuse-detection path raises above.
+            await self._repo.revoke_refresh_token(
+                new_refresh_token_id, reason=RefreshTokenRevocationReason.BULK_REVOCATION
+            )
             access_payload = self._jwt.decode_access_token(tokens.access_token)
             if access_payload is not None:
                 await self._token_revocation.revoke_token(access_payload.jti, access_payload.exp)
@@ -403,7 +457,9 @@ class AuthService:
         if stored_token is None:
             return False
 
-        await self._repo.revoke_refresh_token(stored_token.id)
+        await self._repo.revoke_refresh_token(
+            stored_token.id, reason=RefreshTokenRevocationReason.SINGLE_LOGOUT
+        )
         logger.debug("auth.logged_out", user_id=str(stored_token.user_id))
 
         return True

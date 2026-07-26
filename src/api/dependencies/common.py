@@ -646,6 +646,7 @@ async def init_services(settings: Settings) -> JWTService:
             settings.redis_url,
             socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
             socket_timeout=settings.redis_socket_timeout_seconds,
+            health_check_interval=settings.redis_health_check_interval_seconds,
         )
         _services.sse_ticket_service = SSETicketService(ttl_seconds=settings.sse_ticket_ttl_seconds)
         logger.info("sse_ticket_service.initialized")

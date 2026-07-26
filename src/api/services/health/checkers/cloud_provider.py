@@ -39,6 +39,10 @@ class CloudProviderChecker(abc.ABC):
     """
 
     category = ComponentCategory.cloud_provider
+    # Not in _READINESS_CATEGORIES anyway (category != infrastructure), but
+    # every checker must declare this explicitly for HealthChecker protocol
+    # conformance (issue #142 G2).
+    gates_readiness = True
 
     def __init__(self, http_client: httpx.AsyncClient) -> None:
         self._client = http_client

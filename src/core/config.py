@@ -737,14 +737,27 @@ class Settings(BaseSettings):
         ),
     )
     redis_socket_timeout_seconds: float = Field(
-        default=0.25,
+        default=0.05,
         gt=0,
         le=5.0,
         description=(
             "Redis socket read/write timeout, same rationale as "
             "REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS. Combined with retry_on_timeout=False, a "
             "timeout fails straight into TokenRevocationService's fail-open branch instead of "
-            "silently retrying."
+            "silently retrying. 50ms (issue #142 G3b) is roughly an order of magnitude of "
+            "headroom over a healthy same-network Redis's MGET latency; a backend that "
+            "genuinely needs more than that is already degraded, and failing open on it is "
+            "the documented posture. Measure your actual Redis MGET p99 before raising it."
+        ),
+    )
+    redis_health_check_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=300.0,
+        description=(
+            "How often redis-py proactively PINGs idle pooled connections (issue #142 G3b) "
+            "so a connection gone stale while unused is caught and replaced before it can "
+            "produce a spurious TokenRevocationService failure mid-request."
         ),
     )
     trusted_ip_header: Literal["cf-connecting-ip", "x-forwarded-for", "none"] = Field(

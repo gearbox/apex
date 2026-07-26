@@ -64,6 +64,7 @@ class GpuSessionReconciler:
     name = "gpu_sessions"
     category = ComponentCategory.gpu_session
     product_id = None
+    gates_readiness = True  # not in _READINESS_CATEGORIES anyway (issue #142 G2)
 
     def __init__(
         self,

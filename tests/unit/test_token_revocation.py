@@ -1,13 +1,15 @@
-"""Unit tests for TokenRevocationService (issue #142, rounds 1 and 2)."""
+"""Unit tests for TokenRevocationService (issue #142, rounds 1-3)."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from redis import exceptions as redis_exceptions
 from redis.exceptions import NoScriptError
 
 from src.api.services.token_revocation import (
@@ -349,41 +351,47 @@ class TestIsRevoked:
 
 
 class TestCircuitBreaker:
-    """F4 — is_revoked's Redis calls are gated by an in-process breaker."""
+    """F4 — is_revoked's Redis calls are gated by an in-process breaker.
+
+    Uses ``redis_exceptions.ConnectionError`` throughout as the stand-in
+    failure — the "immediate" class (G3b), threshold 2 — for the general
+    breaker mechanics (opening, logging, recovery). See
+    TestBreakerThresholdByFailureClass below for the ConnectionError-vs-
+    TimeoutError split itself.
+    """
 
     async def test_breaker_stays_closed_under_threshold(self) -> None:
         redis = _make_redis()
-        redis.mget.side_effect = RuntimeError("redis down")
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert service.circuit_open is False
+        assert redis.mget.await_count == 1
+
+    async def test_breaker_opens_after_threshold_and_short_circuits(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
         payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
 
         for _ in range(2):
             await service.is_revoked(payload)  # type: ignore[arg-type]
-
-        assert service.circuit_open is False
-        assert redis.mget.await_count == 2
-
-    async def test_breaker_opens_after_threshold_and_short_circuits(self) -> None:
-        redis = _make_redis()
-        redis.mget.side_effect = RuntimeError("redis down")
-        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
-
-        for _ in range(3):
-            await service.is_revoked(payload)  # type: ignore[arg-type]
         assert service.circuit_open is True
 
-        # A 4th call must not touch Redis at all — breaker short-circuits.
+        # A 3rd call must not touch Redis at all — breaker short-circuits.
         result = await service.is_revoked(payload)  # type: ignore[arg-type]
 
         assert result is False
-        assert redis.mget.await_count == 3
+        assert redis.mget.await_count == 2
 
     async def test_breaker_logs_exactly_one_transition_line_during_outage(self) -> None:
         """Acceptance criterion (F4): one log line for the whole outage, not
         one per request."""
         redis = _make_redis()
-        redis.mget.side_effect = RuntimeError("redis down")
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
         payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
 
@@ -396,11 +404,11 @@ class TestCircuitBreaker:
 
     async def test_breaker_recovers_after_window_and_logs_once(self) -> None:
         redis = _make_redis()
-        redis.mget.side_effect = RuntimeError("redis down")
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
         payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
 
-        for _ in range(3):
+        for _ in range(2):
             await service.is_revoked(payload)  # type: ignore[arg-type]
         assert service.circuit_open is True
 
@@ -417,3 +425,206 @@ class TestCircuitBreaker:
         assert service.circuit_open is False
         mock_logger.info.assert_called_once()
         assert mock_logger.info.call_args.args[0] == "authrev.circuit_closed"
+
+
+class TestBreakerThresholdByFailureClass:
+    """G3b — trip threshold is picked per-failure by exception class.
+
+    Immediate (``ConnectionError`` — refused/reset/DNS failure): 2.
+    Ambiguous (``TimeoutError`` — slow/hung): 3. redis-py's ``TimeoutError``
+    is a *subclass* of ``ConnectionError``, so this is also the regression
+    test for the isinstance-ordering bug: testing ``ConnectionError`` first
+    would misclassify every timeout as immediate and trip after 2.
+    """
+
+    async def test_connection_error_trips_after_two(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+        assert service.circuit_open is False
+
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+        assert service.circuit_open is True
+
+    async def test_timeout_error_does_not_trip_after_two(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = redis_exceptions.TimeoutError("slow")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        for _ in range(2):
+            await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert service.circuit_open is False
+
+    async def test_timeout_error_trips_after_three(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = redis_exceptions.TimeoutError("slow")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        for _ in range(3):
+            await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert service.circuit_open is True
+
+
+class TestBreakerProbeReservation:
+    """G3a — exactly one half-open probe is reserved per window, and
+    circuit_open stays True while it's outstanding."""
+
+    async def _trip_breaker(self, redis: MagicMock, service: TokenRevocationService) -> None:
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+        for _ in range(2):
+            await service.is_revoked(payload)  # type: ignore[arg-type]
+        assert service.circuit_open is True
+        # Force the window to have elapsed — now half-open.
+        service._breaker._opened_at = time.monotonic() - 10
+
+    async def test_only_one_probe_reaches_redis_under_concurrency(self) -> None:
+        """A plain AsyncMock resolves without ever truly yielding to the
+        event loop, so concurrent callers of it would run to completion
+        one at a time rather than actually interleaving — which would prove
+        nothing about the reservation. `_yielding_mget` forces a real
+        suspension point (`asyncio.sleep(0)`) so the other 4 callers get a
+        chance to call `allow_request()` while the probe caller is still
+        mid-flight, genuinely exercising the reservation under concurrency.
+        """
+        redis = _make_redis()
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        await self._trip_breaker(redis, service)
+        calls_before_probe = redis.mget.await_count
+
+        async def _yielding_mget(*_args: object, **_kwargs: object) -> list[None]:
+            await asyncio.sleep(0)
+            return [None, None]
+
+        redis.mget.side_effect = _yielding_mget
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        results = await asyncio.gather(
+            *(service.is_revoked(payload) for _ in range(5))  # type: ignore[arg-type]
+        )
+
+        # Exactly one of the 5 concurrent callers actually reached Redis —
+        # the reserved probe. The other 4 were suppressed by allow_request.
+        assert redis.mget.await_count == calls_before_probe + 1
+        assert all(r is False for r in results)
+
+    async def test_circuit_open_stays_true_while_probe_reserved(self) -> None:
+        redis = _make_redis()
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        await self._trip_breaker(redis, service)
+
+        # Simulate the probe having been claimed but not yet resolved.
+        service._breaker._probe_in_flight = True
+
+        assert service.circuit_open is True
+
+    async def test_probe_slot_freed_after_probe_resolves(self) -> None:
+        redis = _make_redis()
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        await self._trip_breaker(redis, service)
+
+        redis.mget.side_effect = None
+        redis.mget.return_value = [None, None]
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert service.circuit_open is False
+        assert service._breaker._probe_in_flight is False
+
+
+class TestGetCurrentEpochBreakerGating:
+    """B1 — get_current_epoch shares is_revoked's breaker instance."""
+
+    async def test_breaker_open_short_circuits_without_touching_redis(self) -> None:
+        redis = _make_redis()
+        redis.get.side_effect = redis_exceptions.ConnectionError("refused")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        user_id = uuid4()
+
+        for _ in range(2):
+            await service.get_current_epoch(user_id)
+        assert service.circuit_open is True
+
+        result = await service.get_current_epoch(user_id)
+
+        assert result is None
+        assert redis.get.await_count == 2
+
+    async def test_shares_breaker_instance_with_is_revoked(self) -> None:
+        """One refresh request's is_revoked + get_current_epoch pair
+        together contribute to the same failure count — a single refresh
+        can trip the breaker in one round trip instead of needing two."""
+        redis = _make_redis()
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
+        redis.get.side_effect = redis_exceptions.ConnectionError("refused")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+        assert service.circuit_open is False
+
+        await service.get_current_epoch(_USER_ID)
+
+        assert service.circuit_open is True
+
+    async def test_successful_call_resets_shared_breaker_state(self) -> None:
+        """A successful get_current_epoch call resets the breaker state
+        that is_revoked's earlier failure had started accumulating —
+        confirms they share one counter, not two independent ones."""
+        redis = _make_redis()
+        redis.mget.side_effect = redis_exceptions.ConnectionError("refused")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+        assert service._breaker._consecutive_failures == 1
+
+        redis.get.return_value = None
+        await service.get_current_epoch(_USER_ID)
+
+        assert service._breaker._consecutive_failures == 0
+        assert service.circuit_open is False
+
+
+class TestIsRevokedMalformedSubject:
+    """B3 — is_revoked must not raise into a request on a non-UUID subject."""
+
+    async def test_malformed_subject_fails_open_and_logs(self) -> None:
+        redis = _make_redis()
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub="not-a-uuid", iat=1000, jti="jti-1")
+
+        with patch("src.api.services.token_revocation.logger") as mock_logger:
+            result = await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert result is False
+        mock_logger.exception.assert_called_once()
+        assert mock_logger.exception.call_args.args[0] == "authrev.malformed_subject"
+
+    async def test_malformed_subject_never_reaches_redis(self) -> None:
+        redis = _make_redis()
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub="not-a-uuid", iat=1000, jti="jti-1")
+
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        redis.mget.assert_not_called()
+
+    async def test_malformed_subject_does_not_count_toward_breaker(self) -> None:
+        """An input error is not evidence Redis is down — it must not
+        contribute to the breaker's failure threshold."""
+        redis = _make_redis()
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub="not-a-uuid", iat=1000, jti="jti-1")
+
+        for _ in range(5):
+            await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert service.circuit_open is False

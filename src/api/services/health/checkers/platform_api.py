@@ -31,6 +31,7 @@ class VastAIChecker:
     name = "vastai_api"
     category = ComponentCategory.platform_api
     product_id = None  # global — not product-scoped
+    gates_readiness = True  # not in _READINESS_CATEGORIES anyway (issue #142 G2)
 
     # Vast.ai API base URL
     _VASTAI_API_BASE = "https://console.vast.ai/api/v0"

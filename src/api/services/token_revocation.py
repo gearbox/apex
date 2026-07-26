@@ -69,20 +69,66 @@ below); spending this much complexity to close a sub-second-plus-clock-skew
 window is not a proportionate trade. Do not re-litigate this without first
 re-reading this paragraph.
 
-F4 — circuit breaker: ``is_revoked`` now runs on *every* authenticated
-request, so an unbounded per-request Redis timeout during an outage would
-convert "fail open" into "fail slow" — every request pays the full timeout
-before falling back. ``_RevocationCircuitBreaker`` (in-process,
-dependency-free) trips open after 3 consecutive ``is_revoked`` failures and
-short-circuits subsequent calls for 5 seconds without touching Redis at
-all, then allows a single probe through to test recovery. This bounds an
-outage's cost to one timeout every 5 seconds instead of one per request, and
-collapses what would otherwise be a per-request log line into exactly one
-``authrev.circuit_opened`` on the transition and one ``authrev.circuit_closed``
-on recovery. Writes (``revoke_user_sessions``, ``revoke_token``) are rare
-(only on logout/logout-all/password-change/reset/reuse-detection) and are
-deliberately *not* behind the breaker — every write failure is logged, since
-losing a security-relevant write is worth an operator's attention every time.
+F4 — circuit breaker (round 3: G3a/G3b/B1 below): ``is_revoked`` and, since
+B1, ``get_current_epoch`` run on every authenticated request and every
+refresh respectively, so an unbounded per-request Redis timeout during an
+outage would convert "fail open" into "fail slow" — every request pays the
+full timeout before falling back. ``_RevocationCircuitBreaker``
+(in-process, dependency-free, shared by both methods — B1) trips on a
+class-dependent number of consecutive failures rather than a flat count:
+2 for ``redis.exceptions.ConnectionError`` (refused/reset/DNS failure —
+instantaneous and unambiguous evidence Redis is down) vs. 3 for
+``redis.exceptions.TimeoutError`` (slow/hung — costs a full
+``socket_timeout`` each and is ambiguous, since a GC pause or load spike
+can produce one; tripping as eagerly as the immediate case would be a
+security-relevant false-open from transient slowness). ``TimeoutError`` is
+a *subclass* of ``ConnectionError`` in redis-py, so ``on_failure``'s
+``isinstance`` check tests ``TimeoutError`` first — reversing that order
+silently misclassifies every timeout as immediate and reintroduces the
+false-open this split exists to avoid.
+
+Once open, the breaker short-circuits for ``_BREAKER_OPEN_SECONDS`` (5s)
+without touching Redis, then reserves exactly one half-open probe (G3a —
+see ``allow_request``): once the window expires, one caller is let through
+to test recovery and every other concurrent caller that same moment keeps
+short-circuiting, rather than all of them issuing their own Redis call in
+a thundering-herd burst. ``circuit_open`` stays True while that probe is
+reserved, so the health surface (A2 below) doesn't flicker to healthy
+mid-outage between the window expiring and the probe's result landing.
+
+With ``socket_timeout=50ms`` and ``socket_connect_timeout=250ms``
+(``Settings.redis_socket_timeout_seconds``/``redis_socket_connect_timeout_seconds``),
+worst-case trip cost is ~0ms when Redis actively refuses/resets the
+connection (2 x ~0ms), ~150ms when it's merely slow (3 x 50ms), and 500ms
+in the rare black-holed-host case where connects hang until
+``socket_connect_timeout`` (2 x 250ms) — down from a flat 750ms
+(3 x 250ms) before this round. These are design-time estimates: measure
+your actual Redis ``MGET`` p99 in a production-like environment before
+relying on them, and raise ``socket_timeout`` if it's anywhere close to
+50ms.
+
+This bounds an outage's cost to one probe every 5 seconds instead of one
+per request, and collapses what would otherwise be a per-request log line
+into exactly one ``authrev.circuit_opened`` on the transition and one
+``authrev.circuit_closed`` on recovery. Writes (``revoke_user_sessions``,
+``revoke_token``) are rare (only on
+logout/logout-all/password-change/reset/reuse-detection) and are
+deliberately *not* behind the breaker — every write failure is logged,
+since losing a security-relevant write is worth an operator's attention
+every time.
+
+B1 — ``get_current_epoch`` shares ``is_revoked``'s breaker instance
+(issue #142 round 3): before this, an outage made every refresh pay a
+second full Redis timeout on top of ``is_revoked``'s, and — because a
+failed read already returned ``None`` — the F2 backstop below silently
+disabled itself exactly when infrastructure was unhealthy, with no
+distinguishing signal from "no epoch, nothing to do". Sharing the breaker
+fixes both: the extra timeout is now short-circuited like any other Redis
+call once the breaker is open, and one refresh request can now contribute
+up to two failures toward the trip threshold, which trips the breaker
+*faster* in practice during a real outage — desirable, and it composes
+correctly with G3b's per-class thresholds since both methods report the
+same exception types.
 
 F5 — truthful reporting: ``revoke_user_sessions`` returns ``int | None`` (the
 Redis-clock epoch that was written, or ``None`` on failure) and
@@ -108,15 +154,30 @@ write side (``revoke_user_sessions``, taking a ``UUID``) and the read side
 the two can never silently diverge — see ``test_token_revocation.py`` for the
 byte-identity test.
 
-F2 — refresh-rotation race (lives mostly in ``AuthService.refresh_tokens``
-and ``UserRepository.get_refresh_token_by_hash_for_update``, documented here
-because it depends on ``get_current_epoch``): a ``SELECT ... FOR UPDATE`` on
-the refresh-token row serializes rotation against a concurrent bulk
-revocation's DB update, but cannot protect a row that doesn't exist yet at
-the time the bulk update's snapshot is taken. ``get_current_epoch`` closes
-that gap on the access-token side — read before minting, read again after,
-and if the epoch moved, the just-minted pair is revoked and the request is
-refused, deterministically, with no tuned grace constant.
+F2 — refresh-rotation race, now a backstop (issue #142 round 3, G1): the
+primary guarantee lives in ``UserRepository.lock_user_for_session_change``
+— a ``SELECT ... FOR UPDATE`` on the *user* row, acquired before either
+the refresh-token row lock (``AuthService.refresh_tokens``, before
+``get_refresh_token_by_hash_for_update``) or a bulk revocation's UPDATE
+(``revoke_all_user_tokens``/``revoke_all_refresh_tokens``). See that
+method's docstring for the full interleaving this closes and the required
+lock ordering (user row -> refresh-token row in *every* path that
+acquires both, or the two paths deadlock against each other). A row lock
+alone couldn't close this gap: it only serializes against the *old*
+refresh-token row, and can't protect a row that doesn't exist yet at the
+time a bulk revocation's snapshot is taken — which is exactly the failure
+mode the user-row lock fixes by serializing the two operations before
+either touches the refresh_tokens table.
+
+``get_current_epoch`` (read before minting, read again after — if the
+epoch moved, the just-minted pair is revoked and the request refused) is
+kept as a backstop for a revocation arriving via a path that somehow
+bypasses the G1 lock. It is deliberately *not* relied upon as the primary
+guarantee: as of B1 (below), a failed or breaker-suppressed read returns
+``None`` the same as "no epoch key" — an outage during the mint window
+silently disables this specific backstop rather than raising, which is an
+acceptable trade only because the lock, not this check, is what actually
+prevents the race.
 
 A2 — the fail-open posture depends on an operator noticing Redis is down;
 ``enabled``, ``circuit_open``, and ``failed_write_count`` are surfaced
@@ -141,6 +202,7 @@ import time
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import redis.exceptions
 import structlog
 from redis.exceptions import NoScriptError
 
@@ -169,7 +231,15 @@ _EPOCH_WRITE_SCRIPT_SHA = hashlib.sha1(
     _EPOCH_WRITE_SCRIPT.encode(), usedforsecurity=False
 ).hexdigest()
 
-_BREAKER_FAILURE_THRESHOLD = 3
+# issue #142 G3b — the trip threshold is picked per-failure by exception
+# class, not a single flat count: a refused/reset/DNS-failed connection
+# (ConnectionError) is instantaneous and unambiguous evidence Redis is
+# down, so 2 of them is enough to trip. A hung/slow Redis (TimeoutError)
+# costs a full socket_timeout each and is ambiguous — a GC pause or load
+# spike can produce one — so it takes 3 before tripping, to avoid a
+# security-relevant false-open from transient slowness.
+_BREAKER_IMMEDIATE_FAILURE_THRESHOLD = 2
+_BREAKER_TIMEOUT_FAILURE_THRESHOLD = 3
 _BREAKER_OPEN_SECONDS = 5.0
 
 
@@ -211,36 +281,72 @@ def _parse_epoch(raw: str | bytes | None, *, key: str) -> int | None:
 
 
 class _RevocationCircuitBreaker:
-    """In-process, dependency-free breaker gating ``is_revoked``'s Redis call (F4).
+    """In-process, dependency-free breaker gating Redis calls (F4, B1).
 
     Not distributed — each process tracks its own failure count, which is
     fine: the goal is bounding *this process's* per-request latency during
-    an outage, not cluster-wide coordination. After
-    ``_BREAKER_FAILURE_THRESHOLD`` consecutive failures the breaker opens for
-    ``_BREAKER_OPEN_SECONDS``, short-circuiting every call without touching
-    Redis; after that window, exactly one probe is let through to test
-    recovery. A failed probe silently re-opens the window (no duplicate log)
-    so a sustained outage produces exactly one ``authrev.circuit_opened``
-    line, not one per retry cycle.
+    an outage, not cluster-wide coordination. Shared by both ``is_revoked``
+    and ``get_current_epoch`` (issue #142 B1) — the failure mode is
+    identical for both, and per-method breakers would fragment the signal
+    (and the trip decision) across two independent counters for what is,
+    from the operator's perspective, one outage.
+
+    After a class-dependent number of consecutive failures (G3b —
+    ``_BREAKER_IMMEDIATE_FAILURE_THRESHOLD``/``_BREAKER_TIMEOUT_FAILURE_THRESHOLD``)
+    the breaker opens for ``_BREAKER_OPEN_SECONDS``, short-circuiting every
+    call without touching Redis; after that window, exactly one probe is
+    let through to test recovery (G3a — see ``allow_request``). A failed
+    probe silently re-opens the window (no duplicate log) so a sustained
+    outage produces exactly one ``authrev.circuit_opened`` line, not one
+    per retry cycle.
     """
 
     def __init__(self) -> None:
         self._consecutive_failures = 0
         self._opened_at: float | None = None
         self._suppressed = 0
+        self._probe_in_flight = False
 
     @property
     def is_open(self) -> bool:
-        return self._opened_at is not None and (
-            time.monotonic() - self._opened_at < _BREAKER_OPEN_SECONDS
-        )
+        """True while short-circuiting: within the open window, or while a
+        half-open probe is reserved (G3a). The latter case matters for the
+        G2 health surface: without it, ``circuit_open`` would flicker to
+        False the instant the window expires, even though every non-probe
+        caller is still being short-circuited pending that probe's result.
+        """
+        if self._opened_at is None:
+            return False
+        if time.monotonic() - self._opened_at < _BREAKER_OPEN_SECONDS:
+            return True
+        return self._probe_in_flight
 
     def allow_request(self) -> bool:
-        """False means: short-circuit, do not call Redis this time."""
-        if self.is_open:
+        """False means: short-circuit, do not call Redis this time.
+
+        G3a — reserves the single half-open probe: once the open window
+        expires, exactly one caller is let through to test recovery, and
+        every other concurrent caller in that same moment keeps
+        short-circuiting rather than each issuing its own Redis call in a
+        thundering-herd burst every ``_BREAKER_OPEN_SECONDS``.
+
+        This method is synchronous and contains no ``await``, so under
+        asyncio the check-and-reserve below cannot interleave with another
+        call on the same event loop — that atomicity is a property of the
+        event loop's cooperative scheduling, not of this code's shape. If
+        this service is ever driven from a threaded context (multiple OS
+        threads sharing one instance), this needs a real lock.
+        """
+        if self._opened_at is None:
+            return True  # closed
+        if time.monotonic() - self._opened_at < _BREAKER_OPEN_SECONDS:
             self._suppressed += 1
-            return False
-        return True
+            return False  # open
+        if self._probe_in_flight:
+            self._suppressed += 1
+            return False  # half-open, probe already claimed
+        self._probe_in_flight = True
+        return True  # half-open — this caller is the probe
 
     def on_success(self) -> None:
         if self._opened_at is not None:
@@ -252,10 +358,23 @@ class _RevocationCircuitBreaker:
         self._consecutive_failures = 0
         self._opened_at = None
         self._suppressed = 0
+        self._probe_in_flight = False
 
     def on_failure(self, exc: Exception) -> None:
         self._consecutive_failures += 1
-        if self._opened_at is None and self._consecutive_failures >= _BREAKER_FAILURE_THRESHOLD:
+        self._probe_in_flight = False
+        # G3b — redis-py's TimeoutError is a SUBCLASS of ConnectionError,
+        # so this isinstance check MUST test TimeoutError first. Reversing
+        # the order would classify every timeout as an immediate failure,
+        # tripping the breaker after just 2 slow responses and
+        # reintroducing the false-open this threshold split exists to
+        # avoid.
+        threshold = (
+            _BREAKER_TIMEOUT_FAILURE_THRESHOLD
+            if isinstance(exc, redis.exceptions.TimeoutError)
+            else _BREAKER_IMMEDIATE_FAILURE_THRESHOLD
+        )
+        if self._opened_at is None and self._consecutive_failures >= threshold:
             self._opened_at = time.monotonic()
             logger.error("authrev.circuit_opened", op="is_revoked", exc_info=exc)
         elif self._opened_at is not None:
@@ -352,29 +471,41 @@ class TokenRevocationService:
         return int(raw_epoch)
 
     async def get_current_epoch(self, user_id: UUID) -> int | None:
-        """Read the current bulk-revocation epoch without writing (F2).
+        """Read the current bulk-revocation epoch without writing (F2, now a backstop — see G1).
 
         Used by AuthService.refresh_tokens' post-mint race check: reads
         before and after minting a fresh token pair to detect a bulk
-        revocation that landed mid-request. A DB row lock (see
-        UserRepository.get_refresh_token_by_hash_for_update) only serializes
-        rotation against the *old* refresh-token row — it cannot prevent a
-        legitimately-new row/token from being minted concurrently with a
-        revocation happening via this Redis-backed, DB-lock-oblivious path.
+        revocation that landed via a path that somehow bypassed the G1
+        user-row lock (``UserRepository.lock_user_for_session_change``),
+        which is now the primary guarantee serializing rotation against a
+        concurrent bulk revocation.
+
+        Gated by the same circuit breaker instance as ``is_revoked``
+        (issue #142 B1) — sharing it means one refresh request can
+        contribute up to two failures toward the trip threshold (G3b),
+        which is desirable: it makes the breaker trip faster in practice
+        during an outage, not slower.
 
         Returns:
-            The epoch, or None for "no epoch key", "Redis unset", or "Redis
-            failure" alike — the caller treats these identically (no diff
-            observed => nothing to react to, consistent with fail-open).
+            The epoch, or None for "no epoch key", "Redis unset", "breaker
+            open" (B1 — new), or "Redis failure" alike — the caller treats
+            these identically (no diff observed => nothing to react to,
+            consistent with fail-open). Before B1, a failed read already
+            returned None here, which silently made the F2 race check a
+            no-op during an outage — that is now an explicit, documented
+            case rather than an accidental one.
         """
         if self._redis is None:
+            return None
+        if not self._breaker.allow_request():
             return None
         key = _epoch_key(user_id)
         try:
             raw = await self._redis.get(key)
-        except Exception:
-            logger.exception("authrev.backend_unavailable", op="get_current_epoch")
+        except Exception as exc:
+            self._breaker.on_failure(exc)
             return None
+        self._breaker.on_success()
         return _parse_epoch(raw, key=key)
 
     async def revoke_token(self, jti: str, expires_at_ts: int) -> bool:
@@ -416,21 +547,35 @@ class TokenRevocationService:
         bounding latency and log volume to one probe/log per breaker window
         rather than one per request.
 
+        B3 — ``_epoch_key`` (which raises ``ValueError`` on a subject that
+        isn't a valid UUID) is called from inside the protected block
+        below, not before it. This method is a public entrypoint invoked
+        on every authenticated request, and letting a malformed subject
+        raise a 500 here would directly contradict this service's
+        fail-open contract. Callers that already validate ``sub`` (the JWT
+        guards, via ``_identity_from_token``) never reach this branch; it
+        exists for callers that don't.
+
         Returns:
             True if the token's jti is denylisted or its `iat` is at or
             before the user's revocation epoch (D2 — `<=`). False on no
-            match, on a malformed epoch (F6), and — per the D3 fail-open
-            posture — false while the breaker is open or on any Redis error.
+            match, on a malformed epoch (F6), on a malformed subject (B3),
+            and — per the D3 fail-open posture — false while the breaker
+            is open (including a reserved half-open probe, G3a) or on any
+            Redis error.
         """
         if self._redis is None:
             return False
         if not self._breaker.allow_request():
             return False
 
-        epoch_key = _epoch_key(payload.sub)
         jti_key = _jti_key(payload.jti)
         try:
+            epoch_key = _epoch_key(payload.sub)
             epoch_raw, jti_hit = await self._redis.mget([epoch_key, jti_key])
+        except ValueError:
+            logger.exception("authrev.malformed_subject", sub=payload.sub)
+            return False
         except Exception as exc:
             self._breaker.on_failure(exc)
             return False

@@ -40,14 +40,18 @@ class TestInitRedisPool:
             "redis://localhost:6379",
             decode_responses=True,
             socket_connect_timeout=0.25,
-            socket_timeout=0.25,
+            socket_timeout=0.05,
             retry_on_timeout=False,
+            health_check_interval=30.0,
         )
 
     def test_passes_through_custom_timeouts(self) -> None:
         with patch("src.core.redis.aioredis.ConnectionPool.from_url") as mock_from_url:
             init_redis_pool(
-                "redis://localhost:6379", socket_connect_timeout=1.5, socket_timeout=2.5
+                "redis://localhost:6379",
+                socket_connect_timeout=1.5,
+                socket_timeout=2.5,
+                health_check_interval=60.0,
             )
 
         mock_from_url.assert_called_once_with(
@@ -56,6 +60,7 @@ class TestInitRedisPool:
             socket_connect_timeout=1.5,
             socket_timeout=2.5,
             retry_on_timeout=False,
+            health_check_interval=60.0,
         )
 
 
@@ -86,7 +91,8 @@ class TestRedactedUrl:
             "redis.pool_initialized",
             url="redis://redis:6379/0",
             socket_connect_timeout=0.25,
-            socket_timeout=0.25,
+            socket_timeout=0.05,
+            health_check_interval=30.0,
         )
 
 

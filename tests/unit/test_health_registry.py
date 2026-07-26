@@ -16,6 +16,7 @@ def _make_checker(
     status: ComponentStatus = ComponentStatus.healthy,
     delay: float = 0.0,
     raise_exc: Exception | None = None,
+    gates_readiness: bool = True,
 ) -> object:
     """Factory for test checker objects satisfying the HealthChecker protocol."""
 
@@ -24,6 +25,7 @@ def _make_checker(
             self.name = name
             self.category = category
             self.product_id = product_id
+            self.gates_readiness = gates_readiness
 
         async def check(self) -> ComponentHealth:
             if delay:
@@ -90,3 +92,26 @@ class TestRegistry:
         reg.register(_make_checker(name="fast"))  # type: ignore[arg-type]
         results = await reg.check_all()
         assert results[0].latency_ms >= 0.0
+
+    async def test_gates_readiness_propagated_from_checker(self) -> None:
+        """issue #142 G2 — the checker's gates_readiness declaration must be
+        copied onto the ComponentHealth result, since HealthService.readiness()
+        filters on the result, not the checker object."""
+        reg = HealthCheckRegistry()
+        reg.register(_make_checker(name="diagnostic-only", gates_readiness=False))  # type: ignore[arg-type]
+        results = await reg.check_all()
+        assert results[0].gates_readiness is False
+
+    async def test_gates_readiness_propagated_on_timeout(self) -> None:
+        reg = HealthCheckRegistry()
+        reg.register(_make_checker(name="slow", delay=5.0, gates_readiness=False))  # type: ignore[arg-type]
+        results = await reg.check_all(timeout_seconds=0.1)
+        assert results[0].gates_readiness is False
+
+    async def test_gates_readiness_propagated_on_exception(self) -> None:
+        reg = HealthCheckRegistry()
+        reg.register(
+            _make_checker(name="broken", raise_exc=RuntimeError("x"), gates_readiness=False)  # type: ignore[arg-type]
+        )
+        results = await reg.check_all()
+        assert results[0].gates_readiness is False

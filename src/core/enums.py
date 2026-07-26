@@ -438,6 +438,25 @@ class AdminPermission(StrEnum):
     BILLING_ADJUST = "billing_adjust"
 
 
+class RefreshTokenRevocationReason(StrEnum):
+    """Why a refresh token was revoked (issue #142 B2).
+
+    Read by ``AuthService.refresh_tokens`` to distinguish a benign lost race
+    against a bulk revocation (``BULK_REVOCATION`` — e.g. logging out on one
+    device while another device concurrently refreshes) from every other
+    cause, which still raises ``TokenReuseDetectedError``. Legacy rows
+    revoked before this column existed have ``revoked_reason IS NULL``,
+    which is deliberately *not* ``BULK_REVOCATION`` and therefore still
+    triggers the theft path — no backfill needed, no weakening of existing
+    detection.
+    """
+
+    ROTATED = "rotated"
+    BULK_REVOCATION = "bulk_revocation"
+    SINGLE_LOGOUT = "single_logout"
+    REUSE_DETECTED = "reuse_detected"
+
+
 class NotificationLevel(StrEnum):
     """Severity level for system notifications and credit warnings."""
 

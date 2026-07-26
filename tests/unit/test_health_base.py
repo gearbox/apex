@@ -35,6 +35,7 @@ class TestComponentHealth:
             name = "fake"
             category = ComponentCategory.infrastructure
             product_id = None
+            gates_readiness = True
 
             async def check(self) -> ComponentHealth:
                 return ComponentHealth(
