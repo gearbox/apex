@@ -531,6 +531,7 @@ class TestAuthControllerCookies:
         assert cookie.value == ""
         assert cookie.path == "/v1/content"
         assert cookie.domain == COOKIE_DOMAIN
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
     async def test_register_secure_false_in_debug(self, jwt_service: JWTService) -> None:
         """When debug=True, content_cookie_secure=False so Secure attribute is absent."""
