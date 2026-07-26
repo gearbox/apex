@@ -120,6 +120,32 @@ class TestNowpaymentsIpnCallbackUrl:
             )
 
 
+class TestMaxRevocationEpochTtlSeconds:
+    """issue #142 F3 — TokenRevocationService's epoch TTL must derive from
+    the *upper bound* Field constraints, not the currently configured
+    values, so lowering either setting later can't strand epoch keys with a
+    TTL shorter than tokens minted under the old, higher setting."""
+
+    def test_at_least_max_permitted_content_cookie_lifetime(self) -> None:
+        settings = Settings(jwt_secret_key=_JWT_SECRET)
+        # content_cookie_ttl_hours: Field(le=168) -> 168h in seconds.
+        assert settings.max_revocation_epoch_ttl_seconds >= 168 * 3600
+
+    def test_ignores_current_values_uses_upper_bounds(self) -> None:
+        """A deployment running low current values must still get the TTL
+        derived from the field's maximum, not from what's configured now."""
+        settings = Settings(
+            jwt_secret_key=_JWT_SECRET,
+            jwt_access_token_expire_minutes=1,
+            content_cookie_ttl_hours=1,
+        )
+        assert settings.max_revocation_epoch_ttl_seconds == 168 * 3600
+
+    def test_matches_hardcoded_upper_bound_expectation(self) -> None:
+        settings = Settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.max_revocation_epoch_ttl_seconds == max(60 * 60, 168 * 3600)
+
+
 class TestPricingTiersValidAccepted:
     def test_default_tiers_accepted(self) -> None:
         settings = Settings(jwt_secret_key=_JWT_SECRET)

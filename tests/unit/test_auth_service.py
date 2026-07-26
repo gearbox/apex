@@ -324,7 +324,7 @@ class TestAuthServiceRefresh:
         mock_token.product_id = "vex"
         mock_token.is_revoked = False
         mock_token.expires_at = datetime.now(UTC) + timedelta(days=1)
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
 
         # Mock: user is active
         mock_user = MagicMock(spec=User)
@@ -359,7 +359,7 @@ class TestAuthServiceRefresh:
         mock_token.user_id = uuid4()
         mock_token.family_id = family_id
         mock_token.is_revoked = True  # Already revoked!
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
 
         # Mock: family revocation
         mock_repository.revoke_token_family.return_value = 3
@@ -388,7 +388,7 @@ class TestAuthServiceRefresh:
         mock_token.user_id = user_id
         mock_token.family_id = family_id
         mock_token.is_revoked = True
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
         mock_repository.revoke_token_family.return_value = 3
 
         mock_token_revocation = AsyncMock()
@@ -414,7 +414,7 @@ class TestAuthServiceRefresh:
         mock_token = MagicMock(spec=RefreshToken)
         mock_token.is_revoked = False
         mock_token.expires_at = datetime.now(UTC) - timedelta(days=1)  # Expired
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
 
         with pytest.raises(InvalidRefreshTokenError):
             await auth_service.refresh_tokens("expired_token")
@@ -626,7 +626,7 @@ class TestAuthServiceMissingBranches:
     ) -> None:
         from src.api.services.auth import AuthService, InvalidRefreshTokenError
 
-        mock_repository.get_refresh_token_by_hash.return_value = None
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = None
 
         svc = AuthService(
             repository=mock_repository,
@@ -650,7 +650,7 @@ class TestAuthServiceMissingBranches:
         mock_token.user_id = uuid4()
         mock_token.family_id = uuid4()
         mock_token.product_id = "vex"
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
         mock_repository.get_active_user.return_value = None  # user not found/inactive
 
         svc = AuthService(

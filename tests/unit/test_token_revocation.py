@@ -1,17 +1,28 @@
-"""Unit tests for TokenRevocationService (issue #142)."""
+"""Unit tests for TokenRevocationService (issue #142, rounds 1 and 2)."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from redis.exceptions import NoScriptError
 
-from src.api.services.token_revocation import TokenRevocationService
+from src.api.services.token_revocation import (
+    _EPOCH_WRITE_SCRIPT,
+    TokenRevocationService,
+    _epoch_key,
+    _jti_key,
+)
 
 pytestmark = pytest.mark.unit
+
+# _epoch_key normalizes through UUID(...) (A1), so fake payload subjects must
+# be valid UUID strings, matching what create_access_token actually stamps.
+_USER_ID = uuid4()
+_USER_SUB = str(_USER_ID)
 
 
 @dataclass
@@ -24,9 +35,15 @@ class _FakePayload:
 
 
 def _make_redis() -> MagicMock:
+    """A redis mock whose evalsha always raises NoScriptError, exercising the
+    EVAL fallback path by default (see TestRevokeUserSessions for the
+    direct-evalsha-hit path)."""
     redis = MagicMock()
     redis.set = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
     redis.mget = AsyncMock(return_value=[None, None])
+    redis.evalsha = AsyncMock(side_effect=NoScriptError("no cached script"))
+    redis.eval = AsyncMock(return_value=1_700_000_000)
     return redis
 
 
@@ -35,45 +52,131 @@ class TestNoOpWhenRedisUnset:
 
     async def test_revoke_user_sessions_noop(self) -> None:
         service = TokenRevocationService(None, max_token_ttl_seconds=900)
-        await service.revoke_user_sessions(MagicMock())  # must not raise
+        result = await service.revoke_user_sessions(MagicMock())
+        assert result is None
 
-    async def test_revoke_token_noop(self) -> None:
+    async def test_revoke_token_noop_returns_true(self) -> None:
+        """F5 — a documented no-op is not a failure, so it returns True."""
         service = TokenRevocationService(None, max_token_ttl_seconds=900)
-        await service.revoke_token("some-jti", int(time.time()) + 60)  # must not raise
+        result = await service.revoke_token("some-jti", int(time.time()) + 60)
+        assert result is True
 
     async def test_is_revoked_returns_false(self) -> None:
         service = TokenRevocationService(None, max_token_ttl_seconds=900)
-        payload = _FakePayload(sub="user-1", iat=0, jti="jti-1")
+        payload = _FakePayload(sub=_USER_SUB, iat=0, jti="jti-1")
 
         result = await service.is_revoked(payload)  # type: ignore[arg-type]
 
         assert result is False
 
+    async def test_get_current_epoch_noop(self) -> None:
+        service = TokenRevocationService(None, max_token_ttl_seconds=900)
+        assert await service.get_current_epoch(uuid4()) is None
 
-class TestRevokeUserSessions:
-    """D1a — bulk revocation epoch."""
+    def test_enabled_is_false(self) -> None:
+        service = TokenRevocationService(None, max_token_ttl_seconds=900)
+        assert service.enabled is False
 
-    async def test_writes_epoch_with_max_ttl(self) -> None:
+
+class TestEpochKeyHelper:
+    """A1 — the epoch key format must be pinned by a single helper shared by
+    the write path (UUID) and read path (str), or bulk revocation silently
+    stops matching with no error."""
+
+    def test_uuid_and_str_produce_identical_key(self) -> None:
+        user_id = uuid4()
+        assert _epoch_key(user_id) == _epoch_key(str(user_id))
+
+    async def test_key_written_by_revoke_matches_key_read_by_is_revoked(self) -> None:
+        """End-to-end: the exact key revoke_user_sessions(uid) writes must be
+        the exact key is_revoked reads for a token minted for uid."""
         redis = _make_redis()
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
         user_id = uuid4()
 
-        before = int(time.time())
         await service.revoke_user_sessions(user_id)
-        after = int(time.time())
+        write_key = redis.eval.call_args.args[2]
 
-        redis.set.assert_awaited_once()
-        args, kwargs = redis.set.call_args
-        assert args[0] == f"authrev:user:{user_id}"
-        assert before <= args[1] <= after
-        assert kwargs["ex"] == 1200
+        redis.mget.return_value = [None, None]
+        payload = _FakePayload(sub=str(user_id), iat=0, jti="jti-1")
+        await service.is_revoked(payload)  # type: ignore[arg-type]
+        read_key = redis.mget.call_args.args[0][0]
 
-    async def test_redis_error_is_swallowed(self) -> None:
+        assert write_key == read_key == _epoch_key(user_id)
+
+
+class TestRevokeUserSessions:
+    """D1a/F1b — bulk revocation epoch written from Redis's own clock."""
+
+    async def test_writes_epoch_via_eval_fallback_and_returns_it(self) -> None:
         redis = _make_redis()
-        redis.set.side_effect = RuntimeError("redis down")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        user_id = uuid4()
+
+        result = await service.revoke_user_sessions(user_id)
+
+        assert result == 1_700_000_000
+        redis.evalsha.assert_awaited_once()
+        redis.eval.assert_awaited_once_with(_EPOCH_WRITE_SCRIPT, 1, _epoch_key(user_id), 1200)
+
+    async def test_uses_evalsha_directly_when_script_is_cached(self) -> None:
+        redis = _make_redis()
+        redis.evalsha = AsyncMock(return_value=1_700_000_042)
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        user_id = uuid4()
+
+        result = await service.revoke_user_sessions(user_id)
+
+        assert result == 1_700_000_042
+        redis.evalsha.assert_awaited_once()
+        redis.eval.assert_not_called()
+
+    async def test_redis_error_is_swallowed_and_returns_none(self) -> None:
+        redis = _make_redis()
+        redis.evalsha = AsyncMock(side_effect=RuntimeError("redis down"))
+        redis.eval = AsyncMock(side_effect=RuntimeError("redis down"))
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
 
-        await service.revoke_user_sessions(MagicMock())  # must not raise
+        result = await service.revoke_user_sessions(uuid4())
+
+        assert result is None
+
+    async def test_failure_increments_failed_write_count(self) -> None:
+        redis = _make_redis()
+        redis.evalsha = AsyncMock(side_effect=RuntimeError("redis down"))
+        redis.eval = AsyncMock(side_effect=RuntimeError("redis down"))
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+
+        await service.revoke_user_sessions(uuid4())
+
+        assert service.failed_write_count == 1
+
+
+class TestGetCurrentEpoch:
+    """F2 — read-only epoch lookup used by AuthService's post-mint race check."""
+
+    async def test_returns_parsed_epoch(self) -> None:
+        redis = _make_redis()
+        redis.get = AsyncMock(return_value="1700000000")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+
+        result = await service.get_current_epoch(uuid4())
+
+        assert result == 1700000000
+
+    async def test_returns_none_when_no_key(self) -> None:
+        redis = _make_redis()
+        redis.get = AsyncMock(return_value=None)
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+
+        assert await service.get_current_epoch(uuid4()) is None
+
+    async def test_redis_error_returns_none(self) -> None:
+        redis = _make_redis()
+        redis.get = AsyncMock(side_effect=RuntimeError("redis down"))
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+
+        assert await service.get_current_epoch(uuid4()) is None
 
 
 class TestRevokeToken:
@@ -84,8 +187,9 @@ class TestRevokeToken:
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
         expires_at = int(time.time()) + 100
 
-        await service.revoke_token("jti-abc", expires_at)
+        result = await service.revoke_token("jti-abc", expires_at)
 
+        assert result is True
         redis.set.assert_awaited_once()
         args, kwargs = redis.set.call_args
         assert args[0] == "authrev:jti:jti-abc"
@@ -98,37 +202,76 @@ class TestRevokeToken:
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
         expired_at = int(time.time()) - 5
 
-        await service.revoke_token("jti-abc", expired_at)
+        result = await service.revoke_token("jti-abc", expired_at)
 
+        assert result is True
         redis.set.assert_not_called()
 
-    async def test_redis_error_is_swallowed(self) -> None:
+    async def test_redis_error_returns_false(self) -> None:
         redis = _make_redis()
         redis.set.side_effect = RuntimeError("redis down")
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
 
-        await service.revoke_token("jti-abc", int(time.time()) + 60)  # must not raise
+        result = await service.revoke_token("jti-abc", int(time.time()) + 60)
+
+        assert result is False
+
+    async def test_failure_increments_failed_write_count(self) -> None:
+        redis = _make_redis()
+        redis.set.side_effect = RuntimeError("redis down")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+
+        await service.revoke_token("jti-abc", int(time.time()) + 60)
+
+        assert service.failed_write_count == 1
+
+    async def test_ttl_clamped_to_access_token_lifetime_under_skew(self) -> None:
+        """A3 — a short computed ttl (simulating clock skew making the
+        remaining lifetime look shorter than it really is) is clamped up to
+        the configured access-token lifetime."""
+        redis = _make_redis()
+        service = TokenRevocationService(
+            redis, max_token_ttl_seconds=1200, access_token_lifetime_seconds=900
+        )
+        expires_at = int(time.time()) + 10  # looks like only 10s left
+
+        await service.revoke_token("jti-abc", expires_at)
+
+        _args, kwargs = redis.set.call_args
+        assert kwargs["ex"] == 900
+
+    async def test_ttl_not_clamped_when_naturally_longer(self) -> None:
+        redis = _make_redis()
+        service = TokenRevocationService(
+            redis, max_token_ttl_seconds=1200, access_token_lifetime_seconds=60
+        )
+        expires_at = int(time.time()) + 500
+
+        await service.revoke_token("jti-abc", expires_at)
+
+        _args, kwargs = redis.set.call_args
+        assert 495 <= kwargs["ex"] <= 500
 
 
 class TestIsRevoked:
-    """Single round-trip; epoch hit, jti hit, neither, and fail-open on error."""
+    """Single round-trip; epoch hit, jti hit, neither, D2 (<=), F6, breaker."""
 
     async def test_false_when_neither_key_set(self) -> None:
         redis = _make_redis()
         redis.mget.return_value = [None, None]
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub="user-1", iat=1000, jti="jti-1")
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
 
         result = await service.is_revoked(payload)  # type: ignore[arg-type]
 
         assert result is False
-        redis.mget.assert_awaited_once_with(["authrev:user:user-1", "authrev:jti:jti-1"])
+        redis.mget.assert_awaited_once_with([_epoch_key(_USER_ID), _jti_key("jti-1")])
 
     async def test_true_on_jti_hit(self) -> None:
         redis = _make_redis()
         redis.mget.return_value = [None, "1"]
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub="user-1", iat=1000, jti="jti-1")
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
 
         result = await service.is_revoked(payload)  # type: ignore[arg-type]
 
@@ -138,40 +281,30 @@ class TestIsRevoked:
         redis = _make_redis()
         redis.mget.return_value = ["1000", None]
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub="user-1", iat=999, jti="jti-1")
+        payload = _FakePayload(sub=_USER_SUB, iat=999, jti="jti-1")
 
         result = await service.is_revoked(payload)  # type: ignore[arg-type]
 
         assert result is True
 
-    async def test_false_when_iat_equals_epoch(self) -> None:
-        """D2 — strictly less-than, not <=: a token minted in the same second
-        as the revocation must survive, or an immediate re-login after
-        logout_all would be rejected."""
+    async def test_true_when_iat_equals_epoch(self) -> None:
+        """D2 (round 2, F1) — `<=`, not `<`: a token minted in the exact
+        same second as the revocation is rejected. This reverses round 1's
+        design; do not "fix" it back to `<`."""
         redis = _make_redis()
         redis.mget.return_value = ["1000", None]
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub="user-1", iat=1000, jti="jti-1")
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
 
         result = await service.is_revoked(payload)  # type: ignore[arg-type]
 
-        assert result is False
+        assert result is True
 
     async def test_false_when_iat_after_epoch(self) -> None:
         redis = _make_redis()
         redis.mget.return_value = ["1000", None]
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub="user-1", iat=1001, jti="jti-1")
-
-        result = await service.is_revoked(payload)  # type: ignore[arg-type]
-
-        assert result is False
-
-    async def test_redis_error_fails_open(self) -> None:
-        redis = _make_redis()
-        redis.mget.side_effect = RuntimeError("redis down")
-        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub="user-1", iat=1000, jti="jti-1")
+        payload = _FakePayload(sub=_USER_SUB, iat=1001, jti="jti-1")
 
         result = await service.is_revoked(payload)  # type: ignore[arg-type]
 
@@ -182,9 +315,105 @@ class TestIsRevoked:
         redis = _make_redis()
         redis.mget.return_value = ["1", "1"]
         service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
-        payload = _FakePayload(sub="user-1", iat=1000, jti="jti-1")
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
 
         await service.is_revoked(payload)  # type: ignore[arg-type]
 
         redis.mget.assert_awaited_once()
         redis.set.assert_not_called()
+
+    async def test_malformed_epoch_fails_open_and_logs(self) -> None:
+        """F6 — a garbage epoch value must not raise; the request succeeds
+        (token treated as not revoked) and the event is logged."""
+        redis = _make_redis()
+        redis.mget.return_value = ["not-a-number", None]
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        with patch("src.api.services.token_revocation.logger") as mock_logger:
+            result = await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert result is False
+        mock_logger.exception.assert_called_once()
+        assert mock_logger.exception.call_args.args[0] == "authrev.malformed_epoch"
+
+    async def test_redis_error_fails_open(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = RuntimeError("redis down")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        result = await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert result is False
+
+
+class TestCircuitBreaker:
+    """F4 — is_revoked's Redis calls are gated by an in-process breaker."""
+
+    async def test_breaker_stays_closed_under_threshold(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = RuntimeError("redis down")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        for _ in range(2):
+            await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert service.circuit_open is False
+        assert redis.mget.await_count == 2
+
+    async def test_breaker_opens_after_threshold_and_short_circuits(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = RuntimeError("redis down")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        for _ in range(3):
+            await service.is_revoked(payload)  # type: ignore[arg-type]
+        assert service.circuit_open is True
+
+        # A 4th call must not touch Redis at all — breaker short-circuits.
+        result = await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert result is False
+        assert redis.mget.await_count == 3
+
+    async def test_breaker_logs_exactly_one_transition_line_during_outage(self) -> None:
+        """Acceptance criterion (F4): one log line for the whole outage, not
+        one per request."""
+        redis = _make_redis()
+        redis.mget.side_effect = RuntimeError("redis down")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        with patch("src.api.services.token_revocation.logger") as mock_logger:
+            for _ in range(10):
+                await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert mock_logger.error.call_count == 1
+        assert mock_logger.error.call_args.args[0] == "authrev.circuit_opened"
+
+    async def test_breaker_recovers_after_window_and_logs_once(self) -> None:
+        redis = _make_redis()
+        redis.mget.side_effect = RuntimeError("redis down")
+        service = TokenRevocationService(redis, max_token_ttl_seconds=1200)
+        payload = _FakePayload(sub=_USER_SUB, iat=1000, jti="jti-1")
+
+        for _ in range(3):
+            await service.is_revoked(payload)  # type: ignore[arg-type]
+        assert service.circuit_open is True
+
+        # Force the breaker's window to have elapsed.
+        service._breaker._opened_at = time.monotonic() - 10
+
+        redis.mget.side_effect = None
+        redis.mget.return_value = [None, None]
+
+        with patch("src.api.services.token_revocation.logger") as mock_logger:
+            result = await service.is_revoked(payload)  # type: ignore[arg-type]
+
+        assert result is False
+        assert service.circuit_open is False
+        mock_logger.info.assert_called_once()
+        assert mock_logger.info.call_args.args[0] == "authrev.circuit_closed"

@@ -1,4 +1,4 @@
-"""Integration tests for the token-revocation feature (issue #142).
+"""Integration tests for the token-revocation feature (issue #142, rounds 1-2).
 
 Exercises the real call chain — AuthService.logout_all / UserService.change_password
 / UserService.deactivate_account / AuthController.logout — writing into a real
@@ -6,18 +6,20 @@ TokenRevocationService, then verifies rejection (or continued acceptance) via
 real HTTP requests through auth_guard / content_auth_guard on a Litestar
 TestClient.
 
-Uses an in-memory fake Redis client (only the `set`/`mget` subset
-TokenRevocationService needs, with real TTL-expiry semantics) rather than a
-live Redis server — consistent with this repo's other infra-free
-"integration" tests (test_content_cookie_flow.py, test_content_range_streaming.py)
-that exercise real guards/DI/HTTP without a live external dependency.
+Uses an in-memory fake Redis client (the `set`/`mget`/`get`/`eval`/`evalsha`
+subset TokenRevocationService needs, with real TTL-expiry semantics and a
+pluggable clock simulating Redis `TIME`) rather than a live Redis server —
+consistent with this repo's other infra-free "integration" tests
+(test_content_cookie_flow.py, test_content_range_streaming.py) that exercise
+real guards/DI/HTTP without a live external dependency.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -26,6 +28,9 @@ from litestar import Litestar, get
 from litestar.di import Provide
 from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED
 from litestar.testing import TestClient
+from redis.exceptions import NoScriptError
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id, get_optional_user_id
 from src.api.routes.auth import AuthController
@@ -35,34 +40,44 @@ from src.api.services.auth import AuthService, TokenReuseDetectedError
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
+from src.core.uid import new_id
+from src.db.models.user import RefreshToken, User
+from src.db.repositories.user import UserRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
 PRODUCT_ID = "vex"
 
-# A token minted in the same wall-clock second as a revocation epoch must
-# survive by design (D2 — strictly `<`, not `<=`). Tests asserting rejection
-# need a real gap past that second to be deterministic; tests asserting
-# survival (the D2 regression itself) need no gap since real time only moves
-# forward between mint and revoke.
-_PAST_SECOND_BOUNDARY = 1.1
+# Used only by the one deliberate "re-login on the FOLLOWING second succeeds"
+# test (F1 round 2) — everywhere else revocation is asserted immediately,
+# with no sleep, since `<=` (not `<`) means same-second rejection is now the
+# correct, intended behavior rather than something to dodge.
+_NEXT_SECOND_GAP = 1.1
 
 
 class _FakeRedis:
     """Minimal in-memory stand-in for redis.asyncio.Redis.
 
-    Implements only `set`/`mget` — the subset TokenRevocationService uses —
-    with real TTL-expiry semantics, so epoch/jti keys actually age out.
+    Implements `set`/`mget`/`get`/`eval`/`evalsha` — the subset
+    TokenRevocationService uses — with real TTL-expiry semantics, so
+    epoch/jti keys actually age out. `eval` simulates the production Lua
+    epoch-write script (`redis.call('TIME')` + `SET ... EX`) using a
+    pluggable clock so tests can pin the "Redis clock" deterministically
+    instead of depending on real-clock timing.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
         self._store: dict[str, tuple[str, float | None]] = {}
+        self._clock = clock
 
     async def set(self, key: str, value: object, ex: int | None = None) -> None:
-        deadline = time.time() + ex if ex is not None else None
+        deadline = self._clock() + ex if ex is not None else None
         self._store[key] = (str(value), deadline)
 
     async def mget(self, keys: list[str]) -> list[str | None]:
-        now = time.time()
+        now = self._clock()
         result: list[str | None] = []
         for key in keys:
             entry = self._store.get(key)
@@ -77,11 +92,27 @@ class _FakeRedis:
                 result.append(value)
         return result
 
+    async def get(self, key: str) -> str | None:
+        (result,) = await self.mget([key])
+        return result
+
+    async def evalsha(self, _sha: str, _numkeys: int, *_keys_and_args: object) -> int:
+        raise NoScriptError("fake redis never has a cached script")
+
+    async def eval(self, _script: str, numkeys: int, *keys_and_args: object) -> int:
+        """Simulates the production epoch-write script: SET key=TIME, EX=ttl."""
+        key = str(keys_and_args[0])
+        ttl = int(str(keys_and_args[numkeys]))
+        now = int(self._clock())
+        await self.set(key, now, ex=ttl)
+        return now
+
 
 def _make_repo() -> AsyncMock:
     repo = AsyncMock()
     repo.revoke_all_user_tokens.return_value = 1
     repo.get_refresh_token_by_hash.return_value = None
+    repo.get_refresh_token_by_hash_for_update.return_value = None
     return repo
 
 
@@ -145,6 +176,43 @@ def app(jwt_service: JWTService, token_revocation: TokenRevocationService) -> Li
     return _make_app(jwt_service, token_revocation)
 
 
+class TestSameSecondRevocationIsRejected:
+    """F1 (round 2) — `<=`, not `<`: a token minted in the exact same
+    wall-clock second as its revocation must be rejected. This is the case
+    round 1's `_PAST_SECOND_BOUNDARY` sleeps existed to dodge; round 2
+    reverses that decision, so this asserts the opposite outcome
+    deterministically (pinned clock, no sleep) rather than depending on
+    real-clock timing luck.
+    """
+
+    async def test_token_401s_when_revoked_in_the_same_second_as_mint(
+        self, jwt_service: JWTService
+    ) -> None:
+        user_id = uuid4()
+        token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
+        payload = jwt_service.decode_access_token(token)
+        assert payload is not None
+
+        # Pin the fake Redis clock to exactly the token's `iat` — guarantees
+        # the epoch write lands in the identical integer second as the
+        # mint, deterministically, rather than racing real wall-clock time.
+        redis = _FakeRedis(clock=lambda: float(payload.iat))
+        token_revocation = TokenRevocationService(redis, max_token_ttl_seconds=3600)  # type: ignore[arg-type]
+        app = _make_app(jwt_service, token_revocation)
+
+        auth_service = AuthService(
+            repository=_make_repo(),
+            jwt_service=jwt_service,
+            password_service=_make_password_service(),
+            token_revocation_service=token_revocation,
+        )
+        await auth_service.logout_all(user_id)
+
+        with TestClient(app=app) as client:
+            resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == HTTP_401_UNAUTHORIZED
+
+
 class TestLogoutAllRevokesAccessTokens:
     """AuthService.logout_all — bulk revocation via the user epoch (D1a)."""
 
@@ -161,7 +229,6 @@ class TestLogoutAllRevokesAccessTokens:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == HTTP_200_OK
 
-        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
         auth_service = AuthService(
             repository=_make_repo(),
             jwt_service=jwt_service,
@@ -174,17 +241,18 @@ class TestLogoutAllRevokesAccessTokens:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == HTTP_401_UNAUTHORIZED
 
-    async def test_relogin_immediately_after_logout_all_yields_working_token(
+    async def test_relogin_on_the_following_second_yields_working_token(
         self,
         jwt_service: JWTService,
         token_revocation: TokenRevocationService,
         app: Litestar,
     ) -> None:
-        """D2 regression — this is the assertion that catches a `<`→`<=` change.
-
-        No sleep here: real time only moves forward between the
-        logout_all() call and the fresh mint that follows it, so the fresh
-        token's `iat` is always >= the epoch just written, and must survive.
+        """The one canonical "re-login still works" test (F1 round 2 —
+        "keep exactly one test proving re-login succeeds on the following
+        second"). Requires an explicit gap now: with `<=`, a token minted in
+        the *same* second as the revocation is correctly rejected (see
+        TestSameSecondRevocationIsRejected) — only a token minted after that
+        second has elapsed is guaranteed to survive.
         """
         user_id = uuid4()
         auth_service = AuthService(
@@ -195,6 +263,7 @@ class TestLogoutAllRevokesAccessTokens:
         )
         await auth_service.logout_all(user_id)
 
+        await asyncio.sleep(_NEXT_SECOND_GAP)
         fresh_token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
 
         with TestClient(app=app) as client:
@@ -216,7 +285,6 @@ class TestChangePasswordRevokesAccessTokens:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == HTTP_200_OK
 
-        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
         repo = _make_repo()
         user = MagicMock()
         user.password_hash = "hashed"
@@ -249,7 +317,6 @@ class TestDeactivateAccountRevokesAccessTokens:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == HTTP_200_OK
 
-        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
         repo = _make_repo()
         repo.soft_delete_user.return_value = MagicMock()
         user_service = UserService(
@@ -345,7 +412,6 @@ class TestContentCookieRevokedByLogoutAll:
             resp = client.get("/content-ping", cookies={"apex_content": content_token})
         assert resp.status_code == HTTP_200_OK
 
-        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
         auth_service = AuthService(
             repository=_make_repo(),
             jwt_service=jwt_service,
@@ -388,7 +454,6 @@ class TestResetPasswordRevokesAccessTokens:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == HTTP_200_OK
 
-        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
         svc = _make_email_verification_service(token_revocation)
         user = MagicMock()
         user.id = user_id
@@ -418,47 +483,6 @@ class TestResetPasswordRevokesAccessTokens:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == HTTP_401_UNAUTHORIZED
 
-    async def test_relogin_immediately_after_reset_password_yields_working_token(
-        self,
-        jwt_service: JWTService,
-        token_revocation: TokenRevocationService,
-        app: Litestar,
-    ) -> None:
-        """D2 regression, extended to the reset-password path — a token
-        minted in the same wall-clock second as the revocation epoch must
-        survive (strict `<`, not `<=`)."""
-        user_id = uuid4()
-        svc = _make_email_verification_service(token_revocation)
-        user = MagicMock()
-        user.id = user_id
-        session = AsyncMock()
-
-        with (
-            patch("src.api.services.email_verification.UserRepository") as user_repo_cls,
-            patch("src.api.services.email_verification.AuthTokenRepository") as token_repo_cls,
-            patch("src.api.security.PasswordService") as pwd_cls,
-        ):
-            token_repo = AsyncMock()
-            token_repo.consume_reset_token = AsyncMock(return_value=user_id)
-            token_repo_cls.return_value = token_repo
-
-            user_repo = AsyncMock()
-            user_repo.update_user = AsyncMock(return_value=user)
-            user_repo.revoke_all_refresh_tokens = AsyncMock(return_value=2)
-            user_repo_cls.return_value = user_repo
-
-            pwd_instance = MagicMock()
-            pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
-            pwd_cls.return_value = pwd_instance
-
-            await svc.reset_password("raw-reset-token", "new_password", session=session)
-
-        fresh_token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
-
-        with TestClient(app=app) as client:
-            resp = client.get("/ping", headers={"Authorization": f"Bearer {fresh_token}"})
-        assert resp.status_code == HTTP_200_OK
-
 
 class TestTokenReuseDetectionRevokesAccessTokens:
     """R2 (issue #142) — reuse detection must bulk-revoke live access
@@ -478,13 +502,12 @@ class TestTokenReuseDetectionRevokesAccessTokens:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {access_token}"})
         assert resp.status_code == HTTP_200_OK
 
-        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
         repo = _make_repo()
         stored_token = MagicMock()
         stored_token.is_revoked = True
         stored_token.user_id = user_id
         stored_token.family_id = uuid4()
-        repo.get_refresh_token_by_hash.return_value = stored_token
+        repo.get_refresh_token_by_hash_for_update.return_value = stored_token
         repo.revoke_token_family = AsyncMock(return_value=3)
 
         auth_service = AuthService(
@@ -500,38 +523,6 @@ class TestTokenReuseDetectionRevokesAccessTokens:
         with TestClient(app=app) as client:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {access_token}"})
         assert resp.status_code == HTTP_401_UNAUTHORIZED
-
-    async def test_relogin_immediately_after_reuse_detected_yields_working_token(
-        self,
-        jwt_service: JWTService,
-        token_revocation: TokenRevocationService,
-        app: Litestar,
-    ) -> None:
-        """D2 regression, extended to the reuse-detection path."""
-        user_id = uuid4()
-        repo = _make_repo()
-        stored_token = MagicMock()
-        stored_token.is_revoked = True
-        stored_token.user_id = user_id
-        stored_token.family_id = uuid4()
-        repo.get_refresh_token_by_hash.return_value = stored_token
-        repo.revoke_token_family = AsyncMock(return_value=3)
-
-        auth_service = AuthService(
-            repository=repo,
-            jwt_service=jwt_service,
-            password_service=_make_password_service(),
-            token_revocation_service=token_revocation,
-        )
-
-        with pytest.raises(TokenReuseDetectedError):
-            await auth_service.refresh_tokens("stolen-refresh-token")
-
-        fresh_token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
-
-        with TestClient(app=app) as client:
-            resp = client.get("/ping", headers={"Authorization": f"Bearer {fresh_token}"})
-        assert resp.status_code == HTTP_200_OK
 
 
 class TestOptionalAuthGuardRevocation:
@@ -555,7 +546,6 @@ class TestOptionalAuthGuardRevocation:
         assert resp.status_code == HTTP_200_OK
         assert resp.json()["user_id"] == str(user_id)
 
-        await asyncio.sleep(_PAST_SECOND_BOUNDARY)
         auth_service = AuthService(
             repository=_make_repo(),
             jwt_service=jwt_service,
@@ -569,3 +559,163 @@ class TestOptionalAuthGuardRevocation:
         # Never 401s — degrades to anonymous instead, per the guard's contract.
         assert resp.status_code == HTTP_200_OK
         assert resp.json()["user_id"] is None
+
+
+async def _seed_user_with_refresh_token(
+    engine: AsyncEngine, *, user_id: UUID, family_id: UUID
+) -> str:
+    """Commit a real User + RefreshToken row on a dedicated connection.
+
+    Returns the raw (pre-hash) refresh token string.
+    """
+    from src.api.security import generate_token, hash_token
+
+    raw_token = generate_token(32)
+    user = User(
+        id=user_id,
+        email=f"race-{uuid4().hex[:8]}@example.com",
+        password_hash="x" * 64,
+        product_id="vex",
+        is_active=True,
+    )
+    refresh_token = RefreshToken(
+        id=new_id(),
+        user_id=user_id,
+        token_hash=hash_token(raw_token),
+        family_id=family_id,
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id="vex",
+    )
+    async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+        session.add_all([user, refresh_token])
+        await session.commit()
+    return raw_token
+
+
+async def _cleanup_user(engine: AsyncEngine, user_id: UUID) -> None:
+    async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+        await session.execute(delete(RefreshToken).where(RefreshToken.user_id == user_id))
+        await session.execute(delete(User).where(User.id == user_id))
+        await session.commit()
+
+
+async def _attempt_refresh(
+    *,
+    engine: AsyncEngine,
+    jwt_service: JWTService,
+    token_revocation: TokenRevocationService,
+    raw_refresh_token: str,
+    outcome: dict[str, str],
+) -> None:
+    async with (
+        AsyncSession(bind=engine, expire_on_commit=False) as session,
+        session.begin(),
+    ):
+        auth_service = AuthService(
+            repository=UserRepository(session),
+            jwt_service=jwt_service,
+            password_service=_make_password_service(),
+            token_revocation_service=token_revocation,
+        )
+        try:
+            tokens, _uid = await auth_service.refresh_tokens(raw_refresh_token)
+        except TokenReuseDetectedError:
+            outcome["refresh"] = "rejected"
+        else:
+            outcome["refresh"] = tokens.access_token
+
+
+async def _attempt_logout_all(
+    *,
+    engine: AsyncEngine,
+    jwt_service: JWTService,
+    token_revocation: TokenRevocationService,
+    user_id: UUID,
+) -> None:
+    async with (
+        AsyncSession(bind=engine, expire_on_commit=False) as session,
+        session.begin(),
+    ):
+        auth_service = AuthService(
+            repository=UserRepository(session),
+            jwt_service=jwt_service,
+            password_service=_make_password_service(),
+            token_revocation_service=token_revocation,
+        )
+        await auth_service.logout_all(user_id)
+
+
+class TestRefreshVsLogoutAllRace:
+    """F2 — a concurrent refresh-token rotation racing a logout-all must
+    never leave a client holding a usable access token.
+
+    Self-contained against a real Postgres (via `db_engine`, two independent
+    connections) rather than the SAVEPOINT-per-test `db_session` fixture,
+    which only allocates one connection — the row lock this test exercises
+    requires two genuinely concurrent transactions.
+
+    Two orderings are possible depending on which side wins the row lock on
+    the refresh-token row (`UserRepository.get_refresh_token_by_hash_for_update`):
+
+      - logout-all wins: refresh observes `is_revoked=True` on the row once
+        it acquires the lock and raises `TokenReuseDetectedError` without
+        minting anything.
+      - refresh wins: it mints a fresh pair before logout-all's bulk UPDATE
+        (blocked on the same row) can unblock, but the new access token's
+        `iat` necessarily predates the epoch logout-all subsequently
+        writes, so `is_revoked()` flags it correctly once that epoch has
+        propagated (asserted below, after both sides have completed).
+
+    Either way, no access token a client could actually present survives.
+    Run repeatedly — a single pass proves nothing about a race.
+    """
+
+    async def test_no_usable_access_token_survives(self, db_engine: AsyncEngine) -> None:
+        jwt_service = JWTService(JWTConfig(secret_key=TEST_SECRET))
+        iterations = 50
+
+        for _ in range(iterations):
+            user_id = new_id()
+            family_id = new_id()
+            raw_refresh_token = await _seed_user_with_refresh_token(
+                db_engine, user_id=user_id, family_id=family_id
+            )
+
+            # One shared fake Redis/TokenRevocationService — real Redis is
+            # shared infrastructure both concurrent requests would hit, and
+            # the whole point is that the epoch write is visible to both.
+            redis = _FakeRedis()
+            token_revocation = TokenRevocationService(
+                redis,  # type: ignore[arg-type]
+                max_token_ttl_seconds=3600,
+            )
+
+            outcome: dict[str, str] = {}
+
+            try:
+                await asyncio.gather(
+                    _attempt_refresh(
+                        engine=db_engine,
+                        jwt_service=jwt_service,
+                        token_revocation=token_revocation,
+                        raw_refresh_token=raw_refresh_token,
+                        outcome=outcome,
+                    ),
+                    _attempt_logout_all(
+                        engine=db_engine,
+                        jwt_service=jwt_service,
+                        token_revocation=token_revocation,
+                        user_id=user_id,
+                    ),
+                )
+
+                access_token = outcome.get("refresh")
+                if access_token is not None and access_token != "rejected":
+                    payload = jwt_service.decode_access_token(access_token)
+                    assert payload is not None
+                    assert await token_revocation.is_revoked(payload) is True, (
+                        "a refresh that raced logout-all minted an access token "
+                        "that survives revocation"
+                    )
+            finally:
+                await _cleanup_user(db_engine, user_id)

@@ -318,6 +318,33 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_refresh_token_by_hash_for_update(self, token_hash: str) -> RefreshToken | None:
+        """Same lookup as get_refresh_token_by_hash, but row-locked (issue #142 F2).
+
+        Only for the refresh-token *rotation* path (AuthService.refresh_tokens)
+        — do not reuse for read-only lookups such as single-device logout,
+        which don't need the lock and would pay unnecessary row-lock
+        contention for no benefit. Locking this row serializes rotation
+        against revoke_all_user_tokens's bulk UPDATE: a concurrent bulk
+        revocation either commits before this lock is acquired (so the
+        caller observes is_revoked=True on the freshly locked row and takes
+        the reuse-detection branch) or blocks until this transaction
+        commits/rolls back (so it revokes the row only if this transaction
+        did not already revoke it first). The row is intentionally read and
+        re-checked from the same locked SELECT — no separate re-read query
+        is needed.
+
+        Args:
+            token_hash: SHA-256 hash of token.
+
+        Returns:
+            RefreshToken if found, None otherwise.
+        """
+        result = await self._session.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def get_valid_refresh_token(self, token_hash: str) -> RefreshToken | None:
         """Get a valid (non-revoked, non-expired) refresh token.
 

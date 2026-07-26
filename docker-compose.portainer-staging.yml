@@ -56,7 +56,22 @@ services:
     image: redis:7-alpine
     container_name: apex-redis-staging
     restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
+    # --appendonly/--appendfsync (issue #142 F3): default RDB-only snapshotting
+    # can lose every revocation (logout-all, password change/reset, reuse
+    # detection) written since the last snapshot on a restart — un-revoking
+    # credentials that should stay dead. AOF with `everysec` bounds worst-case
+    # loss to one second, the right trade for a security control (small
+    # constant throughput cost vs. RDB-only).
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${REDIS_PASSWORD:?REDIS_PASSWORD is required}",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+      ]
     ports: []
     volumes:
       - redis_staging_data:/data

@@ -36,7 +36,27 @@ class TestInitRedisPool:
 
         assert result is mock_pool
         assert redis_module._pool is mock_pool
-        mock_from_url.assert_called_once_with("redis://localhost:6379", decode_responses=True)
+        mock_from_url.assert_called_once_with(
+            "redis://localhost:6379",
+            decode_responses=True,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
+            retry_on_timeout=False,
+        )
+
+    def test_passes_through_custom_timeouts(self) -> None:
+        with patch("src.core.redis.aioredis.ConnectionPool.from_url") as mock_from_url:
+            init_redis_pool(
+                "redis://localhost:6379", socket_connect_timeout=1.5, socket_timeout=2.5
+            )
+
+        mock_from_url.assert_called_once_with(
+            "redis://localhost:6379",
+            decode_responses=True,
+            socket_connect_timeout=1.5,
+            socket_timeout=2.5,
+            retry_on_timeout=False,
+        )
 
 
 class TestRedactedUrl:
@@ -63,7 +83,10 @@ class TestRedactedUrl:
             init_redis_pool("redis://:supersecret@redis:6379/0")
 
         mock_logger.info.assert_called_once_with(
-            "redis.pool_initialized", url="redis://redis:6379/0"
+            "redis.pool_initialized",
+            url="redis://redis:6379/0",
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
         )
 
 

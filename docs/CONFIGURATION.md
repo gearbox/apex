@@ -54,10 +54,16 @@ Refresh tokens are stored in the database (not as JWTs); only access tokens are 
 
 > **Access-token revocation (issue #142):** access tokens are stateless JWTs, but `auth_guard` /
 > `content_auth_guard` now also reject a token if `REDIS_URL` is configured and `TokenRevocationService`
-> (`src/api/services/token_revocation.py`) says so — either its `iat` predates the caller's most recent
-> bulk "revoke all sessions" event (`logout-all`, password change, deactivation), or its specific `jti` was
-> denylisted by a single-device `POST /v1/auth/logout`. See `REDIS_URL` below for the fail-open behavior
-> when Redis is unset or unavailable.
+> (`src/api/services/token_revocation.py`) says so — either its `iat` is at or before the caller's most
+> recent bulk "revoke all sessions" event (`logout-all`, password change/reset, deactivation, refresh-token
+> reuse detection), or its specific `jti` was denylisted by a single-device `POST /v1/auth/logout`. See
+> `REDIS_URL` below for the fail-open behavior when Redis is unset or unavailable.
+>
+> **NTP is a hard requirement on every API host.** The bulk-revocation epoch is now written from
+> Redis's own clock (`TIME`, round 2 F1b) so multiple API replicas can't disagree with each other about
+> *when* a revocation happened — but a token's `iat` is still stamped by the minting instance's local
+> clock, and the comparison is `iat <= epoch`. An API host with a clock running noticeably behind Redis's
+> can mint tokens that outlive a revocation meant to kill them.
 
 ---
 
@@ -188,11 +194,20 @@ Controls rate limits for authentication endpoints using Redis sliding-window cou
 
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
-| `REDIS_URL` | `None` | `str \| None` | Redis URL (e.g., `redis://localhost:6379/0`). If missing, falls back to single-process in-memory limits. Also backs `TokenRevocationService` (issue #142, access-token revocation — see the JWT Authentication section above): without it, `logout`/`logout-all`/password-change/deactivation still revoke refresh tokens as before, but live access tokens and content cookies are not denylisted until they expire naturally. A Redis outage after startup degrades the same way (fail-open, logged as `authrev.backend_unavailable`) rather than rejecting authenticated requests. |
+| `REDIS_URL` | `None` | `str \| None` | Redis URL (e.g., `redis://localhost:6379/0`). If missing, falls back to single-process in-memory limits. Also backs `TokenRevocationService` (issue #142, access-token revocation — see the JWT Authentication section above): without it, `logout`/`logout-all`/password-change/deactivation/reset still revoke refresh tokens as before, but live access tokens and content cookies are not denylisted until they expire naturally. A Redis outage after startup degrades the same way (fail-open) rather than rejecting authenticated requests — round 2 adds a circuit breaker (see `REDIS_SOCKET_*_TIMEOUT_SECONDS` below) so an outage costs one probe per ~5s instead of a per-request timeout, logged once as `authrev.circuit_opened` / `authrev.circuit_closed` rather than per request. |
+| `REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS` | `0.25` | `float (0–5.0]` | TCP connect timeout for the Redis pool (issue #142 F4). `TokenRevocationService.is_revoked` runs on every authenticated request, so this must stay small — see `src/core/redis.py`'s `init_redis_pool`. |
+| `REDIS_SOCKET_TIMEOUT_SECONDS` | `0.25` | `float (0–5.0]` | Redis socket read/write timeout, same rationale. Combined with `retry_on_timeout=False`, a timeout fails straight into `TokenRevocationService`'s fail-open branch instead of silently retrying. |
 | `RATE_LIMIT_REGISTER` | `5/hour` | `str` | Limit on register endpoint per IP. |
 | `RATE_LIMIT_LOGIN` | `10/minute` | `str` | Limit on login endpoint per IP. |
 | `RATE_LIMIT_FORGOT_PASSWORD` | `3/hour` | `str` | Limit on forgot-password endpoint per IP. |
 | `RATE_LIMIT_RESEND_VERIFICATION` | `3/hour` | `str` | Limit on resend-verification endpoint per IP. |
+
+> **Redis durability (issue #142 F3):** `docker-compose.yml`'s `redis` service runs with
+> `--appendonly yes --appendfsync everysec` — without AOF, a Redis restart can lose every revocation
+> event (logout-all, password change/reset, reuse detection) written since the last RDB snapshot,
+> silently un-revoking credentials that should stay dead. `everysec` bounds worst-case loss to one
+> second at a small constant fsync cost — the right trade for a security control. Do not remove this
+> flag when customizing Redis deployment outside Docker Compose.
 
 ---
 

@@ -21,11 +21,35 @@ def _redacted_url(redis_url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-def init_redis_pool(redis_url: str) -> aioredis.ConnectionPool:
-    """Create and store a global connection pool."""
+def init_redis_pool(
+    redis_url: str,
+    *,
+    socket_connect_timeout: float = 0.25,
+    socket_timeout: float = 0.25,
+) -> aioredis.ConnectionPool:
+    """Create and store a global connection pool.
+
+    F4 (issue #142): explicit socket timeouts are required because
+    TokenRevocationService.is_revoked runs on every authenticated request —
+    without a bound, a network fault stalls each request until the OS-level
+    TCP timeout, turning the documented fail-open posture into fail-slow.
+    `retry_on_timeout=False` so a timeout fails straight into the fail-open
+    branch instead of silently retrying and doubling the stall.
+    """
     global _pool
-    _pool = aioredis.ConnectionPool.from_url(redis_url, decode_responses=True)
-    logger.info("redis.pool_initialized", url=_redacted_url(redis_url))
+    _pool = aioredis.ConnectionPool.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_connect_timeout=socket_connect_timeout,
+        socket_timeout=socket_timeout,
+        retry_on_timeout=False,
+    )
+    logger.info(
+        "redis.pool_initialized",
+        url=_redacted_url(redis_url),
+        socket_connect_timeout=socket_connect_timeout,
+        socket_timeout=socket_timeout,
+    )
     return _pool
 
 

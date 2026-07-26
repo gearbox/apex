@@ -336,6 +336,7 @@ def get_user_service(session: AsyncSession) -> UserService:
         age_verification_service=AgeVerificationService(),
         r2_storage=_services.r2_storage,
         token_revocation_service=get_token_revocation_service(),
+        ops_event_bus=get_ops_event_bus(),
     )
 
 
@@ -641,7 +642,11 @@ async def init_services(settings: Settings) -> JWTService:
     from src.core.redis import get_redis_client, init_redis_pool
 
     if settings.redis_url:
-        init_redis_pool(settings.redis_url)
+        init_redis_pool(
+            settings.redis_url,
+            socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+            socket_timeout=settings.redis_socket_timeout_seconds,
+        )
         _services.sse_ticket_service = SSETicketService(ttl_seconds=settings.sse_ticket_ttl_seconds)
         logger.info("sse_ticket_service.initialized")
     else:
@@ -656,13 +661,13 @@ async def init_services(settings: Settings) -> JWTService:
 
     # Token revocation (issue #142) — a working no-op when Redis isn't
     # configured, so call sites never branch on availability. TTL for the
-    # bulk-revocation epoch key must outlive every token type it protects.
+    # bulk-revocation epoch key derives from the *upper bound* of the config
+    # fields it protects (F3), not their current values — see
+    # Settings.max_revocation_epoch_ttl_seconds.
     _services.token_revocation_service = TokenRevocationService(
         get_redis_client() if settings.redis_url else None,
-        max_token_ttl_seconds=max(
-            settings.jwt_access_token_expire_minutes * 60,
-            settings.content_cookie_ttl_hours * 3600,
-        ),
+        max_token_ttl_seconds=settings.max_revocation_epoch_ttl_seconds,
+        access_token_lifetime_seconds=settings.jwt_access_token_expire_minutes * 60,
     )
     logger.info("token_revocation_service.initialized", enabled=settings.redis_url is not None)
 
@@ -865,6 +870,7 @@ async def init_services(settings: Settings) -> JWTService:
         app_url=settings.app_url,
         app_name=settings.app_name,
         token_revocation_service=_services.token_revocation_service,
+        ops_event_bus=_services.ops_event_bus,
     )
 
     # Initialize and start Aisha job poller
@@ -1144,6 +1150,7 @@ async def init_services(settings: Settings) -> JWTService:
         RedisChecker,
     )
     from src.api.services.health.checkers.platform_api import VastAIChecker
+    from src.api.services.health.checkers.token_revocation import TokenRevocationChecker
     from src.api.services.health.registry import HealthCheckRegistry
 
     # Shared HTTP client for health check probes (cloud providers, platform APIs)
@@ -1161,6 +1168,13 @@ async def init_services(settings: Settings) -> JWTService:
         health_registry.register(RedisChecker(redis=get_redis_client()))
     if _services.r2_storage is not None:
         health_registry.register(R2Checker(r2_storage=_services.r2_storage))
+    if _services.token_revocation_service is None:
+        raise RuntimeError("token_revocation_service must be initialized before health checks")
+    # Registered unconditionally (not gated on settings.redis_url) — the
+    # checker itself reports `inactive` with an explanatory message when
+    # Redis isn't configured (A2), so that state is visible on the health
+    # endpoint rather than simply absent from it.
+    health_registry.register(TokenRevocationChecker(service=_services.token_revocation_service))
 
     # Cloud provider checkers (per-product)
     if settings.grok_configured:

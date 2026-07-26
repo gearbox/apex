@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.api.schemas.ops_events import OpsEventType, UserRegisteredOpsPayload
+from src.api.schemas.ops_events import (
+    PLATFORM_PRODUCT_ID,
+    OpsEventType,
+    TokenRevocationFailedOpsPayload,
+    UserRegisteredOpsPayload,
+)
 from src.api.security import (
     JWTService,
     PasswordService,
@@ -68,6 +73,30 @@ class TokenPair:
     refresh_token: str
     expires_at: datetime
     expires_in: int
+
+
+def _reuse_detected_message(*, bulk_access_revoked: bool) -> str:
+    """TokenReuseDetectedError's user-facing message (issue #142 F5).
+
+    Branches on whether the Redis-backed bulk access-token/content-cookie
+    revocation actually landed — the refresh-token family revocation
+    (DB-side) always succeeds by the time this is called, so only the
+    access-token side can fail (Redis down) or be skipped (Redis not
+    configured). Claiming "all sessions invalidated" when that write failed
+    would over-promise a security guarantee that wasn't actually met, so the
+    message is branched rather than a single fixed string.
+    """
+    if bulk_access_revoked:
+        return (
+            "Security alert: This refresh token was already used. "
+            "All sessions have been invalidated."
+        )
+    return (
+        "Security alert: This refresh token was already used. Your refresh-token "
+        "session has been invalidated, but we could not confirm that other active "
+        "access tokens were revoked — change your password immediately if you "
+        "suspect compromise."
+    )
 
 
 class AuthService:
@@ -175,7 +204,7 @@ class AuthService:
         )
 
         # Generate tokens
-        tokens = await self._create_token_pair(user_id, product_id=product_id)
+        tokens, _refresh_token_id = await self._create_token_pair(user_id, product_id=product_id)
 
         # Send verification email — non-blocking failure: if the email provider
         # is down we still complete registration and let the user resend manually.
@@ -237,7 +266,7 @@ class AuthService:
 
         logger.info("user.logged_in", user_id=str(user.id))
 
-        tokens = await self._create_token_pair(
+        tokens, _refresh_token_id = await self._create_token_pair(
             user.id,
             product_id=product_id,
             user_agent=user_agent,
@@ -271,7 +300,12 @@ class AuthService:
             TokenReuseDetectedError: If revoked token was reused.
         """
         token_hash = hash_token(refresh_token)
-        stored_token = await self._repo.get_refresh_token_by_hash(token_hash)
+        # F2 — row-locked lookup serializes rotation against
+        # revoke_all_user_tokens's bulk UPDATE. See
+        # UserRepository.get_refresh_token_by_hash_for_update's docstring:
+        # is_revoked below is read from this same locked row, so it is
+        # already a re-read under the lock, not a stale pre-lock value.
+        stored_token = await self._repo.get_refresh_token_by_hash_for_update(token_hash)
 
         if stored_token is None:
             raise InvalidRefreshTokenError("Invalid refresh token")
@@ -285,17 +319,22 @@ class AuthService:
             # below is false: an access token or content cookie the
             # attacker already holds would keep working for its full
             # remaining lifetime.
-            await self._token_revocation.revoke_user_sessions(stored_token.user_id)
+            epoch = await self._token_revocation.revoke_user_sessions(stored_token.user_id)
+            bulk_access_revoked = epoch is not None
+            await self._report_revocation_outcome(
+                bulk_access_revoked=bulk_access_revoked,
+                user_id=stored_token.user_id,
+                op="token_reuse_detected",
+            )
             logger.warning(
                 "auth.token_reuse_detected",
                 user_id=str(stored_token.user_id),
                 revoked=revoked_count,
                 family=str(stored_token.family_id),
-                bulk_access_revoked=True,
+                bulk_access_revoked=bulk_access_revoked,
             )
             raise TokenReuseDetectedError(
-                "Security alert: This refresh token was already used. "
-                "All sessions have been invalidated."
+                _reuse_detected_message(bulk_access_revoked=bulk_access_revoked)
             )
 
         # Check expiration
@@ -307,17 +346,43 @@ class AuthService:
         if user is None:
             raise UserInactiveError("User account is deactivated")
 
+        # F2 — read the epoch before minting so a bulk revocation that lands
+        # mid-request (e.g. logout-all on another connection, now unblocked
+        # by our row lock only once we commit) can be detected below. The DB
+        # row lock above cannot protect this: it only serializes against the
+        # *old* row, and a bulk revocation's Redis epoch write is entirely
+        # independent of Postgres locking.
+        epoch_before = await self._token_revocation.get_current_epoch(stored_token.user_id)
+
         # Revoke current token
         await self._repo.revoke_refresh_token(stored_token.id)
 
         # Issue new token pair in same family
-        tokens = await self._create_token_pair(
+        tokens, new_refresh_token_id = await self._create_token_pair(
             stored_token.user_id,
             product_id=stored_token.product_id,
             family_id=stored_token.family_id,
             user_agent=user_agent,
             ip_address=ip_address,
         )
+
+        epoch_after = await self._token_revocation.get_current_epoch(stored_token.user_id)
+        if epoch_after is not None and epoch_after != epoch_before:
+            # A bulk revocation landed between our epoch read and the mint
+            # above — the pair we just issued is already supposed to be
+            # dead. Refuse deterministically rather than trusting the race:
+            # revoke what we just minted (both the new refresh-token row and
+            # the new access token's jti) and raise the same error the
+            # reuse-detection path raises above.
+            await self._repo.revoke_refresh_token(new_refresh_token_id)
+            access_payload = self._jwt.decode_access_token(tokens.access_token)
+            if access_payload is not None:
+                await self._token_revocation.revoke_token(access_payload.jti, access_payload.exp)
+            logger.warning(
+                "auth.refresh_race_detected",
+                user_id=str(stored_token.user_id),
+            )
+            raise TokenReuseDetectedError(_reuse_detected_message(bulk_access_revoked=True))
 
         logger.debug("auth.token_refreshed", user_id=str(stored_token.user_id))
 
@@ -353,9 +418,39 @@ class AuthService:
             Number of tokens revoked.
         """
         count = await self._repo.revoke_all_user_tokens(user_id)
-        await self._token_revocation.revoke_user_sessions(user_id)
-        logger.info("auth.tokens_revoked", user_id=str(user_id), count=count)
+        epoch = await self._token_revocation.revoke_user_sessions(user_id)
+        bulk_access_revoked = epoch is not None
+        await self._report_revocation_outcome(
+            bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="logout_all"
+        )
+        logger.info(
+            "auth.tokens_revoked",
+            user_id=str(user_id),
+            count=count,
+            bulk_access_revoked=bulk_access_revoked,
+        )
         return count
+
+    async def _report_revocation_outcome(
+        self, *, bulk_access_revoked: bool, user_id: UUID, op: str
+    ) -> None:
+        """F5 — surface a failed bulk access-token revocation to operators.
+
+        Only alert-worthy when Redis is actually configured
+        (`token_revocation.enabled`) — a `False` outcome with Redis unset is
+        the documented no-op, already logged once at startup, not a fresh
+        degradation. Never raises and never blocks the caller's primary
+        action (password reset/logout-all/etc. must still complete even if
+        this publish fails — OpsEventBus.publish already guarantees that).
+        """
+        if bulk_access_revoked or not self._token_revocation.enabled:
+            return
+        logger.error("auth.bulk_revocation_failed", user_id=str(user_id), op=op)
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.TOKEN_REVOCATION_FAILED,
+            product_id=PLATFORM_PRODUCT_ID,
+            payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
+        )
 
     async def _create_token_pair(
         self,
@@ -365,7 +460,7 @@ class AuthService:
         family_id: UUID | None = None,
         user_agent: str | None = None,
         ip_address: str | None = None,
-    ) -> TokenPair:
+    ) -> tuple[TokenPair, UUID]:
         """Create new access and refresh token pair.
 
         Args:
@@ -376,7 +471,9 @@ class AuthService:
             ip_address: Client IP address.
 
         Returns:
-            TokenPair with both tokens.
+            Tuple of (TokenPair, the new refresh token's DB row id) — the id
+            lets refresh_tokens' post-mint race check (F2) revoke this exact
+            row if a bulk revocation is detected to have landed mid-mint.
         """
         # Create access token
         access_token, expires_at = self._jwt.create_access_token(user_id, product_id=product_id)
@@ -386,9 +483,10 @@ class AuthService:
         refresh_token = generate_token(32)
         refresh_token_hash = hash_token(refresh_token)
         refresh_expires_at = datetime.now(UTC) + self._jwt.refresh_token_lifetime
+        refresh_token_id = new_id()
 
         await self._repo.create_refresh_token(
-            id=new_id(),
+            id=refresh_token_id,
             user_id=user_id,
             token_hash=refresh_token_hash,
             family_id=family_id or new_id(),
@@ -398,9 +496,12 @@ class AuthService:
             ip_address=ip_address,
         )
 
-        return TokenPair(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            expires_at=expires_at,
-            expires_in=expires_in,
+        return (
+            TokenPair(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_at=expires_at,
+                expires_in=expires_in,
+            ),
+            refresh_token_id,
         )

@@ -7,11 +7,17 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.schemas.ops_events import (
+    PLATFORM_PRODUCT_ID,
+    OpsEventType,
+    TokenRevocationFailedOpsPayload,
+)
 from src.api.schemas.user import (
     UserProfileResponse,
     UserStatsResponse,
 )
 from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
+from src.api.services.ops_event_bus import OpsEventBus
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -56,6 +62,7 @@ class UserService:
         *,
         token_revocation_service: TokenRevocationService,
         r2_storage: R2StorageService | None = None,
+        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         """Initialize user service.
 
@@ -72,12 +79,19 @@ class UserService:
                 the choice is visible rather than a silent default (issue
                 #142 A1).
             r2_storage: R2 storage service for presigned URL generation (optional).
+            ops_event_bus: Publishes an alert when a bulk access-token
+                revocation write fails against a configured Redis (issue
+                #142 F5). Defaults to a disabled bus so callers that don't
+                wire one (tests, older call sites) simply skip publishing.
         """
         self._repo = repository
         self._password = password_service
         self._age_verification = age_verification_service
         self._r2 = r2_storage
         self._token_revocation = token_revocation_service
+        self._ops_event_bus = (
+            ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
+        )
 
     async def get_profile(self, user_id: UUID) -> UserProfileResponse:
         """Get user profile.
@@ -215,8 +229,17 @@ class UserService:
         # Bulk-revoke live access tokens/content cookies too (issue #142) —
         # otherwise a stolen access token survives a password change for its
         # full remaining lifetime.
-        await self._token_revocation.revoke_user_sessions(user_id)
-        logger.info("user.password_changed", user_id=str(user_id), revoked_tokens=revoked)
+        epoch = await self._token_revocation.revoke_user_sessions(user_id)
+        bulk_access_revoked = epoch is not None
+        await self._report_revocation_outcome(
+            bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="change_password"
+        )
+        logger.info(
+            "user.password_changed",
+            user_id=str(user_id),
+            revoked_tokens=revoked,
+            bulk_access_revoked=bulk_access_revoked,
+        )
 
     async def deactivate_account(self, user_id: UUID) -> datetime:
         """Soft delete user account.
@@ -240,12 +263,39 @@ class UserService:
         # Revoke all tokens
         await self._repo.revoke_all_user_tokens(user_id)
         # Bulk-revoke live access tokens/content cookies too (issue #142).
-        await self._token_revocation.revoke_user_sessions(user_id)
+        epoch = await self._token_revocation.revoke_user_sessions(user_id)
+        bulk_access_revoked = epoch is not None
+        await self._report_revocation_outcome(
+            bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="deactivate_account"
+        )
 
         deactivated_at = datetime.now(UTC)
-        logger.info("user.deactivated", user_id=str(user_id))
+        logger.info(
+            "user.deactivated", user_id=str(user_id), bulk_access_revoked=bulk_access_revoked
+        )
 
         return deactivated_at
+
+    async def _report_revocation_outcome(
+        self, *, bulk_access_revoked: bool, user_id: UUID, op: str
+    ) -> None:
+        """F5 — surface a failed bulk access-token revocation to operators.
+
+        Only alert-worthy when Redis is actually configured
+        (`token_revocation.enabled`) — a failed outcome with Redis unset is
+        the documented no-op, already logged once at startup, not a fresh
+        degradation. Never raises and never blocks the caller's primary
+        action — password change/deactivation must still complete even if
+        this publish fails (OpsEventBus.publish already guarantees that).
+        """
+        if bulk_access_revoked or not self._token_revocation.enabled:
+            return
+        logger.error("user.bulk_revocation_failed", user_id=str(user_id), op=op)
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.TOKEN_REVOCATION_FAILED,
+            product_id=PLATFORM_PRODUCT_ID,
+            payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
+        )
 
     async def get_stats(self, user_id: UUID) -> UserStatsResponse:
         """Get user statistics.

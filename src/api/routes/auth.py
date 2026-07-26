@@ -461,8 +461,14 @@ class AuthController(Controller):
 
         if raw_bearer := extract_token_from_header(request.headers.get("authorization")):
             payload = jwt_service.decode_access_token(raw_bearer)
-            if payload is not None:
-                await token_revocation_service.revoke_token(payload.jti, payload.exp)
+            if payload is not None and not await token_revocation_service.revoke_token(
+                payload.jti, payload.exp
+            ):
+                # Redis is configured but the write failed — a genuine
+                # degradation, not the documented Redis-unset no-op (F5).
+                # Logout still succeeds: the refresh token is already
+                # revoked above, which is the primary guarantee.
+                logger.error("auth.jti_denylist_failed", jti=payload.jti)
 
         return Response(
             content=MessageResponse(message="Successfully logged out"),
