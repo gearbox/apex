@@ -1,6 +1,29 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-26 — **Access-token revocation, remediation pass** (§2, §3): closes the
+> _Last updated: 2026-07-26 — **Token-revocation-failure alerting** (§15c, §17): closes the last
+> outstanding gap in [#142](https://github.com/gearbox/apex/issues/142). A failed bulk
+> access-token revocation (the Redis write behind `logout_all`/`change_password`/
+> `deactivate_account`/`reset_password`/`token_reuse_detected`/`refresh_race_detected` failing
+> while Redis is otherwise configured) now reaches operators instead of only being logged. New
+> `NotificationClass.TOKEN_REVOCATION_FAILED` (`"token_revocation.failed"`) appears in `GET
+> /v1/admin/notifications/classes` (§15c, §17) as **platform-scoped** — delivered to every
+> subscribed admin/superadmin regardless of product, like the two health classes, since a
+> revocation-backend degradation isn't specific to one product. Once subscribed, an admin
+> receives a Telegram message naming the failing `op` and stating that the affected user's
+> existing access tokens and content cookies remain valid until they expire — `op` matters: a
+> failure during `token_reuse_detected` is materially more serious than one during a routine
+> `logout_all`. **Admins must keep this class selected**: migration `029` seeds a subscription
+> for every admin who already has a Telegram link, so existing installs get immediate coverage
+> without anyone touching preferences — but subscription is still row-presence, so the next
+> full-set `PUT /v1/admin/notifications/preferences` from a seeded admin that omits this class
+> un-subscribes them, exactly like any other class. This was a deliberate choice over making the
+> class bypass preferences entirely (which would special-case one class out of the uniform
+> subscription model): `GET /v1/admin/health`'s `TokenRevocationChecker` remains a second,
+> preference-independent channel surfacing the same degradation, so the seed-plus-this-note is
+> judged sufficient rather than mandatory-delivery. Backend-only — no request/response shape
+> changes, no frontend action required.
+>
+> _Prior (2026-07-26): **Access-token revocation, remediation pass** (§2, §3): closes the
 > remaining gaps in [#142](https://github.com/gearbox/apex/issues/142) found in review. Three fixes,
 > no request/response shape changes:
 > (1) `POST /v1/auth/reset-password` now also bulk-revokes live access tokens/content cookies via
@@ -2697,9 +2720,11 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `generation.failed` | product | A generation job transitions to `failed` |
 | `health.degraded` | platform | A platform health subsystem becomes `degraded`, `unhealthy`, or `unknown` |
 | `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
+| `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
 
 - **Product-scoped** classes (the first four) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
-- **Platform-scoped** classes (`health.*`) are delivered to every subscribed admin/superadmin regardless of product, since platform health applies everywhere.
+- **Platform-scoped** classes (`health.*`, `token_revocation.failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
+- `token_revocation.failed` ships with a one-time seed (migration `029`): every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
 - Each subscribed class carries an optional `min_interval_seconds` throttle (default `0` = unthrottled, max `86400`). Messages suppressed during the cooldown are counted; the next delivered message for that class appends `(+N suppressed)` to the text.
 
@@ -3001,6 +3026,7 @@ Values: `"billing_adjust"`
 | `generation.failed` | product | Generation job transitions to `failed` |
 | `health.degraded` | platform | A health subsystem becomes `degraded`/`unhealthy`/`unknown` |
 | `health.restored` | platform | A health subsystem recovers |
+| `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
 
 > Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 
