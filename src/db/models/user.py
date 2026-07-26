@@ -244,6 +244,17 @@ class RefreshToken(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # Why this token was revoked (issue #142 B2) — a plain String, not a
+    # native PG enum: ALTER TYPE ... ADD VALUE cannot run inside a
+    # transaction on older PostgreSQL, and RefreshTokenRevocationReason
+    # already gives type safety on the Python side. NULL for rows revoked
+    # before this column existed (no backfill) and for anything revoked by
+    # a path that predates this enum — both deliberately fall through to
+    # the theft-detection branch in AuthService.refresh_tokens.
+    revoked_reason: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
 
     # Relationships
     user: Mapped[User] = relationship(

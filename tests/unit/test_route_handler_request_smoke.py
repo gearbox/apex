@@ -45,6 +45,7 @@ from src.api.schemas.user import UserProfileResponse
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.generation.service import GenerationService
 from src.api.services.idempotency import IdempotencyService
+from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.core.enums import GenerationType, JobStatus, ModelType
 from src.core.product_registry import VEX_CONFIG
@@ -108,6 +109,7 @@ class TestUserControllerSmoke:
         mock_service.get_profile = AsyncMock(return_value=self._make_profile_response(test_user_id))
         app = self._make_app(mock_service)
         app.state["jwt_service"] = jwt_service
+        app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
 
         with TestClient(app=app) as client:
             resp = client.get("/v1/users/me", headers=auth_header)
@@ -122,6 +124,7 @@ class TestUserControllerSmoke:
         mock_service = AsyncMock(spec=UserService)
         app = self._make_app(mock_service)
         app.state["jwt_service"] = jwt_service
+        app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
 
         with TestClient(app=app) as client:
             resp = client.get("/v1/users/me")
@@ -195,6 +198,7 @@ class TestUnifiedGenerationControllerSmoke:
             session=mock_session,
         )
         app.state["jwt_service"] = jwt_service
+        app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
 
         with TestClient(app=app) as client:
             resp = client.post(
@@ -229,6 +233,7 @@ class TestUnifiedGenerationControllerSmoke:
             session=mock_session,
         )
         app.state["jwt_service"] = jwt_service
+        app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
 
         with TestClient(app=app) as client:
             resp = client.post(

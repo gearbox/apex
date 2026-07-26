@@ -17,6 +17,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.schemas.ops_events import (
+    PLATFORM_PRODUCT_ID,
+    OpsEventType,
+    TokenRevocationFailedOpsPayload,
+)
+from src.api.services.ops_event_bus import OpsEventBus
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.user import UserRepository
 
@@ -26,6 +32,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.email import EmailService
+    from src.api.services.token_revocation import TokenRevocationService
     from src.db.models.user import User
 
 logger = structlog.get_logger(__name__)
@@ -60,7 +67,9 @@ class EmailVerificationService:
         *,
         email_service: EmailService,
         app_url: str,
+        token_revocation_service: TokenRevocationService,
         app_name: str = "Apex",
+        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         """Initialise the service.
 
@@ -68,11 +77,30 @@ class EmailVerificationService:
             email_service: Provider that actually sends emails.
             app_url: Base URL of the frontend app, e.g. ``https://app.apex.ai``.
                      Used to build verification/reset links.
+            token_revocation_service: Bulk-revokes access tokens/content
+                cookies on password reset (see
+                src.api.services.token_revocation) — the account-recovery
+                path a user reaches because they believe their account is
+                compromised, so it must invalidate live credentials, not
+                just refresh tokens. Required — callers that intentionally
+                want revocation to no-op (tests, older call sites) must pass
+                an explicit
+                ``TokenRevocationService(None, max_token_ttl_seconds=0)`` so
+                the choice is visible rather than a silent default (issue
+                #142 A1).
             app_name: Public-facing product name for email branding.
+            ops_event_bus: Publishes an alert when a bulk access-token
+                revocation write fails against a configured Redis (issue
+                #142 F5). Defaults to a disabled bus so callers that don't
+                wire one (tests, older call sites) simply skip publishing.
         """
         self._email = email_service
         self._app_url = app_url.rstrip("/")
         self._app_name = app_name
+        self._token_revocation = token_revocation_service
+        self._ops_event_bus = (
+            ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
+        )
 
     # -------------------------------------------------------------------------
     # Email verification
@@ -208,7 +236,12 @@ class EmailVerificationService:
     ) -> User:
         """Consume a reset token and update the user's password.
 
-        Also revokes all active refresh tokens (forces re-login everywhere).
+        Also revokes all active refresh tokens and all live access
+        tokens/content cookies (issue #142) — forces re-authentication
+        everywhere. This is the account-recovery path a user reaches
+        *because* they believe their account is compromised, so an
+        attacker holding a stolen access token or content cookie must not
+        keep it for its remaining lifetime after the reset.
 
         Args:
             raw_token: Token from the reset URL query parameter.
@@ -241,10 +274,41 @@ class EmailVerificationService:
 
         # Revoke all refresh tokens — forces re-authentication on all devices
         revoked = await user_repo.revoke_all_refresh_tokens(user_id)
+        # Bulk-revoke live access tokens/content cookies too (issue #142) —
+        # otherwise a stolen access token or content cookie survives a
+        # password reset for its full remaining lifetime. This must never
+        # block the password reset itself completing (F5) — blocking
+        # account recovery on a cache outage is a worse failure than the
+        # bounded exposure of a live access token.
+        epoch = await self._token_revocation.revoke_user_sessions(user_id)
+        bulk_access_revoked = epoch is not None
+        await self._report_revocation_outcome(
+            bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="reset_password"
+        )
         logger.info(
             "email.password_reset_done",
             user_id=str(user_id),
             revoked_tokens=revoked,
+            bulk_access_revoked=bulk_access_revoked,
         )
 
         return user
+
+    async def _report_revocation_outcome(
+        self, *, bulk_access_revoked: bool, user_id: UUID, op: str
+    ) -> None:
+        """F5 — surface a failed bulk access-token revocation to operators.
+
+        Only alert-worthy when Redis is actually configured
+        (`token_revocation.enabled`) — a failed outcome with Redis unset is
+        the documented no-op, already logged once at startup, not a fresh
+        degradation.
+        """
+        if bulk_access_revoked or not self._token_revocation.enabled:
+            return
+        logger.error("email.bulk_revocation_failed", user_id=str(user_id), op=op)
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.TOKEN_REVOCATION_FAILED,
+            product_id=PLATFORM_PRODUCT_ID,
+            payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
+        )

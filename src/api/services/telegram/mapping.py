@@ -17,6 +17,7 @@ from src.api.schemas.ops_events import (
     HealthTransitionOpsPayload,
     OpsEventEnvelope,
     OpsEventType,
+    TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
 from src.api.services.telegram.html import escape
@@ -53,6 +54,8 @@ def map_ops_event(envelope: OpsEventEnvelope) -> OpsNotification | None:
             headline="Health restored",
             icon="✅",
         )
+    if envelope.event_type is OpsEventType.TOKEN_REVOCATION_FAILED:
+        return _map_token_revocation_failed(envelope)
     return None
 
 
@@ -130,6 +133,21 @@ def _map_health_transition(
     )
     return OpsNotification(
         notification_class=notification_class,
+        product_id=envelope.product_id,
+        text=text,
+    )
+
+
+def _map_token_revocation_failed(envelope: OpsEventEnvelope) -> OpsNotification:
+    payload = msgspec.json.decode(envelope.payload, type=TokenRevocationFailedOpsPayload)
+    text = (
+        f"{_tag(envelope.product_id)} 🚨 <b>Token revocation failed</b>\n"
+        f"user <code>{escape(str(payload.user_id))}</code> · op: <code>{escape(payload.op)}</code>\n"
+        f"bulk access-token revocation could not reach Redis — this user's existing "
+        f"access tokens and content cookies remain valid until they expire"
+    )
+    return OpsNotification(
+        notification_class=NotificationClass.TOKEN_REVOCATION_FAILED,
         product_id=envelope.product_id,
         text=text,
     )

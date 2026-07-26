@@ -35,6 +35,7 @@ from src.api.routes.library import LibraryController
 from src.api.schemas.pagination import CursorPage
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.library import LibraryService
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import LibrarySort
 from src.core.library_ref import LibraryAssetSource
 from src.core.product_registry import VEX_CONFIG
@@ -100,7 +101,12 @@ def _make_client(
             "product_config": Provide(lambda: VEX_CONFIG, sync_to_thread=False),
             "product_id": Provide(lambda: "vex", sync_to_thread=False),
         },
-        state=State({"jwt_service": jwt_service}),
+        state=State(
+            {
+                "jwt_service": jwt_service,
+                "token_revocation": TokenRevocationService(None, max_token_ttl_seconds=0),
+            }
+        ),
     )
 
 

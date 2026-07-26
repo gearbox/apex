@@ -33,6 +33,7 @@ class WorkerHeartbeatChecker:
     name = "background_workers"
     category = ComponentCategory.workers
     product_id = None
+    gates_readiness = True  # not in _READINESS_CATEGORIES anyway (issue #142 G2)
 
     def __init__(self, workers: Sequence[PeriodicWorker]) -> None:
         self._workers = workers

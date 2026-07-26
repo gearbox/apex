@@ -29,6 +29,7 @@ class OpsEventType(StrEnum):
     GPU_NODE_STARTED = "ops.gpu_node.started"
     HEALTH_SUBSYSTEM_DEGRADED = "ops.health.subsystem_degraded"
     HEALTH_SUBSYSTEM_RESTORED = "ops.health.subsystem_restored"
+    TOKEN_REVOCATION_FAILED = "ops.auth.token_revocation_failed"  # noqa: S105
 
 
 class OpsEventEnvelope(msgspec.Struct, kw_only=True):
@@ -77,3 +78,15 @@ class HealthTransitionOpsPayload(msgspec.Struct, kw_only=True):
     previous_status: str
     current_status: str
     overall_status: str
+
+
+class TokenRevocationFailedOpsPayload(msgspec.Struct, kw_only=True):
+    """issue #142 F5 — a bulk access-token revocation write failed against a
+    Redis that IS configured (TokenRevocationService.enabled), so this is an
+    active security-relevant degradation, not the expected no-op of Redis
+    being unset. `op` names the triggering action, e.g. "logout_all",
+    "change_password", "deactivate_account", "reset_password",
+    "token_reuse_detected", "refresh_race_detected"."""
+
+    user_id: UUID
+    op: str

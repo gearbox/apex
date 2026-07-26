@@ -31,7 +31,7 @@ from src.api.schemas.auth import (
     VerifyEmailRequest,
 )
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.security import auth_guard
+from src.api.security import auth_guard, extract_token_from_header
 from src.api.security.content_cookie import (
     clear_content_cookie,
     effective_cookie_domain,
@@ -51,6 +51,7 @@ from src.api.services.email_verification import (
     InvalidTokenError,
     UserNotFoundError,
 )
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import Settings
 from src.core.product import ProductConfig
 from src.db.repositories.user import UserRepository
@@ -424,16 +425,50 @@ class AuthController(Controller):
     @post("/logout")
     async def logout(
         self,
+        request: Request[Any, Any, Any],
         data: Annotated[RefreshTokenRequest, Body()],
         auth_service: AuthService,
+        jwt_service: JWTService,
+        token_revocation_service: TokenRevocationService,
         product_config: ProductConfig,
         settings: Settings,
     ) -> Response[MessageResponse]:
-        """Logout by invalidating refresh token.
+        """Logout by invalidating the refresh token and denylisting the
+        presenting access token's own jti (issue #142).
 
-        The access token will remain valid until expiration.
+        This route is intentionally unguarded — the Authorization header is
+        optional here (the access token may already be expired), so it's
+        decoded manually rather than via auth_guard. When present and valid,
+        its jti is denylisted for its remaining lifetime; when absent,
+        expired, or otherwise undecodable, only the refresh token is revoked
+        (identical to pre-#142 behavior).
+
+        Known limitation: this device's `apex_content` cookie is cleared
+        client-side (via the Set-Cookie below) but is **not** revoked
+        server-side — the cookie is scoped `Path=/v1/content`, so it's never
+        sent to this endpoint, and it carries a different `jti` than the
+        access token being denylisted above. For an honest logout this is
+        harmless (the cookie is gone from the browser); for a *stolen*
+        cookie it means the credential keeps working until it expires (up to
+        `CONTENT_COOKIE_TTL_HOURS`) or until a bulk revocation occurs
+        (logout-all, password change/reset, deactivation). Do not "fix" this
+        by calling `revoke_user_sessions` here — that would log the user out
+        of every other device, which single-device logout must not do. Users
+        who suspect theft should use logout-all or change/reset their
+        password.
         """
         await auth_service.logout(data.refresh_token)
+
+        if raw_bearer := extract_token_from_header(request.headers.get("authorization")):
+            payload = jwt_service.decode_access_token(raw_bearer)
+            if payload is not None and not await token_revocation_service.revoke_token(
+                payload.jti, payload.exp
+            ):
+                # Redis is configured but the write failed — a genuine
+                # degradation, not the documented Redis-unset no-op (F5).
+                # Logout still succeeds: the refresh token is already
+                # revoked above, which is the primary guarantee.
+                logger.error("auth.jti_denylist_failed", jti=payload.jti)
 
         return Response(
             content=MessageResponse(message="Successfully logged out"),

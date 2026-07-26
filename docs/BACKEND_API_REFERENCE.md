@@ -1,22 +1,64 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-25 — **Content cookie lifetime & expiry advertisement** (§2, §9):
-> `content_cookie_ttl_hours` default raised from 1h to **24h** (bound raised from 24h to **168h**/7d) so
-> the `apex_content` cookie survives a suspended PWA — no API traffic means no `/v1/auth/refresh` to
-> re-attach it, so a short-lived cookie previously aged out during suspension and every `<img>` the client
-> fired on resume 401'd before recovery could kick in. `jwt_access_token_expire_minutes` is unchanged at
-> 15 — deliberately not raised; see its config docstring. `POST /v1/auth/content-cookie` now returns
-> **`200`** (was `204`) with a body, `ContentCookieResponse { expires_at: datetime }`, alongside the
-> `Set-Cookie` — this endpoint is days old with exactly one consumer, so the status change is safe. Every
-> `TokenResponse` (register/login/refresh) now also carries `content_cookie_expires_at: datetime`, so a
-> client learns the cookie's absolute expiry from its existing auth response with no extra request. Both
-> values come from one call: `mint_content_cookie` (`src/api/security/content_cookie.py`) derives
-> `max_age` from `content_cookie_max_age` and mints the token via `JWTService.create_content_token`,
-> whose returned `exp` *is* the advertised `expires_at` — not a parallel `now()` computation — so the
-> `Set-Cookie` `Max-Age` and the advertised `expires_at` can never diverge from the value that actually
-> governs the guard. Frontend should
-> regenerate types (`gen:api`) to pick up `ContentCookieResponse` and the new `TokenResponse` field, and
-> schedule its proactive re-mint from the real remaining lifetime rather than a hard-coded constant._
+> _Last updated: 2026-07-26 — **Token-revocation-failure alerting** (§15c, §17): closes the last
+> outstanding gap in [#142](https://github.com/gearbox/apex/issues/142). A failed bulk
+> access-token revocation (the Redis write behind `logout_all`/`change_password`/
+> `deactivate_account`/`reset_password`/`token_reuse_detected`/`refresh_race_detected` failing
+> while Redis is otherwise configured) now reaches operators instead of only being logged. New
+> `NotificationClass.TOKEN_REVOCATION_FAILED` (`"token_revocation.failed"`) appears in `GET
+> /v1/admin/notifications/classes` (§15c, §17) as **platform-scoped** — delivered to every
+> subscribed admin/superadmin regardless of product, like the two health classes, since a
+> revocation-backend degradation isn't specific to one product. Once subscribed, an admin
+> receives a Telegram message naming the failing `op` and stating that the affected user's
+> existing access tokens and content cookies remain valid until they expire — `op` matters: a
+> failure during `token_reuse_detected` is materially more serious than one during a routine
+> `logout_all`. **Admins must keep this class selected**: migration `029` seeds a subscription
+> for every admin who already has a Telegram link, so existing installs get immediate coverage
+> without anyone touching preferences — but subscription is still row-presence, so the next
+> full-set `PUT /v1/admin/notifications/preferences` from a seeded admin that omits this class
+> un-subscribes them, exactly like any other class. This was a deliberate choice over making the
+> class bypass preferences entirely (which would special-case one class out of the uniform
+> subscription model): `GET /v1/admin/health`'s `TokenRevocationChecker` remains a second,
+> preference-independent channel surfacing the same degradation, so the seed-plus-this-note is
+> judged sufficient rather than mandatory-delivery. Backend-only — no request/response shape
+> changes, no frontend action required.
+>
+> _Prior (2026-07-26): **Access-token revocation, remediation pass** (§2, §3): closes the
+> remaining gaps in [#142](https://github.com/gearbox/apex/issues/142) found in review. Three fixes,
+> no request/response shape changes:
+> (1) `POST /v1/auth/reset-password` now also bulk-revokes live access tokens/content cookies via
+> `TokenRevocationService.revoke_user_sessions`, matching the authenticated change-password path —
+> previously the account-recovery flow a user reaches *because* they suspect compromise left a
+> stolen access token or content cookie live for its full remaining lifetime.
+> (2) Refresh-token reuse detection (`AuthService.refresh_tokens`'s theft-detection branch) now
+> bulk-revokes the same way before raising, so its "All sessions have been invalidated" message is
+> now accurate rather than aspirational.
+> (3) `optional_auth_guard` (used by `GET /v1/providers`) now also consults `TokenRevocationService`
+> — a revoked token previously still authenticated on this route, since only `auth_guard` and
+> `content_auth_guard` checked revocation. It degrades a revoked token to anonymous, exactly like it
+> already does for a product-mismatched token, and — unlike the two guards above — tolerates a
+> missing revocation service (treats as not-revoked) rather than raising, preserving its
+> never-401 contract for an anonymous-capable route. Also documented: single-device
+> `POST /v1/auth/logout` cannot revoke that device's `apex_content` cookie server-side (see the
+> endpoint note below) — a pre-existing limitation, not a regression, now made explicit. No frontend
+> action required for any of this.
+>
+> _Prior (2026-07-25): **Access-token revocation** (§2, §3): closes
+> [#142](https://github.com/gearbox/apex/issues/142). `POST /v1/auth/logout`,
+> `POST /v1/users/me/logout-all`, `POST /v1/users/me/password`, and `DELETE /v1/users/me` now invalidate
+> live access tokens and the `apex_content` cookie **immediately**, not just refresh tokens — previously a
+> stolen access token (or a cookie minted before the 24h TTL raise) survived an explicit "log out
+> everywhere" for its full remaining lifetime. Two mechanisms, both backed by Redis (`TokenRevocationService`,
+> `src/api/services/token_revocation.py`): a per-user "revoke all sessions" epoch (bulk sites — logout-all,
+> password change, deactivation) and a per-token denylist keyed by the token's own `jti` (single-device
+> logout only, from the `Authorization` header presented to that call). Both `auth_guard` and
+> `content_auth_guard` now consult this on every request — one Redis round-trip, after the (free) product
+> check and before setting connection state. **Redis dependency, fail-open**: this is a deliberate security
+> posture, not a gap — with `REDIS_URL` unset, or Redis transiently down, revocation silently degrades to
+> the pre-#142 refresh-token-only behavior (logged once at startup / on each backend error as
+> `authrev.backend_unavailable`) rather than 401ing every authenticated request. No response shapes, request
+> shapes, or status codes changed — this is a behind-the-scenes tightening of what "logged out" means.
+> No frontend action required.
 >
 > _Prior (2026-07-24): **Content Proxy performance & streaming** (§9): `GET /v1/content/outputs/{id}`
 > and `GET /v1/content/uploads/{id}` now support single-range `Range` requests (`206 Partial Content` /
@@ -246,7 +288,17 @@ Errors:   401 (token revoked/expired/invalid | token_reuse_detected | account_in
 ```
 Request:  { refresh_token: string }
 Response: { message: string }
-Note:     Revokes the specific refresh token
+Note:     Revokes the specific refresh token. If an Authorization: Bearer header is also present
+          (optional — this route isn't guarded, since the access token may already be expired),
+          its jti is denylisted for its remaining lifetime (issue #142), so that specific access
+          token 401s on its next use while any other device's token is unaffected.
+Limitation: this device's apex_content cookie is cleared client-side only — it is scoped
+          Path=/v1/content (never sent to this endpoint) and carries a different jti than the
+          access token, so it cannot be revoked server-side here. A stolen cookie survives
+          single-device logout until it expires (up to CONTENT_COOKIE_TTL_HOURS) or until a
+          bulk-revocation event (logout-all, password change/reset, deactivation). Users who
+          suspect theft should use logout-all or change/reset their password, not rely on
+          single-device logout.
 ```
 
 #### `POST /v1/auth/verify-email`
@@ -354,14 +406,17 @@ Note:     Age capture is policy-driven by the active product's age_gate (see GET
 Request:  { current_password: string, new_password: string }
 Response: { message: string }
 Errors:   400 invalid_password
-Note:     Revokes ALL refresh tokens
+Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
+          (issue #142) — the most security-sensitive of the three bulk-revocation sites,
+          since a password change is often a reaction to suspected compromise.
 ```
 
 #### `DELETE /v1/users/me`
 
 ```
 Response: { message: string, deactivated_at: datetime }
-Note:     Soft delete — account can be recovered
+Note:     Soft delete — account can be recovered. Revokes ALL refresh tokens, plus all live
+          access tokens and the content cookie (issue #142).
 ```
 
 #### `GET /v1/users/me/stats`
@@ -385,6 +440,11 @@ Response: {
 
 ```
 Response: { message: string }
+Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
+          (issue #142) — the access token used to make this very call also stops working
+          from the next request onward. See the module docstring on TokenRevocationService
+          (src/api/services/token_revocation.py) for the Redis-backed epoch mechanism and its
+          fail-open posture when Redis is unset or transiently unavailable.
 ```
 
 ---
@@ -1091,7 +1151,7 @@ Provides stable, non-expiring authenticated URLs for user content. The server re
 
 ### Auth: the `apex_content` cookie
 
-Requests here accept either a Bearer access token or the `apex_content` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/v1/content`) — see §2 for how it's minted/re-minted. Its lifetime is `content_cookie_ttl_hours` (default **24h**, configurable up to **168h**/7d) — raised from a 1h default specifically so the cookie survives a suspended PWA: with no API traffic there's no `/v1/auth/refresh` to re-attach it, so a short TTL ages out during suspension and the first batch of `<img>` requests on resume all 401 before any JSON call can trigger recovery. This is deliberately asymmetric with the 15-minute access token (§2.1) — the content token is `type: "content"` (structurally rejected by the access-token decoder), product-scoped, and every request here still performs the full ownership check below regardless of which credential was presented; its blast radius is read access to the bearer's own media on one product. `POST /v1/auth/logout` (§2) clears the cookie — that remains the revocation path, since access/content tokens themselves are not denylisted.
+Requests here accept either a Bearer access token or the `apex_content` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/v1/content`) — see §2 for how it's minted/re-minted. Its lifetime is `content_cookie_ttl_hours` (default **24h**, configurable up to **168h**/7d) — raised from a 1h default specifically so the cookie survives a suspended PWA: with no API traffic there's no `/v1/auth/refresh` to re-attach it, so a short TTL ages out during suspension and the first batch of `<img>` requests on resume all 401 before any JSON call can trigger recovery. This is deliberately asymmetric with the 15-minute access token (§2.1) — the content token is `type: "content"` (structurally rejected by the access-token decoder), product-scoped, and every request here still performs the full ownership check below regardless of which credential was presented; its blast radius is read access to the bearer's own media on one product. As of issue #142, `content_auth_guard` also consults `TokenRevocationService`: `POST /v1/auth/logout` clears the cookie client-side *and* denylists a presenting access token's own jti, while `logout-all`/password-change/deactivation (§3) reject any token — access or content — issued before that event, closing the exposure window the 24h TTL raise opened.
 
 ### Response Headers
 
@@ -2660,9 +2720,11 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `generation.failed` | product | A generation job transitions to `failed` |
 | `health.degraded` | platform | A platform health subsystem becomes `degraded`, `unhealthy`, or `unknown` |
 | `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
+| `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
 
 - **Product-scoped** classes (the first four) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
-- **Platform-scoped** classes (`health.*`) are delivered to every subscribed admin/superadmin regardless of product, since platform health applies everywhere.
+- **Platform-scoped** classes (`health.*`, `token_revocation.failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
+- `token_revocation.failed` ships with a one-time seed (migration `029`): every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
 - Each subscribed class carries an optional `min_interval_seconds` throttle (default `0` = unthrottled, max `86400`). Messages suppressed during the cooldown are counted; the next delivered message for that class appends `(+N suppressed)` to the text.
 
@@ -2964,6 +3026,7 @@ Values: `"billing_adjust"`
 | `generation.failed` | product | Generation job transitions to `failed` |
 | `health.degraded` | platform | A health subsystem becomes `degraded`/`unhealthy`/`unknown` |
 | `health.restored` | platform | A health subsystem recovers |
+| `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
 
 > Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 

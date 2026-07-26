@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
+from annotated_types import Le
 from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -593,16 +594,21 @@ class Settings(BaseSettings):
         ge=1,
         le=60,
         description=(
-            "Access token expiration in minutes. Deliberately NOT raised to make media "
-            "auth cheaper (see content_cookie_ttl_hours) — access tokens are irrevocable: "
-            "a `jti` is minted but no guard consults a denylist, and logout_all invalidates "
-            "only refresh tokens, so a stolen access token survives an explicit "
-            "'log out everywhere' for its full remaining lifetime. It also carries full "
-            "account capability (spend tokens, delete assets, change email). 15 minutes is "
-            "the containment window for a credential that cannot be killed. A `jti` denylist "
-            "(Redis, TTL = token lifetime) checked in auth_guard is the prerequisite for "
-            "ever safely raising this — tracked in "
-            "https://github.com/gearbox/apex/issues/142; not implemented yet."
+            "Access token expiration in minutes. Still NOT raised in this release even "
+            "though revocation now exists (issue #142, TokenRevocationService) — landing "
+            "revocation makes a future raise defensible, but it's a separate decision with "
+            "its own review. What revocation actually covers: auth_guard and "
+            "content_auth_guard now reject a token whose `iat` predates the caller's most "
+            "recent 'revoke all sessions' event (logout_all, change_password, "
+            "deactivate_account — a Redis epoch key, TTL = max(this, content_cookie_ttl_hours)) "
+            "or whose specific `jti` was denylisted by a single-device POST /v1/auth/logout "
+            "(TTL = remaining token lifetime). This is fail-open: on Redis being unset or "
+            "transiently unavailable, revocation silently degrades to the old refresh-token-"
+            "only behavior rather than failing every request closed — see "
+            "TokenRevocationService's docstring for why. It also carries full account "
+            "capability (spend tokens, delete assets, change email). 15 minutes remains the "
+            "containment window for a credential compromised between revocation checks — "
+            "e.g. Redis down at the moment of theft."
         ),
     )
     jwt_refresh_token_expire_days: int = Field(
@@ -717,6 +723,41 @@ class Settings(BaseSettings):
             "When None, falls back to in-memory storage for rate limiting (single-process only) "
             "and SSE/pub-sub will not function. Recommended: set to redis://redis:6379/0 in "
             "production Docker environments."
+        ),
+    )
+    redis_socket_connect_timeout_seconds: float = Field(
+        default=0.25,
+        gt=0,
+        le=5.0,
+        description=(
+            "Redis TCP connect timeout. TokenRevocationService.is_revoked (issue #142 F4) "
+            "runs on every authenticated request, so this must stay small — a hung connect "
+            "attempt would otherwise turn the documented fail-open posture into fail-slow, "
+            "stalling every request until the OS-level timeout."
+        ),
+    )
+    redis_socket_timeout_seconds: float = Field(
+        default=0.05,
+        gt=0,
+        le=5.0,
+        description=(
+            "Redis socket read/write timeout, same rationale as "
+            "REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS. Combined with retry_on_timeout=False, a "
+            "timeout fails straight into TokenRevocationService's fail-open branch instead of "
+            "silently retrying. 50ms (issue #142 G3b) is roughly an order of magnitude of "
+            "headroom over a healthy same-network Redis's MGET latency; a backend that "
+            "genuinely needs more than that is already degraded, and failing open on it is "
+            "the documented posture. Measure your actual Redis MGET p99 before raising it."
+        ),
+    )
+    redis_health_check_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=300.0,
+        description=(
+            "How often redis-py proactively PINGs idle pooled connections (issue #142 G3b) "
+            "so a connection gone stale while unused is caught and replaced before it can "
+            "produce a spurious TokenRevocationService failure mid-request."
         ),
     )
     trusted_ip_header: Literal["cf-connecting-ip", "x-forwarded-for", "none"] = Field(
@@ -1561,6 +1602,40 @@ class Settings(BaseSettings):
     def email_configured(self) -> bool:
         """Return True when a real email provider is configured."""
         return bool(self.resend_api_key)
+
+    def _field_upper_bound(self, field_name: str) -> int:
+        """Extract a Settings field's `Field(le=...)` constraint (F3, issue #142).
+
+        Raises:
+            ValueError: The named field has no `Le` constraint — a
+                programming error, not a runtime condition.
+        """
+        for constraint in type(self).model_fields[field_name].metadata:
+            if isinstance(constraint, Le) and isinstance(constraint.le, int):
+                return constraint.le
+        raise ValueError(
+            f"Settings field {field_name!r} has no integer upper-bound (le) constraint"
+        )
+
+    @property
+    def max_revocation_epoch_ttl_seconds(self) -> int:
+        """Upper-bound TTL for TokenRevocationService's bulk-revocation epoch keys.
+
+        Derived from the *maximum permitted* values of
+        jwt_access_token_expire_minutes (Field(le=60)) and
+        content_cookie_ttl_hours (Field(le=168)) — not their currently
+        configured values (issue #142 F3). A deployment that lowers either
+        setting later must not strand epoch keys with a TTL shorter than
+        tokens minted under the old, higher setting: those tokens would
+        remain cryptographically valid after their epoch key silently
+        expired, un-revoking them. Read dynamically from the Field
+        constraints (rather than duplicated constants) so the two can never
+        drift apart — the exact class of bug this fixes.
+        """
+        return max(
+            self._field_upper_bound("jwt_access_token_expire_minutes") * 60,
+            self._field_upper_bound("content_cookie_ttl_hours") * 3600,
+        )
 
 
 @lru_cache

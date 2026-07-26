@@ -70,7 +70,12 @@ class GrokVideoWorkerCLI:
         if self._settings.redis_url:
             from src.core.redis import init_redis_pool
 
-            init_redis_pool(self._settings.redis_url)
+            init_redis_pool(
+                self._settings.redis_url,
+                socket_connect_timeout=self._settings.redis_socket_connect_timeout_seconds,
+                socket_timeout=self._settings.redis_socket_timeout_seconds,
+                health_check_interval=self._settings.redis_health_check_interval_seconds,
+            )
             logger.info("grok_worker.redis_initialized")
 
         # Initialize R2 storage

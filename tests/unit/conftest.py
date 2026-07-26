@@ -11,6 +11,7 @@ import yaml
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.age_verification import AgeVerificationService
 from src.api.services.auth import AuthService
+from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.api.services.workflow_service import WorkflowService
 from src.core.config import Settings
@@ -224,6 +225,7 @@ def auth_service(
         repository=mock_user_repository,
         jwt_service=jwt_service,
         password_service=password_service,
+        token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
     )
 
 
@@ -237,6 +239,7 @@ def user_service(
         repository=mock_user_repository,
         password_service=password_service,
         age_verification_service=AgeVerificationService(),
+        token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
     )
 
 

@@ -14,7 +14,7 @@ from src.core.enums import PLATFORM_SCOPED_NOTIFICATION_CLASSES, NotificationCla
 
 
 class TestClassCatalog:
-    def test_catalog_has_all_six_classes_with_correct_scope(self) -> None:
+    def test_catalog_has_every_class_with_correct_scope(self) -> None:
         service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
 
         catalog = service.get_class_catalog()
@@ -28,6 +28,19 @@ class TestClassCatalog:
                 else "product"
             )
             assert entry.scope == expected_scope
+
+    def test_token_revocation_failed_is_platform_scoped(self) -> None:
+        """N2 (description present) + N3 (frozenset membership) in one assertion."""
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+
+        catalog = service.get_class_catalog()
+
+        entry = next(
+            c
+            for c in catalog
+            if c.notification_class == NotificationClass.TOKEN_REVOCATION_FAILED.value
+        )
+        assert entry.scope == "platform"
 
 
 class TestGetPreferences:

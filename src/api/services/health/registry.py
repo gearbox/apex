@@ -93,6 +93,7 @@ class HealthCheckRegistry:
                 latency_ms=round(elapsed_ms, 2),
                 message=result.message,
                 product_id=result.product_id,
+                gates_readiness=checker.gates_readiness,
                 metadata=result.metadata,
             )
         except TimeoutError:
@@ -105,6 +106,7 @@ class HealthCheckRegistry:
                 latency_ms=round(elapsed_ms, 2),
                 message=f"check timed out after {timeout_seconds}s",
                 product_id=checker.product_id,
+                gates_readiness=checker.gates_readiness,
             )
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
@@ -116,4 +118,5 @@ class HealthCheckRegistry:
                 latency_ms=round(elapsed_ms, 2),
                 message=str(exc),
                 product_id=checker.product_id,
+                gates_readiness=checker.gates_readiness,
             )

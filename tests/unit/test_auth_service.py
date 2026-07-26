@@ -16,7 +16,15 @@ from src.api.services.auth import (
     InvalidRefreshTokenError,
     TokenReuseDetectedError,
 )
+from src.api.services.token_revocation import TokenRevocationService
+from src.core.enums import RefreshTokenRevocationReason
 from src.db.models import RefreshToken, User
+
+
+def _noop_token_revocation() -> TokenRevocationService:
+    """A TokenRevocationService with no Redis client — a visible no-op choice
+    for tests that don't exercise revocation (issue #142 A1)."""
+    return TokenRevocationService(None, max_token_ttl_seconds=0)
 
 
 @pytest.fixture
@@ -53,6 +61,7 @@ def auth_service(
         repository=mock_repository,
         jwt_service=jwt_service,
         password_service=password_service,
+        token_revocation_service=_noop_token_revocation(),
     )
 
 
@@ -316,7 +325,7 @@ class TestAuthServiceRefresh:
         mock_token.product_id = "vex"
         mock_token.is_revoked = False
         mock_token.expires_at = datetime.now(UTC) + timedelta(days=1)
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
 
         # Mock: user is active
         mock_user = MagicMock(spec=User)
@@ -335,7 +344,9 @@ class TestAuthServiceRefresh:
         assert tokens.access_token is not None
         assert tokens.refresh_token is not None
         assert returned_user_id == user_id
-        mock_repository.revoke_refresh_token.assert_called_once_with(mock_token.id)
+        mock_repository.revoke_refresh_token.assert_called_once_with(
+            mock_token.id, reason=RefreshTokenRevocationReason.ROTATED
+        )
 
     @pytest.mark.asyncio
     async def test_refresh_revoked_token_triggers_family_revoke(
@@ -351,7 +362,7 @@ class TestAuthServiceRefresh:
         mock_token.user_id = uuid4()
         mock_token.family_id = family_id
         mock_token.is_revoked = True  # Already revoked!
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
 
         # Mock: family revocation
         mock_repository.revoke_token_family.return_value = 3
@@ -360,6 +371,124 @@ class TestAuthServiceRefresh:
             await auth_service.refresh_tokens("reused_token")
 
         mock_repository.revoke_token_family.assert_called_once_with(family_id)
+
+    @pytest.mark.asyncio
+    async def test_refresh_revoked_token_bulk_revokes_access_tokens(
+        self,
+        jwt_service: JWTService,
+        password_service: PasswordService,
+        mock_repository: AsyncMock,
+    ) -> None:
+        """R2 (issue #142) — reuse detection must also bulk-revoke live
+        access tokens/content cookies, not just the refresh-token family.
+        Otherwise the "All sessions have been invalidated" message it
+        raises is false: a stolen access token/content cookie the attacker
+        already holds would keep working."""
+        user_id = uuid4()
+        family_id = uuid4()
+
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.user_id = user_id
+        mock_token.family_id = family_id
+        mock_token.is_revoked = True
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
+        mock_repository.revoke_token_family.return_value = 3
+
+        mock_token_revocation = AsyncMock()
+        service = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            token_revocation_service=mock_token_revocation,
+        )
+
+        with pytest.raises(TokenReuseDetectedError):
+            await service.refresh_tokens("reused_token")
+
+        mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user_id)
+
+    @pytest.mark.asyncio
+    async def test_refresh_lost_race_to_bulk_revocation_yields_benign_error(
+        self,
+        jwt_service: JWTService,
+        password_service: PasswordService,
+        mock_repository: AsyncMock,
+    ) -> None:
+        """B2 (issue #142) — a refresh that loses the user-row-lock race to
+        a bulk revocation (logout-all/password-change/deactivation/
+        password-reset) is a benign, ordinary outcome, not theft: it must
+        raise InvalidRefreshTokenError, never revoke a token family, and
+        never fire an ops alert."""
+        user_id = uuid4()
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.user_id = user_id
+        mock_token.family_id = uuid4()
+        mock_token.is_revoked = True
+        mock_token.revoked_reason = RefreshTokenRevocationReason.BULK_REVOCATION.value
+        mock_repository.get_refresh_token_owner.return_value = user_id
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
+
+        mock_ops_event_bus = AsyncMock()
+        service = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
+            ops_event_bus=mock_ops_event_bus,
+        )
+
+        with pytest.raises(InvalidRefreshTokenError):
+            await service.refresh_tokens("lost-race-token")
+
+        mock_repository.revoke_token_family.assert_not_called()
+        mock_ops_event_bus.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refresh_null_revoked_reason_still_triggers_theft_path(
+        self,
+        auth_service: AuthService,
+        mock_repository: AsyncMock,
+    ) -> None:
+        """B2 — legacy rows revoked before this column existed have
+        revoked_reason IS NULL, which is *not* bulk_revocation and must
+        still raise TokenReuseDetectedError (no weakening of existing
+        detection for pre-migration data)."""
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.user_id = uuid4()
+        mock_token.family_id = uuid4()
+        mock_token.is_revoked = True
+        mock_token.revoked_reason = None
+        mock_repository.get_refresh_token_owner.return_value = mock_token.user_id
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
+        mock_repository.revoke_token_family.return_value = 1
+
+        with pytest.raises(TokenReuseDetectedError):
+            await auth_service.refresh_tokens("legacy-reused-token")
+
+        mock_repository.revoke_token_family.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_single_logout_reason_still_triggers_theft_path(
+        self,
+        auth_service: AuthService,
+        mock_repository: AsyncMock,
+    ) -> None:
+        """B2 — a token revoked by single-device logout and then replayed
+        is more plausibly theft than a race, so it still raises
+        TokenReuseDetectedError rather than the benign B2 path."""
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.user_id = uuid4()
+        mock_token.family_id = uuid4()
+        mock_token.is_revoked = True
+        mock_token.revoked_reason = RefreshTokenRevocationReason.SINGLE_LOGOUT.value
+        mock_repository.get_refresh_token_owner.return_value = mock_token.user_id
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
+        mock_repository.revoke_token_family.return_value = 1
+
+        with pytest.raises(TokenReuseDetectedError):
+            await auth_service.refresh_tokens("logged-out-then-replayed-token")
+
+        mock_repository.revoke_token_family.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_refresh_expired_token(
@@ -371,7 +500,7 @@ class TestAuthServiceRefresh:
         mock_token = MagicMock(spec=RefreshToken)
         mock_token.is_revoked = False
         mock_token.expires_at = datetime.now(UTC) - timedelta(days=1)  # Expired
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
 
         with pytest.raises(InvalidRefreshTokenError):
             await auth_service.refresh_tokens("expired_token")
@@ -426,6 +555,30 @@ class TestAuthServiceLogout:
         assert count == 5
         mock_repository.revoke_all_user_tokens.assert_called_once_with(user_id)
 
+    @pytest.mark.asyncio
+    async def test_logout_all_bulk_revokes_access_tokens(
+        self,
+        mock_repository: AsyncMock,
+        jwt_service: JWTService,
+        password_service: PasswordService,
+    ) -> None:
+        """logout_all (issue #142) must also write the user's revocation
+        epoch, not just revoke refresh tokens — otherwise a stolen access
+        token survives 'log out everywhere' for its full remaining lifetime."""
+        mock_token_revocation = AsyncMock()
+        service = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            token_revocation_service=mock_token_revocation,
+        )
+        user_id = uuid4()
+        mock_repository.revoke_all_user_tokens.return_value = 2
+
+        await service.logout_all(user_id)
+
+        mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user_id)
+
 
 class TestAuthServiceMissingBranches:
     """Cover remaining uncovered branches."""
@@ -449,6 +602,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
             session=session,
         )
 
@@ -482,6 +636,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
             session=session,
             email_verification_service=email_verification,
         )
@@ -513,6 +668,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
             session=session,
             email_verification_service=email_verification,
         )
@@ -540,6 +696,7 @@ class TestAuthServiceMissingBranches:
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
         )
 
         # Make needs_rehash return True
@@ -555,12 +712,13 @@ class TestAuthServiceMissingBranches:
     ) -> None:
         from src.api.services.auth import AuthService, InvalidRefreshTokenError
 
-        mock_repository.get_refresh_token_by_hash.return_value = None
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = None
 
         svc = AuthService(
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
         )
 
         with pytest.raises(InvalidRefreshTokenError, match="Invalid refresh token"):
@@ -578,13 +736,14 @@ class TestAuthServiceMissingBranches:
         mock_token.user_id = uuid4()
         mock_token.family_id = uuid4()
         mock_token.product_id = "vex"
-        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.get_refresh_token_by_hash_for_update.return_value = mock_token
         mock_repository.get_active_user.return_value = None  # user not found/inactive
 
         svc = AuthService(
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
+            token_revocation_service=_noop_token_revocation(),
         )
 
         with pytest.raises(UserInactiveError):

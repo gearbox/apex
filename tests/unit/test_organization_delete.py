@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.routes.organization import OrganizationController
 from src.api.services.billing_errors import OrganizationBalanceError, OrganizationPermissionError
 from src.api.services.organization import OrganizationService
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import OrgRole, TransactionType, UserRole
 
 if TYPE_CHECKING:
@@ -174,6 +175,7 @@ def _create_org_app(
         },
     )
     app.state["jwt_service"] = jwt_service
+    app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
     return app
 
 

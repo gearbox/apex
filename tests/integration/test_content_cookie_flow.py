@@ -34,6 +34,7 @@ from src.api.dependencies.auth import get_current_user_id
 from src.api.security import auth_guard, content_auth_guard
 from src.api.security.content_cookie import build_content_cookie, clear_content_cookie
 from src.api.security.jwt import JWTConfig, JWTService
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import Settings
 
 if TYPE_CHECKING:
@@ -105,6 +106,7 @@ def _make_content_app(jwt_service: JWTService, product_id: str = PRODUCT_ID) -> 
         middleware=[FakeProductMiddleware],
     )
     app.state["jwt_service"] = jwt_service
+    app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
     return app
 
 
@@ -498,7 +500,7 @@ class TestAuthControllerCookies:
 
     async def test_logout_clears_content_cookie(
         self,
-        jwt_service: JWTService,  # noqa: ARG002
+        jwt_service: JWTService,
         settings: Settings,
     ) -> None:
         from unittest.mock import AsyncMock, MagicMock
@@ -508,11 +510,16 @@ class TestAuthControllerCookies:
 
         mock_auth = AsyncMock()
         mock_auth.logout = AsyncMock(return_value=True)
+        mock_request = MagicMock()
+        mock_request.headers.get.return_value = None
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
+            request=mock_request,
             data=RefreshTokenRequest(refresh_token="tok"),
             auth_service=mock_auth,
+            jwt_service=jwt_service,
+            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
             product_config=_make_product_config(),
             settings=settings,
         )
@@ -701,6 +708,7 @@ class TestRemintContentCookieHTTP:
             },
         )
         app.state["jwt_service"] = jwt_service
+        app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
         return app
 
     def test_no_bearer_returns_401(self, jwt_service: JWTService, settings: Settings) -> None:

@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from src.core.enums import SubscriptionTier, UserRole
+from src.core.enums import RefreshTokenRevocationReason, SubscriptionTier, UserRole
 from src.db.models.user import RefreshToken, User
 
 if TYPE_CHECKING:
@@ -312,6 +312,27 @@ async def test_get_refresh_token_by_hash_not_found(
     assert await user_repo.get_refresh_token_by_hash("nonexistent") is None
 
 
+async def test_get_refresh_token_owner_found(user_repo: UserRepository, make_user) -> None:
+    """get_refresh_token_owner (issue #142 G1) returns just the user_id."""
+    user = await make_user(email="ownerlookup@example.com")
+    expires = datetime.now(UTC) + timedelta(days=7)
+    await user_repo.create_refresh_token(
+        id=uuid4(),
+        user_id=user.id,
+        token_hash="ownerhash",
+        family_id=uuid4(),
+        expires_at=expires,
+        product_id="vex",
+    )
+    owner = await user_repo.get_refresh_token_owner("ownerhash")
+    assert owner == user.id
+
+
+async def test_get_refresh_token_owner_not_found(user_repo: UserRepository) -> None:
+    """get_refresh_token_owner returns None for an unknown hash."""
+    assert await user_repo.get_refresh_token_owner("nonexistent") is None
+
+
 async def test_get_valid_refresh_token_returns_active(user_repo: UserRepository, make_user) -> None:
     """get_valid_refresh_token returns a valid non-revoked, non-expired token."""
     user = await make_user(email="validtoken@example.com")
@@ -345,7 +366,7 @@ async def test_get_valid_refresh_token_returns_none_for_revoked(
         expires_at=expires,
         product_id="vex",
     )
-    await user_repo.revoke_refresh_token(token_id)
+    await user_repo.revoke_refresh_token(token_id, reason=RefreshTokenRevocationReason.ROTATED)
     found = await user_repo.get_valid_refresh_token("revokedhash")
     assert found is None
 
@@ -362,15 +383,25 @@ async def test_revoke_refresh_token_returns_true(user_repo: UserRepository, make
         expires_at=datetime.now(UTC) + timedelta(days=1),
         product_id="vex",
     )
-    result = await user_repo.revoke_refresh_token(token_id)
+    result = await user_repo.revoke_refresh_token(
+        token_id, reason=RefreshTokenRevocationReason.SINGLE_LOGOUT
+    )
     assert result is True
+    revoked = await user_repo.get_refresh_token_by_hash("revhash")
+    assert revoked is not None
+    assert revoked.revoked_reason == RefreshTokenRevocationReason.SINGLE_LOGOUT.value
 
 
 async def test_revoke_refresh_token_returns_false_for_unknown(
     user_repo: UserRepository,
 ) -> None:
     """revoke_refresh_token returns False for unknown token ID."""
-    assert await user_repo.revoke_refresh_token(uuid4()) is False
+    assert (
+        await user_repo.revoke_refresh_token(
+            uuid4(), reason=RefreshTokenRevocationReason.SINGLE_LOGOUT
+        )
+        is False
+    )
 
 
 async def test_revoke_token_family(user_repo: UserRepository, make_user) -> None:
@@ -389,10 +420,14 @@ async def test_revoke_token_family(user_repo: UserRepository, make_user) -> None
         )
     count = await user_repo.revoke_token_family(family_id)
     assert count == 3
+    for i in range(3):
+        token = await user_repo.get_refresh_token_by_hash(f"familyhash{i}")
+        assert token is not None
+        assert token.revoked_reason == RefreshTokenRevocationReason.REUSE_DETECTED.value
 
 
 async def test_revoke_all_user_tokens(user_repo: UserRepository, make_user) -> None:
-    """revoke_all_user_tokens revokes all tokens for a user."""
+    """revoke_all_user_tokens revokes all tokens for a user and records why (issue #142 B2)."""
     user = await make_user(email="revokeall@example.com")
     expires = datetime.now(UTC) + timedelta(days=7)
     for i in range(2):
@@ -406,6 +441,38 @@ async def test_revoke_all_user_tokens(user_repo: UserRepository, make_user) -> N
         )
     count = await user_repo.revoke_all_user_tokens(user.id)
     assert count == 2
+    for i in range(2):
+        token = await user_repo.get_refresh_token_by_hash(f"allhash{i}")
+        assert token is not None
+        assert token.revoked_reason == RefreshTokenRevocationReason.BULK_REVOCATION.value
+
+
+async def test_revoke_all_refresh_tokens(user_repo: UserRepository, make_user) -> None:
+    """revoke_all_refresh_tokens (password-reset path) revokes and records
+    revoked_reason=bulk_revocation (issue #142 B2)."""
+    user = await make_user(email="revokeallrefresh@example.com")
+    expires = datetime.now(UTC) + timedelta(days=7)
+    await user_repo.create_refresh_token(
+        id=uuid4(),
+        user_id=user.id,
+        token_hash="resethash",
+        family_id=uuid4(),
+        expires_at=expires,
+        product_id="vex",
+    )
+    count = await user_repo.revoke_all_refresh_tokens(user.id)
+    assert count == 1
+    token = await user_repo.get_refresh_token_by_hash("resethash")
+    assert token is not None
+    assert token.revoked_reason == RefreshTokenRevocationReason.BULK_REVOCATION.value
+
+
+async def test_lock_user_for_session_change_smoke(user_repo: UserRepository, make_user) -> None:
+    """lock_user_for_session_change (issue #142 G1) acquires a row lock
+    without raising for an existing user; the concurrency guarantee itself
+    is proven end-to-end by TestRefreshVsLogoutAllRace."""
+    user = await make_user(email="lockuser@example.com")
+    await user_repo.lock_user_for_session_change(user.id)
 
 
 async def test_revoke_all_user_tokens_no_tokens(user_repo: UserRepository, make_user) -> None:

@@ -47,7 +47,17 @@ _CATALOG_DESCRIPTIONS: dict[NotificationClass, str] = {
     NotificationClass.GENERATION_FAILED: "A generation job failed.",
     NotificationClass.HEALTH_DEGRADED: "A platform subsystem became degraded or unhealthy.",
     NotificationClass.HEALTH_RESTORED: "A platform subsystem recovered.",
+    NotificationClass.TOKEN_REVOCATION_FAILED: (
+        "A bulk access-token revocation failed to write to Redis — a user's "
+        "existing access tokens/content cookies remain valid until they expire."
+    ),
 }
+# Fail at import time, not at GET /v1/admin/notifications/classes request
+# time: get_class_catalog() indexes this dict by every NotificationClass
+# member, so a member added without its description here would otherwise
+# surface as a 500 on that endpoint instead of a startup failure.
+if set(_CATALOG_DESCRIPTIONS) != set(NotificationClass):
+    raise RuntimeError("_CATALOG_DESCRIPTIONS is missing an entry for a NotificationClass member")
 
 
 class AdminNotificationError(Exception):

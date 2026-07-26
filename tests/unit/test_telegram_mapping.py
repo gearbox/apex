@@ -15,6 +15,7 @@ from src.api.schemas.ops_events import (
     HealthTransitionOpsPayload,
     OpsEventEnvelope,
     OpsEventType,
+    TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
 from src.api.services.telegram.mapping import map_ops_event
@@ -146,6 +147,53 @@ class TestHealthTransitions:
         assert notification is not None
         assert notification.notification_class == NotificationClass.HEALTH_RESTORED
         assert "Health restored" in notification.text
+
+
+class TestTokenRevocationFailed:
+    def test_maps_class_user_id_and_op(self) -> None:
+        user_id = uuid4()
+        envelope = _envelope(
+            OpsEventType.TOKEN_REVOCATION_FAILED,
+            "platform",
+            TokenRevocationFailedOpsPayload(user_id=user_id, op="logout_all"),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert notification.notification_class == NotificationClass.TOKEN_REVOCATION_FAILED
+        assert "[platform]" in notification.text
+        assert str(user_id) in notification.text
+        assert "logout_all" in notification.text
+        assert "remain valid until they expire" in notification.text
+
+    def test_token_reuse_op_is_rendered_verbatim(self) -> None:
+        """`op` is interpolated as-is — the more urgent `token_reuse_detected`
+        case must be distinguishable in the rendered text from a routine
+        `logout_all`, since it's a materially more serious situation."""
+        envelope = _envelope(
+            OpsEventType.TOKEN_REVOCATION_FAILED,
+            "platform",
+            TokenRevocationFailedOpsPayload(user_id=uuid4(), op="token_reuse_detected"),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert "token_reuse_detected" in notification.text
+
+    def test_op_is_html_escaped(self) -> None:
+        envelope = _envelope(
+            OpsEventType.TOKEN_REVOCATION_FAILED,
+            "platform",
+            TokenRevocationFailedOpsPayload(user_id=uuid4(), op="<script>alert(1)</script>"),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert "<script>" not in notification.text
+        assert "&lt;script&gt;" in notification.text
 
 
 class TestHtmlEscaping:

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from litestar.handlers import BaseRouteHandler
 
     from src.api.security.jwt import JWTService, TokenPayload
+    from src.api.services.token_revocation import TokenRevocationService
     from src.db.models import User
 
 logger = structlog.get_logger(__name__)
@@ -73,10 +74,13 @@ def extract_token_from_header(authorization: str | None) -> str | None:
 def _identity_from_token(
     raw: str | None,
     decode: Callable[[str], TokenPayload | None],
-) -> tuple[UUID, str | None] | None:
-    """Decode a raw token string into (user_id, product_id).
+) -> tuple[UUID, TokenPayload] | None:
+    """Decode a raw token string into (user_id, payload).
 
-    Returns None if the token is absent, invalid, or has an unparseable subject.
+    Returns the full TokenPayload (not just product_id) so callers can also
+    run it through TokenRevocationService.is_revoked(), which needs `sub`,
+    `iat`, and `jti`. Returns None if the token is absent, invalid, or has an
+    unparseable subject.
     """
     if not raw:
         return None
@@ -84,7 +88,7 @@ def _identity_from_token(
     if payload is None:
         return None
     try:
-        return UUID(payload.sub), payload.product_id
+        return UUID(payload.sub), payload
     except ValueError:
         return None
 
@@ -107,6 +111,21 @@ def _enforce_product(
         raise NotAuthorizedException(detail="Token is not scoped to the requested product")
     if token_product_id != request_product_id:
         raise NotAuthorizedException(detail="Token was issued for a different product")
+
+
+def _get_token_revocation(
+    connection: ASGIConnection[Any, Any, Any, Any],
+) -> TokenRevocationService:
+    """Fetch the TokenRevocationService wired into app.state by the lifespan.
+
+    Mirrors the jwt_service lookup pattern — always present once the app has
+    started, so a miss means the app wasn't wired correctly, not a runtime
+    condition to degrade on.
+    """
+    token_revocation: TokenRevocationService | None = connection.app.state.get("token_revocation")
+    if token_revocation is None:
+        raise RuntimeError("Token revocation service not configured")
+    return token_revocation
 
 
 async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
@@ -136,8 +155,15 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
     if identity is None:
         raise NotAuthorizedException(detail="Invalid or expired token")
 
-    user_id, token_product_id = identity
-    _enforce_product(connection, token_product_id)
+    user_id, payload = identity
+    # Cheap, local check first; the Redis round-trip only runs for tokens
+    # that already passed product scoping.
+    _enforce_product(connection, payload.product_id)
+
+    token_revocation = _get_token_revocation(connection)
+    if await token_revocation.is_revoked(payload):
+        logger.info("auth.token_revoked", user_id=str(user_id))
+        raise NotAuthorizedException(detail="Invalid or expired token")
 
     connection.state["user_id"] = user_id
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
@@ -176,12 +202,20 @@ async def content_auth_guard(
     if identity is None:
         raise NotAuthorizedException(detail="Missing or invalid credentials")
 
-    user_id, token_product_id = identity
+    user_id, payload = identity
 
     # 3. Product check — token must belong to the resolved request product
-    _enforce_product(connection, token_product_id)
+    _enforce_product(connection, payload.product_id)
 
-    # 4. Mirror auth_guard state — downstream DI reads from here
+    # 4. Revocation check — covers both access tokens and content cookies:
+    # logout_all's epoch rejects any token (of either type) issued before
+    # it, and single-device logout's jti denylist rejects the specific
+    # access token that was retired.
+    token_revocation = _get_token_revocation(connection)
+    if await token_revocation.is_revoked(payload):
+        raise NotAuthorizedException(detail="Missing or invalid credentials")
+
+    # 5. Mirror auth_guard state — downstream DI reads from here
     connection.state["user_id"] = user_id
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
 
@@ -215,6 +249,15 @@ async def optional_auth_guard(
             a security bug: an anonymous caller could get the same response
             by omitting the token, so the "optional" auth buys nothing and
             the route silently depends on callers behaving honestly.
+        (d) A revoked token (logout-all, password change/reset, deactivation,
+            or refresh-token reuse detection — issue #142) also degrades to
+            anonymous here, never raises. Unlike ``auth_guard``/
+            ``content_auth_guard``, this guard tolerates a missing
+            ``token_revocation`` app-state entry (treats it as "not
+            revoked") rather than raising — see A2: reusing
+            ``_get_token_revocation()``'s raise-on-missing behavior here
+            would break this guard's degrade-to-anonymous contract on an
+            anonymous-capable route.
         Routes using this guard are enumerated and pinned in
         ``tests/unit/security/test_optional_auth_guard_usage.py`` — adding a
         new route requires updating that allowlist, forcing a conscious
@@ -228,16 +271,28 @@ async def optional_auth_guard(
     token = extract_token_from_header(authorization)
 
     jwt_service: JWTService | None = connection.app.state.get("jwt_service")
-    identity: tuple[UUID, str | None] | None = None
+    identity: tuple[UUID, TokenPayload] | None = None
     if jwt_service is not None:
         identity = _identity_from_token(token, jwt_service.decode_access_token)
 
     if identity is not None:
-        token_product_id = identity[1]
+        payload = identity[1]
         try:
-            _enforce_product(connection, token_product_id)
+            _enforce_product(connection, payload.product_id)
         except NotAuthorizedException:
             logger.debug("optional_auth.product_mismatch_treated_as_anonymous")
+            identity = None
+
+    if identity is not None:
+        # Tolerant lookup (A2) — unlike auth_guard/content_auth_guard's
+        # _get_token_revocation(), a missing service here must not raise:
+        # this guard's whole contract is to degrade to anonymous, never
+        # 500 an anonymous-capable route.
+        token_revocation: TokenRevocationService | None = connection.app.state.get(
+            "token_revocation"
+        )
+        if token_revocation is not None and await token_revocation.is_revoked(identity[1]):
+            logger.debug("optional_auth.revoked_treated_as_anonymous")
             identity = None
 
     if identity is not None:

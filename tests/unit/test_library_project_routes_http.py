@@ -28,6 +28,7 @@ from src.api.routes.library_project import LibraryProjectController
 from src.api.schemas.library import LibraryProject
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.library_project import LibraryProjectNameConflictError, LibraryProjectService
+from src.api.services.token_revocation import TokenRevocationService
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -75,7 +76,12 @@ def _make_client(
             "session": Provide(lambda: session, sync_to_thread=False),
             "product_id": Provide(lambda: "vex", sync_to_thread=False),
         },
-        state=State({"jwt_service": jwt_service}),
+        state=State(
+            {
+                "jwt_service": jwt_service,
+                "token_revocation": TokenRevocationService(None, max_token_ttl_seconds=0),
+            }
+        ),
     )
 
 

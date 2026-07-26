@@ -18,10 +18,6 @@ logger = structlog.get_logger()
 # Readiness checks only these categories (fast, no external deps)
 _READINESS_CATEGORIES = {ComponentCategory.infrastructure}
 
-# Components excluded from readiness even if infrastructure
-# (R2 HeadBucket can be slow, not needed for accepting traffic)
-_READINESS_EXCLUDED = {"r2"}
-
 
 class HealthService:
     """Orchestrates health checks across the three endpoint tiers.
@@ -44,14 +40,16 @@ class HealthService:
 
         Returns:
             Tuple of (is_ready, {component_name: status_value}).
-            Uses a tight timeout (3s) and excludes slow components (R2).
+            Uses a tight timeout (3s). A checker whose ``gates_readiness``
+            is False (e.g. r2, token_revocation — issue #142 G2) still
+            appears in the returned checks dict for visibility, but never
+            affects ``is_ready``.
         """
         results = await self._registry.check_all(
             timeout_seconds=min(self._timeout_seconds, 3.0),
             categories=_READINESS_CATEGORIES,
         )
-        # Exclude R2 from readiness determination
-        relevant = [r for r in results if r.name not in _READINESS_EXCLUDED]
+        relevant = [r for r in results if r.gates_readiness]
         checks = {r.name: r.status.value for r in results}
         is_ready = all(r.status == ComponentStatus.healthy for r in relevant)
         return is_ready, checks

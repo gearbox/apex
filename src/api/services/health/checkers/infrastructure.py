@@ -25,6 +25,7 @@ class PostgresChecker:
     name = "postgres"
     category = ComponentCategory.infrastructure
     product_id = None
+    gates_readiness = True
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -55,6 +56,7 @@ class RedisChecker:
     name = "redis"
     category = ComponentCategory.infrastructure
     product_id = None
+    gates_readiness = True
 
     def __init__(self, redis: Redis) -> None:
         self._redis = redis
@@ -96,6 +98,9 @@ class R2Checker:
     name = "r2"
     category = ComponentCategory.infrastructure
     product_id = None
+    # issue #142 G2 — HeadBucket can be slow; not needed for accepting
+    # traffic, so a degraded R2 must not fail the readiness probe.
+    gates_readiness = False
 
     def __init__(self, r2_storage: R2StorageService) -> None:
         self._r2_storage = r2_storage

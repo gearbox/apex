@@ -7,6 +7,7 @@ from src.api.services.health.checkers.infrastructure import (
     R2Checker,
     RedisChecker,
 )
+from src.api.services.health.checkers.token_revocation import TokenRevocationChecker
 from src.core.enums import ComponentStatus
 
 
@@ -80,3 +81,46 @@ class TestR2Checker:
         checker = R2Checker(r2_storage=mock_r2)
         result = await checker.check()
         assert result.status == ComponentStatus.unhealthy
+
+    def test_does_not_gate_readiness(self) -> None:
+        """issue #142 G2 — a slow HeadBucket must never fail GET /health/ready."""
+        assert R2Checker.gates_readiness is False
+
+
+class TestTokenRevocationChecker:
+    """issue #142 G2/A2 — diagnostic checker, must never gate readiness."""
+
+    def test_does_not_gate_readiness(self) -> None:
+        assert TokenRevocationChecker.gates_readiness is False
+
+    async def test_inactive_when_disabled(self) -> None:
+        mock_service = MagicMock()
+        mock_service.enabled = False
+        mock_service.failed_write_count = 0
+        checker = TokenRevocationChecker(mock_service)
+
+        result = await checker.check()
+
+        assert result.status == ComponentStatus.inactive
+
+    async def test_unhealthy_when_circuit_open(self) -> None:
+        mock_service = MagicMock()
+        mock_service.enabled = True
+        mock_service.circuit_open = True
+        mock_service.failed_write_count = 2
+        checker = TokenRevocationChecker(mock_service)
+
+        result = await checker.check()
+
+        assert result.status == ComponentStatus.unhealthy
+
+    async def test_healthy_when_enabled_and_circuit_closed(self) -> None:
+        mock_service = MagicMock()
+        mock_service.enabled = True
+        mock_service.circuit_open = False
+        mock_service.failed_write_count = 0
+        checker = TokenRevocationChecker(mock_service)
+
+        result = await checker.check()
+
+        assert result.status == ComponentStatus.healthy

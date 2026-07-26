@@ -438,6 +438,25 @@ class AdminPermission(StrEnum):
     BILLING_ADJUST = "billing_adjust"
 
 
+class RefreshTokenRevocationReason(StrEnum):
+    """Why a refresh token was revoked (issue #142 B2).
+
+    Read by ``AuthService.refresh_tokens`` to distinguish a benign lost race
+    against a bulk revocation (``BULK_REVOCATION`` — e.g. logging out on one
+    device while another device concurrently refreshes) from every other
+    cause, which still raises ``TokenReuseDetectedError``. Legacy rows
+    revoked before this column existed have ``revoked_reason IS NULL``,
+    which is deliberately *not* ``BULK_REVOCATION`` and therefore still
+    triggers the theft path — no backfill needed, no weakening of existing
+    detection.
+    """
+
+    ROTATED = "rotated"
+    BULK_REVOCATION = "bulk_revocation"
+    SINGLE_LOGOUT = "single_logout"
+    REUSE_DETECTED = "reuse_detected"
+
+
 class NotificationLevel(StrEnum):
     """Severity level for system notifications and credit warnings."""
 
@@ -538,8 +557,13 @@ class SupportedLocale(StrEnum):
 class NotificationClass(StrEnum):
     """Admin-facing ops notification classes.
 
-    Adding a new class = add a member here + a mapping branch in
-    telegram_mapping.py + a catalog entry. No schema change.
+    Adding a new class means, all in one commit: a member here + a mapping
+    branch in telegram/mapping.py + a catalog entry in
+    admin_notifications.py's ``_CATALOG_DESCRIPTIONS`` + a scope decision —
+    add it to ``PLATFORM_SCOPED_NOTIFICATION_CLASSES`` below if it isn't
+    tied to a single product. Skipping that last step silently filters the
+    notification out for every recipient (see the frozenset's docstring).
+    No schema change.
     """
 
     USER_REGISTERED = "user.registered"
@@ -548,12 +572,19 @@ class NotificationClass(StrEnum):
     GENERATION_FAILED = "generation.failed"
     HEALTH_DEGRADED = "health.degraded"
     HEALTH_RESTORED = "health.restored"
+    TOKEN_REVOCATION_FAILED = "token_revocation.failed"  # noqa: S105
 
 
-# Classes 1-4 (USER_REGISTERED..GENERATION_FAILED) are product-scoped: delivered
-# only to recipients whose product matches the event's product_id. Classes 5-6
-# (health) are platform-scoped: delivered to any subscribed admin/superadmin
-# regardless of product, since health applies to the whole platform.
+# Platform-scoped classes are delivered to every subscribed admin/superadmin
+# regardless of product — the right scope for events that describe the
+# health/safety of the whole platform rather than any single product (e.g.
+# health transitions, revocation-backend degradation). Every other class is
+# product-scoped: delivered only to recipients whose product matches the
+# event's product_id.
 PLATFORM_SCOPED_NOTIFICATION_CLASSES: Final[frozenset[NotificationClass]] = frozenset(
-    {NotificationClass.HEALTH_DEGRADED, NotificationClass.HEALTH_RESTORED}
+    {
+        NotificationClass.HEALTH_DEGRADED,
+        NotificationClass.HEALTH_RESTORED,
+        NotificationClass.TOKEN_REVOCATION_FAILED,
+    }
 )

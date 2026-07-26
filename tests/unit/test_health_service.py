@@ -11,12 +11,14 @@ def _make_checker(
     category: ComponentCategory,
     status: ComponentStatus,
     product_id: str | None = None,
+    gates_readiness: bool = True,
 ) -> object:
     class _C:
         def __init__(self) -> None:
             self.name = name
             self.category = category
             self.product_id = product_id
+            self.gates_readiness = gates_readiness
 
         async def check(self) -> ComponentHealth:
             return ComponentHealth(
@@ -25,6 +27,7 @@ def _make_checker(
                 status=status,
                 latency_ms=0.0,
                 product_id=self.product_id,
+                gates_readiness=self.gates_readiness,
             )
 
     return _C()
@@ -59,13 +62,50 @@ class TestReadiness:
         svc = _build_service(
             _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
             _make_checker("redis", ComponentCategory.infrastructure, ComponentStatus.healthy),
-            _make_checker("r2", ComponentCategory.infrastructure, ComponentStatus.unhealthy),
+            _make_checker(
+                "r2",
+                ComponentCategory.infrastructure,
+                ComponentStatus.unhealthy,
+                gates_readiness=False,
+            ),
         )
         is_ready, checks = await svc.readiness()
         # R2 unhealthy but excluded from readiness determination
         assert is_ready is True
         # R2 should still appear in checks dict for visibility
         assert "r2" in checks
+
+    async def test_token_revocation_inactive_does_not_fail_readiness(self) -> None:
+        """issue #142 G2 — Redis unset must not permanently 503 readiness."""
+        svc = _build_service(
+            _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
+            _make_checker(
+                "token_revocation",
+                ComponentCategory.infrastructure,
+                ComponentStatus.inactive,
+                gates_readiness=False,
+            ),
+        )
+        is_ready, checks = await svc.readiness()
+        assert is_ready is True
+        assert checks["token_revocation"] == "inactive"
+
+    async def test_token_revocation_breaker_open_does_not_fail_readiness(self) -> None:
+        """issue #142 G2 — an open circuit breaker must not pull the whole
+        API fleet out of rotation; that's the exact outage the fail-open
+        posture exists to prevent."""
+        svc = _build_service(
+            _make_checker("postgres", ComponentCategory.infrastructure, ComponentStatus.healthy),
+            _make_checker(
+                "token_revocation",
+                ComponentCategory.infrastructure,
+                ComponentStatus.unhealthy,
+                gates_readiness=False,
+            ),
+        )
+        is_ready, checks = await svc.readiness()
+        assert is_ready is True
+        assert checks["token_revocation"] == "unhealthy"
 
     async def test_cloud_providers_excluded_from_readiness(self) -> None:
         svc = _build_service(
