@@ -456,6 +456,14 @@ class AuthController(Controller):
         of every other device, which single-device logout must not do. Users
         who suspect theft should use logout-all or change/reset their
         password.
+
+        The response also sends `Clear-Site-Data: "cache", "storage"`,
+        instructing the browser to drop its HTTP disk cache (and storage)
+        for this API origin — the origin content URLs (`/v1/content/...`)
+        are served from. This closes the browser-cache residue left behind
+        after logout (cached content responses were otherwise readable
+        until natural cache eviction), rather than relying on a
+        client-side workaround.
         """
         await auth_service.logout(data.refresh_token)
 
@@ -479,6 +487,7 @@ class AuthController(Controller):
                     secure=settings.content_cookie_secure,
                 )
             ],
+            headers={"Clear-Site-Data": '"cache", "storage"'},
         )
 
     @post("/forgot-password")
