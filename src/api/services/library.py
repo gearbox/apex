@@ -185,7 +185,8 @@ class LibraryService:
             expiring: Optional filter to assets expiring within (True) or
                 beyond (False) the expiring-soon window.
             query: Optional case-insensitive substring search over
-                display_title / display_filename / prompt.
+                display_title, display_filename (falling back to
+                original_filename on pre-030 uploads), and prompt.
             created_from: Optional lower bound on created_at.
             created_to: Optional upper bound on created_at.
             sort: newest (default), oldest, or expiring_soon.
@@ -966,13 +967,15 @@ class LibraryService:
                 pairs, user_id=user_id, product_id=product_id
             )
             new_ids = set(tag_ids_deduped)
-            over_cap = [
+            if over_cap := [
                 format_asset_ref(r.source, r.asset_id)
                 for r in parsed
-                if len({t.id for t in existing.get((r.source.value, r.asset_id), [])} | new_ids)
+                if len(
+                    {t.id for t in existing.get((r.source.value, r.asset_id), [])}
+                    | new_ids
+                )
                 > _MAX_TAGS_PER_ASSET
-            ]
-            if over_cap:
+            ]:
                 raise LibraryBulkTagCapError(over_cap, _MAX_TAGS_PER_ASSET)
 
         if isinstance(op, BulkSetFavorite):

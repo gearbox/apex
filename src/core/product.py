@@ -36,6 +36,13 @@ class AuthMethod(StrEnum):
     # SSO_SAML = "sso_saml"  # Future: enterprise SSO
 
 
+class PaymentMethodKind(StrEnum):
+    """User-facing payment method class — deliberately gateway-agnostic."""
+
+    CARD = "card"
+    CRYPTO = "crypto"
+
+
 class PaymentProvider(StrEnum):
     """Supported payment providers."""
 
@@ -54,13 +61,6 @@ class PaymentProvider(StrEnum):
         if kind is None:
             raise ValueError(f"No PaymentMethodKind mapped for provider {self.value!r}")
         return kind
-
-
-class PaymentMethodKind(StrEnum):
-    """User-facing payment method class — deliberately gateway-agnostic."""
-
-    CARD = "card"
-    CRYPTO = "crypto"
 
 
 # Single source of truth for provider → user-facing method class. Every

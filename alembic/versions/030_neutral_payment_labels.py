@@ -26,17 +26,33 @@ to the append-only invariant — not a relaxation of it: the trigger is
 re-enabled before this migration commits, so no application code path gains
 any new ability to mutate a ledger row.
 
-Also adds ``user_images.display_filename`` (D-B4/B4a of the companion
-filename-safety fix): a nullable, display/search-only copy of the
-client-supplied upload filename, NFC-normalized and control-char stripped at
-write time. Historical rows are intentionally left NULL — there is no safe
-way to recover the original name from ``original_filename`` once it has
-been overwritten with the canonical ``{uuid}.{ext}`` system name by the
-application-side change in this same release; backfilling would either
-require re-deriving from the now-removed R2 ``original-filename`` object
-metadata (also being dropped) or fabricating data. NULL correctly represents
-"no display name recorded" and the column is never used for anything but
-display/search.
+``user_images.display_filename`` (D-B4/B4a of the companion filename-safety
+fix) is added by the following revision (031), deliberately kept out of this
+one — see that migration's docstring for why.
+
+ROLLOUT ORDER — READ BEFORE DEPLOYING
+-------------------------------------
+The backfill matches the *old* description format, so it only fixes rows
+that already exist when it runs. Any top-up settled by the old application
+code after this migration completes is written with the gateway name and is
+never revisited — the backfill has already passed it.
+
+Deploy the application image and this migration together, or run the
+migration last. If they do drift apart, re-running just the data statement
+closes the window and is safe at any time (the equality predicates make it
+idempotent):
+
+    psql "$DATABASE_URL" -c "ALTER TABLE token_transactions DISABLE TRIGGER enforce_token_transactions_immutable"
+    psql "$DATABASE_URL" -f <NEUTRALIZE_DESCRIPTIONS_SQL>
+    psql "$DATABASE_URL" -c "ALTER TABLE token_transactions ENABLE TRIGGER enforce_token_transactions_immutable"
+
+PRIVILEGES: `ALTER TABLE ... DISABLE TRIGGER` requires ownership of
+token_transactions (or superuser). Verify in staging *and* prod that the
+role in DATABASE_URL owns the table — it is not necessarily the role that
+ran migration 001:
+
+    SELECT tableowner FROM pg_tables WHERE tablename = 'token_transactions';
+    SELECT current_user;
 """
 
 from collections.abc import Sequence
@@ -91,22 +107,28 @@ _TRIGGER_NAME = "enforce_token_transactions_immutable"
 DISABLE_IMMUTABILITY_TRIGGER_SQL = f"ALTER TABLE token_transactions DISABLE TRIGGER {_TRIGGER_NAME}"
 ENABLE_IMMUTABILITY_TRIGGER_SQL = f"ALTER TABLE token_transactions ENABLE TRIGGER {_TRIGGER_NAME}"
 
+# The trigger toggle below takes ACCESS EXCLUSIVE on token_transactions and
+# Postgres holds it until this migration commits — every ledger read and
+# write blocks for the duration. Fail fast rather than queueing behind (or
+# stalling) live traffic: a timeout aborts the migration cleanly and the
+# whole transaction rolls back, leaving the trigger enabled.
+_LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '5s'"
+_STATEMENT_TIMEOUT_SQL = "SET LOCAL statement_timeout = '60s'"
+
 
 def upgrade() -> None:
-    """Neutralize historical top-up descriptions and add display_filename."""
+    """Neutralize historical top-up descriptions."""
+    op.execute(sa.text(_LOCK_TIMEOUT_SQL))
+    op.execute(sa.text(_STATEMENT_TIMEOUT_SQL))
     op.execute(sa.text(DISABLE_IMMUTABILITY_TRIGGER_SQL))
     op.execute(sa.text(NEUTRALIZE_DESCRIPTIONS_SQL))
     op.execute(sa.text(ENABLE_IMMUTABILITY_TRIGGER_SQL))
 
-    op.add_column(
-        "user_images",
-        sa.Column("display_filename", sa.String(255), nullable=True),
-    )
-
 
 def downgrade() -> None:
-    """Restore gateway-named descriptions and drop display_filename."""
-    op.drop_column("user_images", "display_filename")
+    """Restore gateway-named descriptions."""
+    op.execute(sa.text(_LOCK_TIMEOUT_SQL))
+    op.execute(sa.text(_STATEMENT_TIMEOUT_SQL))
     op.execute(sa.text(DISABLE_IMMUTABILITY_TRIGGER_SQL))
     op.execute(sa.text(RESTORE_DESCRIPTIONS_SQL))
     op.execute(sa.text(ENABLE_IMMUTABILITY_TRIGGER_SQL))

@@ -16,12 +16,19 @@ is wrapped in its own ``asyncio.run()`` per phase instead; the shared
 db_engine uses NullPool, so handing it across separate event loops here is
 safe (no connection is held open between phases).
 
-The upgrade() function does both a data UPDATE and a DDL add_column, so
-unlike the pure-data seed migration (029), we cannot call upgrade() twice
-in-process to prove idempotence — the second add_column would fail with
-"column already exists". Instead we re-run just the UPDATE statement (the
-same module-level SQL constant upgrade() itself calls) directly against the
+``command.upgrade`` tracks the applied revision in ``alembic_version``, so
+calling it a second time with the same target ("030") is a no-op rather than
+re-executing ``upgrade()`` — it cannot be used to prove the backfill is
+idempotent. Instead we re-run just the UPDATE statement (the same
+module-level SQL constant ``upgrade()`` itself calls) directly against the
 already-upgraded schema.
+
+``user_images.display_filename`` is added by the following revision (031),
+not this one (see 030's docstring) — pinning ``command.upgrade``/
+``command.downgrade`` calls in this test to "030" therefore never touches
+that column. ``_display_filename_column_exists()`` still asserts its
+absence after the final downgrade to "029" purely as a defense-in-depth
+check that the two migrations' DDL didn't get re-merged.
 """
 
 from __future__ import annotations

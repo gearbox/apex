@@ -158,8 +158,9 @@ class LibraryRepository:
             expiring: Filter to assets expiring within (True) or beyond
                 (False) the ``expiring_soon`` window (P6, 7 days).
             query: Case-insensitive substring search over display_title,
-                display_filename (uploads), and the owning job's prompt
-                (outputs). Escaped before use — never interpolated raw.
+                display_filename (falling back to original_filename on
+                pre-030 uploads), and the owning job's prompt (outputs).
+                Escaped before use — never interpolated raw.
             created_from: Lower bound (inclusive) on ``created_at``.
             created_to: Upper bound (inclusive) on ``created_at``.
             sort: ``newest`` (default), ``oldest``, or ``expiring_soon``.
@@ -353,7 +354,15 @@ class LibraryRepository:
             pattern = f"%{search_term}%"
             query = query.where(
                 or_(
-                    UserImage.display_filename.ilike(pattern, escape="\\"),
+                    # display_filename is the sanitized client name on rows written
+                    # since migration 030; it is NULL for every upload predating it,
+                    # whose real name still lives in original_filename. COALESCE (not
+                    # OR) keeps those searchable without also matching the {uuid}.{ext}
+                    # canonical name on new rows.
+                    func.coalesce(
+                        UserImage.display_filename,
+                        UserImage.original_filename,
+                    ).ilike(pattern, escape="\\"),
                     LibraryAssetMetadata.display_title.ilike(pattern, escape="\\"),
                 )
             )

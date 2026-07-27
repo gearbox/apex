@@ -315,7 +315,9 @@ class UserContentService:
             raise UserContentValidationError(str(e)) from e
         except StorageError as e:
             logger.exception("user_content.storage_upload_failed", user_id=str(user_id))
-            raise UserContentStorageError("Storage backend unavailable") from e
+            raise UserContentStorageError(
+                f"Storage backend unavailable ({type(e).__name__})"
+            ) from e
 
     async def _upload_video(
         self,
@@ -352,7 +354,9 @@ class UserContentService:
             raise UserContentValidationError(str(e)) from e
         except StorageError as e:
             logger.exception("user_content.storage_upload_failed", user_id=str(user_id))
-            raise UserContentStorageError("Storage backend unavailable") from e
+            raise UserContentStorageError(
+                f"Storage backend unavailable ({type(e).__name__})"
+            ) from e
 
         now = datetime.now(UTC)
         expires_at = now + timedelta(days=self._retention_days)

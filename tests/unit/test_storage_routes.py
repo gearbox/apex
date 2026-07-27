@@ -253,7 +253,7 @@ class TestUploadImageHandler:
 
         user_content = AsyncMock()
         user_content.upload_image = AsyncMock(
-            side_effect=UserContentStorageError("Storage backend unavailable")
+            side_effect=UserContentStorageError("Storage backend unavailable (StorageUploadError)")
         )
 
         response = await StorageController.upload_image.fn(  # type: ignore[attr-defined]
@@ -265,6 +265,8 @@ class TestUploadImageHandler:
 
         assert response.status_code == HTTP_502_BAD_GATEWAY
         assert response.content.error == "upstream_error"
+        assert response.content.message == "Storage backend unavailable"
+        assert "StorageUploadError" not in response.content.message
 
     async def test_none_filename_defaults_to_data_png(self) -> None:
         from src.api.routes.storage import StorageController
