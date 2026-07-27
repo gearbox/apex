@@ -21,7 +21,12 @@ PLATFORM_PRODUCT_ID: Final[str] = "platform"
 
 
 class OpsEventType(StrEnum):
-    """Wire event types on the ``ops:events`` Redis channel."""
+    """Wire event types on the ``ops:events`` Redis channel.
+
+    Publishing a new member here does not, by itself, reach an operator —
+    it must also have a ``NotificationClass`` (``src.core.enums``); see that
+    enum's docstring for the four wiring steps.
+    """
 
     USER_REGISTERED = "ops.user.registered"
     GENERATION_CREATED = "ops.generation.created"

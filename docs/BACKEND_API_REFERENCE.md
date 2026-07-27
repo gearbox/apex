@@ -1,6 +1,33 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-27 — **Push-subscription cleanup on bulk session revocation** (§2, §3,
+> _Last updated: 2026-07-27 — **Review remediation: push-cleanup ops alert wiring** (§15c, §17):
+> the push-subscription-cleanup work below shipped `OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED`
+> from all three affected services, but never wired it past that point — no `NotificationClass`
+> member, no `telegram/mapping.py` branch, no catalog entry, no platform-scope membership, so the
+> event reached no operator (the same gap previously found and fixed for
+> `TOKEN_REVOCATION_FAILED`). Fixed by following that precedent exactly: new
+> `NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED` (`"push_subscriptions.cleanup_failed"`),
+> platform-scoped, with a mapping branch and catalog entry, plus a one-time preference seed
+> (migration `032`) for admins who already have a Telegram link — see the Notification Classes
+> table below. `OpsEventType`'s docstring now points at `NotificationClass`'s wiring checklist, so
+> a developer adding a new ops event from that enum has a reason to open the other one. Also in
+> this pass: the three near-identical `_delete_push_subscriptions` methods (`AuthService`,
+> `UserService`, `EmailVerificationService`) were consolidated into one module-level helper
+> (`src.api.services.push_cleanup.delete_user_push_subscriptions`) — the `None`-session guard
+> stayed at the two call sites that need it (`AuthService`/`UserService`), and existing
+> `{source}.push_subscriptions_deleted` / `_cleanup_failed` log event names are unchanged, so no
+> log-based alert or dashboard keyed on them needs updating. `PushSubscriptionRepository.
+> delete_all_for_user` no longer carries a `type: ignore` — its `CursorResult` is now typed
+> explicitly and a driver-reported `-1` (no count available) is clamped to `0` before it reaches
+> logs or the ops payload. A missing `session` on `AuthService`/`UserService` (construction without
+> one, which only happens in tests today — both DI providers always pass one) now logs a warning
+> instead of silently skipping the cleanup. **Rejected**: Sourcery's suggestion to inject
+> `PushSubscriptionRepository` instead of constructing it inline — every other repository in this
+> codebase (e.g. `admin_management.py`) is constructed inline from the session, so special-casing
+> just this one would make these three services the outlier; a wholesale inject-vs-construct
+> refactor is a separate change with its own review.
+>
+> _Prior (2026-07-27): **Push-subscription cleanup on bulk session revocation** (§2, §3,
 > §15b): closes a gap where no server-side path ever deleted a user's Web Push subscriptions.
 > Previously only the client-initiated `DELETE /v1/push/subscriptions` (the caller's own endpoint)
 > and the dispatcher's own expired-subscription pruning ever removed a row — a user who hit
@@ -2822,10 +2849,11 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `health.degraded` | platform | A platform health subsystem becomes `degraded`, `unhealthy`, or `unknown` |
 | `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
 | `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
+| `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup (`delete_all_for_user`) failed — the affected user's devices that should have been unsubscribed may still receive push notifications |
 
 - **Product-scoped** classes (the first four) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
-- **Platform-scoped** classes (`health.*`, `token_revocation.failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
-- `token_revocation.failed` ships with a one-time seed (migration `029`): every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class.
+- **Platform-scoped** classes (`health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
+- `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` has no second, preference-independent channel (no health checker watches it), which is why seeding — not just a release note — was judged necessary here.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
 - Each subscribed class carries an optional `min_interval_seconds` throttle (default `0` = unthrottled, max `86400`). Messages suppressed during the cooldown are counted; the next delivered message for that class appends `(+N suppressed)` to the text.
 
@@ -3128,6 +3156,7 @@ Values: `"billing_adjust"`
 | `health.degraded` | platform | A health subsystem becomes `degraded`/`unhealthy`/`unknown` |
 | `health.restored` | platform | A health subsystem recovers |
 | `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
+| `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup failed |
 
 > Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 

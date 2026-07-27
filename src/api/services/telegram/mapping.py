@@ -17,6 +17,7 @@ from src.api.schemas.ops_events import (
     HealthTransitionOpsPayload,
     OpsEventEnvelope,
     OpsEventType,
+    PushSubscriptionsCleanupFailedOpsPayload,
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
@@ -56,6 +57,8 @@ def map_ops_event(envelope: OpsEventEnvelope) -> OpsNotification | None:
         )
     if envelope.event_type is OpsEventType.TOKEN_REVOCATION_FAILED:
         return _map_token_revocation_failed(envelope)
+    if envelope.event_type is OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED:
+        return _map_push_subscriptions_cleanup_failed(envelope)
     return None
 
 
@@ -148,6 +151,21 @@ def _map_token_revocation_failed(envelope: OpsEventEnvelope) -> OpsNotification:
     )
     return OpsNotification(
         notification_class=NotificationClass.TOKEN_REVOCATION_FAILED,
+        product_id=envelope.product_id,
+        text=text,
+    )
+
+
+def _map_push_subscriptions_cleanup_failed(envelope: OpsEventEnvelope) -> OpsNotification:
+    payload = msgspec.json.decode(envelope.payload, type=PushSubscriptionsCleanupFailedOpsPayload)
+    text = (
+        f"{_tag(envelope.product_id)} 🚨 <b>Push subscription cleanup failed</b>\n"
+        f"user <code>{escape(str(payload.user_id))}</code> · op: <code>{escape(payload.op)}</code>\n"
+        f"push subscriptions were <b>not</b> deleted — devices that should have been "
+        f"unsubscribed may still receive notifications"
+    )
+    return OpsNotification(
+        notification_class=NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
         product_id=envelope.product_id,
         text=text,
     )

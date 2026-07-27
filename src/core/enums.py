@@ -573,6 +573,7 @@ class NotificationClass(StrEnum):
     HEALTH_DEGRADED = "health.degraded"
     HEALTH_RESTORED = "health.restored"
     TOKEN_REVOCATION_FAILED = "token_revocation.failed"  # noqa: S105
+    PUSH_SUBSCRIPTIONS_CLEANUP_FAILED = "push_subscriptions.cleanup_failed"
 
 
 # Platform-scoped classes are delivered to every subscribed admin/superadmin
@@ -586,5 +587,6 @@ PLATFORM_SCOPED_NOTIFICATION_CLASSES: Final[frozenset[NotificationClass]] = froz
         NotificationClass.HEALTH_DEGRADED,
         NotificationClass.HEALTH_RESTORED,
         NotificationClass.TOKEN_REVOCATION_FAILED,
+        NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
     }
 )

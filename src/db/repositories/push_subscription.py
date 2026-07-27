@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from uuid import UUID
 
+    from sqlalchemy.engine import CursorResult
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -105,13 +106,18 @@ class PushSubscriptionRepository(BaseRepository[PushSubscription]):
         Idempotent — a user with no subscriptions yields 0, not an error.
 
         Returns:
-            Number of rows deleted.
+            Number of rows deleted — best-effort, for observability only
+            (drivers that can't supply a count report -1, clamped to 0
+            here); no caller branches on the exact value.
         """
-        result = await self._session.execute(
-            delete(PushSubscription).where(PushSubscription.user_id == user_id)
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                delete(PushSubscription).where(PushSubscription.user_id == user_id)
+            ),
         )
         await self._session.flush()
-        return result.rowcount  # type: ignore[attr-defined,no-any-return]
+        return max(result.rowcount, 0)
 
     async def list_by_user(self, user_id: UUID) -> Sequence[PushSubscription]:
         """List all subscriptions for a user (no pagination — per-user fan-out is small)."""

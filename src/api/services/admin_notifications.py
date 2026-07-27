@@ -51,6 +51,10 @@ _CATALOG_DESCRIPTIONS: dict[NotificationClass, str] = {
         "A bulk access-token revocation failed to write to Redis — a user's "
         "existing access tokens/content cookies remain valid until they expire."
     ),
+    NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED: (
+        "A bulk-revocation event's push-subscription cleanup failed — a user's "
+        "devices that should have been unsubscribed may still receive push notifications."
+    ),
 }
 # Fail at import time, not at GET /v1/admin/notifications/classes request
 # time: get_class_catalog() indexes this dict by every NotificationClass

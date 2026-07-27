@@ -481,5 +481,12 @@ async def test_delete_all_for_user_zero_rows_is_a_noop(
     push_subscription_repo: PushSubscriptionRepository, make_user
 ) -> None:
     user = await make_user()
+
     deleted = await push_subscription_repo.delete_all_for_user(user.id)
+
     assert deleted == 0
+    assert await push_subscription_repo.list_by_user(user.id) == []
+
+    # Idempotent — an immediate second call still returns 0, not an error.
+    deleted_again = await push_subscription_repo.delete_all_for_user(user.id)
+    assert deleted_again == 0

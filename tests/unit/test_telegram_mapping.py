@@ -15,6 +15,7 @@ from src.api.schemas.ops_events import (
     HealthTransitionOpsPayload,
     OpsEventEnvelope,
     OpsEventType,
+    PushSubscriptionsCleanupFailedOpsPayload,
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
@@ -187,6 +188,57 @@ class TestTokenRevocationFailed:
             OpsEventType.TOKEN_REVOCATION_FAILED,
             "platform",
             TokenRevocationFailedOpsPayload(user_id=uuid4(), op="<script>alert(1)</script>"),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert "<script>" not in notification.text
+        assert "&lt;script&gt;" in notification.text
+
+
+class TestPushSubscriptionsCleanupFailed:
+    def test_maps_class_user_id_and_op(self) -> None:
+        user_id = uuid4()
+        envelope = _envelope(
+            OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
+            "platform",
+            PushSubscriptionsCleanupFailedOpsPayload(user_id=user_id, op="logout_all"),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert (
+            notification.notification_class == NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED
+        )
+        assert "[platform]" in notification.text
+        assert str(user_id) in notification.text
+        assert "logout_all" in notification.text
+        assert "not" in notification.text.lower()
+
+    def test_token_reuse_op_is_rendered_verbatim(self) -> None:
+        """Same reasoning as TestTokenRevocationFailed — `op` must be
+        distinguishable in the rendered text so an operator can tell a
+        routine `logout_all` apart from `token_reuse_detected`."""
+        envelope = _envelope(
+            OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
+            "platform",
+            PushSubscriptionsCleanupFailedOpsPayload(user_id=uuid4(), op="token_reuse_detected"),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert "token_reuse_detected" in notification.text
+
+    def test_op_is_html_escaped(self) -> None:
+        envelope = _envelope(
+            OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
+            "platform",
+            PushSubscriptionsCleanupFailedOpsPayload(
+                user_id=uuid4(), op="<script>alert(1)</script>"
+            ),
         )
 
         notification = map_ops_event(envelope)
