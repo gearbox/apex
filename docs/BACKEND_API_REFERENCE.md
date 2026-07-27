@@ -1,6 +1,23 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-26 — **Token-revocation-failure alerting** (§15c, §17): closes the last
+> _Last updated: 2026-07-27 — **`Clear-Site-Data` coverage for session-ending endpoints** (§2, §3):
+> a frontend request to change `Cache-Control` on `/v1/content/...` to `private, no-store` was
+> declined — it would force a full re-fetch of every thumbnail on every library grid render,
+> reproducing the parallel-request saturation behind a prior mobile bug, and would nullify the
+> video prewarm design's HTTP-cache reuse. The residue concern behind that request (private images
+> sitting in a shared device's HTTP cache after an account switch) is instead addressed by
+> extending `Clear-Site-Data: "cache", "storage"` — previously sent only by single-device
+> `POST /v1/auth/logout` — to every other endpoint that ends the caller's own session:
+> `POST /v1/users/me/logout-all`, `POST /v1/users/me/password`, `POST /v1/auth/reset-password`,
+> and `DELETE /v1/users/me`. All five now share one constant (`CLEAR_SITE_DATA_HEADER`,
+> `src/api/security/response_headers.py`). Also newly documented: `POST /v1/auth/logout` returning
+> `200` + the header **regardless of whether `refresh_token` was valid, unknown, or already
+> revoked** is a deliberate, permanent contract, not incidental behavior — a client that discovers
+> its session was revoked remotely has no other way to purge this origin's HTTP cache, so it fires
+> a best-effort logout purely to receive this header. `Cache-Control` on `/v1/content/...` is
+> unchanged. No request/response shapes or status codes changed for any of these five endpoints.
+>
+> _Prior (2026-07-26): **Token-revocation-failure alerting** (§15c, §17): closes the last
 > outstanding gap in [#142](https://github.com/gearbox/apex/issues/142). A failed bulk
 > access-token revocation (the Redis write behind `logout_all`/`change_password`/
 > `deactivate_account`/`reset_password`/`token_reuse_detected`/`refresh_race_detected` failing
@@ -288,6 +305,16 @@ Errors:   401 (token revoked/expired/invalid | token_reuse_detected | account_in
 ```
 Request:  { refresh_token: string }
 Response: { message: string }
+Status:   Always 200, even if refresh_token is unknown, malformed-but-syntactically-valid, or
+          already revoked — a deliberate, permanent contract (not incidental behavior). A client
+          that discovers its session was revoked remotely (logout-all/password change/reset
+          elsewhere) has no way to clear this origin's HTTP cache itself, so it fires a
+          best-effort logout purely to receive the Clear-Site-Data header below. The uniform 200
+          is also the correct privacy posture — it never reveals whether a given refresh token
+          was ever valid.
+Headers:  Clear-Site-Data: "cache", "storage" — purges this origin's HTTP cache/storage on the
+          calling device. Shared across all session-ending endpoints (see the changelog entry
+          above); "executionContexts" is deliberately omitted (would force a page reload).
 Note:     Revokes the specific refresh token. If an Authorization: Bearer header is also present
           (optional — this route isn't guarded, since the access token may already be expired),
           its jti is denylisted for its remaining lifetime (issue #142), so that specific access
@@ -323,6 +350,8 @@ Rate:     3/hour
 Request:  { token: string (20-100 chars), new_password: string (8-128 chars) }
 Response: { message: string }
 Errors:   400 (invalid_token | expired)
+Headers:  (200 only) Clear-Site-Data: "cache", "storage" — the calling device ends its own
+          session here too, and this is the compromised-account recovery path.
 ```
 
 #### `POST /v1/auth/resend-verification` *(authenticated)*
@@ -406,6 +435,7 @@ Note:     Age capture is policy-driven by the active product's age_gate (see GET
 Request:  { current_password: string, new_password: string }
 Response: { message: string }
 Errors:   400 invalid_password
+Headers:  (200 only) Clear-Site-Data: "cache", "storage" — the caller's own session ends here too.
 Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
           (issue #142) — the most security-sensitive of the three bulk-revocation sites,
           since a password change is often a reaction to suspected compromise.
@@ -415,6 +445,7 @@ Note:     Revokes ALL refresh tokens, plus all live access tokens and the conten
 
 ```
 Response: { message: string, deactivated_at: datetime }
+Headers:  Clear-Site-Data: "cache", "storage" — the caller's own session ends here too.
 Note:     Soft delete — account can be recovered. Revokes ALL refresh tokens, plus all live
           access tokens and the content cookie (issue #142).
 ```
@@ -440,6 +471,9 @@ Response: {
 
 ```
 Response: { message: string }
+Headers:  Clear-Site-Data: "cache", "storage" — the calling device ends its own session here too.
+          Other devices whose sessions this call ends never receive this response at all — they
+          discover the revocation via a 401 on their next request.
 Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
           (issue #142) — the access token used to make this very call also stops working
           from the next request onward. See the module docstring on TokenRevocationService
@@ -1148,6 +1182,8 @@ Response: {
 Provides stable, non-expiring authenticated URLs for user content. The server resolves ownership, checks product scoping, then streams bytes directly from R2. **No presigned URLs are exposed** — the client only ever sees `/v1/content/...` paths.
 
 > **Why use this instead of presigned URLs?** Content proxy URLs are permanent (for the lifetime of the resource), cacheable with `Cache-Control: private, max-age=<ttl>, immutable`, and enforce per-request authorization. They are the preferred URL format for Library and any UI that persists content references.
+
+> **Why not `Cache-Control: private, no-store`?** Raised and declined (2026-07-27): `no-store` would re-fetch every thumbnail on every library grid render/page switch, reproducing a prior mobile bug (parallel-request saturation causing blank thumbnails) and nullifying the video prewarm design's HTTP-cache reuse. The residue concern it was meant to address — private images surviving in a shared device's HTTP cache after an account switch — is instead closed by `Clear-Site-Data: "cache", "storage"` on every session-ending endpoint (§2, §3) plus client-side session isolation. See the content route's module docstring (`src/api/routes/content.py`) for the full reasoning.
 
 ### Auth: the `apex_content` cookie
 

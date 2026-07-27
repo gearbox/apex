@@ -31,7 +31,7 @@ from src.api.schemas.auth import (
     VerifyEmailRequest,
 )
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.security import auth_guard, extract_token_from_header
+from src.api.security import CLEAR_SITE_DATA_HEADER, auth_guard, extract_token_from_header
 from src.api.security.content_cookie import (
     clear_content_cookie,
     effective_cookie_domain,
@@ -464,6 +464,18 @@ class AuthController(Controller):
         after logout (cached content responses were otherwise readable
         until natural cache eviction), rather than relying on a
         client-side workaround.
+
+        Deliberate contract: this endpoint always responds 200 with the
+        Clear-Site-Data header, regardless of whether `refresh_token` was
+        valid, unknown, or already revoked — `auth_service.logout`'s return
+        value is intentionally ignored below. A client that discovers its
+        session was revoked remotely (logout-all/password change/reset
+        elsewhere) has no way to clear this origin's HTTP cache itself, so
+        it fires a best-effort logout purely to receive this header. Making
+        the response depend on token validity would both break that
+        recovery path and leak whether a given refresh token was ever
+        valid — the uniform 200 is also the correct privacy posture. Do not
+        "fix" this by 401ing on an unknown/invalid token.
         """
         await auth_service.logout(data.refresh_token)
 
@@ -487,7 +499,7 @@ class AuthController(Controller):
                     secure=settings.content_cookie_secure,
                 )
             ],
-            headers={"Clear-Site-Data": '"cache", "storage"'},
+            headers=CLEAR_SITE_DATA_HEADER,
         )
 
     @post("/forgot-password")
@@ -535,7 +547,11 @@ class AuthController(Controller):
         """Consume a password reset token and update the password.
 
         Revokes all active refresh tokens (forces re-login on all devices).
-        Returns 400 for invalid or expired tokens.
+        Returns 400 for invalid or expired tokens. This is the
+        compromised-account recovery path, so on success the response also
+        sends `Clear-Site-Data: "cache", "storage"` — the caller's device
+        ends its own session here too, and the account is being recovered
+        because it's suspected compromised.
         """
         try:
             await email_verification_service.reset_password(
@@ -549,6 +565,7 @@ class AuthController(Controller):
                     message="Password updated successfully. Please log in with your new password."
                 ),
                 status_code=HTTP_200_OK,
+                headers=CLEAR_SITE_DATA_HEADER,
             )
         except InvalidTokenError:
             return Response(

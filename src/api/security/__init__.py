@@ -20,9 +20,11 @@ from .jwt import (
     TokenPayload,
 )
 from .password import PasswordService
+from .response_headers import CLEAR_SITE_DATA_HEADER
 from .utils import generate_token, hash_token
 
 __all__ = [
+    "CLEAR_SITE_DATA_HEADER",
     "AuthenticatedUser",
     "InvalidTokenError",
     "JWTConfig",

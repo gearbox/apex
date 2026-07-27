@@ -204,3 +204,43 @@ class TestInlineSafeSetDerivation:
         from src.api.services.storage.r2 import ALLOWED_CONTENT_TYPES
 
         assert frozenset(ALLOWED_CONTENT_TYPES) | {"video/mp4"} == _INLINE_SAFE_CONTENT_TYPES
+
+
+class TestCacheControlUnchanged:
+    """D1 (Clear-Site-Data coverage prompt): a frontend request to change this
+    to `private, no-store` was declined — see the module docstring on
+    src.api.routes.content for the full reasoning. This pins the header so a
+    future edit trips a test instead of silently regressing the decision."""
+
+    async def test_full_200_response_keeps_private_immutable_cache_control(self) -> None:
+        r2_mock = _make_r2_mock("image/png")
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "users/abc/outputs/img.png",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=None,
+        )
+
+        assert isinstance(result, Stream)
+        assert result.headers["Cache-Control"] == f"private, max-age={CACHE_TTL}, immutable"
+
+    async def test_304_response_keeps_private_immutable_cache_control(self) -> None:
+        r2_mock = _make_r2_mock("image/png")
+        quoted_etag = f'"{ETAG}"'
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "users/abc/outputs/img.png",
+            ETAG,
+            SIZE_BYTES,
+            CACHE_TTL,
+            range_header=None,
+            if_none_match=quoted_etag,
+        )
+
+        assert not isinstance(result, Stream)
+        assert result.headers["Cache-Control"] == f"private, max-age={CACHE_TTL}, immutable"

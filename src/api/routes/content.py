@@ -10,6 +10,23 @@ Endpoints:
 
 Both support HTTP Range (single range only — see src.api.utils.http_range)
 and If-None-Match conditional requests.
+
+Cache-Control stays `private, max-age=<content_url_ttl>, immutable` —
+deliberately NOT `no-store`. A library grid renders on the order of thirty
+thumbnails; `no-store` would re-fetch all of them on every render and page
+switch, reproducing the parallel-request saturation behind a prior mobile
+bug ("images disappear in the grid, showing blank black squares" after
+several page switches), and would nullify the video prewarm design (its
+`cacheMode: 'default'` warm exists specifically so `<video>` range requests
+reuse HTTP-cached bytes). The residue concern `no-store` was proposed to fix
+— private images sitting in a shared device's HTTP cache after an account
+switch — is instead addressed by `Clear-Site-Data: "cache", "storage"` on
+every session-ending endpoint (see CLEAR_SITE_DATA_HEADER,
+src/api/security/response_headers.py) plus client-side session isolation
+(the frontend never requests a previous account's content URLs). If further
+defence in depth is wanted, shorten `content_url_ttl` instead of reaching
+for `no-store` — that shrinks the residue window while preserving the
+within-session cache benefit.
 """
 
 from __future__ import annotations

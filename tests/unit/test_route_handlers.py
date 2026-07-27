@@ -252,6 +252,7 @@ class TestUserRouteHandlers:
             user_service=user_service,
         )
         assert response.status_code == HTTP_200_OK
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
     async def test_change_password_returns_400_on_invalid_password(self) -> None:
         from src.api.routes.user import UserController
@@ -271,6 +272,7 @@ class TestUserRouteHandlers:
             user_service=user_service,
         )
         assert response.status_code == HTTP_400_BAD_REQUEST
+        assert "Clear-Site-Data" not in response.headers
 
     async def test_change_password_raises_404_on_user_not_found(self) -> None:
         from src.api.routes.user import UserController
@@ -303,6 +305,7 @@ class TestUserRouteHandlers:
             user_service=user_service,
         )
         assert response.status_code == HTTP_200_OK
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
     async def test_delete_account_raises_404_on_user_not_found(self) -> None:
         from src.api.routes.user import UserController
@@ -359,6 +362,7 @@ class TestUserRouteHandlers:
         )
         assert response.status_code == HTTP_200_OK
         assert "3" in response.content.message
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
     async def test_get_current_user_id_raises_when_missing(self) -> None:
         from src.api.routes.user import get_current_user_id
@@ -1566,6 +1570,7 @@ class TestAuthRouteHandlers:
             settings=settings,
         )
         assert response.status_code == 200
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
         # No Authorization header presented — nothing to denylist.
         jwt_service.decode_access_token.assert_not_called()
         token_revocation_service.revoke_token.assert_not_called()
@@ -1607,6 +1612,7 @@ class TestAuthRouteHandlers:
         )
 
         assert response.status_code == 200
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
         auth_service.logout.assert_awaited_once_with("ref")
         token_revocation_service.revoke_token.assert_awaited_once_with(
             payload.jti, int(expires_at.timestamp())
@@ -1650,7 +1656,42 @@ class TestAuthRouteHandlers:
         )
 
         assert response.status_code == 200
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
         token_revocation_service.revoke_token.assert_not_called()
+
+    async def test_logout_with_unknown_refresh_token_still_returns_200_with_header(self) -> None:
+        """D4 — AuthService.logout returning False (unknown/already-revoked
+        refresh token) must not change this endpoint's response: still 200
+        with Clear-Site-Data, since the route deliberately ignores the
+        return value (see the handler docstring)."""
+        from src.api.routes.auth import AuthController
+
+        auth_service = AsyncMock()
+        auth_service.logout = AsyncMock(return_value=False)
+        data = MagicMock()
+        data.refresh_token = "unknown-or-already-revoked"
+        product_config = MagicMock()
+        product_config.cookie_domain = "example.com"
+        settings = MagicMock()
+        settings.content_cookie_secure = True
+        request = MagicMock()
+        request.headers.get.return_value = None
+        jwt_service = MagicMock()
+        token_revocation_service = AsyncMock()
+
+        response = await AuthController.logout.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            request=request,
+            data=data,
+            auth_service=auth_service,
+            jwt_service=jwt_service,
+            token_revocation_service=token_revocation_service,
+            product_config=product_config,
+            settings=settings,
+        )
+
+        assert response.status_code == 200
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
     async def test_forgot_password_always_200(self) -> None:
         from src.api.routes.auth import AuthController
@@ -1712,6 +1753,7 @@ class TestAuthRouteHandlers:
             email_verification_service=svc,
         )
         assert response.status_code == 200
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
     async def test_reset_password_invalid_token(self) -> None:
         from src.api.routes.auth import AuthController
@@ -1731,6 +1773,8 @@ class TestAuthRouteHandlers:
             email_verification_service=svc,
         )
         assert response.status_code == 400
+        # No session was ended — the error response must not purge the cache.
+        assert "Clear-Site-Data" not in response.headers
 
     async def test_product_info(self) -> None:
         from src.api.routes.auth import AuthController
