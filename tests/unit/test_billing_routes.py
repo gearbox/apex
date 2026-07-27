@@ -22,6 +22,41 @@ pytestmark = pytest.mark.unit
 _JWT_SECRET = "test-secret-key-that-is-definitely-long-enough-32bytes"
 
 
+class TestGetTransactions:
+    """Issue A regression: the transaction history response must carry the
+    neutral payment_method discriminator and never the gateway name."""
+
+    async def test_credit_row_exposes_payment_method_not_gateway_name(self) -> None:
+        txn = MagicMock(
+            id=uuid4(),
+            transaction_type="credit",
+            amount=1000,
+            balance_after=1000,
+            description="Token purchase via crypto payment",
+            metadata_={"payment_method": "crypto"},
+            job_id=None,
+            payment_id=uuid4(),
+            created_at=datetime.now(UTC),
+            created_by=None,
+        )
+        billing_service = AsyncMock()
+        billing_service.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        billing_service.get_transaction_history = AsyncMock(return_value=[txn])
+
+        result = await BillingController.get_transactions.fn(
+            MagicMock(),
+            current_user_id=uuid4(),
+            session=AsyncMock(),
+            billing_service=billing_service,
+        )
+
+        assert result.items[0].payment_method == "crypto"
+
+        body = msgspec.json.encode(result)
+        assert b"nowpayments" not in body
+        assert b"stripe" not in body
+
+
 class TestGetTopupOptions:
     async def test_topup_options_reflects_settings(self) -> None:
         settings = Settings(

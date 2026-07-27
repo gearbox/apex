@@ -23,6 +23,7 @@ from src.api.services.billing import (
 )
 from src.api.services.event_bus import EventBus
 from src.core.enums import TransactionType
+from src.core.product import PaymentProvider
 
 pytestmark = pytest.mark.unit
 
@@ -80,6 +81,7 @@ class TestMutatingMethodsReturnEventAndDoNotPublish:
                 100,
                 uuid4(),
                 description="test credit",
+                payment_provider=PaymentProvider.STRIPE,
                 session=session,
                 product_id="vex",
             ),
@@ -258,6 +260,7 @@ class TestCreditAndAdminAdjustShareTargetResolution:
                 100,
                 uuid4(),
                 description="personal credit",
+                payment_provider=PaymentProvider.STRIPE,
                 session=session,
                 product_id="vex",
             )
@@ -285,6 +288,7 @@ class TestCreditAndAdminAdjustShareTargetResolution:
                 100,
                 uuid4(),
                 description="org credit",
+                payment_provider=PaymentProvider.STRIPE,
                 session=session,
                 product_id="vex",
             )
@@ -316,6 +320,7 @@ class TestCreditAndAdminAdjustShareTargetResolution:
                         100,
                         uuid4(),
                         description="d",
+                        payment_provider=PaymentProvider.STRIPE,
                         session=session,
                         product_id="vex",
                     )

@@ -35,7 +35,6 @@ from src.api.services.job_state_transition import (
 )
 from src.api.services.storage import R2StorageService, StorageType
 from src.core.enums import JobStatus
-from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
@@ -438,7 +437,6 @@ class AishaJobPoller(PeriodicWorker):
             result = await self._r2.upload(
                 user_id=job.user_id,
                 data=data,
-                filename=filename,
                 content_type=content_type,
                 storage_type=StorageType.OUTPUT,
                 job_id=job.id,
@@ -468,13 +466,10 @@ class AishaJobPoller(PeriodicWorker):
         results: list[GenerationOutputData] = [full]
 
         for generated in thumbnails:
-            thumb_id = new_id()
-            thumb_filename = f"{thumb_id}_thumb.webp"
             try:
                 thumb_upload = await self._r2.upload(
                     user_id=job.user_id,
                     data=generated.result.data,
-                    filename=thumb_filename,
                     content_type=generated.result.content_type,
                     storage_type=StorageType.OUTPUT,
                     job_id=job.id,

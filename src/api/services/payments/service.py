@@ -22,6 +22,7 @@ from src.api.services.payments.contracts import (
     CreatedCharge,
     WebhookEnvelope,
 )
+from src.api.services.payments.descriptions import topup_description
 from src.core.enums import PaymentStatus
 from src.core.topup_pricing import TopUpQuote, build_quote, topup_tiers_for
 from src.core.uid import new_id
@@ -272,15 +273,18 @@ class PaymentService:
         # This is the only provider-payment credit write path. The payment row
         # remains locked through the status check, flush, and ledger insert.
         if credit_delta > 0 and credit_ratio is not None:
-            description = f"Token purchase via {provider.value}"
-            if credit_ratio < _FULL_PAYMENT_TOLERANCE_LOW:
-                description += " (partial)"
+            method_kind = provider.method_kind
+            description = topup_description(
+                method_kind,
+                partial=credit_ratio < _FULL_PAYMENT_TOLERANCE_LOW,
+            )
             credit_result = await self._billing.credit(
                 payment.account_id,
                 credit_delta,
                 payment.id,
                 description=description,
-                payment_provider=provider.value,
+                payment_provider=provider,
+                metadata={"payment_method": method_kind.value},
                 session=session,
                 product_id=payment.product_id,
             )

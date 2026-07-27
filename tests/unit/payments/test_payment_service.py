@@ -904,3 +904,135 @@ class TestSettledCurrencyPatch:
         assert payment.status == PaymentStatus.COMPLETED.value
         billing.credit.assert_awaited_once()
         assert billing.credit.await_args.args[1] == 1000
+
+
+class TestNeutralPaymentDescriptions:
+    """Issue A regression: ledger descriptions must never name the gateway."""
+
+    async def test_completed_nowpayments_credits_crypto_description(self) -> None:
+        payment = _make_payment(tokens_granted=1000)
+        gateway = AsyncMock()
+        gateway.provider = PaymentProvider.NOWPAYMENTS
+        gateway.verify_webhook = AsyncMock(
+            return_value=_ratio_outcome(
+                payment_id=payment.id,
+                status=PaymentStatus.COMPLETED,
+                amount_paid="10.00",
+                amount_due="10.00",
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+        repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+        billing = AsyncMock()
+        billing.credit = AsyncMock(return_value=MagicMock(event=None))
+
+        with patch("src.api.services.payments.service.BillingRepository", return_value=repo):
+            service = PaymentService(
+                billing_service=billing,
+                settings=_settings(),
+                registry=GatewayRegistry([gateway]),
+                provider_state_service=AsyncMock(),
+            )
+            await service.handle_webhook(
+                PaymentProvider.NOWPAYMENTS,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        description = billing.credit.await_args.kwargs["description"]
+        assert description == "Token purchase via crypto payment"
+        assert "nowpayments" not in description
+        assert billing.credit.await_args.kwargs["metadata"] == {"payment_method": "crypto"}
+
+    async def test_partial_nowpayments_keeps_partial_suffix_no_gateway_name(self) -> None:
+        payment = _make_payment(tokens_granted=1000)
+        gateway = AsyncMock()
+        gateway.provider = PaymentProvider.NOWPAYMENTS
+        gateway.verify_webhook = AsyncMock(
+            return_value=_ratio_outcome(
+                payment_id=payment.id,
+                status=PaymentStatus.PARTIALLY_PAID,
+                amount_paid="4.00",
+                amount_due="10.00",
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+        repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+        billing = AsyncMock()
+        billing.credit = AsyncMock(return_value=MagicMock(event=None))
+
+        with patch("src.api.services.payments.service.BillingRepository", return_value=repo):
+            service = PaymentService(
+                billing_service=billing,
+                settings=_settings(),
+                registry=GatewayRegistry([gateway]),
+                provider_state_service=AsyncMock(),
+            )
+            await service.handle_webhook(
+                PaymentProvider.NOWPAYMENTS,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        description = billing.credit.await_args.kwargs["description"]
+        assert description == "Token purchase via crypto payment (partial)"
+        assert "nowpayments" not in description
+
+    async def test_completed_stripe_credits_card_description(self) -> None:
+        payment = _make_payment(tokens_granted=1000)
+        gateway = AsyncMock()
+        gateway.verify_webhook = AsyncMock(
+            return_value=_ratio_outcome(
+                payment_id=payment.id,
+                status=PaymentStatus.COMPLETED,
+                amount_paid="10.00",
+                amount_due="10.00",
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+        repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+        billing = AsyncMock()
+        billing.credit = AsyncMock(return_value=MagicMock(event=None))
+
+        with patch("src.api.services.payments.service.BillingRepository", return_value=repo):
+            await _service(gateway, AsyncMock(), billing).handle_webhook(
+                PaymentProvider.STRIPE,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        description = billing.credit.await_args.kwargs["description"]
+        assert description == "Token purchase via card payment"
+        assert "stripe" not in description
+        assert billing.credit.await_args.kwargs["metadata"] == {"payment_method": "card"}
+
+    async def test_partial_stripe_keeps_partial_suffix_no_gateway_name(self) -> None:
+        payment = _make_payment(tokens_granted=1000)
+        gateway = AsyncMock()
+        gateway.verify_webhook = AsyncMock(
+            return_value=_ratio_outcome(
+                payment_id=payment.id,
+                status=PaymentStatus.PARTIALLY_PAID,
+                amount_paid="4.00",
+                amount_due="10.00",
+            )
+        )
+        repo = AsyncMock()
+        repo.get_payment_for_update = AsyncMock(return_value=payment)
+        repo.get_credited_tokens_for_payment = AsyncMock(return_value=0)
+        billing = AsyncMock()
+        billing.credit = AsyncMock(return_value=MagicMock(event=None))
+
+        with patch("src.api.services.payments.service.BillingRepository", return_value=repo):
+            await _service(gateway, AsyncMock(), billing).handle_webhook(
+                PaymentProvider.STRIPE,
+                WebhookEnvelope(raw_body=b"{}", headers={}, product_id="vex"),
+                session=AsyncMock(),
+            )
+
+        description = billing.credit.await_args.kwargs["description"]
+        assert description == "Token purchase via card payment (partial)"
+        assert "stripe" not in description

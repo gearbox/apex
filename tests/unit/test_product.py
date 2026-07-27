@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.core.enums import ModelType, Product
-from src.core.product import AgeGatePolicy, PaymentProvider
+from src.core.product import AgeGatePolicy, PaymentMethodKind, PaymentProvider
 from src.core.product_registry import (
     PRODUCT_REGISTRY,
     SYNTHARA_CONFIG,
@@ -126,6 +126,24 @@ class TestProductConfigSupportsPaymentProvider:
 
     def test_synthara_does_not_support_nowpayments(self) -> None:
         assert not SYNTHARA_CONFIG.supports_payment_provider(PaymentProvider.NOWPAYMENTS)
+
+
+class TestPaymentProviderMethodKind:
+    """Tests for PaymentProvider.method_kind — the crypto/card discriminator."""
+
+    def test_payment_method_kind_total(self) -> None:
+        """Every PaymentProvider member must map to a PaymentMethodKind.
+
+        Guards future providers: adding a PaymentProvider without extending
+        the mapping fails the build here, not in production with a wrong
+        label on a financial record.
+        """
+        for provider in PaymentProvider:
+            assert isinstance(provider.method_kind, PaymentMethodKind)
+
+    def test_method_kind_values(self) -> None:
+        assert PaymentProvider.STRIPE.method_kind is PaymentMethodKind.CARD
+        assert PaymentProvider.NOWPAYMENTS.method_kind is PaymentMethodKind.CRYPTO
 
 
 class TestResolveProductByDomain:

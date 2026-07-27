@@ -38,6 +38,7 @@ class UserImageRepository(BaseRepository[UserImage]):
         format: str,
         expires_at: datetime,
         product_id: str,
+        display_filename: str | None = None,
         is_thumbnail: bool = False,
         parent_image_id: UUID | None = None,
         thumbnail_max_edge: int | None = None,
@@ -54,12 +55,16 @@ class UserImageRepository(BaseRepository[UserImage]):
             id: Unique upload ID (matches R2 file ID).
             user_id: Owner of the upload.
             storage_key: Full R2 storage key.
-            original_filename: Original uploaded filename.
+            original_filename: Canonical system filename, always
+                ``{uuid}.{ext}`` — never the client-supplied name.
             content_type: MIME type.
             size_bytes: File size.
             format: Image format (png, jpeg, webp) or video format.
             expires_at: When the upload should be cleaned up.
             product_id: Product this upload belongs to.
+            display_filename: Sanitized client-supplied filename, for
+                display/search only. ``None`` on thumbnail rows and rows
+                predating this field.
             is_thumbnail: Whether this is a derived thumbnail row.
             parent_image_id: Parent upload this thumbnail derives from.
             thumbnail_max_edge: Size bucket (150=sm, 512=md). None on full rows.
@@ -83,6 +88,7 @@ class UserImageRepository(BaseRepository[UserImage]):
             user_id=user_id,
             storage_key=storage_key,
             original_filename=original_filename,
+            display_filename=display_filename,
             content_type=content_type,
             size_bytes=size_bytes,
             format=format,

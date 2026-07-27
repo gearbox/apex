@@ -15,6 +15,7 @@ from src.api.services.billing_errors import AccountNotFoundError, InsufficientBa
 from src.api.services.gpu_session.credit_guard import SessionCreditGuard
 from src.core.config import Settings
 from src.core.enums import GpuSessionStatus, NotificationLevel, TransactionType
+from src.core.product import PaymentProvider
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -970,6 +971,7 @@ class TestTopupNetsAgainstDebt:
                 2500,
                 uuid4(),
                 description="top-up",
+                payment_provider=PaymentProvider.STRIPE,
                 session=mock_session,
                 product_id="vex",
             )
@@ -989,6 +991,7 @@ class TestTopupNetsAgainstDebt:
                 3000,
                 uuid4(),
                 description="top-up",
+                payment_provider=PaymentProvider.STRIPE,
                 session=mock_session,
                 product_id="vex",
             )

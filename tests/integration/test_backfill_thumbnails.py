@@ -61,7 +61,6 @@ def _make_mock_r2(
         *,
         user_id: UUID,
         data: bytes,
-        filename: str,  # noqa: ARG001
         content_type: str,
         storage_type: StorageType,
         job_id: UUID | None = None,

@@ -8,10 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING, Final
 
 # Runtime import required: PEP 563 field annotations on ProductConfig are resolved
 # by Litestar DI and msgspec at runtime.
 from src.core.enums import ModelType, Product  # noqa: TC001
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class AgeGatePolicy(StrEnum):
@@ -37,6 +41,35 @@ class PaymentProvider(StrEnum):
 
     STRIPE = "stripe"
     NOWPAYMENTS = "nowpayments"  # Crypto
+
+    @property
+    def method_kind(self) -> PaymentMethodKind:
+        """User-facing payment method class for this gateway.
+
+        Raises:
+            ValueError: If the provider has no mapping — fail loud rather
+                than defaulting to a wrong label on a financial record.
+        """
+        kind = _PROVIDER_METHOD_KIND.get(self)
+        if kind is None:
+            raise ValueError(f"No PaymentMethodKind mapped for provider {self.value!r}")
+        return kind
+
+
+class PaymentMethodKind(StrEnum):
+    """User-facing payment method class — deliberately gateway-agnostic."""
+
+    CARD = "card"
+    CRYPTO = "crypto"
+
+
+# Single source of truth for provider → user-facing method class. Every
+# PaymentProvider member MUST appear here; test_payment_method_kind_total
+# fails the build if a new provider is added without a mapping.
+_PROVIDER_METHOD_KIND: Final[Mapping[PaymentProvider, PaymentMethodKind]] = {
+    PaymentProvider.STRIPE: PaymentMethodKind.CARD,
+    PaymentProvider.NOWPAYMENTS: PaymentMethodKind.CRYPTO,
+}
 
 
 class ContentRating(StrEnum):

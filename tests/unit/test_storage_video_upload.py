@@ -86,6 +86,39 @@ class TestUploadVideoAccepted:
         assert create_kwargs["height"] == 720
         assert create_kwargs["format"] == "mp4"
 
+    async def test_upload_video_non_latin_filename_succeeds(self) -> None:
+        """Issue B regression: a non-latin filename must not reach R2 metadata
+        headers and must not raise — original_filename becomes {uuid}.mp4."""
+        service, storage = _make_service()
+        upload_result = _make_upload_result()
+        storage.upload = AsyncMock(return_value=upload_result)
+        db_video = _make_db_video()
+        service._image_repo.create = AsyncMock(return_value=db_video)
+
+        probe_result = VideoProbe(duration_ms=8000, width=1280, height=720, codec="h264")
+        with (
+            patch(
+                "src.api.services.user_content.ffmpeg_probe",
+                AsyncMock(return_value=probe_result),
+            ),
+            patch(
+                "src.api.services.user_content.extract_video_thumbnail",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            result = await service.upload_image(
+                user_id=uuid4(),
+                data=b"fake mp4 bytes",
+                filename="видео тест.mp4",
+                content_type="video/mp4",
+            )
+
+        assert isinstance(result, UploadedImage)
+        assert "filename" not in storage.upload.call_args.kwargs
+        create_kwargs = service._image_repo.create.call_args.kwargs
+        assert create_kwargs["original_filename"] == f"{upload_result.id}.mp4"
+        assert create_kwargs["display_filename"] == "видео тест.mp4"
+
     async def test_upload_mov_container_accepted(self) -> None:
         service, storage = _make_service()
         storage.upload = AsyncMock(return_value=_make_upload_result(ext="mov"))

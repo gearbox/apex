@@ -191,12 +191,10 @@ async def _backfill_output_row(
             variants_created += 1
             continue
 
-        thumb_filename = f"thumb_{g.spec.label}_{full.id}.webp"
         try:
             up = await r2.upload(
                 user_id=full.user_id,
                 data=g.result.data,
-                filename=thumb_filename,
                 content_type=g.result.content_type,
                 storage_type=StorageType.OUTPUT,
                 job_id=full.job_id,
@@ -296,12 +294,10 @@ async def _backfill_upload_row(
             variants_created += 1
             continue
 
-        thumb_filename = f"thumb_{g.spec.label}_{full.original_filename}"
         try:
             up = await r2.upload(
                 user_id=full.user_id,
                 data=g.result.data,
-                filename=thumb_filename,
                 content_type=g.result.content_type,
                 storage_type=StorageType.UPLOAD,
             )
@@ -320,7 +316,7 @@ async def _backfill_upload_row(
                     id=up.id,
                     user_id=full.user_id,
                     storage_key=up.storage_key,
-                    original_filename=thumb_filename,
+                    original_filename=f"{up.id}.{g.result.format}",
                     content_type=g.result.content_type,
                     size_bytes=len(g.result.data),
                     format=g.result.format,

@@ -20,12 +20,13 @@ from src.db.repositories.billing import BillingRepository
 from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.core.product import PaymentProvider
     from src.db.models.billing import TokenAccount, TokenTransaction
 
 logger = structlog.get_logger(__name__)
@@ -432,6 +433,7 @@ class BillingService:
         job_id: UUID,
         *,
         description: str,
+        metadata: Mapping[str, Any] | None = None,
         session: AsyncSession,
         product_id: str,
         user_id: UUID | None = None,
@@ -469,6 +471,7 @@ class BillingService:
             balance_after=new_balance,
             job_id=job_id,
             description=description,
+            metadata=dict(metadata) if metadata else {},
             product_id=product_id,
         )
 
@@ -584,7 +587,8 @@ class BillingService:
         payment_id: UUID,
         *,
         description: str,
-        payment_provider: str = "",
+        payment_provider: PaymentProvider,
+        metadata: Mapping[str, Any] | None = None,
         session: AsyncSession,
         product_id: str,
     ) -> BillingResult:
@@ -612,6 +616,7 @@ class BillingService:
             balance_after=new_balance,
             payment_id=payment_id,
             description=description,
+            metadata=dict(metadata) if metadata else {},
             product_id=product_id,
         )
 
@@ -621,7 +626,7 @@ class BillingService:
             payment_id=str(payment_id),
             amount=amount,
             balance_after=new_balance,
-            payment_provider=payment_provider,
+            payment_provider=payment_provider.value,
         )
 
         target_user_ids = await self._resolve_event_targets(account, repo)

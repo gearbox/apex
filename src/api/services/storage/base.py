@@ -26,7 +26,6 @@ class StorageService(Protocol):
         *,
         user_id: UUID,
         data: bytes,
-        filename: str,
         content_type: str,
         storage_type: StorageType,
         job_id: UUID | None = None,
@@ -36,7 +35,6 @@ class StorageService(Protocol):
         Args:
             user_id: Owner of the file.
             data: Raw file bytes.
-            filename: Original filename (for reference).
             content_type: MIME type of the file.
             storage_type: Whether this is an upload or output.
             job_id: Associated generation job (for outputs).
