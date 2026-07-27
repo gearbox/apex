@@ -970,10 +970,7 @@ class LibraryService:
             if over_cap := [
                 format_asset_ref(r.source, r.asset_id)
                 for r in parsed
-                if len(
-                    {t.id for t in existing.get((r.source.value, r.asset_id), [])}
-                    | new_ids
-                )
+                if len({t.id for t in existing.get((r.source.value, r.asset_id), [])} | new_ids)
                 > _MAX_TAGS_PER_ASSET
             ]:
                 raise LibraryBulkTagCapError(over_cap, _MAX_TAGS_PER_ASSET)
