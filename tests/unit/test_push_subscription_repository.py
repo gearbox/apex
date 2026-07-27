@@ -113,3 +113,21 @@ async def test_list_batch_uses_cursor_when_provided() -> None:
 
     assert result == rows
     cast("Any", session).execute.assert_awaited_once()
+
+
+async def test_delete_all_for_user_returns_rowcount_and_flushes() -> None:
+    repo, session = _repo_with_result(FakeResult(rowcount=2))
+
+    deleted = await repo.delete_all_for_user(uuid4())
+
+    assert deleted == 2
+    cast("Any", session).execute.assert_awaited_once()
+    cast("Any", session).flush.assert_awaited_once()
+
+
+async def test_delete_all_for_user_zero_rows_is_a_noop() -> None:
+    repo, _session = _repo_with_result(FakeResult(rowcount=0))
+
+    deleted = await repo.delete_all_for_user(uuid4())
+
+    assert deleted == 0

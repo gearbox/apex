@@ -30,6 +30,7 @@ class OpsEventType(StrEnum):
     HEALTH_SUBSYSTEM_DEGRADED = "ops.health.subsystem_degraded"
     HEALTH_SUBSYSTEM_RESTORED = "ops.health.subsystem_restored"
     TOKEN_REVOCATION_FAILED = "ops.auth.token_revocation_failed"  # noqa: S105
+    PUSH_SUBSCRIPTIONS_CLEANUP_FAILED = "ops.push.subscriptions_cleanup_failed"
 
 
 class OpsEventEnvelope(msgspec.Struct, kw_only=True):
@@ -87,6 +88,19 @@ class TokenRevocationFailedOpsPayload(msgspec.Struct, kw_only=True):
     being unset. `op` names the triggering action, e.g. "logout_all",
     "change_password", "deactivate_account", "reset_password",
     "token_reuse_detected", "refresh_race_detected"."""
+
+    user_id: UUID
+    op: str
+
+
+class PushSubscriptionsCleanupFailedOpsPayload(msgspec.Struct, kw_only=True):
+    """A bulk-revocation event's push-subscription cleanup (``delete_all_for_user``)
+    failed. Independent of `TokenRevocationFailedOpsPayload` — push deletion is a
+    plain DB operation with its own failure mode, not gated on Redis (see
+    `TokenRevocationService`). `op` names the triggering action, using the same
+    vocabulary as `TokenRevocationFailedOpsPayload.op`: "logout_all",
+    "change_password", "deactivate_account", "reset_password",
+    "token_reuse_detected"."""
 
     user_id: UUID
     op: str

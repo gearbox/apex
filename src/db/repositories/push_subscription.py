@@ -99,6 +99,20 @@ class PushSubscriptionRepository(BaseRepository[PushSubscription]):
         )
         await self._session.flush()
 
+    async def delete_all_for_user(self, user_id: UUID) -> int:
+        """Delete every subscription owned by user_id (bulk-revocation cleanup).
+
+        Idempotent — a user with no subscriptions yields 0, not an error.
+
+        Returns:
+            Number of rows deleted.
+        """
+        result = await self._session.execute(
+            delete(PushSubscription).where(PushSubscription.user_id == user_id)
+        )
+        await self._session.flush()
+        return result.rowcount  # type: ignore[attr-defined,no-any-return]
+
     async def list_by_user(self, user_id: UUID) -> Sequence[PushSubscription]:
         """List all subscriptions for a user (no pagination — per-user fan-out is small)."""
         result = await self._session.execute(

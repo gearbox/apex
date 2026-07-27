@@ -11,6 +11,7 @@ import structlog
 from src.api.schemas.ops_events import (
     PLATFORM_PRODUCT_ID,
     OpsEventType,
+    PushSubscriptionsCleanupFailedOpsPayload,
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
@@ -24,6 +25,7 @@ from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import RefreshTokenRevocationReason
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
+from src.db.repositories.push_subscription import PushSubscriptionRepository
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -376,6 +378,7 @@ class AuthService:
                 user_id=stored_token.user_id,
                 op="token_reuse_detected",
             )
+            await self._delete_push_subscriptions(stored_token.user_id, op="token_reuse_detected")
             logger.warning(
                 "auth.token_reuse_detected",
                 user_id=str(stored_token.user_id),
@@ -479,6 +482,7 @@ class AuthService:
         await self._report_revocation_outcome(
             bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="logout_all"
         )
+        await self._delete_push_subscriptions(user_id, op="logout_all")
         logger.info(
             "auth.tokens_revoked",
             user_id=str(user_id),
@@ -507,6 +511,37 @@ class AuthService:
             product_id=PLATFORM_PRODUCT_ID,
             payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
         )
+
+    async def _delete_push_subscriptions(self, user_id: UUID, *, op: str) -> None:
+        """Delete every push subscription for the user (push-cleanup-on-revocation).
+
+        Runs alongside the bulk access-token revocation above, not inside
+        TokenRevocationService (D3) — push deletion is a plain DB operation
+        with its own failure semantics, independent of Redis availability.
+
+        Wrapped in a SAVEPOINT so a failure here rolls back only the delete,
+        never poisoning the caller's outer transaction: logout-all/password
+        change/reset/deactivation must still commit even if this fails (D4).
+        Never raises. Logs the outcome truthfully and publishes an ops event
+        only on failure — mirrors _report_revocation_outcome above, whose
+        unconditional-success-logging mistake this must not repeat.
+        """
+        if self._session is None:
+            return
+        try:
+            async with self._session.begin_nested():
+                deleted = await PushSubscriptionRepository(self._session).delete_all_for_user(
+                    user_id
+                )
+        except Exception:
+            logger.exception("auth.push_subscriptions_cleanup_failed", user_id=str(user_id), op=op)
+            await self._ops_event_bus.publish(
+                event_type=OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
+                product_id=PLATFORM_PRODUCT_ID,
+                payload=PushSubscriptionsCleanupFailedOpsPayload(user_id=user_id, op=op),
+            )
+            return
+        logger.info("auth.push_subscriptions_deleted", user_id=str(user_id), op=op, deleted=deleted)
 
     async def _create_token_pair(
         self,
