@@ -103,6 +103,20 @@ Controls how Apex connects to the ComfyUI backend that executes generation workf
 | `API_PORT` | `8000` | `int` | TCP port the Litestar API listens on. |
 | `DEBUG` | `false` | `bool` | Enables debug mode: detailed tracebacks and verbose logging. **Never enable in production.** |
 
+> **⚠️ Same-origin reverse-proxy hazard (`Clear-Site-Data`):** every session-ending endpoint
+> (`POST /v1/auth/logout`, `POST /v1/users/me/logout-all`, `POST /v1/users/me/password`,
+> `POST /v1/auth/reset-password`, `DELETE /v1/users/me`) sends
+> `Clear-Site-Data: "cache", "storage"` (`CLEAR_SITE_DATA_HEADER`,
+> `src/api/security/response_headers.py`). `"storage"` clears storage for the origin that
+> *sent* the header. Today the API and the frontend are separate origins (`APP_URL` on its own
+> host/port vs. `API_HOST`/`API_PORT`, e.g. `api.` vs. the app host in production), so this only
+> clears the API origin — which holds nothing but cached content-proxy responses. If the API is
+> ever reverse-proxied same-origin with the frontend (e.g. under `/api` on the app domain behind
+> the `API_HOST=127.0.0.1` setup above), `"storage"` would instead clear the **frontend's**
+> storage on every logout — including service worker registrations, unregistering the PWA worker
+> and breaking offline behavior and push until the next load re-registers it. Keep the API on its
+> own origin, or drop `"storage"` from the header before ever proxying same-origin.
+
 ---
 
 ### Database (PostgreSQL)

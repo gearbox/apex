@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id, get_optional_user_id
 from src.api.routes.auth import AuthController
+from src.api.routes.user import UserController
 from src.api.security import auth_guard, content_auth_guard, hash_token, optional_auth_guard
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.auth import AuthService, InvalidRefreshTokenError, TokenReuseDetectedError
@@ -236,7 +237,12 @@ class TestLogoutAllRevokesAccessTokens:
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
         )
-        await auth_service.logout_all(user_id)
+        logout_all_response = await UserController.logout_all.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=user_id,
+            auth_service=auth_service,
+        )
+        assert logout_all_response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
         with TestClient(app=app) as client:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
@@ -297,7 +303,16 @@ class TestChangePasswordRevokesAccessTokens:
             age_verification_service=MagicMock(),
             token_revocation_service=token_revocation,
         )
-        await user_service.change_password(user_id, current_password="old", new_password="new")
+        data = MagicMock()
+        data.current_password = "old"
+        data.new_password = "new"
+        change_password_response = await UserController.change_password.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=user_id,
+            data=data,
+            user_service=user_service,
+        )
+        assert change_password_response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
         with TestClient(app=app) as client:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
@@ -326,7 +341,12 @@ class TestDeactivateAccountRevokesAccessTokens:
             age_verification_service=MagicMock(),
             token_revocation_service=token_revocation,
         )
-        await user_service.deactivate_account(user_id)
+        delete_account_response = await UserController.delete_account.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=user_id,
+            user_service=user_service,
+        )
+        assert delete_account_response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
         with TestClient(app=app) as client:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})
@@ -382,6 +402,7 @@ class TestSingleDeviceLogoutDenylistsOnlyThatToken:
             settings=settings,
         )
         assert response.status_code == HTTP_200_OK
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
         with TestClient(app=app) as client:
             resp_a_after = client.get(
@@ -392,6 +413,54 @@ class TestSingleDeviceLogoutDenylistsOnlyThatToken:
             )
         assert resp_a_after.status_code == HTTP_401_UNAUTHORIZED
         assert resp_b_after.status_code == HTTP_200_OK
+
+
+class TestUnknownRefreshTokenLogoutStillPurgesCache:
+    """D4 (Clear-Site-Data coverage prompt) — POST /v1/auth/logout must
+    respond 200 with Clear-Site-Data regardless of whether refresh_token was
+    ever valid. This is a deliberate, permanent contract: a client that
+    discovers its session was revoked remotely has no other way to purge
+    this origin's HTTP cache, so it fires a best-effort logout purely to
+    receive the header. Uses the real AuthService.logout call chain — the
+    stub repo's get_refresh_token_by_hash returns None (see _make_repo),
+    so this exercises a syntactically valid but unknown/already-revoked
+    token exactly as AuthService.logout returning False does.
+    """
+
+    async def test_unknown_refresh_token_returns_200_with_clear_site_data(
+        self,
+        jwt_service: JWTService,
+        token_revocation: TokenRevocationService,
+    ) -> None:
+        from src.api.routes.auth import AuthController
+
+        auth_service = AuthService(
+            repository=_make_repo(),
+            jwt_service=jwt_service,
+            password_service=_make_password_service(),
+            token_revocation_service=token_revocation,
+        )
+
+        request = MagicMock()
+        request.headers.get.return_value = None
+        product_config = MagicMock()
+        product_config.cookie_domain = "example.com"
+        settings = MagicMock()
+        settings.content_cookie_secure = True
+
+        response = await AuthController.logout.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            request=request,
+            data=MagicMock(refresh_token="never-issued-or-already-revoked"),
+            auth_service=auth_service,
+            jwt_service=jwt_service,
+            token_revocation_service=token_revocation,
+            product_config=product_config,
+            settings=settings,
+        )
+
+        assert response.status_code == HTTP_200_OK
+        assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
 
 class TestContentCookieRevokedByLogoutAll:
@@ -478,7 +547,16 @@ class TestResetPasswordRevokesAccessTokens:
             pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
             pwd_cls.return_value = pwd_instance
 
-            await svc.reset_password("raw-reset-token", "new_password", session=session)
+            data = MagicMock()
+            data.token = "raw-reset-token"
+            data.new_password = "new_password"
+            reset_password_response = await AuthController.reset_password.fn(  # type: ignore[attr-defined]
+                MagicMock(),
+                data=data,
+                session=session,
+                email_verification_service=svc,
+            )
+            assert reset_password_response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
         with TestClient(app=app) as client:
             resp = client.get("/ping", headers={"Authorization": f"Bearer {token}"})

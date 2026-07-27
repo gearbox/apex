@@ -24,7 +24,7 @@ from src.api.schemas.user import (
     UserProfileResponse,
     UserStatsResponse,
 )
-from src.api.security import auth_guard
+from src.api.security import CLEAR_SITE_DATA_HEADER, auth_guard
 from src.api.services.age_verification import AgeVerificationError
 from src.api.services.auth import AuthService
 from src.api.services.user import (
@@ -134,7 +134,10 @@ class UserController(Controller):
     ) -> Response[MessageResponse | ErrorEnvelope]:
         """Change current user's password.
 
-        All existing sessions will be invalidated.
+        All existing sessions will be invalidated, including the caller's
+        own — so on success the response also sends
+        `Clear-Site-Data: "cache", "storage"` to purge this origin's HTTP
+        cache on the device that made the call.
         """
         try:
             await user_service.change_password(
@@ -147,6 +150,7 @@ class UserController(Controller):
                     message="Password changed successfully. Please log in again."
                 ),
                 status_code=HTTP_200_OK,
+                headers=CLEAR_SITE_DATA_HEADER,
             )
 
         except UserNotFoundError as e:
@@ -171,7 +175,10 @@ class UserController(Controller):
         """Deactivate current user's account.
 
         This is a soft delete - the account can be recovered.
-        All sessions will be invalidated.
+        All sessions will be invalidated, including the caller's own — so
+        on success the response also sends
+        `Clear-Site-Data: "cache", "storage"` to purge this origin's HTTP
+        cache on the device that made the call.
         """
         try:
             deactivated_at = await user_service.deactivate_account(current_user_id)
@@ -181,6 +188,7 @@ class UserController(Controller):
                     deactivated_at=deactivated_at,
                 ),
                 status_code=HTTP_200_OK,
+                headers=CLEAR_SITE_DATA_HEADER,
             )
 
         except UserNotFoundError as e:
@@ -208,10 +216,16 @@ class UserController(Controller):
     ) -> Response[MessageResponse]:
         """Logout from all devices.
 
-        Invalidates all refresh tokens for the current user.
+        Invalidates all refresh tokens for the current user, including the
+        calling device's own — so the response also sends
+        `Clear-Site-Data: "cache", "storage"` to purge this origin's HTTP
+        cache on the device that made the call. Other devices whose
+        sessions are ended by this call never receive this response at
+        all — they discover the revocation via a 401 on their next request.
         """
         count = await auth_service.logout_all(current_user_id)
         return Response(
             content=MessageResponse(message=f"Logged out from {count} session(s)"),
             status_code=HTTP_200_OK,
+            headers=CLEAR_SITE_DATA_HEADER,
         )
