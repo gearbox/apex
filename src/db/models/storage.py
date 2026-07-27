@@ -71,6 +71,11 @@ class UserImage(Base):
 
     # File metadata
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Display/search-only copy of the client-supplied filename (NFC-normalized,
+    # control chars stripped). Never used for storage keys, HTTP headers, R2
+    # metadata, or filesystem paths — original_filename (above) is the
+    # canonical {uuid}.{ext} system identifier used everywhere else.
+    display_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content_type: Mapped[str] = mapped_column(String(100), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     format: Mapped[str] = mapped_column(String(10), nullable=False)  # png, jpeg, webp

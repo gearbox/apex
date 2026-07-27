@@ -35,6 +35,8 @@ class TransactionResponse(msgspec.Struct, kw_only=True):
     payment_id: UUID | None
     created_at: datetime
     created_by: UUID | None
+    payment_method: str | None = None
+    """User-facing payment method class (``crypto`` / ``card``), if this is a top-up credit."""
 
 
 class PricingRuleResponse(msgspec.Struct, kw_only=True):

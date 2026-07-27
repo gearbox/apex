@@ -43,7 +43,10 @@ class LibraryAssetItem(msgspec.Struct, kw_only=True):
     """User-set display name, if any (see PATCH /assets/{asset_ref})."""
 
     original_filename: str | None = None
-    """Upload-only: the originally uploaded filename."""
+    """Upload-only: canonical system filename (``{uuid}.{ext}``), kept for compatibility."""
+
+    display_filename: str | None = None
+    """Upload-only: sanitized, human-readable original filename, for display/search."""
 
     is_favorite: bool
 

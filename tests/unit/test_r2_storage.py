@@ -1,5 +1,6 @@
 """Tests for R2 storage service."""
 
+import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -106,41 +107,41 @@ class TestR2ValidationRules:
     def test_validate_empty_file(self, r2_service: R2StorageService) -> None:
         """Test that empty files are rejected."""
         with pytest.raises(StorageValidationError, match="empty"):
-            r2_service._validate_upload(b"", "image/png", "test.png")
+            r2_service._validate_upload(b"", "image/png")
 
     def test_validate_file_too_large(self, r2_service: R2StorageService) -> None:
         """Test that files over 20MB are rejected."""
         large_data = b"x" * (21 * 1024 * 1024)  # 21MB
         with pytest.raises(StorageValidationError, match="exceeds maximum"):
-            r2_service._validate_upload(large_data, "image/png", "test.png")
+            r2_service._validate_upload(large_data, "image/png")
 
     def test_validate_invalid_content_type(self, r2_service: R2StorageService) -> None:
         """Test that invalid content types are rejected."""
         with pytest.raises(StorageValidationError, match="not allowed"):
-            r2_service._validate_upload(b"test", "image/gif", "test.gif")
+            r2_service._validate_upload(b"test", "image/gif")
 
         with pytest.raises(StorageValidationError, match="not allowed"):
-            r2_service._validate_upload(b"test", "text/plain", "test.txt")
+            r2_service._validate_upload(b"test", "text/plain")
 
     def test_validate_valid_png(self, r2_service: R2StorageService) -> None:
         """Test that valid PNG is accepted."""
-        result = r2_service._validate_upload(b"test", "image/png", "test.png")
+        result = r2_service._validate_upload(b"test", "image/png")
         assert result == MediaFormat.PNG
 
     def test_validate_valid_jpeg(self, r2_service: R2StorageService) -> None:
         """Test that valid JPEG is accepted."""
-        result = r2_service._validate_upload(b"test", "image/jpeg", "test.jpg")
+        result = r2_service._validate_upload(b"test", "image/jpeg")
         assert result == MediaFormat.JPEG
 
     def test_validate_valid_webp(self, r2_service: R2StorageService) -> None:
         """Test that valid WebP is accepted."""
-        result = r2_service._validate_upload(b"test", "image/webp", "test.webp")
+        result = r2_service._validate_upload(b"test", "image/webp")
         assert result == MediaFormat.WEBP
 
     def test_validate_max_size_boundary(self, r2_service: R2StorageService) -> None:
         """Test file at exactly max size is accepted."""
         max_data = b"x" * (20 * 1024 * 1024)  # Exactly 20MB
-        result = r2_service._validate_upload(max_data, "image/png", "test.png")
+        result = r2_service._validate_upload(max_data, "image/png")
         assert result == MediaFormat.PNG
 
 
@@ -258,6 +259,62 @@ class TestSignKey:
             await r2_service.sign_key("any/key")
 
         mock_client.head_object.assert_not_awaited()
+
+
+class TestUpload:
+    """Tests for R2StorageService.upload — Issue B regression.
+
+    ``upload()`` must not accept a client filename at all, and the R2 object
+    metadata it builds must never carry an externally-controlled string: HTTP
+    header values are latin-1 constrained, and a non-latin filename used to
+    raise UnicodeEncodeError deep in the aiohttp/botocore header-encoding
+    path before the request was even sent.
+    """
+
+    def test_upload_signature_has_no_filename_parameter(self) -> None:
+        params = inspect.signature(R2StorageService.upload).parameters
+        assert "filename" not in params
+
+    async def test_metadata_has_no_original_filename_key(
+        self, r2_service: R2StorageService
+    ) -> None:
+        mock_client = AsyncMock()
+
+        @asynccontextmanager
+        async def _fake_get_client():
+            yield mock_client
+
+        with patch.object(r2_service, "_get_client", _fake_get_client):
+            await r2_service.upload(
+                user_id=uuid4(),
+                data=b"test",
+                content_type="image/png",
+                storage_type=StorageType.UPLOAD,
+            )
+
+        _, kwargs = mock_client.put_object.call_args
+        metadata = kwargs["Metadata"]
+        assert "original-filename" not in metadata
+
+    async def test_metadata_values_are_latin1_encodable(self, r2_service: R2StorageService) -> None:
+        mock_client = AsyncMock()
+
+        @asynccontextmanager
+        async def _fake_get_client():
+            yield mock_client
+
+        with patch.object(r2_service, "_get_client", _fake_get_client):
+            await r2_service.upload(
+                user_id=uuid4(),
+                data=b"test",
+                content_type="image/png",
+                storage_type=StorageType.UPLOAD,
+                job_id=uuid4(),
+            )
+
+        _, kwargs = mock_client.put_object.call_args
+        metadata = kwargs["Metadata"]
+        assert all(v.encode("latin-1") for v in metadata.values())
 
 
 class TestPutRaw:

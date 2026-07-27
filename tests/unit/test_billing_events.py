@@ -10,6 +10,8 @@ for the commit-ordering invariant itself.
 
 from __future__ import annotations
 
+import inspect
+import typing
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -23,6 +25,7 @@ from src.api.services.billing import (
 )
 from src.api.services.event_bus import EventBus
 from src.core.enums import TransactionType
+from src.core.product import PaymentProvider
 
 pytestmark = pytest.mark.unit
 
@@ -80,6 +83,7 @@ class TestMutatingMethodsReturnEventAndDoNotPublish:
                 100,
                 uuid4(),
                 description="test credit",
+                payment_provider=PaymentProvider.STRIPE,
                 session=session,
                 product_id="vex",
             ),
@@ -258,6 +262,7 @@ class TestCreditAndAdminAdjustShareTargetResolution:
                 100,
                 uuid4(),
                 description="personal credit",
+                payment_provider=PaymentProvider.STRIPE,
                 session=session,
                 product_id="vex",
             )
@@ -285,6 +290,7 @@ class TestCreditAndAdminAdjustShareTargetResolution:
                 100,
                 uuid4(),
                 description="org credit",
+                payment_provider=PaymentProvider.STRIPE,
                 session=session,
                 product_id="vex",
             )
@@ -316,6 +322,7 @@ class TestCreditAndAdminAdjustShareTargetResolution:
                         100,
                         uuid4(),
                         description="d",
+                        payment_provider=PaymentProvider.STRIPE,
                         session=session,
                         product_id="vex",
                     )
@@ -334,3 +341,33 @@ class TestCreditAndAdminAdjustShareTargetResolution:
         assert credit_result.event is not None
         assert admin_result.event is not None
         assert credit_result.event.user_ids == admin_result.event.user_ids == member_ids
+
+
+def test_credit_requires_typed_payment_provider() -> None:
+    """D-A5: payment_provider is keyword-only and typed — no silent
+    empty-string default on a financial write path.
+
+    ``billing.py`` uses ``from __future__ import annotations`` and imports
+    UUID/AsyncSession under TYPE_CHECKING only, so resolving the postponed
+    annotations here needs those names supplied explicitly via localns —
+    they're never bound in the module's runtime globals.
+    """
+    from collections.abc import Mapping
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    sig = inspect.signature(BillingService.credit)
+    param = sig.parameters["payment_provider"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+    hints = typing.get_type_hints(
+        BillingService.credit,
+        localns={
+            "UUID": UUID,
+            "Mapping": Mapping,
+            "AsyncSession": AsyncSession,
+            "PaymentProvider": PaymentProvider,
+        },
+    )
+    assert hints["payment_provider"] is PaymentProvider

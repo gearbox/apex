@@ -70,6 +70,7 @@ def _txn_to_response(txn: TokenTransaction) -> TransactionResponse:
         payment_id=txn.payment_id,
         created_at=txn.created_at,
         created_by=txn.created_by,
+        payment_method=txn.metadata_.get("payment_method"),
     )
 
 

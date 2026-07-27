@@ -17,6 +17,7 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    HTTP_502_BAD_GATEWAY,
 )
 
 from src.api.schemas.media import MediaObject, MediaOriginal
@@ -24,6 +25,7 @@ from src.api.schemas.user_content import ImageAccess, UploadedImage
 from src.api.services.user_content import (
     UserContentError,
     UserContentNotFoundError,
+    UserContentStorageError,
     UserContentTooLargeError,
     UserContentValidationError,
 )
@@ -224,6 +226,47 @@ class TestUploadImageHandler:
         )
 
         assert response.status_code == HTTP_400_BAD_REQUEST
+
+    async def test_cyrillic_filename_returns_201_not_500(self) -> None:
+        """Issue B regression: a non-latin multipart filename must succeed,
+        not surface as an opaque 500 from a UnicodeEncodeError deep in R2."""
+        from src.api.routes.storage import StorageController
+
+        uploaded = _make_uploaded_image()
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(return_value=uploaded)
+
+        response = await StorageController.upload_image.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            user_content=user_content,
+            data=_upload_form(filename="тестовое фото.png"),
+        )
+
+        assert response.status_code == HTTP_201_CREATED
+
+    async def test_storage_error_returns_502_upstream_error(self) -> None:
+        """D-B3: UserContentStorageError maps to 502, not 500 and not 400 —
+        an R2 outage is not the client's fault. The message must not echo
+        the underlying storage exception text."""
+        from src.api.routes.storage import StorageController
+
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(
+            side_effect=UserContentStorageError("Storage backend unavailable (StorageUploadError)")
+        )
+
+        response = await StorageController.upload_image.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            user_content=user_content,
+            data=_upload_form(),
+        )
+
+        assert response.status_code == HTTP_502_BAD_GATEWAY
+        assert response.content.error == "upstream_error"
+        assert response.content.message == "Storage backend unavailable"
+        assert "StorageUploadError" not in response.content.message
 
     async def test_none_filename_defaults_to_data_png(self) -> None:
         from src.api.routes.storage import StorageController

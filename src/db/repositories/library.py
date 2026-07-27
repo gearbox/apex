@@ -95,6 +95,7 @@ class LibraryAssetRow:
     height: int | None
     duration_ms: int | None
     original_filename: str | None
+    display_filename: str | None
     job_id: UUID | None
     model: str | None
     generation_type: str | None
@@ -157,8 +158,9 @@ class LibraryRepository:
             expiring: Filter to assets expiring within (True) or beyond
                 (False) the ``expiring_soon`` window (P6, 7 days).
             query: Case-insensitive substring search over display_title,
-                original_filename (uploads), and the owning job's prompt
-                (outputs). Escaped before use — never interpolated raw.
+                display_filename (falling back to original_filename on
+                pre-030 uploads), and the owning job's prompt (outputs).
+                Escaped before use — never interpolated raw.
             created_from: Lower bound (inclusive) on ``created_at``.
             created_to: Upper bound (inclusive) on ``created_at``.
             sort: ``newest`` (default), ``oldest``, or ``expiring_soon``.
@@ -250,6 +252,7 @@ class LibraryRepository:
                 height=row["height"],
                 duration_ms=row["duration_ms"],
                 original_filename=row["original_filename"],
+                display_filename=row["display_filename"],
                 job_id=row["job_id"],
                 model=row["model"],
                 generation_type=row["generation_type"],
@@ -299,6 +302,7 @@ class LibraryRepository:
                 UserImage.height.label("height"),
                 UserImage.duration_ms.label("duration_ms"),
                 UserImage.original_filename.label("original_filename"),
+                UserImage.display_filename.label("display_filename"),
                 cast(null(), PG_UUID(as_uuid=True)).label("job_id"),
                 cast(null(), String(50)).label("model"),
                 cast(null(), String(20)).label("generation_type"),
@@ -350,7 +354,15 @@ class LibraryRepository:
             pattern = f"%{search_term}%"
             query = query.where(
                 or_(
-                    UserImage.original_filename.ilike(pattern, escape="\\"),
+                    # display_filename is the sanitized client name on rows written
+                    # since migration 030; it is NULL for every upload predating it,
+                    # whose real name still lives in original_filename. COALESCE (not
+                    # OR) keeps those searchable without also matching the {uuid}.{ext}
+                    # canonical name on new rows.
+                    func.coalesce(
+                        UserImage.display_filename,
+                        UserImage.original_filename,
+                    ).ilike(pattern, escape="\\"),
                     LibraryAssetMetadata.display_title.ilike(pattern, escape="\\"),
                 )
             )
@@ -411,6 +423,7 @@ class LibraryRepository:
                 GenerationOutput.height.label("height"),
                 cast(null(), Integer).label("duration_ms"),
                 cast(null(), String(255)).label("original_filename"),
+                cast(null(), String(255)).label("display_filename"),
                 GenerationOutput.job_id.label("job_id"),
                 GenerationJob.model.label("model"),
                 GenerationJob.generation_type.label("generation_type"),

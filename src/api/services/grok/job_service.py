@@ -348,7 +348,8 @@ class GrokJobService:
             try:
                 await billing_service.refund(
                     job_id,
-                    description=f"Provider error refund: {getattr(e, 'message', str(e))}",
+                    description="Generation failed — tokens refunded",
+                    metadata={"refund_reason": "provider_error"},
                     session=session,
                     product_id=product_id,
                 )
@@ -361,7 +362,7 @@ class GrokJobService:
             raise GrokJobError(f"Image generation failed: {e}") from e
 
         except Exception as e:
-            logger.exception("grok.unexpected_error", job_id=str(job_id))
+            logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
             job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
@@ -375,7 +376,8 @@ class GrokJobService:
             try:
                 await billing_service.refund(
                     job_id,
-                    description=f"Unexpected error refund: {e!s}",
+                    description="Generation failed — tokens refunded",
+                    metadata={"refund_reason": "internal_error"},
                     session=session,
                     product_id=product_id,
                 )
@@ -694,7 +696,8 @@ class GrokJobService:
             try:
                 await billing_service.refund(
                     job_id,
-                    description=f"Provider error refund: {getattr(e, 'message', str(e))}",
+                    description="Generation failed — tokens refunded",
+                    metadata={"refund_reason": "provider_error"},
                     session=session,
                     product_id=product_id,
                 )
@@ -707,7 +710,7 @@ class GrokJobService:
             raise GrokJobError(f"Failed to start video generation: {e}") from e
 
         except Exception as e:
-            logger.exception("grok.unexpected_error", job_id=str(job_id))
+            logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
             job = await job_repo.update_status(
                 job_id,
                 JobStatus.FAILED,
@@ -721,7 +724,8 @@ class GrokJobService:
             try:
                 await billing_service.refund(
                     job_id,
-                    description=f"Unexpected error refund: {e!s}",
+                    description="Generation failed — tokens refunded",
+                    metadata={"refund_reason": "internal_error"},
                     session=session,
                     product_id=product_id,
                 )

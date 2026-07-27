@@ -12,7 +12,9 @@ a route guard is misconfigured, the service layer will reject cross-user access.
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +35,7 @@ from src.api.services.media import build_upload_media
 from src.api.services.storage import (
     MediaFormat,
     R2StorageService,
+    StorageError,
     StorageNotFoundError,
     StorageType,
     StorageValidationError,
@@ -53,6 +56,28 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+_CONTROL_CHAR_RUNS = re.compile(r"[\x00-\x1f\x7f]+")
+_DISPLAY_FILENAME_MAX_LEN = 255
+
+
+def sanitize_display_filename(raw: str | None) -> str | None:
+    """Normalize a client-supplied filename for display/search only.
+
+    NEVER use the result for storage keys, HTTP headers, R2 metadata,
+    ComfyUI inputs, or any filesystem path — ``UserImage.original_filename``
+    is the canonical system identifier and is always ``{uuid}.{ext}``.
+
+    Each maximal run of control characters (e.g. a header-injection
+    ``\\r\\n``) collapses to a single space rather than being deleted
+    outright — deleting would silently mash adjacent words together
+    (``"photo\\r\\nX"`` -> ``"photoX"``).
+    """
+    if not raw:
+        return None
+    leaf = raw.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    cleaned = _CONTROL_CHAR_RUNS.sub(" ", unicodedata.normalize("NFC", leaf)).strip()
+    return cleaned[:_DISPLAY_FILENAME_MAX_LEN] or None
+
 
 class UserContentError(Exception):
     """Base exception for user content operations."""
@@ -68,6 +93,10 @@ class UserContentValidationError(UserContentError):
 
 class UserContentTooLargeError(UserContentValidationError):
     """Raised when an uploaded image's pixel count exceeds the configured cap."""
+
+
+class UserContentStorageError(UserContentError):
+    """Raised when the storage backend fails for reasons unrelated to client input."""
 
 
 class UserContentService:
@@ -200,10 +229,10 @@ class UserContentService:
             result = await self._storage.upload(
                 user_id=user_id,
                 data=normalized.data,
-                filename=filename,
                 content_type=normalized.content_type,
                 storage_type=StorageType.UPLOAD,
             )
+            canonical_filename = f"{result.id}.{normalized.format.value}"
 
             now = datetime.now(UTC)
             expires_at = now + timedelta(days=self._retention_days)
@@ -216,7 +245,8 @@ class UserContentService:
                 id=result.id,
                 user_id=user_id,
                 storage_key=result.storage_key,
-                original_filename=filename,
+                original_filename=canonical_filename,
+                display_filename=sanitize_display_filename(filename),
                 content_type=normalized.content_type,
                 size_bytes=len(normalized.data),
                 format=normalized.format.value,
@@ -239,11 +269,9 @@ class UserContentService:
             try:
                 thumbnails = await make_image_thumbnails(normalized.data)
                 for generated in thumbnails:
-                    thumb_filename = f"thumb_{generated.spec.label}_{filename}"
                     thumb_result = await self._storage.upload(
                         user_id=user_id,
                         data=generated.result.data,
-                        filename=thumb_filename,
                         content_type=generated.result.content_type,
                         storage_type=StorageType.UPLOAD,
                     )
@@ -251,7 +279,7 @@ class UserContentService:
                         id=thumb_result.id,
                         user_id=user_id,
                         storage_key=thumb_result.storage_key,
-                        original_filename=thumb_filename,
+                        original_filename=f"{thumb_result.id}.{generated.result.format}",
                         content_type=generated.result.content_type,
                         size_bytes=len(generated.result.data),
                         format=generated.result.format,
@@ -285,6 +313,11 @@ class UserContentService:
 
         except StorageValidationError as e:
             raise UserContentValidationError(str(e)) from e
+        except StorageError as e:
+            logger.exception("user_content.storage_upload_failed", user_id=str(user_id))
+            raise UserContentStorageError(
+                f"Storage backend unavailable ({type(e).__name__})"
+            ) from e
 
     async def _upload_video(
         self,
@@ -314,12 +347,16 @@ class UserContentService:
             result = await self._storage.upload(
                 user_id=user_id,
                 data=data,
-                filename=filename,
                 content_type=content_type,
                 storage_type=StorageType.UPLOAD,
             )
         except StorageValidationError as e:
             raise UserContentValidationError(str(e)) from e
+        except StorageError as e:
+            logger.exception("user_content.storage_upload_failed", user_id=str(user_id))
+            raise UserContentStorageError(
+                f"Storage backend unavailable ({type(e).__name__})"
+            ) from e
 
         now = datetime.now(UTC)
         expires_at = now + timedelta(days=self._retention_days)
@@ -329,7 +366,8 @@ class UserContentService:
             id=result.id,
             user_id=user_id,
             storage_key=result.storage_key,
-            original_filename=filename,
+            original_filename=f"{result.id}.{video_format.value}",
+            display_filename=sanitize_display_filename(filename),
             content_type=content_type,
             size_bytes=len(data),
             format=video_format.value,
@@ -357,11 +395,9 @@ class UserContentService:
             if poster is not None:
                 thumbnails = await make_image_thumbnails(poster)
                 for generated in thumbnails:
-                    thumb_filename = f"thumb_{generated.spec.label}_{filename}"
                     thumb_result = await self._storage.upload(
                         user_id=user_id,
                         data=generated.result.data,
-                        filename=thumb_filename,
                         content_type=generated.result.content_type,
                         storage_type=StorageType.UPLOAD,
                     )
@@ -369,7 +405,7 @@ class UserContentService:
                         id=thumb_result.id,
                         user_id=user_id,
                         storage_key=thumb_result.storage_key,
-                        original_filename=thumb_filename,
+                        original_filename=f"{thumb_result.id}.{generated.result.format}",
                         content_type=generated.result.content_type,
                         size_bytes=len(generated.result.data),
                         format=generated.result.format,
@@ -598,7 +634,6 @@ class UserContentService:
         result = await self._storage.upload(
             user_id=user_id,
             data=data,
-            filename=f"output_{output_index}.png",
             content_type=content_type,
             storage_type=StorageType.OUTPUT,
             job_id=job_id,

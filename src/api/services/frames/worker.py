@@ -254,12 +254,9 @@ class FrameExtractionWorker(PeriodicWorker):
             out_format="png",
             timeout_seconds=self._ffmpeg_timeout,
         )
-        filename = f"frame_{timestamp_ms}ms.png"
-
         upload_result = await self._storage.upload(
             user_id=job.user_id,
             data=png_bytes,
-            filename=filename,
             content_type=MediaFormat.PNG.content_type,
             storage_type=StorageType.UPLOAD,
         )
@@ -271,7 +268,7 @@ class FrameExtractionWorker(PeriodicWorker):
             id=upload_result.id,
             user_id=job.user_id,
             storage_key=upload_result.storage_key,
-            original_filename=filename,
+            original_filename=f"{upload_result.id}.png",
             content_type=MediaFormat.PNG.content_type,
             size_bytes=len(png_bytes),
             format=MediaFormat.PNG.value,
@@ -288,11 +285,9 @@ class FrameExtractionWorker(PeriodicWorker):
         try:
             thumbnails = await make_image_thumbnails(png_bytes)
             for generated in thumbnails:
-                thumb_filename = f"thumb_{generated.spec.label}_{filename}"
                 thumb_result = await self._storage.upload(
                     user_id=job.user_id,
                     data=generated.result.data,
-                    filename=thumb_filename,
                     content_type=generated.result.content_type,
                     storage_type=StorageType.UPLOAD,
                 )
@@ -301,7 +296,7 @@ class FrameExtractionWorker(PeriodicWorker):
                     id=thumb_result.id,
                     user_id=job.user_id,
                     storage_key=thumb_result.storage_key,
-                    original_filename=thumb_filename,
+                    original_filename=f"{thumb_result.id}.{generated.result.format}",
                     content_type=generated.result.content_type,
                     size_bytes=len(generated.result.data),
                     format=generated.result.format,

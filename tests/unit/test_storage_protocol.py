@@ -25,7 +25,6 @@ class TestStorageServiceProtocolStubs:
         result = await svc.upload(
             user_id=uuid4(),
             data=b"",
-            filename="f.jpg",
             content_type="image/jpeg",
             storage_type=mock,
         )

@@ -574,20 +574,65 @@ class TestListAssetsSearchQuery:
         assert match.id in ids
         assert no_match.id not in ids
 
-    async def test_search_matches_original_filename(
+    async def test_search_matches_display_filename(
         self,
         library_repo: LibraryRepository,
         make_user: Callable[..., Coroutine[Any, Any, User]],
         make_user_image: Callable[..., Coroutine[Any, Any, Any]],
     ) -> None:
+        """original_filename is a canonical {uuid}.{ext} system name (never
+        searched); display_filename holds the sanitized client-supplied name
+        and is the search target instead."""
         user = await make_user(email=f"searchfile-{uuid4().hex[:8]}@example.com")
-        match = await make_user_image(user=user, original_filename="vacation_photo.png")
-        no_match = await make_user_image(user=user, original_filename="other.png")
+        match = await make_user_image(user=user, display_filename="vacation_photo.png")
+        no_match = await make_user_image(user=user, display_filename="other.png")
 
         rows = await library_repo.list_assets(user.id, "vex", limit=20, query="vacation")
         ids = {r.id for r in rows}
         assert match.id in ids
         assert no_match.id not in ids
+
+    async def test_search_matches_legacy_original_filename_when_display_is_null(
+        self,
+        library_repo: LibraryRepository,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+    ) -> None:
+        """Pre-030 uploads have display_filename NULL but a real
+        original_filename — they must stay searchable (H1)."""
+        user = await make_user(email=f"searchlegacy-{uuid4().hex[:8]}@example.com")
+        legacy = await make_user_image(
+            user=user, original_filename="vacation_photo.png", display_filename=None
+        )
+        other = await make_user_image(
+            user=user, original_filename="other.png", display_filename=None
+        )
+
+        rows = await library_repo.list_assets(user.id, "vex", limit=20, query="vacation")
+        ids = {r.id for r in rows}
+        assert legacy.id in ids
+        assert other.id not in ids
+
+    async def test_search_does_not_match_uuid_canonical_filename_on_new_rows(
+        self,
+        library_repo: LibraryRepository,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+    ) -> None:
+        """COALESCE (not OR): a post-030 row's {uuid}.{ext} original_filename
+        must not be searchable, or hex fragments produce junk hits."""
+        user = await make_user(email=f"searchuuid-{uuid4().hex[:8]}@example.com")
+        image_id = uuid4()
+        row = await make_user_image(
+            image_id=image_id,
+            user=user,
+            original_filename=f"{image_id}.png",
+            display_filename="holiday.png",
+        )
+
+        hex_fragment = str(image_id)[:6]
+        rows = await library_repo.list_assets(user.id, "vex", limit=20, query=hex_fragment)
+        assert row.id not in {r.id for r in rows}
 
     async def test_search_matches_job_prompt_on_output_branch(
         self,
@@ -656,9 +701,9 @@ class TestListAssetsSearchQuery:
         contains a literal "100%" substring.
         """
         user = await make_user(email=f"searchesc-{uuid4().hex[:8]}@example.com")
-        literal_percent = await make_user_image(user=user, original_filename="100%done.png")
-        no_literal_percent = await make_user_image(user=user, original_filename="100done.png")
-        unrelated = await make_user_image(user=user, original_filename="somethingelsedone.png")
+        literal_percent = await make_user_image(user=user, display_filename="100%done.png")
+        no_literal_percent = await make_user_image(user=user, display_filename="100done.png")
+        unrelated = await make_user_image(user=user, display_filename="somethingelsedone.png")
 
         rows = await library_repo.list_assets(user.id, "vex", limit=20, query="100%")
         ids = {r.id for r in rows}

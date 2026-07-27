@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -12,14 +13,18 @@ from PIL import Image
 
 from src.api.schemas.media import MediaObject, MediaOriginal
 from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
-from src.api.services.storage import StorageNotFoundError, StorageValidationError
+from src.api.services.storage import StorageError, StorageNotFoundError, StorageValidationError
 from src.api.services.user_content import (
     UserContentNotFoundError,
     UserContentService,
+    UserContentStorageError,
     UserContentTooLargeError,
     UserContentValidationError,
+    sanitize_display_filename,
 )
 from src.core.enums import MediaFormat, OutputMediaType
+
+_CANONICAL_FILENAME_RE = re.compile(r"^[0-9a-f-]{36}\.(png|jpeg|webp)$")
 
 pytestmark = pytest.mark.unit
 
@@ -241,6 +246,163 @@ class TestUploadImage:
                 filename="photo.png",
                 content_type="image/png",
             )
+
+    async def test_storage_error_raises_user_content_storage_error(self) -> None:
+        service, storage = _make_service()
+        storage.upload = AsyncMock(side_effect=StorageError("R2 outage"))
+
+        with (
+            patch("src.api.services.user_content.read_dimensions", return_value=None),
+            patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
+            pytest.raises(UserContentStorageError),
+        ):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=_png_bytes(),
+                filename="photo.png",
+                content_type="image/png",
+            )
+
+
+# ---------------------------------------------------------------------------
+# upload_image — filename safety (Issue B regression)
+#
+# Non-latin/injection/path-traversal filenames must never reach R2 (as an
+# x-amz-meta-* header) or the filesystem. original_filename is always a
+# canonical {uuid}.{ext} system name; the sanitized client filename (if any)
+# only ever lands in display_filename, for display/search.
+# ---------------------------------------------------------------------------
+
+
+class TestUploadImageFilenameSafety:
+    @pytest.mark.parametrize(
+        "raw_filename",
+        [
+            "фотография тест.png",
+            "写真.png",
+            "photo\r\nX-Injected: 1.png",
+            "../../etc/passwd",
+            "emoji 🎨.png",
+            "x" * 400 + ".png",
+        ],
+    )
+    async def test_non_latin_and_malicious_filenames_succeed(self, raw_filename: str) -> None:
+        service, storage = _make_service()
+
+        upload_result = _make_upload_result()
+        storage.upload = AsyncMock(return_value=upload_result)
+
+        db_image = _make_db_image()
+        service._image_repo.create = AsyncMock(return_value=db_image)
+
+        with (
+            patch("src.api.services.user_content.read_dimensions", return_value=None),
+            patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
+        ):
+            result = await service.upload_image(
+                user_id=uuid4(),
+                data=_png_bytes(),
+                filename=raw_filename,
+                content_type="image/png",
+            )
+
+        assert isinstance(result, UploadedImage)
+
+        # upload() must never receive a filename kwarg at all.
+        assert "filename" not in storage.upload.call_args.kwargs
+
+        create_kwargs = service._image_repo.create.call_args.kwargs
+        assert create_kwargs["original_filename"] == f"{upload_result.id}.png"
+        assert _CANONICAL_FILENAME_RE.match(create_kwargs["original_filename"])
+
+    async def test_original_filename_matches_uuid_ext_pattern(self) -> None:
+        service, storage = _make_service()
+        upload_result = _make_upload_result()
+        storage.upload = AsyncMock(return_value=upload_result)
+        db_image = _make_db_image()
+        service._image_repo.create = AsyncMock(return_value=db_image)
+
+        with (
+            patch("src.api.services.user_content.read_dimensions", return_value=None),
+            patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
+        ):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=_png_bytes(),
+                filename="whatever.png",
+                content_type="image/png",
+            )
+
+        create_kwargs = service._image_repo.create.call_args.kwargs
+        assert _CANONICAL_FILENAME_RE.match(create_kwargs["original_filename"])
+
+    async def test_thumbnail_rows_get_uuid_names_no_thumb_prefix(self) -> None:
+        service, storage = _make_service()
+
+        main_result = _make_upload_result()
+        thumb_result = _make_upload_result()
+        storage.upload = AsyncMock(side_effect=[main_result, thumb_result])
+
+        db_image = _make_db_image()
+        thumb_db = _make_db_image()
+        service._image_repo.create = AsyncMock(side_effect=[db_image, thumb_db])
+
+        from src.api.services.image_thumbnail import GeneratedThumbnail, ThumbnailResult
+        from src.core.thumbnails import ThumbnailSpec
+
+        thumb = GeneratedThumbnail(
+            spec=ThumbnailSpec("sm", 150),
+            result=ThumbnailResult(data=b"webpdata", width=100, height=75),
+        )
+
+        with (
+            patch("src.api.services.user_content.read_dimensions", return_value=None),
+            patch("src.api.services.user_content.make_image_thumbnails", return_value=[thumb]),
+        ):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=_png_bytes(),
+                filename="фото на русском.png",
+                content_type="image/png",
+            )
+
+        thumb_create_kwargs = service._image_repo.create.call_args_list[1].kwargs
+        thumb_filename = thumb_create_kwargs["original_filename"]
+        assert thumb_filename == f"{thumb_result.id}.webp"
+        assert not thumb_filename.startswith("thumb_")
+        assert "фото" not in thumb_filename
+        assert "русском" not in thumb_filename
+
+    @pytest.mark.parametrize(
+        ("raw_filename", "expected"),
+        [
+            ("photo\r\nX: 1.png", "photo X: 1.png"),
+            ("x" * 400 + ".png", ("x" * 400 + ".png")[:255]),
+        ],
+    )
+    async def test_display_filename_is_sanitized(self, raw_filename: str, expected: str) -> None:
+        assert sanitize_display_filename(raw_filename) == expected
+
+    async def test_display_filename_wired_into_repo_create(self) -> None:
+        service, storage = _make_service()
+        upload_result = _make_upload_result()
+        storage.upload = AsyncMock(return_value=upload_result)
+        db_image = _make_db_image()
+        service._image_repo.create = AsyncMock(return_value=db_image)
+
+        with (
+            patch("src.api.services.user_content.read_dimensions", return_value=None),
+            patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
+        ):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=_png_bytes(),
+                filename="photo\r\nX-Injected: 1.png",
+                content_type="image/png",
+            )
+
+        create_kwargs = service._image_repo.create.call_args.kwargs
+        assert create_kwargs["display_filename"] == "photo X-Injected: 1.png"
 
 
 # ---------------------------------------------------------------------------

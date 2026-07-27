@@ -144,14 +144,12 @@ class R2StorageService:
         self,
         data: bytes,
         content_type: str,
-        _filename: str,
     ) -> MediaFormat:
         """Validate upload parameters.
 
         Args:
             data: File content.
             content_type: MIME type.
-            filename: Original filename.
 
         Returns:
             Validated image format.
@@ -213,14 +211,18 @@ class R2StorageService:
         *,
         user_id: UUID,
         data: bytes,
-        filename: str,
         content_type: str,
         storage_type: StorageType,
         job_id: UUID | None = None,
     ) -> UploadResult:
-        """Upload a file to R2 storage."""
+        """Upload a file to R2 storage.
+
+        Stored objects are identified solely by their storage key
+        (``users/{user_id}/uploads|outputs/.../{file_id}.{ext}``) — no
+        client-supplied filename is ever persisted as R2 object metadata.
+        """
         # Validate and get format
-        image_format = self._validate_upload(data, content_type, filename)
+        image_format = self._validate_upload(data, content_type)
 
         # Generate unique file ID
         file_id = new_id()
@@ -238,10 +240,13 @@ class R2StorageService:
         now = datetime.now(UTC)
         expires_at = now + timedelta(days=self._settings.retention_days)
 
-        # Build metadata
+        # Build metadata. Deliberately no client-controlled fields (e.g. an
+        # original filename): HTTP header values are latin-1 constrained, and
+        # a non-latin filename raised UnicodeEncodeError before the request
+        # was even sent — nothing reads "original-filename" back, so it's
+        # dropped rather than encoded.
         metadata = {
             "user-id": str(user_id),
-            "original-filename": filename,
             "storage-type": storage_type.value,
             "uploaded-at": now.isoformat(),
         }
