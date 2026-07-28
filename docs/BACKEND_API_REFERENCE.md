@@ -1,6 +1,33 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-27 — **Review remediation: push-cleanup ops alert wiring** (§15c, §17):
+> _Last updated: 2026-07-28 — **Review remediation r2: serialize push-subscription creation
+> against bulk revocation** (§15b): `POST /v1/push/subscriptions` could commit a fresh
+> subscription row *after* a concurrent bulk revocation (logout-all, password change/reset,
+> deactivation, refresh-token reuse detection) had already run its cleanup — `push_subscriptions.
+> user_id` carries `ON DELETE CASCADE`, so the insert's implicit `FOR KEY SHARE` lock on the user
+> row blocks behind the bulk path's `FOR UPDATE`, then proceeds to insert regardless once the bulk
+> transaction commits. The device the revocation was meant to unsubscribe stayed subscribed
+> indefinitely. Fixed by having the handler acquire the same user-row lock
+> (`UserRepository.lock_user_for_session_change`) *before* re-checking revocation and upserting:
+> whichever side wins the lock, the other observes a consistent outcome — either the bulk delete's
+> subsequent snapshot includes the new row, or the insert's re-check sees the epoch the bulk path
+> just wrote and rejects with `401`. Lock ordering is user-row-only in this handler, so it cannot
+> invert the user-row -> refresh-token-row ordering the bulk paths already rely on. Fails open on
+> Redis unavailability, consistent with every other revocation check in this codebase — a cache
+> outage must not block push registration. This required exposing the decoded JWT `TokenPayload`
+> (previously discarded once `auth_guard` returned) via `connection.state["token_payload"]` and a
+> new `get_current_token_payload` DI dependency, following the existing `current_user_id` pattern;
+> `optional_auth_guard` mirrors this for consistency, explicitly setting `None` on the anonymous
+> path. Proven by a 50-iteration-per-ordering concurrency test against a real database
+> (`tests/integration/test_push_subscription_revocation_race.py`) forcing both lock-acquisition
+> orderings deterministically via an `asyncio.Event` rather than relying on scheduling luck.
+> **Follow-up filed, not fixed here**: revocation is enforced only at the guard boundary, so any
+> other mutating handler can still commit work authorized by a token revoked mid-request — push
+> subscriptions were singled out because the row outlives the request and keeps delivering to a
+> device, which is what makes this instance worth a dedicated fix rather than accepting the
+> general gap.
+>
+> _Prior (2026-07-27): **Review remediation: push-cleanup ops alert wiring** (§15c, §17):
 > the push-subscription-cleanup work below shipped `OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED`
 > from all three affected services, but never wired it past that point — no `NotificationClass`
 > member, no `telegram/mapping.py` branch, no catalog entry, no platform-scope membership, so the
@@ -2716,6 +2743,12 @@ Errors:   401 unauthorized, 422 validation_error, 503 (push not configured)
 Note:     Upserts by endpoint. If the endpoint was previously registered under a
           different user (shared device, account switch), it is reassigned to the
           current user.
+Note:     Serialized against the five bulk-revocation events below: the handler
+          acquires the same user-row lock those paths take first, then re-checks
+          revocation before upserting. A token revoked concurrently with this
+          request (not just before it) is rejected with 401 rather than being
+          allowed to register a subscription that would outlive the session —
+          see "Server-Side Cleanup on Bulk Session Revocation" below.
 ```
 
 #### `DELETE /v1/push/subscriptions` *(authenticated)*
@@ -2753,6 +2786,13 @@ silently kill push on the user's other devices; the client is expected to unsubs
 endpoint locally before calling it. Cleanup is best-effort and isolated (a SAVEPOINT, not the
 outer transaction): a failure never blocks the triggering action itself, and is reported via the
 `ops.push.subscriptions_cleanup_failed` ops event rather than assumed successful.
+
+**Race with a concurrent `POST /v1/push/subscriptions`**: any of the five events above can land
+while a device is mid-registration. `POST /v1/push/subscriptions` acquires the same user-row lock
+these events take first, then re-checks revocation before upserting — so whichever side wins the
+lock, the other observes it: a subscription that wins the race is still caught by the bulk delete's
+subsequent snapshot, and a bulk event that wins the race causes the registration to see the fresh
+epoch and reject with 401 rather than insert a row the revocation already believes it cleaned up.
 
 ### Wire Payload Contract
 

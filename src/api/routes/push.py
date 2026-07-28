@@ -12,10 +12,11 @@ from uuid import UUID
 
 from litestar import Controller, Response, delete, get, post
 from litestar.di import Provide
+from litestar.exceptions import NotAuthorizedException
 from litestar.status_codes import HTTP_204_NO_CONTENT, HTTP_503_SERVICE_UNAVAILABLE
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies.auth import get_current_user_id
+from src.api.dependencies.auth import get_current_token_payload, get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.push import (
     PushSubscriptionDeleteRequest,
@@ -24,8 +25,11 @@ from src.api.schemas.push import (
     VapidPublicKeyResponse,
 )
 from src.api.security import auth_guard
+from src.api.security.jwt import TokenPayload
 from src.api.services.push import PushService
+from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import get_settings
+from src.db.repositories import UserRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -47,7 +51,10 @@ class PushController(Controller):
 
     path = "/v1/push"
     tags: Sequence[str] | None = ("Push",)
-    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
+        "current_user_id": Provide(get_current_user_id),
+        "token_payload": Provide(get_current_token_payload),
+    }
 
     @get("/vapid-public-key", guards=[auth_guard])
     async def get_vapid_public_key(
@@ -68,12 +75,44 @@ class PushController(Controller):
         product_id: str,
         session: AsyncSession,
         push_service: PushService,
+        token_payload: TokenPayload,
+        token_revocation_service: TokenRevocationService,
     ) -> PushSubscriptionResponse:
         """Register or upsert a browser push subscription for the current user.
 
         ``push_service`` resolution itself raises 503 when push is disabled
         (see ``get_push_service``), so no separate gate is needed here.
+
+        Serialized against bulk revocation (be-push-subscription-race-fix
+        R1): ``push_subscriptions.user_id`` has ``ON DELETE CASCADE``, so
+        this insert would otherwise acquire a ``FOR KEY SHARE`` lock on the
+        user row that conflicts with the ``FOR UPDATE`` every bulk-revocation
+        path takes via ``lock_user_for_session_change`` — meaning a revoked
+        request could still block until the bulk transaction commits and then
+        insert anyway, leaving the row the revocation meant to delete. Taking
+        the same lock explicitly, then re-checking revocation, makes both
+        interleavings safe: if this insert wins the lock, the bulk path's
+        subsequent snapshot (taken after it acquires the lock) includes the
+        new row and deletes it; if the bulk path wins, this request blocks
+        until it commits, then observes the epoch it just wrote and 401s
+        instead of inserting.
+
+        Lock ordering: this handler acquires the user row only (never a
+        refresh-token row afterward), so it cannot invert the user-row ->
+        refresh-token-row ordering documented on
+        ``lock_user_for_session_change`` — no deadlock risk. Do not add a
+        second lock acquisition to this handler without re-reading that
+        ordering rule first.
+
+        Fails open on Redis unavailability, consistent with every other
+        revocation check in this codebase (see TokenRevocationService's
+        module docstring, D3): if ``is_revoked`` can't reach Redis, the
+        subscription is created anyway rather than blocking registration on
+        a cache outage. Do not change this to fail-closed.
         """
+        await UserRepository(session).lock_user_for_session_change(current_user_id)
+        if await token_revocation_service.is_revoked(token_payload):
+            raise NotAuthorizedException(detail="Session has been revoked")
         subscription = await push_service.upsert_subscription(
             user_id=current_user_id,
             product_id=product_id,
