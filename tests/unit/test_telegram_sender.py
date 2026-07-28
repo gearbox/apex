@@ -205,6 +205,43 @@ class TestGetUpdates:
             await sender.get_updates(offset=None, timeout_seconds=25)
 
 
+class TestStatusCodePropagation:
+    async def test_decode_ok_error_status_propagates_as_status_code(self) -> None:
+        sender = _make_sender()
+        sender._client.get = AsyncMock(  # type: ignore[method-assign]
+            return_value=_response(
+                status_code=409,
+                json_body={"ok": False, "description": "terminated by other getUpdates request"},
+                is_error=True,
+            )
+        )
+
+        with pytest.raises(TelegramSendError) as exc_info:
+            await sender.get_updates(offset=None, timeout_seconds=25)
+
+        assert exc_info.value.status_code == 409
+
+    async def test_network_error_yields_none_status_code(self) -> None:
+        sender = _make_sender()
+        sender._client.get = AsyncMock(side_effect=httpx.ConnectError("dns failed"))  # type: ignore[method-assign]
+
+        with pytest.raises(TelegramSendError) as exc_info:
+            await sender.get_updates(offset=None, timeout_seconds=25)
+
+        assert exc_info.value.status_code is None
+
+    async def test_non_json_response_yields_none_status_code(self) -> None:
+        sender = _make_sender()
+        response = _response()
+        response.json = MagicMock(side_effect=ValueError("not json"))
+        sender._client.post = AsyncMock(return_value=response)  # type: ignore[method-assign]
+
+        with pytest.raises(TelegramSendError) as exc_info:
+            await sender.send_message(chat_id=42, text="hello")
+
+        assert exc_info.value.status_code is None
+
+
 class TestAclose:
     async def test_closes_underlying_client(self) -> None:
         sender = _make_sender()

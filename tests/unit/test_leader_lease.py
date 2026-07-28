@@ -121,8 +121,9 @@ class TestReleaseOnlyOwnLease:
         assert client._store.get("worker:x:lease") == first._token
 
 
-class TestRedisErrorFailsOpen:
-    async def test_redis_error_fails_open_with_warning(self) -> None:
+class TestRedisErrorFailsClosedWhenNotHeld:
+    async def test_redis_error_without_held_lease_fails_closed(self) -> None:
+        """A process that never held the lease must never promote itself on error."""
         lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
 
         with (
@@ -131,10 +132,110 @@ class TestRedisErrorFailsOpen:
         ):
             acquired = await lease.acquire_or_renew()
 
+        assert acquired is False
+        assert lease.is_held is False
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error", key="worker:x:lease", held=False, within_grace=False
+        )
+
+
+class TestRedisErrorWithinGraceWindow:
+    async def test_redis_error_within_grace_stays_leader(self) -> None:
+        """A recently-renewed key is still provably live in Redis — safe to stay leader."""
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 10.0),
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
+            acquired = await lease.acquire_or_renew()
+
         assert acquired is True
         assert lease.is_held is True
-        mock_logger.warning.assert_called_once_with("worker.lease.error", key="worker:x:lease")
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error", key="worker:x:lease", held=True, within_grace=True
+        )
 
+    async def test_redis_error_past_grace_fails_closed(self) -> None:
+        """Elapsed time past ttl - margin means the key may already be gone."""
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 90.0),
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
+            acquired = await lease.acquire_or_renew()
+
+        assert acquired is False
+        assert lease.is_held is False
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error", key="worker:x:lease", held=True, within_grace=False
+        )
+
+    async def test_consecutive_out_of_grace_misses_escalate_to_error(self) -> None:
+        """A lease that cannot be renewed at all is an infrastructure fault, not a warning."""
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 90.0),
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
+            assert await lease.acquire_or_renew() is False  # 1st miss: warning
+            assert await lease.acquire_or_renew() is False  # 2nd consecutive miss: error
+
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error", key="worker:x:lease", held=True, within_grace=False
+        )
+        mock_logger.error.assert_called_once_with(
+            "worker.lease.error", key="worker:x:lease", held=False, within_grace=False
+        )
+
+    async def test_recovery_after_grace_failure_resets_state(self) -> None:
+        """A successful renew after an out-of-grace failure clears the miss streak.
+
+        The failed renewal never actually deleted the Redis key (we only lost
+        the ability to confirm it), so once Redis is reachable again the same
+        token still owns it and the renew script succeeds.
+        """
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 90.0),
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+        ):
+            assert await lease.acquire_or_renew() is False
+            assert lease._consecutive_grace_misses == 1
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._consecutive_grace_misses == 0
+
+
+class TestReleaseSwallowsRedisError:
     async def test_release_swallows_redis_error(self) -> None:
         lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
         lease._held = True
@@ -143,6 +244,7 @@ class TestRedisErrorFailsOpen:
             await lease.release()  # must not raise
 
         assert lease.is_held is False
+        assert lease._last_renew_at is None
 
 
 class TestDisabledLeaseAlwaysLeader:

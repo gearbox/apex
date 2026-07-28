@@ -116,6 +116,28 @@ class TestConfigureLogging:
 
 
 # ---------------------------------------------------------------------------
+# Third-party logger levels
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("_reset_structlog")
+class TestThirdPartyLoggerLevels:
+    @pytest.mark.parametrize(
+        "logger_name",
+        ["botocore", "aiobotocore", "boto3", "httpcore", "httpx", "urllib3"],
+    )
+    def test_pinned_to_warning_regardless_of_log_level(self, logger_name: str) -> None:
+        settings = Settings(
+            comfyui_host="127.0.0.1",
+            comfyui_port=_DEFAULT_COMFYUI_PORT,
+            log_level="DEBUG",
+            log_format="json",
+        )
+        configure_logging(settings)
+        assert logging.getLogger(logger_name).level == logging.WARNING
+
+
+# ---------------------------------------------------------------------------
 # get_logger
 # ---------------------------------------------------------------------------
 

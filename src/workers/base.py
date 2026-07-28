@@ -20,9 +20,11 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from datetime import UTC, datetime
+from typing import Final
 
 import structlog
 
+from src.core.config import get_settings
 from src.core.redis import get_redis_client
 
 logger = structlog.get_logger(__name__)
@@ -36,6 +38,12 @@ _RENEW_LEASE_SCRIPT = (
 )
 _RELEASE_LEASE_SCRIPT = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"
 
+# Renewal must succeed with enough margin that our key cannot have expired in
+# Redis while we were unable to reach it. If Redis is unreachable but our last
+# successful renewal is recent, our key is still live and no other process can
+# take the lease — continuing to act as leader is safe for that window only.
+_LEASE_RENEW_SAFETY_MARGIN_SECONDS: Final[float] = 5.0
+
 
 class LeaderLease:
     """Redis-backed owned lease with heartbeat renewal.
@@ -44,10 +52,14 @@ class LeaderLease:
     token: renewal and release both compare-and-swap against that token, so
     one process can never silently steal or drop a lease it doesn't own.
 
-    Fails open on Redis errors (D5): if Redis is unreachable, the caller
-    proceeds as leader. Fail-closed would turn a transient Redis outage into
-    a total processing outage, which is worse than the (bounded) risk of a
-    duplicate tick.
+    Fails CLOSED on Redis errors: a process that cannot verify its leadership
+    does not act as leader. The one exception is a process that already holds
+    the lease and renewed it recently enough that its key is provably still
+    live in Redis (see ``_LEASE_RENEW_SAFETY_MARGIN_SECONDS``) — no other
+    process could have taken the lease in that window, so continuing to act
+    as leader is safe. Fail-open would let any process with a broken Redis
+    connection promote itself to leader of every worker at once — the exact
+    failure mode this class exists to prevent.
     """
 
     def __init__(self, *, key: str, ttl_seconds: int, redis_enabled: bool) -> None:
@@ -56,6 +68,8 @@ class LeaderLease:
         self._enabled = redis_enabled
         self._token = secrets.token_hex(16)
         self._held = False
+        self._last_renew_at: float | None = None
+        self._consecutive_grace_misses = 0
 
     @property
     def is_held(self) -> bool:
@@ -78,6 +92,8 @@ class LeaderLease:
             )
             if acquired:
                 self._held = True
+                self._last_renew_at = time.monotonic()
+                self._consecutive_grace_misses = 0
                 return True
 
             renewed = await client.eval(
@@ -88,10 +104,36 @@ class LeaderLease:
                 self._ttl_seconds,
             )
             self._held = bool(renewed)
+            if self._held:
+                self._last_renew_at = time.monotonic()
+                self._consecutive_grace_misses = 0
         except Exception:
-            logger.warning("worker.lease.error", key=self._key)
-            self._held = True
-            return True
+            # Fail CLOSED. A process that cannot reach Redis must not promote
+            # itself to leader — that is how two pollers, two reconcilers and
+            # two provisioners end up running at once. The only safe
+            # exception: our own key is still live in Redis (we're within the
+            # grace window), so no other process could have taken it yet.
+            grace_ok = (
+                self._held
+                and self._last_renew_at is not None
+                and (time.monotonic() - self._last_renew_at)
+                < (self._ttl_seconds - _LEASE_RENEW_SAFETY_MARGIN_SECONDS)
+            )
+            log = logger.warning
+            if not grace_ok:
+                self._consecutive_grace_misses += 1
+                if self._consecutive_grace_misses > 1:
+                    log = logger.error
+            log(
+                "worker.lease.error",
+                key=self._key,
+                held=self._held,
+                within_grace=grace_ok,
+            )
+            if grace_ok:
+                return True
+            self._held = False
+            return False
         else:
             return self._held
 
@@ -99,6 +141,7 @@ class LeaderLease:
         """Best-effort compare-and-delete release. Never raises."""
         if not self._enabled or not self._held:
             self._held = False
+            self._last_renew_at = None
             return
 
         try:
@@ -108,6 +151,7 @@ class LeaderLease:
             logger.warning("worker.lease.release_error", key=self._key)
         finally:
             self._held = False
+            self._last_renew_at = None
 
 
 class PeriodicWorker(ABC):
@@ -144,8 +188,11 @@ class PeriodicWorker(ABC):
         # survives one slow tick plus one missed renewal before another
         # process could steal the lease.
         lease_ttl_seconds = max(int(interval_seconds * 3), 90)
+        # Namespaced by environment so staging and production can never elect
+        # a shared leader if they ever end up pointed at the same Redis.
+        environment = get_settings().environment
         self._lease = LeaderLease(
-            key=f"worker:{name}:lease",
+            key=f"{environment}:worker:{name}:lease",
             ttl_seconds=lease_ttl_seconds,
             redis_enabled=redis_enabled and use_leader_lease,
         )

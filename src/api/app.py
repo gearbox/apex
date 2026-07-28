@@ -391,6 +391,12 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:
     configure_logging(settings)
 
     logger.info("app.startup")
+    # Never log settings.telegram_bot_token or any other SecretStr alongside this.
+    logger.info(
+        "app.build_info",
+        build_sha=settings.build_sha,
+        environment=settings.environment,
+    )
 
     jwt_service = await init_services(settings)
 

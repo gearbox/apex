@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
 if TYPE_CHECKING:
     from src.core.config import Settings
+
+# Pinned unconditionally, independent of settings.log_level — raising the app
+# to DEBUG must not also enable verbose wire-level dumps from these libraries
+# (e.g. botocore's SigV4 canonical request bodies).
+_THIRD_PARTY_LOGGER_LEVELS: Final[dict[str, int]] = {
+    "botocore": logging.WARNING,
+    "aiobotocore": logging.WARNING,
+    "boto3": logging.WARNING,
+    "httpcore": logging.WARNING,
+    "httpx": logging.WARNING,
+    "urllib3": logging.WARNING,
+}
 
 
 def configure_logging(settings: Settings) -> None:
@@ -68,8 +80,12 @@ def configure_logging(settings: Settings) -> None:
     root_logger.handlers = [handler]
     root_logger.setLevel(log_level)
 
-    # Suppress noisy third-party loggers
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Suppress noisy third-party loggers, unconditionally (see
+    # _THIRD_PARTY_LOGGER_LEVELS docstring above) — this must run after
+    # root_logger.setLevel() above, since stdlib logging resolves effective
+    # level by walking up to the nearest ancestor with an explicit level set.
+    for logger_name, level in _THIRD_PARTY_LOGGER_LEVELS.items():
+        logging.getLogger(logger_name).setLevel(level)
     logging.getLogger("xai_sdk").setLevel(logging.INFO)
 
 

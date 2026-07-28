@@ -35,6 +35,7 @@ import structlog
 
 from src.api.schemas.events import EventEnvelope
 from src.api.services.push_mapping import map_event_to_notification
+from src.core.config import get_settings
 from src.core.redis import get_redis_client
 from src.workers.base import LeaderLease
 
@@ -73,8 +74,9 @@ class PushDispatcher:
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        environment = get_settings().environment
         self._lease = LeaderLease(
-            key="worker:push_dispatcher:lease",
+            key=f"{environment}:worker:push_dispatcher:lease",
             ttl_seconds=_LEASE_TTL_SECONDS,
             redis_enabled=redis_enabled,
         )
