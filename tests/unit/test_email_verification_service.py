@@ -17,6 +17,20 @@ from src.api.services.token_revocation import TokenRevocationService
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
+def _make_session() -> AsyncMock:
+    """Session mock whose begin_nested() behaves like a real SAVEPOINT context manager."""
+    session = AsyncMock()
+
+    def _begin_nested() -> AsyncMock:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=None)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    session.begin_nested = MagicMock(side_effect=_begin_nested)
+    return session
+
+
 def _make_user(user_id=None, email="user@example.com", display_name="Alice", locale="en"):
     user = MagicMock()
     user.id = user_id or uuid4()
@@ -181,7 +195,7 @@ class TestSendPasswordResetEmail:
 class TestResetPassword:
     async def test_resets_password_and_revokes_tokens(self) -> None:
         user = _make_user()
-        session = AsyncMock()
+        session = _make_session()
         svc = _make_svc()
 
         with (
@@ -214,7 +228,7 @@ class TestResetPassword:
         believe their account is compromised, so it must also kill live
         access tokens/content cookies, not just refresh tokens."""
         user = _make_user()
-        session = AsyncMock()
+        session = _make_session()
         mock_token_revocation = AsyncMock()
         svc = _make_svc(token_revocation_service=mock_token_revocation)
 

@@ -414,3 +414,79 @@ async def test_list_batch_returns_empty_past_the_end(
 
     next_page = await push_subscription_repo.list_batch(limit=10, cursor_id=page[-1].id)
     assert next_page == []
+
+
+# ---------------------------------------------------------------------------
+# delete_all_for_user — bulk-revocation cleanup (push-cleanup-on-revocation)
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_all_for_user_removes_every_subscription(
+    push_subscription_repo: PushSubscriptionRepository, make_user
+) -> None:
+    user = await make_user()
+    await push_subscription_repo.upsert(
+        user_id=user.id,
+        product_id="vex",
+        endpoint="https://push.example/delete-all-1",
+        p256dh="p",
+        auth="a",
+        user_agent=None,
+    )
+    await push_subscription_repo.upsert(
+        user_id=user.id,
+        product_id="vex",
+        endpoint="https://push.example/delete-all-2",
+        p256dh="p",
+        auth="a",
+        user_agent=None,
+    )
+
+    deleted = await push_subscription_repo.delete_all_for_user(user.id)
+
+    assert deleted == 2
+    assert await push_subscription_repo.list_by_user(user.id) == []
+
+
+async def test_delete_all_for_user_does_not_touch_other_users(
+    push_subscription_repo: PushSubscriptionRepository, make_user
+) -> None:
+    owner = await make_user(email="owner-delete-all@example.com")
+    other = await make_user(email="other-delete-all@example.com")
+    await push_subscription_repo.upsert(
+        user_id=owner.id,
+        product_id="vex",
+        endpoint="https://push.example/owner-delete-all",
+        p256dh="p",
+        auth="a",
+        user_agent=None,
+    )
+    await push_subscription_repo.upsert(
+        user_id=other.id,
+        product_id="vex",
+        endpoint="https://push.example/other-delete-all",
+        p256dh="p",
+        auth="a",
+        user_agent=None,
+    )
+
+    deleted = await push_subscription_repo.delete_all_for_user(owner.id)
+
+    assert deleted == 1
+    assert await push_subscription_repo.list_by_user(owner.id) == []
+    assert len(await push_subscription_repo.list_by_user(other.id)) == 1
+
+
+async def test_delete_all_for_user_zero_rows_is_a_noop(
+    push_subscription_repo: PushSubscriptionRepository, make_user
+) -> None:
+    user = await make_user()
+
+    deleted = await push_subscription_repo.delete_all_for_user(user.id)
+
+    assert deleted == 0
+    assert await push_subscription_repo.list_by_user(user.id) == []
+
+    # Idempotent — an immediate second call still returns 0, not an error.
+    deleted_again = await push_subscription_repo.delete_all_for_user(user.id)
+    assert deleted_again == 0

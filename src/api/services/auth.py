@@ -21,6 +21,7 @@ from src.api.security import (
     hash_token,
 )
 from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.push_cleanup import delete_user_push_subscriptions
 from src.core.enums import RefreshTokenRevocationReason
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
@@ -376,6 +377,7 @@ class AuthService:
                 user_id=stored_token.user_id,
                 op="token_reuse_detected",
             )
+            await self._delete_push_subscriptions(stored_token.user_id, op="token_reuse_detected")
             logger.warning(
                 "auth.token_reuse_detected",
                 user_id=str(stored_token.user_id),
@@ -479,6 +481,7 @@ class AuthService:
         await self._report_revocation_outcome(
             bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="logout_all"
         )
+        await self._delete_push_subscriptions(user_id, op="logout_all")
         logger.info(
             "auth.tokens_revoked",
             user_id=str(user_id),
@@ -506,6 +509,21 @@ class AuthService:
             event_type=OpsEventType.TOKEN_REVOCATION_FAILED,
             product_id=PLATFORM_PRODUCT_ID,
             payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
+        )
+
+    async def _delete_push_subscriptions(self, user_id: UUID, *, op: str) -> None:
+        """Delete every push subscription for the user, if a session is wired.
+
+        A missing session (M3) means a mis-wired construction would
+        otherwise skip this security-relevant cleanup silently — production
+        always wires one (get_auth_service), so this only fires for direct
+        construction (mostly tests).
+        """
+        if self._session is None:
+            logger.warning("auth.push_subscriptions_cleanup_skipped_no_session", op=op)
+            return
+        await delete_user_push_subscriptions(
+            self._session, self._ops_event_bus, user_id=user_id, op=op, source="auth"
         )
 
     async def _create_token_pair(

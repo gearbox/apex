@@ -42,6 +42,20 @@ class TestClassCatalog:
         )
         assert entry.scope == "platform"
 
+    def test_push_subscriptions_cleanup_failed_is_platform_scoped(self) -> None:
+        """M1: same wiring gap as TOKEN_REVOCATION_FAILED — a catalog entry +
+        frozenset membership is required or this event never reaches an operator."""
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+
+        catalog = service.get_class_catalog()
+
+        entry = next(
+            c
+            for c in catalog
+            if c.notification_class == NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED.value
+        )
+        assert entry.scope == "platform"
+
 
 class TestGetPreferences:
     async def test_returns_repo_rows(self) -> None:

@@ -18,9 +18,12 @@ from src.api.schemas.user import (
 )
 from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
 from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.push_cleanup import delete_user_push_subscriptions
 
 if TYPE_CHECKING:
     from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.security import PasswordService
     from src.api.services.storage import R2StorageService
@@ -63,6 +66,7 @@ class UserService:
         token_revocation_service: TokenRevocationService,
         r2_storage: R2StorageService | None = None,
         ops_event_bus: OpsEventBus | None = None,
+        session: AsyncSession | None = None,
     ) -> None:
         """Initialize user service.
 
@@ -83,6 +87,10 @@ class UserService:
                 revocation write fails against a configured Redis (issue
                 #142 F5). Defaults to a disabled bus so callers that don't
                 wire one (tests, older call sites) simply skip publishing.
+            session: Database session, used to delete the user's push
+                subscriptions alongside a bulk revocation
+                (push-cleanup-on-revocation). Optional — callers that don't
+                wire one (tests, older call sites) simply skip that cleanup.
         """
         self._repo = repository
         self._password = password_service
@@ -92,6 +100,7 @@ class UserService:
         self._ops_event_bus = (
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
         )
+        self._session = session
 
     async def get_profile(self, user_id: UUID) -> UserProfileResponse:
         """Get user profile.
@@ -234,6 +243,7 @@ class UserService:
         await self._report_revocation_outcome(
             bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="change_password"
         )
+        await self._delete_push_subscriptions(user_id, op="change_password")
         logger.info(
             "user.password_changed",
             user_id=str(user_id),
@@ -268,6 +278,7 @@ class UserService:
         await self._report_revocation_outcome(
             bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="deactivate_account"
         )
+        await self._delete_push_subscriptions(user_id, op="deactivate_account")
 
         deactivated_at = datetime.now(UTC)
         logger.info(
@@ -295,6 +306,21 @@ class UserService:
             event_type=OpsEventType.TOKEN_REVOCATION_FAILED,
             product_id=PLATFORM_PRODUCT_ID,
             payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
+        )
+
+    async def _delete_push_subscriptions(self, user_id: UUID, *, op: str) -> None:
+        """Delete every push subscription for the user, if a session is wired.
+
+        A missing session (M3) means a mis-wired construction would
+        otherwise skip this security-relevant cleanup silently — production
+        always wires one (get_user_service), so this only fires for direct
+        construction (mostly tests).
+        """
+        if self._session is None:
+            logger.warning("user.push_subscriptions_cleanup_skipped_no_session", op=op)
+            return
+        await delete_user_push_subscriptions(
+            self._session, self._ops_event_bus, user_id=user_id, op=op, source="user"
         )
 
     async def get_stats(self, user_id: UUID) -> UserStatsResponse:

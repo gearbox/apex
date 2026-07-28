@@ -361,7 +361,7 @@ def _build_openapi_config(settings: Settings) -> OpenAPIConfig:
     """
     return OpenAPIConfig(
         title="Apex Generation API",
-        version="0.4.2",
+        version="0.4.4",
         description=(
             "Apex REST API for AI content generation.\n\n"
             "## Providers\n\n"

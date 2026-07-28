@@ -113,3 +113,40 @@ async def test_list_batch_uses_cursor_when_provided() -> None:
 
     assert result == rows
     cast("Any", session).execute.assert_awaited_once()
+
+
+async def test_delete_all_for_user_returns_rowcount_and_flushes() -> None:
+    repo, session = _repo_with_result(FakeResult(rowcount=2))
+
+    deleted = await repo.delete_all_for_user(uuid4())
+
+    assert deleted == 2
+    cast("Any", session).execute.assert_awaited_once()
+    cast("Any", session).flush.assert_awaited_once()
+
+
+async def test_delete_all_for_user_zero_rows_is_a_noop() -> None:
+    repo, session = _repo_with_result(FakeResult(rowcount=0))
+    user_id = uuid4()
+
+    deleted = await repo.delete_all_for_user(user_id)
+
+    assert deleted == 0
+    cast("Any", session).execute.assert_awaited_once()
+    cast("Any", session).flush.assert_awaited_once()
+
+    # Idempotent — an immediate second call still returns 0, not an error.
+    deleted_again = await repo.delete_all_for_user(user_id)
+
+    assert deleted_again == 0
+    assert cast("Any", session).execute.await_count == 2
+
+
+async def test_delete_all_for_user_negative_driver_rowcount_is_clamped_to_zero() -> None:
+    """S3: some drivers report -1 when they can't supply a row count — this
+    must never surface as a negative deletion count to logs or the ops payload."""
+    repo, _session = _repo_with_result(FakeResult(rowcount=-1))
+
+    deleted = await repo.delete_all_for_user(uuid4())
+
+    assert deleted == 0

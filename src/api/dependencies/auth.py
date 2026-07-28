@@ -6,13 +6,14 @@ context from request state (set by auth_guard).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from litestar import Request  # noqa: TC002
 from litestar.exceptions import NotAuthorizedException
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 
+from src.api.security.jwt import TokenPayload  # noqa: TC001
 from src.core.enums import AdminPermission, UserRole
 from src.db.models import User  # noqa: TC001
 from src.db.repositories import UserRepository
@@ -119,6 +120,30 @@ async def get_current_user_id(request: Request[Any, Any, Any]) -> UUID:
     if user_id is None:
         raise NotAuthorizedException(detail="Not authenticated")
     return UUID(str(user_id))
+
+
+async def get_current_token_payload(request: Request[Any, Any, Any]) -> TokenPayload:
+    """Extract the decoded access-token payload from request state.
+
+    Must be used in routes protected by auth_guard (or content_auth_guard),
+    which populate request.state["token_payload"] after decoding the JWT.
+    Needed by handlers that must re-check revocation mid-request —
+    is_revoked() needs `sub`/`iat`/`jti`, which get_current_user_id's bare
+    UUID can't provide (see be-push-subscription-race-fix R1/R2).
+
+    Args:
+        request: Litestar request.
+
+    Returns:
+        The authenticated request's decoded TokenPayload.
+
+    Raises:
+        NotAuthorizedException: If not authenticated.
+    """
+    payload = request.state.get("token_payload")
+    if payload is None:
+        raise NotAuthorizedException(detail="Not authenticated")
+    return cast("TokenPayload", payload)
 
 
 async def get_current_admin_user(request: Request[Any, Any, Any], session: AsyncSession) -> User:

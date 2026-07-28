@@ -1,6 +1,81 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-27 — **`Clear-Site-Data` coverage for session-ending endpoints** (§2, §3):
+> _Last updated: 2026-07-28 — **Review remediation r2: serialize push-subscription creation
+> against bulk revocation** (§15b): `POST /v1/push/subscriptions` could commit a fresh
+> subscription row *after* a concurrent bulk revocation (logout-all, password change/reset,
+> deactivation, refresh-token reuse detection) had already run its cleanup — `push_subscriptions.
+> user_id` carries `ON DELETE CASCADE`, so the insert's implicit `FOR KEY SHARE` lock on the user
+> row blocks behind the bulk path's `FOR UPDATE`, then proceeds to insert regardless once the bulk
+> transaction commits. The device the revocation was meant to unsubscribe stayed subscribed
+> indefinitely. Fixed by having the handler acquire the same user-row lock
+> (`UserRepository.lock_user_for_session_change`) *before* re-checking revocation and upserting:
+> whichever side wins the lock, the other observes a consistent outcome — either the bulk delete's
+> subsequent snapshot includes the new row, or the insert's re-check sees the epoch the bulk path
+> just wrote and rejects with `401`. Lock ordering is user-row-only in this handler, so it cannot
+> invert the user-row -> refresh-token-row ordering the bulk paths already rely on. Fails open on
+> Redis unavailability, consistent with every other revocation check in this codebase — a cache
+> outage must not block push registration. This required exposing the decoded JWT `TokenPayload`
+> (previously discarded once `auth_guard` returned) via `connection.state["token_payload"]` and a
+> new `get_current_token_payload` DI dependency, following the existing `current_user_id` pattern;
+> `optional_auth_guard` mirrors this for consistency, explicitly setting `None` on the anonymous
+> path. Proven by a 50-iteration-per-ordering concurrency test against a real database
+> (`tests/integration/test_push_subscription_revocation_race.py`) forcing both lock-acquisition
+> orderings deterministically via an `asyncio.Event` rather than relying on scheduling luck.
+> **Follow-up filed, not fixed here**: revocation is enforced only at the guard boundary, so any
+> other mutating handler can still commit work authorized by a token revoked mid-request — push
+> subscriptions were singled out because the row outlives the request and keeps delivering to a
+> device, which is what makes this instance worth a dedicated fix rather than accepting the
+> general gap.
+>
+> _Prior (2026-07-27): **Review remediation: push-cleanup ops alert wiring** (§15c, §17):
+> the push-subscription-cleanup work below shipped `OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED`
+> from all three affected services, but never wired it past that point — no `NotificationClass`
+> member, no `telegram/mapping.py` branch, no catalog entry, no platform-scope membership, so the
+> event reached no operator (the same gap previously found and fixed for
+> `TOKEN_REVOCATION_FAILED`). Fixed by following that precedent exactly: new
+> `NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED` (`"push_subscriptions.cleanup_failed"`),
+> platform-scoped, with a mapping branch and catalog entry, plus a one-time preference seed
+> (migration `032`) for admins who already have a Telegram link — see the Notification Classes
+> table below. `OpsEventType`'s docstring now points at `NotificationClass`'s wiring checklist, so
+> a developer adding a new ops event from that enum has a reason to open the other one. Also in
+> this pass: the three near-identical `_delete_push_subscriptions` methods (`AuthService`,
+> `UserService`, `EmailVerificationService`) were consolidated into one module-level helper
+> (`src.api.services.push_cleanup.delete_user_push_subscriptions`) — the `None`-session guard
+> stayed at the two call sites that need it (`AuthService`/`UserService`), and existing
+> `{source}.push_subscriptions_deleted` / `_cleanup_failed` log event names are unchanged, so no
+> log-based alert or dashboard keyed on them needs updating. `PushSubscriptionRepository.
+> delete_all_for_user` no longer carries a `type: ignore` — its `CursorResult` is now typed
+> explicitly and a driver-reported `-1` (no count available) is clamped to `0` before it reaches
+> logs or the ops payload. A missing `session` on `AuthService`/`UserService` (construction without
+> one, which only happens in tests today — both DI providers always pass one) now logs a warning
+> instead of silently skipping the cleanup. **Rejected**: Sourcery's suggestion to inject
+> `PushSubscriptionRepository` instead of constructing it inline — every other repository in this
+> codebase (e.g. `admin_management.py`) is constructed inline from the session, so special-casing
+> just this one would make these three services the outlier; a wholesale inject-vs-construct
+> refactor is a separate change with its own review.
+>
+> _Prior (2026-07-27): **Push-subscription cleanup on bulk session revocation** (§2, §3,
+> §15b): closes a gap where no server-side path ever deleted a user's Web Push subscriptions.
+> Previously only the client-initiated `DELETE /v1/push/subscriptions` (the caller's own endpoint)
+> and the dispatcher's own expired-subscription pruning ever removed a row — a user who hit
+> "log out all devices" because they suspected compromise left the attacker's device subscribed
+> indefinitely, since nothing else ever touched the table. `PushSubscriptionRepository` gained
+> `delete_all_for_user(user_id) -> int`, now called from all **five** bulk-revocation sites
+> alongside their existing `TokenRevocationService.revoke_user_sessions` call (not inside it —
+> different failure semantics, no dependency on Redis availability):
+> `POST /v1/users/me/logout-all`, `POST /v1/users/me/password`, `POST /v1/auth/reset-password`,
+> `DELETE /v1/users/me`, and refresh-token reuse detection. **`POST /v1/auth/logout`
+> (single-device) is deliberately unchanged** — it still only ever touches the calling device's own
+> subscription client-side, exactly as before. Push deletion runs inside a SAVEPOINT and is
+> best-effort: a failure never blocks the primary action (the password change/reset/logout-all/
+> deactivation still succeeds) and is reported via the new platform-scoped
+> `NotificationClass`-adjacent ops event `ops.push.subscriptions_cleanup_failed`
+> (`PushSubscriptionsCleanupFailedOpsPayload`), logged truthfully rather than assumed successful.
+> No request/response shape changes; no frontend action required to adopt this, though the
+> client-side detach-before-revoke workaround in `ChangePasswordModal`/`LogoutAllModal` is now
+> redundant and can be simplified to a local-only `PushManager` unsubscribe.
+>
+> _Prior (2026-07-27): **`Clear-Site-Data` coverage for session-ending endpoints** (§2, §3):
 > a frontend request to change `Cache-Control` on `/v1/content/...` to `private, no-store` was
 > declined — it would force a full re-fetch of every thumbnail on every library grid render,
 > reproducing the parallel-request saturation behind a prior mobile bug, and would nullify the
@@ -298,6 +373,10 @@ Request:  { refresh_token: string }
 Response: { access_token, refresh_token, token_type: "bearer", expires_in: int, expires_at: datetime,
             content_cookie_expires_at: datetime }
 Errors:   401 (token revoked/expired/invalid | token_reuse_detected | account_inactive)
+Note:     A `token_reuse_detected` 401 (a revoked refresh token replayed) is one of the five
+          bulk-revocation sites — it also deletes every Web Push subscription the user has,
+          same as logout-all, so a confirmed theft signal doesn't leave the thief's device
+          subscribed.
 ```
 
 #### `POST /v1/auth/logout`
@@ -326,6 +405,12 @@ Limitation: this device's apex_content cookie is cleared client-side only — it
           bulk-revocation event (logout-all, password change/reset, deactivation). Users who
           suspect theft should use logout-all or change/reset their password, not rely on
           single-device logout.
+Note:     Does NOT delete the caller's Web Push subscription server-side — deliberately, since
+          this ends only one device's session and other devices must keep receiving push
+          notifications. The client is expected to unsubscribe its own endpoint locally
+          (DELETE /v1/push/subscriptions, §15b) before calling this. Contrast with the five
+          bulk-revocation endpoints (logout-all, password change/reset, deactivation, and
+          refresh-token reuse detection), which delete every subscription the user has.
 ```
 
 #### `POST /v1/auth/verify-email`
@@ -352,6 +437,9 @@ Response: { message: string }
 Errors:   400 (invalid_token | expired)
 Headers:  (200 only) Clear-Site-Data: "cache", "storage" — the calling device ends its own
           session here too, and this is the compromised-account recovery path.
+Note:     One of the five bulk-revocation sites — also deletes every Web Push subscription the
+          user has (§15b), same as logout-all. Best-effort: a failure here never blocks the
+          password reset itself from succeeding.
 ```
 
 #### `POST /v1/auth/resend-verification` *(authenticated)*
@@ -438,7 +526,9 @@ Errors:   400 invalid_password
 Headers:  (200 only) Clear-Site-Data: "cache", "storage" — the caller's own session ends here too.
 Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
           (issue #142) — the most security-sensitive of the three bulk-revocation sites,
-          since a password change is often a reaction to suspected compromise.
+          since a password change is often a reaction to suspected compromise. Also deletes
+          every Web Push subscription the user has (§15b) — best-effort, never blocks the
+          password change itself from succeeding.
 ```
 
 #### `DELETE /v1/users/me`
@@ -447,7 +537,9 @@ Note:     Revokes ALL refresh tokens, plus all live access tokens and the conten
 Response: { message: string, deactivated_at: datetime }
 Headers:  Clear-Site-Data: "cache", "storage" — the caller's own session ends here too.
 Note:     Soft delete — account can be recovered. Revokes ALL refresh tokens, plus all live
-          access tokens and the content cookie (issue #142).
+          access tokens and the content cookie (issue #142). Also deletes every Web Push
+          subscription the user has (§15b) — best-effort, never blocks deactivation itself
+          from succeeding.
 ```
 
 #### `GET /v1/users/me/stats`
@@ -478,7 +570,9 @@ Note:     Revokes ALL refresh tokens, plus all live access tokens and the conten
           (issue #142) — the access token used to make this very call also stops working
           from the next request onward. See the module docstring on TokenRevocationService
           (src/api/services/token_revocation.py) for the Redis-backed epoch mechanism and its
-          fail-open posture when Redis is unset or transiently unavailable.
+          fail-open posture when Redis is unset or transiently unavailable. Also deletes every
+          Web Push subscription the user has (§15b) — best-effort, never blocks logout-all
+          itself from succeeding.
 ```
 
 ---
@@ -2649,6 +2743,12 @@ Errors:   401 unauthorized, 422 validation_error, 503 (push not configured)
 Note:     Upserts by endpoint. If the endpoint was previously registered under a
           different user (shared device, account switch), it is reassigned to the
           current user.
+Note:     Serialized against the five bulk-revocation events below: the handler
+          acquires the same user-row lock those paths take first, then re-checks
+          revocation before upserting. A token revoked concurrently with this
+          request (not just before it) is rejected with 401 rather than being
+          allowed to register a subscription that would outlive the session —
+          see "Server-Side Cleanup on Bulk Session Revocation" below.
 ```
 
 #### `DELETE /v1/push/subscriptions` *(authenticated)*
@@ -2659,8 +2759,40 @@ Response: (empty body)
 Status:   204 No Content
 Errors:   401 unauthorized, 503 (push not configured)
 Note:     Idempotent — returns 204 even if the endpoint was never registered, or
-          already belongs to a different user (no ownership leak).
+          already belongs to a different user (no ownership leak). Deletes only the
+          caller's own endpoint — for every subscription a user has, see the
+          bulk-revocation cleanup note below.
 ```
+
+### Server-Side Cleanup on Bulk Session Revocation
+
+Besides the client-initiated `DELETE /v1/push/subscriptions` above (one endpoint) and the
+dispatcher's own pruning of expired subscriptions (a 404/410 from the push service, see
+"Delivery Guarantees" below), five server-side events also delete **every** subscription a user has
+(`PushSubscriptionRepository.delete_all_for_user`), run alongside their existing
+`TokenRevocationService.revoke_user_sessions` bulk-revocation call:
+
+- `POST /v1/users/me/logout-all` (§3)
+- `POST /v1/users/me/password` (§3)
+- `DELETE /v1/users/me` (§3)
+- `POST /v1/auth/reset-password` (§2.2)
+- Refresh-token reuse detection — a `token_reuse_detected` 401 on `POST /v1/auth/refresh` (§2.2)
+
+This closes the gap the client cannot: a user who suspects compromise and revokes every session
+from one device previously left the attacker's device subscribed indefinitely, since nothing
+server-side ever deleted that row. **Single-device `POST /v1/auth/logout` deliberately does
+NOT delete any subscription** — it ends only one session, and deleting every subscription would
+silently kill push on the user's other devices; the client is expected to unsubscribe its own
+endpoint locally before calling it. Cleanup is best-effort and isolated (a SAVEPOINT, not the
+outer transaction): a failure never blocks the triggering action itself, and is reported via the
+`ops.push.subscriptions_cleanup_failed` ops event rather than assumed successful.
+
+**Race with a concurrent `POST /v1/push/subscriptions`**: any of the five events above can land
+while a device is mid-registration. `POST /v1/push/subscriptions` acquires the same user-row lock
+these events take first, then re-checks revocation before upserting — so whichever side wins the
+lock, the other observes it: a subscription that wins the race is still caught by the bulk delete's
+subsequent snapshot, and a bulk event that wins the race causes the registration to see the fresh
+epoch and reject with 401 rather than insert a row the revocation already believes it cleaned up.
 
 ### Wire Payload Contract
 
@@ -2757,10 +2889,11 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `health.degraded` | platform | A platform health subsystem becomes `degraded`, `unhealthy`, or `unknown` |
 | `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
 | `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
+| `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup (`delete_all_for_user`) failed — the affected user's devices that should have been unsubscribed may still receive push notifications |
 
 - **Product-scoped** classes (the first four) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
-- **Platform-scoped** classes (`health.*`, `token_revocation.failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
-- `token_revocation.failed` ships with a one-time seed (migration `029`): every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class.
+- **Platform-scoped** classes (`health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
+- `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` has no second, preference-independent channel (no health checker watches it), which is why seeding — not just a release note — was judged necessary here.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
 - Each subscribed class carries an optional `min_interval_seconds` throttle (default `0` = unthrottled, max `86400`). Messages suppressed during the cooldown are counted; the next delivered message for that class appends `(+N suppressed)` to the text.
 
@@ -3063,6 +3196,7 @@ Values: `"billing_adjust"`
 | `health.degraded` | platform | A health subsystem becomes `degraded`/`unhealthy`/`unknown` |
 | `health.restored` | platform | A health subsystem recovers |
 | `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
+| `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup failed |
 
 > Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 

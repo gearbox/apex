@@ -21,7 +21,7 @@ from litestar.status_codes import (
 )
 from litestar.testing import TestClient
 
-from src.api.dependencies.auth import get_current_user_id
+from src.api.dependencies.auth import get_current_token_payload, get_current_user_id
 from src.api.security import JWTConfig, JWTService, auth_guard
 from src.api.security.guards import AuthenticatedUser, extract_token_from_header
 from src.api.services.token_revocation import TokenRevocationService
@@ -168,6 +168,49 @@ class TestGetCurrentUserIdDependency:
 
         with pytest.raises(NotAuthorizedException):
             await get_current_user_id(mock_request)
+
+
+# ---------------------------------------------------------------------------
+# Unit Tests: get_current_token_payload dependency (R2, be-push-subscription-race-fix)
+# ---------------------------------------------------------------------------
+
+
+class TestGetCurrentTokenPayloadDependency:
+    """Tests for the shared token_payload dependency function."""
+
+    @pytest.mark.asyncio
+    async def test_returns_payload_from_state(self, jwt_service: JWTService) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        token, _ = jwt_service.create_access_token(uuid4())
+        payload = jwt_service.decode_access_token(token)
+        state_dict = {"token_payload": payload}
+        mock_request = MagicMock()
+        mock_state = SimpleNamespace(**state_dict)
+        mock_state.get = state_dict.get
+        mock_request.state = mock_state
+
+        result = await get_current_token_payload(mock_request)
+        assert result is payload
+
+    @pytest.mark.asyncio
+    async def test_raises_when_no_token_payload(self) -> None:
+        """Verify 401 raised when token_payload is missing from state —
+        mirrors get_current_user_id's contract."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from litestar.exceptions import NotAuthorizedException
+
+        empty_dict: dict[str, Any] = {}
+        mock_request = MagicMock()
+        mock_state = SimpleNamespace()
+        mock_state.get = empty_dict.get
+        mock_request.state = mock_state
+
+        with pytest.raises(NotAuthorizedException):
+            await get_current_token_payload(mock_request)
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +737,7 @@ class TestAuthGuardRevocation:
         token_revocation.is_revoked.assert_awaited_once()
         assert "user_id" not in state
         assert "auth_user" not in state
+        assert "token_payload" not in state
 
     @pytest.mark.asyncio
     async def test_non_revoked_token_sets_state(self, jwt_service: JWTService) -> None:
@@ -716,6 +760,10 @@ class TestAuthGuardRevocation:
 
         assert state["user_id"] == uid
         token_revocation.is_revoked.assert_awaited_once()
+        # R2 (be-push-subscription-race-fix) — the decoded TokenPayload must
+        # also land in state so a handler can re-run is_revoked() itself.
+        assert state["token_payload"].sub == str(uid)
+        assert state["token_payload"] is token_revocation.is_revoked.call_args.args[0]
 
     @pytest.mark.asyncio
     async def test_missing_token_revocation_service_raises_runtime_error(
@@ -786,6 +834,7 @@ class TestOptionalAuthGuard:
 
         assert conn.state.get("user_id") is None
         assert conn.state.get("auth_user") is None
+        assert conn.state.get("token_payload") is None
 
     @pytest.mark.asyncio
     async def test_sets_none_when_jwt_service_missing(self) -> None:
@@ -815,6 +864,8 @@ class TestOptionalAuthGuard:
         assert conn.state.get("user_id") == uid
         assert isinstance(conn.state.get("auth_user"), AuthenticatedUser)
         assert conn.state.get("auth_user").user_id == uid
+        # R2 (be-push-subscription-race-fix) — token_payload mirrors auth_guard.
+        assert conn.state.get("token_payload").sub == str(uid)
 
     @pytest.mark.asyncio
     async def test_sets_none_when_invalid_token(self, jwt_service: JWTService) -> None:

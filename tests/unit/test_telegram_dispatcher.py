@@ -14,6 +14,7 @@ from src.api.schemas.ops_events import (
     HealthTransitionOpsPayload,
     OpsEventEnvelope,
     OpsEventType,
+    PushSubscriptionsCleanupFailedOpsPayload,
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
@@ -156,6 +157,32 @@ async def test_token_revocation_failed_delivered_to_real_product_recipient() -> 
 
     assert len(sender.sent) == 1
     assert sender.sent[0][0] == 888
+
+
+async def test_push_subscriptions_cleanup_failed_delivered_to_real_product_recipient() -> None:
+    """M1: PUSH_SUBSCRIPTIONS_CLEANUP_FAILED is published with product_id="platform" —
+    a recipient on a real product (not "platform") must still receive it. Without
+    the class in PLATFORM_SCOPED_NOTIFICATION_CLASSES, this delivery would be
+    silently filtered out even with a correct mapping branch in place — the
+    same gap M1 fixes for TOKEN_REVOCATION_FAILED above."""
+    sender = _FakeSender()
+    dispatcher = _make_dispatcher(sender)
+    data = _raw_envelope(
+        OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
+        "platform",
+        PushSubscriptionsCleanupFailedOpsPayload(user_id=uuid4(), op="logout_all"),
+    )
+    vex_admin = RecipientRow(user_id=uuid4(), product_id="vex", chat_id=999, min_interval_seconds=0)
+
+    with patch("src.workers.telegram_dispatcher.AdminNotificationRepository") as mock_repo_cls:
+        mock_repo = AsyncMock()
+        mock_repo.list_recipients_for_class = AsyncMock(return_value=[vex_admin])
+        mock_repo_cls.return_value = mock_repo
+
+        await dispatcher._handle_raw_message(data)
+
+    assert len(sender.sent) == 1
+    assert sender.sent[0][0] == 999
 
 
 async def test_send_failure_for_one_recipient_does_not_block_next() -> None:

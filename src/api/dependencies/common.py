@@ -337,6 +337,7 @@ def get_user_service(session: AsyncSession) -> UserService:
         r2_storage=_services.r2_storage,
         token_revocation_service=get_token_revocation_service(),
         ops_event_bus=get_ops_event_bus(),
+        session=session,
     )
 
 

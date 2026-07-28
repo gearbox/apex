@@ -125,6 +125,23 @@ def _make_password_service() -> MagicMock:
     return pwd
 
 
+def _make_mock_session() -> AsyncMock:
+    """AsyncMock session whose begin_nested() behaves like a real SAVEPOINT
+    context manager (push-cleanup-on-revocation's _delete_push_subscriptions
+    uses ``async with session.begin_nested():``, which a bare AsyncMock()
+    cannot satisfy — see test_grok_image_thumbnails.py for the same idiom)."""
+    session = AsyncMock()
+
+    def _begin_nested() -> AsyncMock:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=None)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    session.begin_nested = MagicMock(side_effect=_begin_nested)
+    return session
+
+
 def _make_app(jwt_service: JWTService, token_revocation: TokenRevocationService) -> Litestar:
     """A minimal app exposing an auth_guard route, a content_auth_guard
     route, and an optional_auth_guard route — every guard that consults
@@ -527,7 +544,7 @@ class TestResetPasswordRevokesAccessTokens:
         svc = _make_email_verification_service(token_revocation)
         user = MagicMock()
         user.id = user_id
-        session = AsyncMock()
+        session = _make_mock_session()
 
         with (
             patch("src.api.services.email_verification.UserRepository") as user_repo_cls,

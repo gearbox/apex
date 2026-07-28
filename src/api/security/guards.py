@@ -132,7 +132,11 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
     """Guard that requires valid JWT authentication.
 
     Extracts and validates JWT from Authorization header.
-    Sets user_id in connection state for downstream handlers.
+    Sets user_id, auth_user, and token_payload in connection state for
+    downstream handlers — the latter (the decoded ``TokenPayload``) lets a
+    handler re-run ``TokenRevocationService.is_revoked`` mid-request, e.g.
+    after acquiring a row lock that serializes it against a concurrent bulk
+    revocation (see ``PushController.create_subscription``).
 
     Args:
         connection: ASGI connection.
@@ -167,6 +171,7 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
 
     connection.state["user_id"] = user_id
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
+    connection.state["token_payload"] = payload
 
 
 async def content_auth_guard(
@@ -218,6 +223,7 @@ async def content_auth_guard(
     # 5. Mirror auth_guard state — downstream DI reads from here
     connection.state["user_id"] = user_id
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
+    connection.state["token_payload"] = payload
 
 
 async def optional_auth_guard(
@@ -234,7 +240,12 @@ async def optional_auth_guard(
     synthara.app page) must not break access to a page that doesn't require
     authentication in the first place.
 
-    Sets user_id/auth_user in connection state if authenticated.
+    Sets user_id/auth_user/token_payload in connection state if authenticated,
+    or None for all three on the anonymous path — ``token_payload=None`` here
+    is deliberately indistinguishable from "no token was presented", since
+    that is exactly this guard's contract (b): a handler cannot tell whether
+    anonymity came from a missing token or a rejected one, only that it
+    is anonymous.
 
     Contract — read before attaching this guard to a new route:
         (a) This guard MUST only be attached to routes whose response is
@@ -296,9 +307,11 @@ async def optional_auth_guard(
             identity = None
 
     if identity is not None:
-        user_id = identity[0]
+        user_id, payload = identity
         connection.state["user_id"] = user_id
         connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
+        connection.state["token_payload"] = payload
     else:
         connection.state["user_id"] = None
         connection.state["auth_user"] = None
+        connection.state["token_payload"] = None

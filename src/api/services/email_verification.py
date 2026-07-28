@@ -23,6 +23,7 @@ from src.api.schemas.ops_events import (
     TokenRevocationFailedOpsPayload,
 )
 from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.push_cleanup import delete_user_push_subscriptions
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.user import UserRepository
 
@@ -284,6 +285,9 @@ class EmailVerificationService:
         bulk_access_revoked = epoch is not None
         await self._report_revocation_outcome(
             bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="reset_password"
+        )
+        await delete_user_push_subscriptions(
+            session, self._ops_event_bus, user_id=user_id, op="reset_password", source="email"
         )
         logger.info(
             "email.password_reset_done",
