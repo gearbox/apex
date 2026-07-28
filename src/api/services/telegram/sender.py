@@ -26,6 +26,10 @@ _MAX_RETRY_AFTER_SECONDS = 30.0
 class TelegramSendError(Exception):
     """A Telegram Bot API call failed (network error, non-2xx, or ok=false)."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class _TelegramChat(msgspec.Struct, kw_only=True):
     id: int
@@ -164,6 +168,7 @@ class HttpxTelegramSender:
             )
             raise TelegramSendError(
                 f"{method} failed: status={response.status_code} "
-                f"description={body.get('description')}"
+                f"description={body.get('description')}",
+                status_code=response.status_code,
             )
         return dict(body)

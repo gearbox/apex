@@ -18,12 +18,15 @@ simply lands in the "invalid" branch — harmless.
 from __future__ import annotations
 
 import re
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from src.api.services.telegram.sender import TelegramSendError
 from src.db.repositories.admin_notifications import AdminNotificationRepository
 from src.workers.base import PeriodicWorker
 
@@ -37,13 +40,24 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# TODO(redis-namespacing): unnamespaced like every other worker lease key.
 _LEASE_KEY_NAME = "telegram_link_poller"
 
 _START_COMMAND_RE = re.compile(r"^/start\s+(\S+)$")
 
 _SUCCESS_REPLY = "✅ Telegram linked to your Apex admin account."
 _INVALID_REPLY = "⚠️ Link token is invalid or expired. Generate a new link in the admin panel."
+
+# Telegram allows exactly one active getUpdates long-poll per bot token,
+# platform-wide — a second holder (orphaned container, dev machine, prod
+# sharing staging's token) gets a 409 on every call until it stops. Back off
+# instead of hammering the API, and cap how often we log it.
+_CONFLICT_BACKOFF_SECONDS: Final[float] = 60.0
+_CONFLICT_RELOG_INTERVAL_SECONDS: Final[float] = 300.0
+_CONFLICT_REMEDIATION = (
+    "Another process is holding this bot token's getUpdates long-poll — find "
+    "and stop it, or rotate TELEGRAM_BOT_TOKEN via BotFather (/revoke) if it "
+    "cannot be identified or stopped."
+)
 
 
 class TelegramLinkPoller(PeriodicWorker):
@@ -68,14 +82,51 @@ class TelegramLinkPoller(PeriodicWorker):
         self._session_factory = session_factory
         self._poll_timeout_seconds = poll_timeout_seconds
         self._next_offset: int | None = None
+        self._consecutive_conflicts = 0
+        self._last_conflict_logged_at: float | None = None
 
     async def run_once(self) -> None:
-        updates = await self._sender.get_updates(
-            offset=self._next_offset, timeout_seconds=self._poll_timeout_seconds
-        )
+        try:
+            updates = await self._sender.get_updates(
+                offset=self._next_offset, timeout_seconds=self._poll_timeout_seconds
+            )
+        except TelegramSendError as exc:
+            if exc.status_code != HTTPStatus.CONFLICT:
+                raise
+            await self._handle_conflict()
+            return
+
+        if self._consecutive_conflicts:
+            logger.info(
+                "telegram.getupdates_conflict_cleared",
+                consecutive=self._consecutive_conflicts,
+            )
+            self._consecutive_conflicts = 0
+            self._last_conflict_logged_at = None
+
         for update in updates:
             self._next_offset = update.update_id + 1
             await self._handle_update(update)
+
+    async def _handle_conflict(self) -> None:
+        """Another process holds this bot token's getUpdates poll.
+
+        Never resets ``_next_offset`` — the conflict tells us nothing about
+        which updates the other holder has consumed.
+        """
+        self._consecutive_conflicts += 1
+        now = time.monotonic()
+        if (
+            self._last_conflict_logged_at is None
+            or (now - self._last_conflict_logged_at) >= _CONFLICT_RELOG_INTERVAL_SECONDS
+        ):
+            self._last_conflict_logged_at = now
+            logger.error(
+                "telegram.getupdates_conflict",
+                consecutive=self._consecutive_conflicts,
+                remediation=_CONFLICT_REMEDIATION,
+            )
+        await self._interruptible_sleep(_CONFLICT_BACKOFF_SECONDS)
 
     async def _handle_update(self, update: TelegramUpdate) -> None:
         message = update.message

@@ -30,7 +30,7 @@ from src.api.services.telegram.mapping import map_ops_event
 from src.core.enums import PLATFORM_SCOPED_NOTIFICATION_CLASSES
 from src.core.redis import get_redis_client
 from src.db.repositories.admin_notifications import AdminNotificationRepository
-from src.workers.base import LeaderLease
+from src.workers.base import LeaderLease, lease_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,8 +44,6 @@ logger = structlog.get_logger(__name__)
 
 _decoder = msgspec.json.Decoder(OpsEventEnvelope)
 
-# TODO(redis-namespacing): unnamespaced like every other worker lease key.
-_LEASE_KEY = "worker:telegram_dispatcher:lease"
 _LEASE_TTL_SECONDS = 90
 _POLL_TIMEOUT_SECONDS = 5.0
 _NOT_LEADER_SLEEP_SECONDS = 5.0
@@ -73,7 +71,7 @@ class TelegramDispatcher:
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._lease = LeaderLease(
-            key=_LEASE_KEY,
+            key=lease_key("telegram_dispatcher"),
             ttl_seconds=_LEASE_TTL_SECONDS,
             redis_enabled=redis_enabled,
         )

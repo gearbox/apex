@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from http import HTTPStatus
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-from src.api.services.telegram.sender import TelegramUpdate, _TelegramChat, _TelegramMessage
-from src.workers.telegram_link_poller import TelegramLinkPoller
+import pytest
+
+from src.api.services.telegram.sender import (
+    TelegramSendError,
+    TelegramUpdate,
+    _TelegramChat,
+    _TelegramMessage,
+)
+from src.workers.telegram_link_poller import _CONFLICT_BACKOFF_SECONDS, TelegramLinkPoller
 
 
 def _update(update_id: int, text: str | None, chat_id: int = 100) -> TelegramUpdate:
@@ -150,3 +158,87 @@ async def test_run_once_advances_offset_and_processes_updates() -> None:
 
     assert poller._next_offset == 7
     sender.get_updates.assert_awaited_once_with(offset=None, timeout_seconds=25)
+
+
+async def test_conflict_does_not_propagate_and_backs_off() -> None:
+    sender = AsyncMock()
+    sender.get_updates = AsyncMock(
+        side_effect=TelegramSendError("conflict", status_code=HTTPStatus.CONFLICT)
+    )
+    poller = _make_poller(sender)
+
+    with patch.object(poller, "_interruptible_sleep", new=AsyncMock()) as mock_sleep:
+        await poller.run_once()  # must not raise
+
+    mock_sleep.assert_awaited_once_with(_CONFLICT_BACKOFF_SECONDS)
+    assert poller._consecutive_conflicts == 1
+
+
+async def test_non_conflict_telegram_error_propagates() -> None:
+    sender = AsyncMock()
+    sender.get_updates = AsyncMock(
+        side_effect=TelegramSendError("unauthorized", status_code=HTTPStatus.UNAUTHORIZED)
+    )
+    poller = _make_poller(sender)
+
+    with pytest.raises(TelegramSendError):
+        await poller.run_once()
+
+
+async def test_conflict_does_not_reset_next_offset() -> None:
+    sender = AsyncMock()
+    sender.get_updates = AsyncMock(
+        side_effect=TelegramSendError("conflict", status_code=HTTPStatus.CONFLICT)
+    )
+    poller = _make_poller(sender)
+    poller._next_offset = 42
+
+    with patch.object(poller, "_interruptible_sleep", new=AsyncMock()):
+        await poller.run_once()
+
+    assert poller._next_offset == 42
+
+
+async def test_conflict_logged_once_per_relog_interval_with_consecutive_count() -> None:
+    sender = AsyncMock()
+    sender.get_updates = AsyncMock(
+        side_effect=TelegramSendError("conflict", status_code=HTTPStatus.CONFLICT)
+    )
+    poller = _make_poller(sender)
+
+    times = iter([1000.0, 1010.0, 1400.0])  # 2nd call within the 300s relog window, 3rd past it
+
+    with (
+        patch.object(poller, "_interruptible_sleep", new=AsyncMock()),
+        patch(
+            "src.workers.telegram_link_poller.time.monotonic",
+            side_effect=lambda: next(times),
+        ),
+        patch("src.workers.telegram_link_poller.logger") as mock_logger,
+    ):
+        await poller.run_once()
+        await poller.run_once()
+        await poller.run_once()
+
+    assert mock_logger.error.call_count == 2  # 1st occurrence + 1st past the relog interval
+    first_call, second_call = mock_logger.error.call_args_list
+    assert first_call.kwargs["consecutive"] == 1
+    assert second_call.kwargs["consecutive"] == 3
+
+
+async def test_conflict_cleared_logged_on_recovery() -> None:
+    sender = AsyncMock()
+    sender.get_updates = AsyncMock(
+        side_effect=[TelegramSendError("conflict", status_code=HTTPStatus.CONFLICT), []]
+    )
+    poller = _make_poller(sender)
+
+    with (
+        patch.object(poller, "_interruptible_sleep", new=AsyncMock()),
+        patch("src.workers.telegram_link_poller.logger") as mock_logger,
+    ):
+        await poller.run_once()
+        await poller.run_once()
+
+    mock_logger.info.assert_any_call("telegram.getupdates_conflict_cleared", consecutive=1)
+    assert poller._consecutive_conflicts == 0

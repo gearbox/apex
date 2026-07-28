@@ -33,6 +33,24 @@ services:
     environment:
 
       DEBUG: "false"
+      # --- Deployment identity ---
+      # Namespaces worker leader-lease keys and is logged at startup
+      # (app.build_info). MUST differ between staging and production — with the
+      # default (`development`) both would use identical lease keys.
+      ENVIRONMENT: "production"
+
+      # --- Rate limiting: client IP trust ---
+      # Deliberately NOT set here (unlike staging's TRUSTED_IP_HEADER=cf-connecting-ip).
+      # This compose file defines no in-stack proxy (redis/postgres have
+      # ports: [], ingress terminates outside this stack), and prod's actual
+      # topology (Cloudflare Tunnel vs. host-level nginx/Traefik vs. directly
+      # reachable) has not been verified. Setting the wrong header lets a
+      # client spoof its own rate-limit key via a forged header — strictly
+      # worse than the current single-bucket symptom. Verify the topology and
+      # set this explicitly (tracking issue: see PR description) before
+      # relying on per-client rate limiting in production. Until then the
+      # startup warning for an unset TRUSTED_IP_HEADER is correct and expected.
+
       # JWT — must be set explicitly in production; no fallback allowed
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required in production}
       JWT_ISSUER: ${JWT_ISSUER:-apex-api}
@@ -70,6 +88,9 @@ services:
       VAPID_SUBJECT: ${VAPID_SUBJECT:?VAPID_SUBJECT is required for web-push}
 
       # --- Telegram ops notifications (optional; bot token + Redis required to enable) ---
+      # Telegram allows exactly ONE active getUpdates long-poll per bot token,
+      # platform-wide — this MUST be a different bot than staging's, or each
+      # environment's poller terminates the other's with HTTP 409 indefinitely.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_LINK_TOKEN_TTL_SECONDS: ${TELEGRAM_LINK_TOKEN_TTL_SECONDS:-900}
       TELEGRAM_SEND_TIMEOUT_SECONDS: ${TELEGRAM_SEND_TIMEOUT_SECONDS:-10.0}

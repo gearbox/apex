@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 from src.workers.base import LeaderLease
 
 
@@ -35,9 +38,7 @@ class _FakeRedisClient:
                 return 1
             return 0
         # renew script
-        if current == token:
-            return 1
-        return 0
+        return 1 if current == token else 0
 
 
 def _patched_client(client: _FakeRedisClient) -> Any:
@@ -121,11 +122,65 @@ class TestReleaseOnlyOwnLease:
         assert client._store.get("worker:x:lease") == first._token
 
 
-class TestRedisErrorFailsOpen:
-    async def test_redis_error_fails_open_with_warning(self) -> None:
+class TestRedisErrorFailsClosedWhenNotHeld:
+    async def test_redis_error_without_held_lease_fails_closed(self) -> None:
+        """A process that never held the lease must never promote itself on error.
+
+        Uses redis.exceptions.ConnectionError (a RedisError, NOT a builtin
+        OSError) to exercise the RedisError arm of the narrowed except clause
+        specifically — the grace-window tests below cover the OSError arm.
+        """
         lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
 
         with (
+            patch(
+                "src.workers.base.get_redis_client",
+                side_effect=RedisConnectionError("down"),
+            ),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
+            acquired = await lease.acquire_or_renew()
+
+        assert acquired is False
+        assert lease.is_held is False
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=False,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
+        )
+
+    async def test_type_error_propagates_instead_of_forfeiting_leadership(self) -> None:
+        """A programming error must surface as a tick failure, not "not leader".
+
+        Only genuine Redis/transport failures (RedisError, OSError) are
+        allowed to be swallowed and converted into a fail-closed result.
+        """
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with (
+            patch("src.workers.base.get_redis_client", side_effect=TypeError("boom")),
+            pytest.raises(TypeError, match="boom"),
+        ):
+            await lease.acquire_or_renew()
+
+        assert lease.is_held is False
+
+
+class TestRedisErrorWithinGraceWindow:
+    async def test_redis_error_within_grace_stays_leader(self) -> None:
+        """A recently-renewed key is still provably live in Redis — safe to stay leader."""
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 10.0),
             patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
             patch("src.workers.base.logger") as mock_logger,
         ):
@@ -133,16 +188,133 @@ class TestRedisErrorFailsOpen:
 
         assert acquired is True
         assert lease.is_held is True
-        mock_logger.warning.assert_called_once_with("worker.lease.error", key="worker:x:lease")
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=True,
+            within_grace=True,
+            error="down",
+            error_type="ConnectionError",
+        )
 
+    async def test_redis_error_past_grace_fails_closed(self) -> None:
+        """Elapsed time past ttl - margin means the key may already be gone."""
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 90.0),
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
+            acquired = await lease.acquire_or_renew()
+
+        assert acquired is False
+        assert lease.is_held is False
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=True,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
+        )
+
+    async def test_consecutive_out_of_grace_misses_escalate_to_error(self) -> None:
+        """A lease that cannot be renewed at all is an infrastructure fault, not a warning."""
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 90.0),
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
+            assert await lease.acquire_or_renew() is False  # 1st miss: warning
+            assert await lease.acquire_or_renew() is False  # 2nd consecutive miss: error
+
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=True,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
+        )
+        mock_logger.error.assert_called_once_with(
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=False,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
+        )
+
+    async def test_recovery_after_grace_failure_resets_state(self) -> None:
+        """A successful renew after an out-of-grace failure clears the miss streak.
+
+        The failed renewal never actually deleted the Redis key (we only lost
+        the ability to confirm it), so once Redis is reachable again the same
+        token still owns it and the renew script succeeds.
+        """
+        client = _FakeRedisClient()
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._last_renew_at is not None
+        with (
+            patch("src.workers.base.time.monotonic", return_value=lease._last_renew_at + 90.0),
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+        ):
+            assert await lease.acquire_or_renew() is False
+            assert lease._consecutive_grace_misses == 1
+
+        with _patched_client(client):
+            assert await lease.acquire_or_renew() is True
+
+        assert lease._consecutive_grace_misses == 0
+
+
+class TestReleaseSwallowsRedisError:
     async def test_release_swallows_redis_error(self) -> None:
         lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
         lease._held = True
 
-        with patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")):
+        with (
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
             await lease.release()  # must not raise
 
         assert lease.is_held is False
+        assert lease._last_renew_at is None
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.release_error",
+            key="worker:x:lease",
+            error="down",
+            error_type="ConnectionError",
+        )
+
+    async def test_release_type_error_propagates(self) -> None:
+        """A programming error in release() must surface too, not be swallowed."""
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+        lease._held = True
+
+        with (
+            patch("src.workers.base.get_redis_client", side_effect=TypeError("boom")),
+            pytest.raises(TypeError, match="boom"),
+        ):
+            await lease.release()
 
 
 class TestDisabledLeaseAlwaysLeader:

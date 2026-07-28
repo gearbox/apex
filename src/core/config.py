@@ -541,6 +541,16 @@ class Settings(BaseSettings):
         default="unknown",
         description="Git SHA of the running build, injected at image build time.",
     )
+    environment: Literal["development", "staging", "production"] = Field(
+        default="development",
+        description=(
+            "Deployment environment identifier. Logged at startup (app.build_info) and used "
+            "to namespace worker leader-lease keys, so staging and production can never elect "
+            "a shared leader if they ever end up pointed at the same Redis instance. Unrelated "
+            "to the per-request product_id (vex/synthara) — this is a single value per deployed "
+            "process, not per-tenant."
+        ),
+    )
 
     # ASGI Granian settings
     asgi_workers: int = Field(
