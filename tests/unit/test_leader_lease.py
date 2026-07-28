@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 from src.workers.base import LeaderLease
 
 
@@ -35,9 +38,7 @@ class _FakeRedisClient:
                 return 1
             return 0
         # renew script
-        if current == token:
-            return 1
-        return 0
+        return 1 if current == token else 0
 
 
 def _patched_client(client: _FakeRedisClient) -> Any:
@@ -123,11 +124,19 @@ class TestReleaseOnlyOwnLease:
 
 class TestRedisErrorFailsClosedWhenNotHeld:
     async def test_redis_error_without_held_lease_fails_closed(self) -> None:
-        """A process that never held the lease must never promote itself on error."""
+        """A process that never held the lease must never promote itself on error.
+
+        Uses redis.exceptions.ConnectionError (a RedisError, NOT a builtin
+        OSError) to exercise the RedisError arm of the narrowed except clause
+        specifically — the grace-window tests below cover the OSError arm.
+        """
         lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
 
         with (
-            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch(
+                "src.workers.base.get_redis_client",
+                side_effect=RedisConnectionError("down"),
+            ),
             patch("src.workers.base.logger") as mock_logger,
         ):
             acquired = await lease.acquire_or_renew()
@@ -135,8 +144,29 @@ class TestRedisErrorFailsClosedWhenNotHeld:
         assert acquired is False
         assert lease.is_held is False
         mock_logger.warning.assert_called_once_with(
-            "worker.lease.error", key="worker:x:lease", held=False, within_grace=False
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=False,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
         )
+
+    async def test_type_error_propagates_instead_of_forfeiting_leadership(self) -> None:
+        """A programming error must surface as a tick failure, not "not leader".
+
+        Only genuine Redis/transport failures (RedisError, OSError) are
+        allowed to be swallowed and converted into a fail-closed result.
+        """
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+
+        with (
+            patch("src.workers.base.get_redis_client", side_effect=TypeError("boom")),
+            pytest.raises(TypeError, match="boom"),
+        ):
+            await lease.acquire_or_renew()
+
+        assert lease.is_held is False
 
 
 class TestRedisErrorWithinGraceWindow:
@@ -159,7 +189,12 @@ class TestRedisErrorWithinGraceWindow:
         assert acquired is True
         assert lease.is_held is True
         mock_logger.warning.assert_called_once_with(
-            "worker.lease.error", key="worker:x:lease", held=True, within_grace=True
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=True,
+            within_grace=True,
+            error="down",
+            error_type="ConnectionError",
         )
 
     async def test_redis_error_past_grace_fails_closed(self) -> None:
@@ -181,7 +216,12 @@ class TestRedisErrorWithinGraceWindow:
         assert acquired is False
         assert lease.is_held is False
         mock_logger.warning.assert_called_once_with(
-            "worker.lease.error", key="worker:x:lease", held=True, within_grace=False
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=True,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
         )
 
     async def test_consecutive_out_of_grace_misses_escalate_to_error(self) -> None:
@@ -202,10 +242,20 @@ class TestRedisErrorWithinGraceWindow:
             assert await lease.acquire_or_renew() is False  # 2nd consecutive miss: error
 
         mock_logger.warning.assert_called_once_with(
-            "worker.lease.error", key="worker:x:lease", held=True, within_grace=False
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=True,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
         )
         mock_logger.error.assert_called_once_with(
-            "worker.lease.error", key="worker:x:lease", held=False, within_grace=False
+            "worker.lease.error",
+            key="worker:x:lease",
+            held=False,
+            within_grace=False,
+            error="down",
+            error_type="ConnectionError",
         )
 
     async def test_recovery_after_grace_failure_resets_state(self) -> None:
@@ -240,11 +290,31 @@ class TestReleaseSwallowsRedisError:
         lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
         lease._held = True
 
-        with patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")):
+        with (
+            patch("src.workers.base.get_redis_client", side_effect=ConnectionError("down")),
+            patch("src.workers.base.logger") as mock_logger,
+        ):
             await lease.release()  # must not raise
 
         assert lease.is_held is False
         assert lease._last_renew_at is None
+        mock_logger.warning.assert_called_once_with(
+            "worker.lease.release_error",
+            key="worker:x:lease",
+            error="down",
+            error_type="ConnectionError",
+        )
+
+    async def test_release_type_error_propagates(self) -> None:
+        """A programming error in release() must surface too, not be swallowed."""
+        lease = LeaderLease(key="worker:x:lease", ttl_seconds=90, redis_enabled=True)
+        lease._held = True
+
+        with (
+            patch("src.workers.base.get_redis_client", side_effect=TypeError("boom")),
+            pytest.raises(TypeError, match="boom"),
+        ):
+            await lease.release()
 
 
 class TestDisabledLeaseAlwaysLeader:

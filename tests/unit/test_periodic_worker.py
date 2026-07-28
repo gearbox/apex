@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from src.workers.base import PeriodicWorker
+from src.workers.base import PeriodicWorker, lease_key
 
 
 class _CountingWorker(PeriodicWorker):
@@ -153,6 +153,19 @@ class TestCancelledErrorPropagates:
         assert task.cancelled()
         for call in mock_logger.exception.call_args_list:
             assert call.args[0] != "worker.tick_error"
+
+
+class TestLeaseKeyHelper:
+    def test_lease_key_namespaced_by_environment(self) -> None:
+        fake_settings = MagicMock(environment="staging")
+        with patch("src.workers.base.get_settings", return_value=fake_settings):
+            assert lease_key("x") == "staging:worker:x:lease"
+
+    async def test_periodic_worker_construction_goes_through_lease_key(self) -> None:
+        fake_settings = MagicMock(environment="production")
+        with patch("src.workers.base.get_settings", return_value=fake_settings):
+            worker = _CountingWorker(**_worker_kwargs(name="my_worker"))
+        assert worker._lease._key == "production:worker:my_worker:lease"
 
 
 class TestIsLeaderReflectsLease:

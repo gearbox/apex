@@ -75,6 +75,12 @@ services:
       LOG_LEVEL: "DEBUG"
       LOG_FORMAT: "json"
 
+      # --- Deployment identity ---
+      # Namespaces worker leader-lease keys and is logged at startup
+      # (app.build_info). MUST differ between staging and production — with the
+      # default (`development`) both would use identical lease keys.
+      ENVIRONMENT: "staging"
+
       # --- Rate limiting: client IP trust ---
       # cloudflared (below) is the only path in — it terminates the Cloudflare
       # Tunnel and connects straight to api:8100, so CF-Connecting-IP is set by

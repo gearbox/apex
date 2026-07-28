@@ -245,6 +245,14 @@ async def test_recipient_lookup_failure_is_logged_and_does_not_raise() -> None:
 
 
 class TestLifecycle:
+    async def test_lease_key_goes_through_shared_helper(self) -> None:
+        """The dispatcher's lease key must be built by lease_key(), not a local f-string."""
+        fake_settings = MagicMock(environment="staging")
+        with patch("src.workers.base.get_settings", return_value=fake_settings):
+            dispatcher = _make_dispatcher(_FakeSender())
+
+        assert dispatcher._lease._key == "staging:worker:telegram_dispatcher:lease"
+
     async def test_start_is_idempotent_and_stop_releases_lease(self) -> None:
         dispatcher = _make_dispatcher(_FakeSender())
         dispatcher._run_loop = AsyncMock()  # type: ignore[method-assign]

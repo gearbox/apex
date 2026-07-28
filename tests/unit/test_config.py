@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from src.core.config import Settings
 
@@ -144,6 +145,21 @@ class TestMaxRevocationEpochTtlSeconds:
     def test_matches_hardcoded_upper_bound_expectation(self) -> None:
         settings = Settings(jwt_secret_key=_JWT_SECRET)
         assert settings.max_revocation_epoch_ttl_seconds == max(60 * 60, 168 * 3600)
+
+
+class TestDeploymentEnvironment:
+    def test_defaults_to_development(self) -> None:
+        settings = Settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.environment == "development"
+
+    def test_env_var_sets_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ENVIRONMENT", "staging")
+        settings = Settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.environment == "staging"
+
+    def test_invalid_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(jwt_secret_key=_JWT_SECRET, environment="prod")  # pyright: ignore[reportArgumentType]
 
 
 class TestPricingTiersValidAccepted:

@@ -11,7 +11,7 @@ from structlog.contextvars import bind_contextvars, clear_contextvars, get_conte
 from structlog.testing import capture_logs
 
 from src.core.config import Settings
-from src.core.logging import configure_logging, get_logger
+from src.core.logging import _THIRD_PARTY_LOGGER_LEVELS, configure_logging, get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -122,19 +122,17 @@ class TestConfigureLogging:
 
 @pytest.mark.usefixtures("_reset_structlog")
 class TestThirdPartyLoggerLevels:
-    @pytest.mark.parametrize(
-        "logger_name",
-        ["botocore", "aiobotocore", "boto3", "httpcore", "httpx", "urllib3"],
-    )
-    def test_pinned_to_warning_regardless_of_log_level(self, logger_name: str) -> None:
+    @pytest.mark.parametrize("log_level", ["DEBUG", "INFO", "WARNING"])
+    @pytest.mark.parametrize("logger_name", sorted(_THIRD_PARTY_LOGGER_LEVELS))
+    def test_pinned_regardless_of_log_level(self, logger_name: str, log_level: str) -> None:
         settings = Settings(
             comfyui_host="127.0.0.1",
             comfyui_port=_DEFAULT_COMFYUI_PORT,
-            log_level="DEBUG",
+            log_level=log_level,
             log_format="json",
         )
         configure_logging(settings)
-        assert logging.getLogger(logger_name).level == logging.WARNING
+        assert logging.getLogger(logger_name).level == _THIRD_PARTY_LOGGER_LEVELS[logger_name]
 
 
 # ---------------------------------------------------------------------------

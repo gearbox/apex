@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import msgspec
@@ -319,3 +319,16 @@ async def test_interruptible_sleep_times_out_without_raising() -> None:
     )
 
     await dispatcher._interruptible_sleep(0)
+
+
+async def test_lease_key_goes_through_shared_helper() -> None:
+    """The dispatcher's lease key must be built by lease_key(), not a local f-string."""
+    fake_settings = MagicMock(environment="staging")
+    with patch("src.workers.base.get_settings", return_value=fake_settings):
+        dispatcher = PushDispatcher(
+            push_service=AsyncMock(),
+            session_factory=_session_factory(FakeSession()),
+            redis_enabled=False,
+        )
+
+    assert cast("Any", dispatcher)._lease._key == "staging:worker:push_dispatcher:lease"

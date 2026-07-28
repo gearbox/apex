@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 import structlog
+from redis.exceptions import RedisError
 
 from src.core.config import get_settings
 from src.core.redis import get_redis_client
@@ -45,6 +46,16 @@ _RELEASE_LEASE_SCRIPT = "if redis.call('GET', KEYS[1]) == ARGV[1] then return re
 _LEASE_RENEW_SAFETY_MARGIN_SECONDS: Final[float] = 5.0
 
 
+def lease_key(name: str) -> str:
+    """Build the environment-namespaced Redis key for a worker's leader lease.
+
+    Single construction site: staging and production must never share a lease
+    key, and a dispatcher that builds its own key by hand will eventually
+    forget the prefix.
+    """
+    return f"{get_settings().environment}:worker:{name}:lease"
+
+
 class LeaderLease:
     """Redis-backed owned lease with heartbeat renewal.
 
@@ -60,6 +71,13 @@ class LeaderLease:
     as leader is safe. Fail-open would let any process with a broken Redis
     connection promote itself to leader of every worker at once — the exact
     failure mode this class exists to prevent.
+
+    Lease keys are namespaced by deployment environment. Note this makes the
+    *leases* environment-safe, not the Redis keyspace as a whole: pub/sub
+    channels (``ops:events``, ``user:*``, ``system:broadcast``) and the
+    ``rate_limit:``, ``model_rate_limit:``, ``sse_ticket:`` and
+    ``vastai_terminal_state:`` key families are still global. Staging and
+    production MUST NOT share a Redis instance until those are namespaced too.
     """
 
     def __init__(self, *, key: str, ttl_seconds: int, redis_enabled: bool) -> None:
@@ -107,7 +125,12 @@ class LeaderLease:
             if self._held:
                 self._last_renew_at = time.monotonic()
                 self._consecutive_grace_misses = 0
-        except Exception:
+        # Narrow: only genuine Redis/transport failures forfeit leadership.
+        # A TypeError or a Lua bug is a programming error and must surface as
+        # a tick failure, not be silently downgraded to "not leader".
+        # asyncio.TimeoutError is an alias of built-in TimeoutError, which
+        # subclasses OSError — no separate entry needed.
+        except (RedisError, OSError) as exc:
             # Fail CLOSED. A process that cannot reach Redis must not promote
             # itself to leader — that is how two pollers, two reconcilers and
             # two provisioners end up running at once. The only safe
@@ -129,6 +152,8 @@ class LeaderLease:
                 key=self._key,
                 held=self._held,
                 within_grace=grace_ok,
+                error=str(exc),
+                error_type=type(exc).__name__,
             )
             if grace_ok:
                 return True
@@ -147,8 +172,13 @@ class LeaderLease:
         try:
             client = get_redis_client()
             await client.eval(_RELEASE_LEASE_SCRIPT, 1, self._key, self._token)
-        except Exception:
-            logger.warning("worker.lease.release_error", key=self._key)
+        except (RedisError, OSError) as exc:
+            logger.warning(
+                "worker.lease.release_error",
+                key=self._key,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
         finally:
             self._held = False
             self._last_renew_at = None
@@ -189,10 +219,10 @@ class PeriodicWorker(ABC):
         # process could steal the lease.
         lease_ttl_seconds = max(int(interval_seconds * 3), 90)
         # Namespaced by environment so staging and production can never elect
-        # a shared leader if they ever end up pointed at the same Redis.
-        environment = get_settings().environment
+        # a shared leader — see LeaderLease docstring for what this does and
+        # does not cover.
         self._lease = LeaderLease(
-            key=f"{environment}:worker:{name}:lease",
+            key=lease_key(name),
             ttl_seconds=lease_ttl_seconds,
             redis_enabled=redis_enabled and use_leader_lease,
         )
