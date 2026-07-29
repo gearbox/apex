@@ -639,8 +639,11 @@ async def init_services(settings: Settings) -> JWTService:
     )
     logger.info("provisioning_callback_service.initialized")
 
-    # Initialize Redis (required for pub/sub and rate limiting)
-    from src.core.redis import get_redis_client, init_redis_pool
+    # Initialize Redis (required for pub/sub and rate limiting). Two pools —
+    # see src/core/redis.py module docstring: the shared pool serves
+    # short-lived operations (token revocation, leases, SSE tickets), the
+    # SSE pool serves EventBus.subscribe's per-client long-lived connections.
+    from src.core.redis import get_redis_client, init_redis_pool, init_sse_redis_pool
 
     if settings.redis_url:
         init_redis_pool(
@@ -648,6 +651,14 @@ async def init_services(settings: Settings) -> JWTService:
             socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
             socket_timeout=settings.redis_socket_timeout_seconds,
             health_check_interval=settings.redis_health_check_interval_seconds,
+            max_connections=settings.redis_max_connections,
+        )
+        init_sse_redis_pool(
+            settings.redis_url,
+            socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+            socket_timeout=settings.redis_socket_timeout_seconds,
+            health_check_interval=settings.redis_health_check_interval_seconds,
+            max_connections=settings.redis_sse_max_connections,
         )
         _services.sse_ticket_service = SSETicketService(ttl_seconds=settings.sse_ticket_ttl_seconds)
         logger.info("sse_ticket_service.initialized")

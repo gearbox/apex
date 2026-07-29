@@ -7,13 +7,15 @@ Redis Pub/Sub mode (production) and direct polling fallback (no Redis).
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
+from redis.exceptions import RedisError
 
 from src.api.services.health import HEALTH_STREAM_CHANNEL
-from src.core.redis import get_redis_client
+from src.core.redis import get_sse_redis_client, get_sse_redis_pool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -50,10 +52,24 @@ async def health_sse_generator(
 async def _redis_stream() -> AsyncGenerator[dict[str, str]]:
     """Subscribe to Redis health:stream channel and yield SSE events."""
 
-    client = get_redis_client()
+    # Long-lived per-connected-admin subscription — belongs on the SSE pool,
+    # not the shared short-lived-operation pool. See src/core/redis.py.
+    client = get_sse_redis_client()
+    # Created outside the try: PubSub connects lazily, so this acquires
+    # nothing, but it must be in scope for the finally that releases it.
     pubsub = client.pubsub()
+
     try:
-        await pubsub.subscribe(HEALTH_STREAM_CHANNEL)
+        try:
+            await pubsub.subscribe(HEALTH_STREAM_CHANNEL)
+        except (RedisError, OSError) as exc:
+            logger.exception(
+                "health.sse.subscribe_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                sse_pool_max=get_sse_redis_pool().max_connections,
+            )
+            raise
 
         while True:
             try:
@@ -77,7 +93,12 @@ async def _redis_stream() -> AsyncGenerator[dict[str, str]]:
     except asyncio.CancelledError:
         logger.debug("health.sse.client_disconnected")
     finally:
-        await pubsub.unsubscribe(HEALTH_STREAM_CHANNEL)
+        # unsubscribe is a courtesy and will itself raise if the connection
+        # is already dead — suppressed so it cannot replace the exception
+        # actually propagating to the caller. aclose() is the call that
+        # returns the connection to the SSE pool.
+        with suppress(RedisError, OSError):
+            await pubsub.unsubscribe(HEALTH_STREAM_CHANNEL)
         await pubsub.aclose()  # type: ignore[no-untyped-call]
 
 

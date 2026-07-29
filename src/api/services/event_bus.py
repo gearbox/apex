@@ -8,18 +8,20 @@ To migrate to WebSockets later:
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
+from redis.exceptions import RedisError
 
 from src.api.schemas.events import (
     BalanceUpdatedPayload,
     EventEnvelope,
     EventType,
 )
-from src.core.redis import get_redis_client
+from src.core.redis import get_redis_client, get_sse_redis_client, get_sse_redis_pool
 from src.core.uid import new_id
 
 if TYPE_CHECKING:
@@ -166,12 +168,31 @@ class EventBus:
         """
         if not self._enabled:
             raise RuntimeError("EventBus is disabled (no Redis configured) — cannot subscribe")
-        client = get_redis_client()
-        pubsub: PubSub = client.pubsub()
+        # Dedicated SSE pool: this connection is held for the life of the
+        # stream and must not be able to exhaust the auth hot path's pool.
+        client = get_sse_redis_client()
         user_channel = self.user_channel(user_id)
+        # Created outside the try: PubSub connects lazily, so this acquires
+        # nothing, but it must be in scope for the finally that releases it.
+        pubsub: PubSub = client.pubsub()
 
         try:
-            await pubsub.subscribe(user_channel, self.SYSTEM_CHANNEL)
+            try:
+                await pubsub.subscribe(user_channel, self.SYSTEM_CHANNEL)
+            except (RedisError, OSError) as exc:
+                # Deliberately neutral: redis-py raises ConnectionError for
+                # pool exhaustion AND for a Redis that is simply down. The
+                # raw message discriminates them ("Too many connections" vs
+                # a transport error); sse_pool_max gives the ceiling to
+                # compare against without guessing.
+                logger.exception(
+                    "event_bus.subscribe_failed",
+                    user_id=str(user_id),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    sse_pool_max=get_sse_redis_pool().max_connections,
+                )
+                raise
             logger.info(
                 "event_bus.subscribed",
                 channels=[user_channel, self.SYSTEM_CHANNEL],
@@ -194,6 +215,11 @@ class EventBus:
                         channel=message.get("channel"),
                     )
         finally:
-            await pubsub.unsubscribe(user_channel, self.SYSTEM_CHANNEL)
+            # unsubscribe is a courtesy and will itself raise if the
+            # connection is already dead — suppressed so it cannot replace
+            # the exception actually propagating to the caller. aclose() is
+            # the call that returns the connection to the SSE pool.
+            with suppress(RedisError, OSError):
+                await pubsub.unsubscribe(user_channel, self.SYSTEM_CHANNEL)
             await pubsub.aclose()  # type: ignore[no-untyped-call]
             logger.info("event_bus.unsubscribed", user_id=str(user_id))
