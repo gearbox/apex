@@ -9,8 +9,10 @@ environment's workers claim the other's leases. Do not consolidate.
 Two pools, deliberately. The default pool serves short-lived operations -
 token revocation on every authenticated request, worker lease renewals, SSE
 ticket lookups - and is tuned for fail-fast (50ms socket timeout). The SSE
-pool serves EventBus.subscribe, which checks out one connection per connected
-client and holds it for the life of the stream.
+pool serves subscribers whose connection count scales with the number of
+connected clients - EventBus.subscribe and health.stream._redis_stream -
+each of which checks out one connection per connected client and holds it
+for the life of the stream.
 
 They are separate because redis-py raises ConnectionError on pool exhaustion
 rather than blocking, and ConnectionError is a RedisError: a shared pool
@@ -143,7 +145,9 @@ def init_sse_redis_pool(
 ) -> aioredis.ConnectionPool:
     """Create and store the global SSE connection pool.
 
-    Dedicated pool for `EventBus.subscribe`, which checks out one connection
+    Dedicated pool for subscribers whose connection count scales with the
+    number of connected clients — `EventBus.subscribe` and
+    `health.stream._redis_stream` — each of which checks out one connection
     per connected client and holds it for the life of the stream (minutes to
     hours). Isolated from `init_redis_pool`'s short-lived-operation pool so
     SSE concurrency can never exhaust the auth hot path — see the module
@@ -196,9 +200,15 @@ def get_sse_redis_pool() -> aioredis.ConnectionPool:
 def get_sse_redis_client() -> aioredis.Redis:
     """Get a Redis client from the SSE (long-lived-subscriber) pool.
 
-    Only `EventBus.subscribe` should call this. Every other Redis consumer —
-    including `EventBus.publish`/`publish_system` — is short-lived and
-    belongs on `get_redis_client()`.
+    For subscribers whose connection count scales with the number of connected
+    clients: `EventBus.subscribe` (one per SSE client) and
+    `health.stream._redis_stream` (one per connected admin). Each holds its
+    connection for the life of the stream.
+
+    Not for `TelegramDispatcher` or `PushDispatcher`: they also hold long-lived
+    PubSub connections, but exactly one each and only while holding the leader
+    lease, so they cannot scale with load and correctly stay on the shared
+    pool. The distinction is unbounded-count, not long-lived.
     """
     return aioredis.Redis(connection_pool=get_sse_redis_pool())
 

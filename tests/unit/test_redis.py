@@ -212,6 +212,17 @@ class TestGetSseRedisPool:
         with pytest.raises(RuntimeError, match="not initialized"):
             get_sse_redis_pool()
 
+    def test_max_connections_reflects_configured_setting(self) -> None:
+        """Pins the public `max_connections` attribute that
+        event_bus.subscribe_failed / health.sse.subscribe_failed logging
+        reads — must stay the real, undoctored redis-py attribute, not a
+        private one that can silently change shape across releases. Uses the
+        real (lazily-connecting) ConnectionPool.from_url rather than a mock so
+        the attribute is genuinely sourced from the constructor arg."""
+        init_sse_redis_pool("redis://localhost:6379", max_connections=321)
+
+        assert get_sse_redis_pool().max_connections == 321
+
 
 class TestGetSseRedisClient:
     def test_returns_client_from_sse_pool(self) -> None:

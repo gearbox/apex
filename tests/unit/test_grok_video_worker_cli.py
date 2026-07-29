@@ -30,6 +30,10 @@ def settings() -> MagicMock:
     s.grok_video_max_poll_time = 600
     s.grok_video_max_concurrent_polls = 8
     s.redis_url = None
+    s.redis_socket_connect_timeout_seconds = 0.25
+    s.redis_socket_timeout_seconds = 0.05
+    s.redis_health_check_interval_seconds = 30.0
+    s.redis_max_connections = 77
     return s
 
 
@@ -193,3 +197,45 @@ class TestGrokVideoWorkerCLIRun:
             settings=settings,
             redis_enabled=False,
         )
+
+    async def test_redis_pool_initialized_with_max_connections_from_settings(
+        self, settings: MagicMock
+    ) -> None:
+        """The standalone worker must pass max_connections through, or it
+        silently falls back to init_redis_pool's default of 50 and ignores
+        REDIS_MAX_CONNECTIONS entirely. No SSE pool is initialized here —
+        this process has no long-lived subscribers."""
+        settings.redis_url = "redis://localhost:6379"
+        mock_db_manager = AsyncMock()
+        mock_r2_storage = AsyncMock()
+        mock_grok_client = AsyncMock()
+        mock_job_service = AsyncMock()
+        mock_worker = AsyncMock()
+
+        with (
+            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
+            patch("src.workers.grok_video.R2StorageService", return_value=mock_r2_storage),
+            patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
+            patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
+            patch("src.workers.grok_video.GrokVideoWorker", return_value=mock_worker),
+            patch("src.workers.grok_video.BillingService"),
+            patch("src.core.redis.init_redis_pool") as mock_init_redis_pool,
+            patch("src.core.redis.init_sse_redis_pool") as mock_init_sse_redis_pool,
+            patch("src.core.redis.close_redis_pool", new_callable=AsyncMock),
+        ):
+            runner = GrokVideoWorkerCLI(settings)
+
+            async def trigger_shutdown() -> None:
+                await asyncio.sleep(0)
+                runner.handle_signal()
+
+            await asyncio.gather(runner.run(), trigger_shutdown())
+
+        mock_init_redis_pool.assert_called_once_with(
+            settings.redis_url,
+            socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+            socket_timeout=settings.redis_socket_timeout_seconds,
+            health_check_interval=settings.redis_health_check_interval_seconds,
+            max_connections=settings.redis_max_connections,
+        )
+        mock_init_sse_redis_pool.assert_not_called()
