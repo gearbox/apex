@@ -19,6 +19,7 @@ from litestar import Request, Response
 from litestar.enums import ScopeType
 from litestar.middleware import MiddlewareProtocol
 from litestar.status_codes import HTTP_429_TOO_MANY_REQUESTS
+from redis.exceptions import RedisError
 
 from src.api.schemas.errors import ErrorEnvelope
 from src.core.config import Settings, get_settings
@@ -32,11 +33,29 @@ logger = structlog.get_logger(__name__)
 _limiter_storage: Storage | None = None
 
 
-def create_storage(redis_url: str | None) -> Storage:
+def create_storage(
+    redis_url: str | None,
+    *,
+    socket_connect_timeout: float = 0.25,
+    socket_timeout: float = 0.05,
+    health_check_interval: float = 30.0,
+) -> Storage:
     """Create limits storage backend.
 
     Args:
         redis_url: Redis connection string, or None for in-memory.
+        socket_connect_timeout: Forwarded to the underlying redis client.
+            Should match `Settings.redis_socket_connect_timeout_seconds` —
+            this is a second, independent Redis client from the shared pool
+            in src/core/redis.py, and without an explicit bound it has no
+            timeout at all, stalling auth requests until the OS-level TCP
+            timeout. These defaults are only a fallback for callers that
+            don't pass explicit values — `init_rate_limiter` always passes
+            the `Settings`-derived values, so there is one source of truth.
+        socket_timeout: Forwarded to the underlying redis client. Should
+            match `Settings.redis_socket_timeout_seconds`.
+        health_check_interval: Forwarded to the underlying redis client.
+            Should match `Settings.redis_health_check_interval_seconds`.
 
     Returns:
         Storage instance (Redis or Memory).
@@ -47,7 +66,13 @@ def create_storage(redis_url: str | None) -> Storage:
     # in this project's dependency tree. redispy (the plain `redis` package,
     # already a dependency and used elsewhere via redis.asyncio — see
     # src/core/redis.py) has async support and works as a drop-in.
-    return RedisStorage(redis_url, implementation="redispy")
+    return RedisStorage(
+        redis_url,
+        implementation="redispy",
+        socket_connect_timeout=socket_connect_timeout,
+        socket_timeout=socket_timeout,
+        health_check_interval=health_check_interval,
+    )
 
 
 def init_rate_limiter(settings: Settings) -> None:
@@ -57,7 +82,15 @@ def init_rate_limiter(settings: Settings) -> None:
         settings: Application settings.
     """
     global _limiter_storage
-    _limiter_storage = create_storage(settings.redis_url)
+    # Same timeouts as the shared redis-py pool (src/core/redis.py) — this is
+    # a second, independent Redis client and without these it has no bound at
+    # all, stalling auth requests until the OS-level TCP timeout.
+    _limiter_storage = create_storage(
+        settings.redis_url,
+        socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+        health_check_interval=settings.redis_health_check_interval_seconds,
+    )
     logger.info("rate_limiter.initialized", backend="redis" if settings.redis_url else "memory")
 
     if settings.trusted_ip_header == "none" and not settings.debug:
@@ -186,9 +219,26 @@ class RateLimitMiddleware(MiddlewareProtocol):
         # We form a unique key using the route and the IP
         key = f"rate_limit:{route_key}:{ip}"
 
-        # hit() atomically increments and returns False when limit is exceeded
-        allowed = await limiter.hit(limit_item, key)
-        stats = await limiter.get_window_stats(limit_item, key)
+        # Fail OPEN on storage trouble, matching TokenRevocationService's
+        # documented posture (issue #142 F4). Rate limiting is abuse control,
+        # not authorization: briefly admitting unthrottled traffic during a
+        # Redis outage is strictly better than 500-ing every login. Logged at
+        # warning so the degradation is visible rather than silent. Narrow
+        # catch — a `limits` programming error or a bad limit string must
+        # still surface, so only the two storage calls are wrapped, not the
+        # rest of the request.
+        try:
+            # hit() atomically increments and returns False when limit is exceeded
+            allowed = await limiter.hit(limit_item, key)
+            stats = await limiter.get_window_stats(limit_item, key)
+        except (RedisError, OSError) as exc:
+            logger.warning(
+                "rate_limit.storage_error",
+                route=route_key,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return await self.app(scope, receive, send)
 
         limit = limit_item.amount
         remaining = max(0, stats.remaining)

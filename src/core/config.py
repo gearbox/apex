@@ -770,6 +770,31 @@ class Settings(BaseSettings):
             "produce a spurious TokenRevocationService failure mid-request."
         ),
     )
+    redis_max_connections: int = Field(
+        default=50,
+        gt=0,
+        le=1000,
+        description=(
+            "Upper bound on the shared Redis pool, which serves only short-lived operations "
+            "(token revocation, worker leases, SSE tickets, currency cache). 50 is ample "
+            "because nothing holds a connection across requests - SSE subscriptions use "
+            "REDIS_SSE_MAX_CONNECTIONS instead. Effective total per host is this value times "
+            "ASGI_WORKERS; check against Redis maxclients before raising."
+        ),
+    )
+    redis_sse_max_connections: int = Field(
+        default=500,
+        gt=0,
+        le=10000,
+        description=(
+            "Upper bound on the SSE Redis pool. EventBus.subscribe holds one connection per "
+            "connected client for the life of the stream, so this is the ceiling on "
+            "concurrent SSE clients per process. Size it at expected peak concurrent "
+            "streams plus headroom; effective total per host is this value times "
+            "ASGI_WORKERS. Exhaustion surfaces as a failed SSE connection - it can no "
+            "longer affect authentication or leader election."
+        ),
+    )
     trusted_ip_header: Literal["cf-connecting-ip", "x-forwarded-for", "none"] = Field(
         default="none",
         description=(

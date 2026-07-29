@@ -221,12 +221,33 @@ class TestEventBusDisabledMode:
 
 class TestEventBusSubscribe:
     @patch("src.api.services.event_bus.get_redis_client")
+    @patch("src.api.services.event_bus.get_sse_redis_client")
+    async def test_subscribe_uses_sse_pool_not_shared_pool(
+        self,
+        mock_get_sse_client: MagicMock,
+        mock_get_client: MagicMock,
+        event_bus: EventBus,
+        user_id,
+    ) -> None:
+        """subscribe() must check out its connection from the dedicated SSE
+        pool, never the shared pool used by TokenRevocationService/LeaderLease
+        (R3) — a long-lived SSE subscriber on the shared pool can exhaust it."""
+        pubsub = _mock_pubsub([None])
+        mock_get_sse_client.return_value = _mock_client(pubsub)
+
+        async for _ in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+            break
+
+        mock_get_sse_client.assert_called_once()
+        mock_get_client.assert_not_called()
+
+    @patch("src.api.services.event_bus.get_sse_redis_client")
     async def test_subscribe_yields_decoded_envelope(
-        self, mock_get_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
     ) -> None:
         wire = _make_wire(job_status_payload)
         pubsub = _mock_pubsub([{"type": "message", "channel": f"user:{user_id}", "data": wire}])
-        mock_get_client.return_value = _mock_client(pubsub)
+        mock_get_sse_client.return_value = _mock_client(pubsub)
 
         results = []
         async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
@@ -237,13 +258,13 @@ class TestEventBusSubscribe:
         assert len(results) == 1
         assert results[0].event_type == EventType.JOB_STATUS_CHANGED
 
-    @patch("src.api.services.event_bus.get_redis_client")
+    @patch("src.api.services.event_bus.get_sse_redis_client")
     async def test_subscribe_yields_none_on_get_message_timeout(
-        self, mock_get_client: MagicMock, event_bus: EventBus, user_id
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id
     ) -> None:
         """get_message returning None (no message in interval) → subscribe yields None."""
         pubsub = _mock_pubsub([None])
-        mock_get_client.return_value = _mock_client(pubsub)
+        mock_get_sse_client.return_value = _mock_client(pubsub)
 
         results = []
         async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
@@ -252,13 +273,13 @@ class TestEventBusSubscribe:
 
         assert results == [None]
 
-    @patch("src.api.services.event_bus.get_redis_client")
+    @patch("src.api.services.event_bus.get_sse_redis_client")
     async def test_subscribe_get_message_called_with_heartbeat_interval(
-        self, mock_get_client: MagicMock, event_bus: EventBus, user_id
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id
     ) -> None:
         """get_message must be called with timeout=heartbeat_interval."""
         pubsub = _mock_pubsub([None])
-        mock_get_client.return_value = _mock_client(pubsub)
+        mock_get_sse_client.return_value = _mock_client(pubsub)
 
         async for _ in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
             break
@@ -267,9 +288,9 @@ class TestEventBusSubscribe:
             ignore_subscribe_messages=True, timeout=_HEARTBEAT_INTERVAL
         )
 
-    @patch("src.api.services.event_bus.get_redis_client")
+    @patch("src.api.services.event_bus.get_sse_redis_client")
     async def test_subscribe_skips_decode_errors_and_continues(
-        self, mock_get_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
     ) -> None:
         """A bad message is skipped and the next good message is still yielded."""
         wire = _make_wire(job_status_payload)
@@ -279,7 +300,7 @@ class TestEventBusSubscribe:
                 {"type": "message", "channel": f"user:{user_id}", "data": wire},
             ]
         )
-        mock_get_client.return_value = _mock_client(pubsub)
+        mock_get_sse_client.return_value = _mock_client(pubsub)
 
         results = []
         async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
@@ -290,9 +311,9 @@ class TestEventBusSubscribe:
         assert len(results) == 1
         assert results[0].event_type == EventType.JOB_STATUS_CHANGED
 
-    @patch("src.api.services.event_bus.get_redis_client")
+    @patch("src.api.services.event_bus.get_sse_redis_client")
     async def test_subscribe_skips_non_message_type(
-        self, mock_get_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id, job_status_payload
     ) -> None:
         """Messages with type != 'message' are skipped."""
         wire = _make_wire(job_status_payload)
@@ -302,7 +323,7 @@ class TestEventBusSubscribe:
                 {"type": "message", "channel": f"user:{user_id}", "data": wire},
             ]
         )
-        mock_get_client.return_value = _mock_client(pubsub)
+        mock_get_sse_client.return_value = _mock_client(pubsub)
 
         results = []
         async for item in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
@@ -312,12 +333,12 @@ class TestEventBusSubscribe:
 
         assert len(results) == 1
 
-    @patch("src.api.services.event_bus.get_redis_client")
+    @patch("src.api.services.event_bus.get_sse_redis_client")
     async def test_subscribe_unsubscribes_and_closes_on_exit(
-        self, mock_get_client: MagicMock, event_bus: EventBus, user_id
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id
     ) -> None:
         pubsub = _mock_pubsub([None])
-        mock_get_client.return_value = _mock_client(pubsub)
+        mock_get_sse_client.return_value = _mock_client(pubsub)
 
         gen = event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL)
         async for _ in gen:
@@ -327,12 +348,12 @@ class TestEventBusSubscribe:
 
         pubsub.unsubscribe.assert_awaited_once()
         pubsub.aclose.assert_awaited_once()
-        # shared pool client must NOT be closed
-        mock_get_client.return_value.aclose.assert_not_awaited()
+        # SSE pool client itself must NOT be closed (only the pubsub is)
+        mock_get_sse_client.return_value.aclose.assert_not_awaited()
 
-    @patch("src.api.services.event_bus.get_redis_client")
+    @patch("src.api.services.event_bus.get_sse_redis_client")
     async def test_subscribe_unsubscribes_on_cancellation(
-        self, mock_get_client: MagicMock, event_bus: EventBus, user_id
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id
     ) -> None:
         """Cleanup (unsubscribe + aclose) runs even when the generator is cancelled."""
 
@@ -344,7 +365,7 @@ class TestEventBusSubscribe:
 
         pubsub = AsyncMock()
         pubsub.get_message = AsyncMock(side_effect=cancel_on_second)
-        mock_get_client.return_value = _mock_client(pubsub)
+        mock_get_sse_client.return_value = _mock_client(pubsub)
 
         with pytest.raises(asyncio.CancelledError):
             async for _ in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
@@ -352,3 +373,27 @@ class TestEventBusSubscribe:
 
         pubsub.unsubscribe.assert_awaited_once()
         pubsub.aclose.assert_awaited_once()
+
+    @patch("src.api.services.event_bus.get_sse_redis_client")
+    async def test_subscribe_logs_pool_exhausted_on_connection_error(
+        self, mock_get_sse_client: MagicMock, event_bus: EventBus, user_id
+    ) -> None:
+        """ConnectionError from pubsub subscribe (SSE pool exhaustion) is logged
+        as event_bus.pool_exhausted and re-raised — never silently swallowed."""
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        mock_client = AsyncMock()
+        mock_pubsub = MagicMock()
+        mock_pubsub.subscribe = AsyncMock(side_effect=RedisConnectionError("Too many connections"))
+        mock_client.pubsub = MagicMock(return_value=mock_pubsub)
+        mock_get_sse_client.return_value = mock_client
+
+        with (
+            patch("src.api.services.event_bus.logger") as mock_logger,
+            pytest.raises(RedisConnectionError),
+        ):
+            async for _ in event_bus.subscribe(user_id, heartbeat_interval=_HEARTBEAT_INTERVAL):
+                pass
+
+        mock_logger.exception.assert_called_once()
+        assert mock_logger.exception.call_args[0][0] == "event_bus.pool_exhausted"

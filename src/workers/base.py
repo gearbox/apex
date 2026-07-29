@@ -72,12 +72,12 @@ class LeaderLease:
     connection promote itself to leader of every worker at once — the exact
     failure mode this class exists to prevent.
 
-    Lease keys are namespaced by deployment environment. Note this makes the
-    *leases* environment-safe, not the Redis keyspace as a whole: pub/sub
-    channels (``ops:events``, ``user:*``, ``system:broadcast``) and the
-    ``rate_limit:``, ``model_rate_limit:``, ``sse_ticket:`` and
-    ``vastai_terminal_state:`` key families are still global. Staging and
-    production MUST NOT share a Redis instance until those are namespaced too.
+    Lease keys carry a deployment-environment prefix (see ``lease_key``). Note
+    this is defensive only: every environment runs its own Redis container and
+    no shared instance is planned, so in a correct deployment the prefix never
+    distinguishes anything. The rest of the Redis keyspace - pub/sub channels
+    and the ``rate_limit:``/``sse_ticket:``/``vastai_terminal_state:`` families
+    - is deliberately unnamespaced for the same reason.
     """
 
     def __init__(self, *, key: str, ttl_seconds: int, redis_enabled: bool) -> None:

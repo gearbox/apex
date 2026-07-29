@@ -13,13 +13,14 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from src.api.schemas.events import (
     BalanceUpdatedPayload,
     EventEnvelope,
     EventType,
 )
-from src.core.redis import get_redis_client
+from src.core.redis import get_redis_client, get_sse_redis_client
 from src.core.uid import new_id
 
 if TYPE_CHECKING:
@@ -166,17 +167,28 @@ class EventBus:
         """
         if not self._enabled:
             raise RuntimeError("EventBus is disabled (no Redis configured) — cannot subscribe")
-        client = get_redis_client()
-        pubsub: PubSub = client.pubsub()
+        # Dedicated SSE pool: this connection is held for the life of the
+        # stream and must not be able to exhaust the auth hot path's pool.
+        client = get_sse_redis_client()
         user_channel = self.user_channel(user_id)
 
         try:
+            pubsub: PubSub = client.pubsub()
             await pubsub.subscribe(user_channel, self.SYSTEM_CHANNEL)
-            logger.info(
-                "event_bus.subscribed",
-                channels=[user_channel, self.SYSTEM_CHANNEL],
-            )
+        except RedisConnectionError:
+            # Most likely cause: the SSE pool's max_connections is exhausted.
+            # redis-py raises ConnectionError rather than blocking — see
+            # src/core/redis.py module docstring. Logged at error so hitting
+            # the ceiling is unmistakable rather than a sporadic client-side
+            # stream failure.
+            logger.exception("event_bus.pool_exhausted", user_id=str(user_id))
+            raise
+        logger.info(
+            "event_bus.subscribed",
+            channels=[user_channel, self.SYSTEM_CHANNEL],
+        )
 
+        try:
             while True:
                 message = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=heartbeat_interval
