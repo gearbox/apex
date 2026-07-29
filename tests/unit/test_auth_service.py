@@ -7,8 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+import structlog.testing
 
 from src.api.security import JWTConfig, JWTService, PasswordService
+from src.api.security.jwt import TokenPayload
 from src.api.services.auth import (
     AuthService,
     EmailAlreadyExistsError,
@@ -539,6 +541,115 @@ class TestAuthServiceLogout:
         result = await auth_service.logout("invalid_token")
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_logout_with_payload_locks_user_row_before_denylisting_jti(
+        self,
+        mock_repository: AsyncMock,
+        jwt_service: JWTService,
+        password_service: PasswordService,
+    ) -> None:
+        """E1 — the jti denylist write must be serialized behind the same
+        row lock every bulk revocation takes: without it, a mutating
+        request holding that lock can still commit after this logout
+        returns, because the Redis write was never ordered against it."""
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.id = uuid4()
+        mock_token.user_id = uuid4()
+        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.revoke_refresh_token.return_value = True
+
+        events: list[str] = []
+
+        async def _fake_lock(user_id: object) -> None:  # noqa: ARG001
+            events.append("locked")
+
+        mock_repository.lock_user_for_session_change = AsyncMock(side_effect=_fake_lock)
+
+        token_revocation = AsyncMock()
+
+        async def _fake_revoke_token(jti: str, exp: int) -> bool:  # noqa: ARG001
+            events.append("denylisted")
+            return True
+
+        token_revocation.revoke_token.side_effect = _fake_revoke_token
+
+        service = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            token_revocation_service=token_revocation,
+        )
+
+        user_id = uuid4()
+        payload = TokenPayload(sub=str(user_id), exp=9999999999, iat=0, jti="jti-x")
+
+        result = await service.logout("valid_token", token_payload=payload)
+
+        assert result is True
+        assert events == ["locked", "denylisted"]
+        mock_repository.lock_user_for_session_change.assert_awaited_once_with(user_id)
+        token_revocation.revoke_token.assert_awaited_once_with("jti-x", payload.exp)
+
+    @pytest.mark.asyncio
+    async def test_logout_without_payload_takes_no_lock(
+        self,
+        auth_service: AuthService,
+        mock_repository: AsyncMock,
+    ) -> None:
+        """Logout is reachable with an expired or absent bearer — only lock
+        when a payload was decoded (there's no jti/sub to act on
+        otherwise), and an unauthenticated logout must not pay for a row
+        lock it has no use for."""
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.id = uuid4()
+        mock_token.user_id = uuid4()
+        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.revoke_refresh_token.return_value = True
+
+        result = await auth_service.logout("valid_token")
+
+        assert result is True
+        mock_repository.revoke_refresh_token.assert_called_once()
+        mock_repository.lock_user_for_session_change.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_logout_jti_denylist_failure_still_logs_and_returns_success(
+        self,
+        mock_repository: AsyncMock,
+        jwt_service: JWTService,
+        password_service: PasswordService,
+    ) -> None:
+        """A Redis write failure (as opposed to Redis being unconfigured)
+        is a genuine degradation worth an error log, but must not fail the
+        logout — the refresh-token revocation is the primary guarantee and
+        already succeeded."""
+        mock_token = MagicMock(spec=RefreshToken)
+        mock_token.id = uuid4()
+        mock_token.user_id = uuid4()
+        mock_repository.get_refresh_token_by_hash.return_value = mock_token
+        mock_repository.revoke_refresh_token.return_value = True
+
+        token_revocation = AsyncMock()
+        token_revocation.revoke_token.return_value = False  # write failed
+
+        service = AuthService(
+            repository=mock_repository,
+            jwt_service=jwt_service,
+            password_service=password_service,
+            token_revocation_service=token_revocation,
+        )
+
+        user_id = uuid4()
+        payload = TokenPayload(sub=str(user_id), exp=9999999999, iat=0, jti="jti-y")
+
+        with structlog.testing.capture_logs() as logs:
+            result = await service.logout("valid_token", token_payload=payload)
+
+        assert result is True
+        mock_repository.lock_user_for_session_change.assert_awaited_once_with(user_id)
+        events = [log["event"] for log in logs]
+        assert "auth.jti_denylist_failed" in events
 
     @pytest.mark.asyncio
     async def test_logout_all(

@@ -519,7 +519,6 @@ class TestAuthControllerCookies:
             data=RefreshTokenRequest(refresh_token="tok"),
             auth_service=mock_auth,
             jwt_service=jwt_service,
-            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
             product_config=_make_product_config(),
             settings=settings,
         )

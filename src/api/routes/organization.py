@@ -223,13 +223,18 @@ class OrganizationController(Controller):
         (src/api/security/revocation_recheck.py) — membership grants
         persistent access to a shared, org-billed token account, the same
         durable-side-effect concern that first motivated this pattern for
-        push subscriptions.
+        push subscriptions. ``also_lock`` the new member (``data.user_id``,
+        not the path's ``org_id``): the membership INSERT references
+        ``user_id`` and takes a ``FOR KEY SHARE`` lock on that row via the
+        FK, which deadlocks against a mirrored add the same way an explicit
+        ``UPDATE`` does.
         """
         await recheck_revocation_or_raise(
             session=session,
             actor_id=current_user_id,
             token_payload=token_payload,
             token_revocation_service=token_revocation_service,
+            also_lock=(data.user_id,),
         )
         member = await organization_service.add_member(
             org_id,
@@ -313,13 +318,19 @@ class OrganizationController(Controller):
         Re-checks revocation of the acting owner's own session first — see
         ``add_member`` above and ``src/api/security/revocation_recheck.py``
         for why: a role change persistently escalates or demotes access to
-        the shared org-billed account.
+        the shared org-billed account. No ``also_lock`` here: unlike
+        ``add_member``, ``OrganizationService.change_role`` only assigns
+        ``member.role`` on an already-loaded ``OrganizationMember`` and
+        flushes — the FK column (``user_id``) is unchanged, so SQLAlchemy
+        emits an ``UPDATE`` of the changed column only and never re-checks
+        the FK. Nothing here takes a second lock on a ``users`` row.
         """
         await recheck_revocation_or_raise(
             session=session,
             actor_id=current_user_id,
             token_payload=token_payload,
             token_revocation_service=token_revocation_service,
+            # no also_lock: change_role only updates the role column, no users-row lock downstream
         )
         member = await organization_service.change_role(
             org_id,

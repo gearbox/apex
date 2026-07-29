@@ -98,6 +98,10 @@ class AdminManagementController(Controller):
         — a persistent role grant must not survive a revocation of the
         credentials that authorized it, the same durable-side-effect
         concern that first motivated this pattern for push subscriptions.
+        ``also_lock`` the target: ``update_user_admin`` takes an explicit
+        row-exclusive lock on the target's ``users`` row, which deadlocks
+        against a mirrored grant (two superadmins granting each other a
+        role concurrently) unless both rows are locked in one sorted pass.
         """
         try:
             await recheck_revocation_or_raise(
@@ -105,6 +109,7 @@ class AdminManagementController(Controller):
                 actor_id=superadmin.id,
                 token_payload=token_payload,
                 token_revocation_service=token_revocation_service,
+                also_lock=(user_id,),
             )
             await admin_mgmt.grant_role(
                 actor_id=superadmin.id,
@@ -170,7 +175,11 @@ class AdminManagementController(Controller):
 
         Re-checks revocation of the granting superadmin's own session first
         — see ``grant_role`` above and
-        ``src/api/security/revocation_recheck.py`` for why.
+        ``src/api/security/revocation_recheck.py`` for why. ``also_lock``
+        the target: the permission-grant INSERT references ``user_id`` and
+        takes a ``FOR KEY SHARE`` lock on that row via the FK, which
+        deadlocks against a mirrored grant the same way an explicit
+        ``UPDATE`` does.
         """
         try:
             await recheck_revocation_or_raise(
@@ -178,6 +187,7 @@ class AdminManagementController(Controller):
                 actor_id=superadmin.id,
                 token_payload=token_payload,
                 token_revocation_service=token_revocation_service,
+                also_lock=(user_id,),
             )
             await admin_mgmt.grant_permission(
                 actor_id=superadmin.id,

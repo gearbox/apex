@@ -11,7 +11,7 @@ from src.core.enums import JobStatus, RefreshTokenRevocationReason, Subscription
 from src.db.models import GenerationJob, GenerationOutput, RefreshToken, User, UserImage
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -263,6 +263,28 @@ class UserRepository:
             user_id: User whose row to lock.
         """
         await self._session.execute(select(User.id).where(User.id == user_id).with_for_update())
+
+    async def lock_users_for_session_change(self, user_ids: Iterable[UUID]) -> None:
+        """Lock several user rows in a deterministic (sorted) order.
+
+        Handlers that lock the acting user and then write a row referencing
+        a *different* user take a second lock on that user — explicitly
+        (``UPDATE users``) or implicitly (a ``FOR KEY SHARE`` foreign-key
+        check on INSERT). Two such requests with mirrored actor/target pairs
+        form a lock cycle and Postgres aborts one as a deadlock. Locking the
+        full set up front, ordered by UUID, means every request takes them
+        in the same sequence and no cycle can form.
+
+        Duplicates collapse; a single id behaves exactly like
+        ``lock_user_for_session_change``. The user-row -> refresh-token-row
+        ordering documented there still applies to all of these.
+
+        Args:
+            user_ids: Every user row the caller's transaction will touch —
+                deduplicated and locked in ascending UUID order.
+        """
+        for user_id in sorted(set(user_ids)):
+            await self.lock_user_for_session_change(user_id)
 
     async def revoke_all_refresh_tokens(self, user_id: UUID) -> int:
         """Revoke all active refresh tokens for a user.

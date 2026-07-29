@@ -51,17 +51,28 @@ revocation's snapshot in the other direction, observing a stale epoch — see
 ``TokenRevocationService`` F2, where the lock-free read is documented as a
 backstop precisely because it can't close this gap alone.
 
-Lock ordering / deadlock risk: this acquires only the *acting* user's own
-row lock, and never a second lock afterward — it cannot invert the
-documented user-row -> refresh-token-row ordering
-(``UserRepository.lock_user_for_session_change``). Call it as the first
-lock-acquiring operation in the handler's transaction, before any other
-writes, and do not acquire the same user's row lock again afterward in the
-same request.
+Lock ordering / deadlock risk: this helper is frequently NOT the only lock
+a handler takes. Any handler that writes a row referencing another user
+also locks that user's row — explicitly (``UPDATE users``) or implicitly
+(a ``FOR KEY SHARE`` foreign-key check on INSERT, e.g.
+``organization_members.user_id`` or ``admin_permission_grants.user_id``).
+Two requests with mirrored actor/target pairs then form a lock cycle.
+
+Therefore: pass every user row the handler will touch via ``also_lock``, and
+call this before any write. All of them are then acquired in one sorted
+pass and no cycle can form. Locking one row (``push.py``, where actor ==
+target) is the degenerate case, not the rule. The user-row ->
+refresh-token-row ordering documented on
+``UserRepository.lock_user_for_session_change`` still applies.
 
 Fails open on Redis unavailability, same as every other revocation check
 in this codebase (``TokenRevocationService`` D3): if ``is_revoked`` can't
 reach Redis, the write proceeds rather than blocking on a cache outage.
+``is_revoked`` reads both the bulk epoch and the per-jti denylist, and both
+are now serialized by this lock: single-device logout's jti denylist write
+(``AuthService.logout``) also takes ``lock_user_for_session_change`` before
+writing to Redis, so the guarantee and the check no longer diverge — see
+that method's docstring.
 """
 
 from __future__ import annotations
@@ -73,6 +84,7 @@ from litestar.exceptions import NotAuthorizedException
 from src.db.repositories import UserRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,15 +99,16 @@ async def recheck_revocation_or_raise(
     actor_id: UUID,
     token_payload: TokenPayload,
     token_revocation_service: TokenRevocationService,
+    also_lock: Iterable[UUID] = (),
 ) -> None:
-    """Lock the acting user's row and re-check revocation before a durable write commits.
+    """Lock every touched user row and re-check revocation before a durable write commits.
 
     Must be called before the handler's mutating write (and, transitively,
     before ``session.commit()``) — see the module docstring for why
     ordering and lock scope matter.
 
     Args:
-        session: The request's transaction. The row lock lives until this
+        session: The request's transaction. The row locks live until this
             transaction commits or rolls back.
         actor_id: The user whose session might have been revoked — the
             caller of the endpoint, not necessarily the target of the
@@ -104,11 +117,19 @@ async def recheck_revocation_or_raise(
         token_payload: The decoded access token the current request
             authenticated with (``get_current_token_payload``).
         token_revocation_service: Shared revocation checker.
+        also_lock: Every other user row the handler will write or
+            reference by foreign key — including rows locked implicitly by
+            an FK check on INSERT (e.g. an ``organization_members`` or
+            ``admin_permission_grants`` insert referencing ``user_id``).
+            Locked together with ``actor_id`` in one sorted pass so mirrored
+            actor/target requests can't form a deadlock cycle. Defaults to
+            empty, which collapses to locking only ``actor_id`` (the
+            ``push.py`` case, where actor == target).
 
     Raises:
         NotAuthorizedException: The token was revoked (bulk epoch or
             per-jti denylist) after the request started.
     """
-    await UserRepository(session).lock_user_for_session_change(actor_id)
+    await UserRepository(session).lock_users_for_session_change((actor_id, *also_lock))
     if await token_revocation_service.is_revoked(token_payload):
         raise NotAuthorizedException(detail="Session has been revoked")

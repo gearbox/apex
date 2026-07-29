@@ -99,12 +99,18 @@ class PushController(Controller):
         grants and organization membership changes) and the lock-ordering
         rule — do not add a second lock acquisition to this handler without
         reading it first.
+
+        No ``also_lock`` here: actor and target are the same user
+        (``current_user_id``), so the FK's ``FOR KEY SHARE`` lands on the
+        row this same transaction already holds ``FOR UPDATE`` — the set
+        collapses to one id.
         """
         await recheck_revocation_or_raise(
             session=session,
             actor_id=current_user_id,
             token_payload=token_payload,
             token_revocation_service=token_revocation_service,
+            # no also_lock: actor == target here, so the set collapses to one id
         )
         subscription = await push_service.upsert_subscription(
             user_id=current_user_id,

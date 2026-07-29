@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import structlog
 
@@ -27,10 +28,9 @@ from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
-    from uuid import UUID
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.security.jwt import TokenPayload
     from src.api.services.email_verification import EmailVerificationService
     from src.api.services.token_revocation import TokenRevocationService
     from src.db.models import User
@@ -444,27 +444,59 @@ class AuthService:
 
         return tokens, stored_token.user_id
 
-    async def logout(self, refresh_token: str) -> bool:
-        """Logout by revoking the refresh token.
+    async def logout(
+        self,
+        refresh_token: str,
+        *,
+        token_payload: TokenPayload | None = None,
+    ) -> bool:
+        """Revoke the refresh token and, when an access token was presented,
+        deny-list its jti.
+
+        The jti write takes ``lock_user_for_session_change`` first, for the
+        same reason every bulk revocation does: a mutating request that
+        passed ``recheck_revocation_or_raise`` holds that row lock until it
+        commits, so this blocks behind it and the two outcomes are
+        deterministic. Without the lock the Redis write cannot be observed
+        by an in-flight mutation and the grant lands after logout returns —
+        see src/api/security/revocation_recheck.py.
+
+        Deliberately unchanged: logout still does **not** call
+        ``revoke_user_sessions``. The lock serializes single-device logout;
+        it must not widen it into a bulk revocation.
 
         Args:
             refresh_token: Refresh token to revoke.
+            token_payload: The decoded access token presented alongside the
+                refresh token, if any. Only present when the caller had a
+                valid, unexpired bearer token — logout is reachable with an
+                expired or absent one, and only then is there a jti (and a
+                ``sub`` to lock) to act on.
 
         Returns:
-            True if token was revoked, False if not found.
+            True if the refresh token was revoked, False if not found.
         """
         token_hash = hash_token(refresh_token)
         stored_token = await self._repo.get_refresh_token_by_hash(token_hash)
 
-        if stored_token is None:
-            return False
+        revoked = False
+        if stored_token is not None:
+            await self._repo.revoke_refresh_token(
+                stored_token.id, reason=RefreshTokenRevocationReason.SINGLE_LOGOUT
+            )
+            logger.debug("auth.logged_out", user_id=str(stored_token.user_id))
+            revoked = True
 
-        await self._repo.revoke_refresh_token(
-            stored_token.id, reason=RefreshTokenRevocationReason.SINGLE_LOGOUT
-        )
-        logger.debug("auth.logged_out", user_id=str(stored_token.user_id))
+        if token_payload is not None:
+            await self._repo.lock_user_for_session_change(UUID(token_payload.sub))
+            if not await self._token_revocation.revoke_token(token_payload.jti, token_payload.exp):
+                # Redis is configured but the write failed — a genuine
+                # degradation, not the documented Redis-unset no-op (F5).
+                # Logout still succeeds: the refresh token is already
+                # revoked above, which is the primary guarantee.
+                logger.error("auth.jti_denylist_failed", jti=token_payload.jti)
 
-        return True
+        return revoked
 
     async def logout_all(self, user_id: UUID) -> int:
         """Logout from all devices by revoking all tokens.

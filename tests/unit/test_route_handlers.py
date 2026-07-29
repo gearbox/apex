@@ -1577,7 +1577,6 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = None
         jwt_service = MagicMock()
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1585,26 +1584,27 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
         assert response.status_code == 200
         assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
-        # No Authorization header presented — nothing to denylist.
+        # No Authorization header presented — nothing to decode or denylist.
         jwt_service.decode_access_token.assert_not_called()
-        token_revocation_service.revoke_token.assert_not_called()
+        auth_service.logout.assert_awaited_once_with("ref", token_payload=None)
 
-    async def test_logout_with_bearer_denylists_presenting_token_jti(self) -> None:
-        """issue #142 — POST /v1/auth/logout denylists the presenting access
-        token's own jti alongside the existing refresh-token revocation."""
+    async def test_logout_with_bearer_passes_decoded_payload_to_auth_service(self) -> None:
+        """issue #142 / review r1 E1 — the route decodes the presenting
+        access token and hands the payload to ``AuthService.logout``, which
+        now owns the jti-denylist write (and the row lock that serializes
+        it) itself — see test_auth_service.py for that behavior."""
         from src.api.routes.auth import AuthController
         from src.api.security.jwt import JWTConfig, JWTService
 
         real_jwt_service = JWTService(
             JWTConfig(secret_key="test_secret_key_for_testing_only_256bits_long")
         )
-        token, expires_at = real_jwt_service.create_access_token(uuid4(), product_id="vex")
+        token, _expires_at = real_jwt_service.create_access_token(uuid4(), product_id="vex")
         payload = real_jwt_service.decode_access_token(token)
         assert payload is not None
 
@@ -1618,7 +1618,6 @@ class TestAuthRouteHandlers:
         settings.content_cookie_secure = True
         request = MagicMock()
         request.headers.get.return_value = f"Bearer {token}"
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1626,19 +1625,15 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=real_jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
 
         assert response.status_code == 200
         assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
-        auth_service.logout.assert_awaited_once_with("ref")
-        token_revocation_service.revoke_token.assert_awaited_once_with(
-            payload.jti, int(expires_at.timestamp())
-        )
+        auth_service.logout.assert_awaited_once_with("ref", token_payload=payload)
 
-    async def test_logout_with_expired_bearer_skips_jti_denylist(self) -> None:
+    async def test_logout_with_expired_bearer_passes_no_payload(self) -> None:
         """An already-expired presenting token decodes to None — nothing to
         denylist, only the refresh token is revoked (pre-#142 behavior)."""
         from src.api.routes.auth import AuthController
@@ -1662,7 +1657,6 @@ class TestAuthRouteHandlers:
         settings.content_cookie_secure = True
         request = MagicMock()
         request.headers.get.return_value = f"Bearer {token}"
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1670,14 +1664,13 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=expired_jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
 
         assert response.status_code == 200
         assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
-        token_revocation_service.revoke_token.assert_not_called()
+        auth_service.logout.assert_awaited_once_with("ref", token_payload=None)
 
     async def test_logout_with_unknown_refresh_token_still_returns_200_with_header(self) -> None:
         """D4 — AuthService.logout returning False (unknown/already-revoked
@@ -1697,7 +1690,6 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = None
         jwt_service = MagicMock()
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1705,7 +1697,6 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
