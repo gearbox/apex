@@ -488,6 +488,12 @@ class TestAdminManagementRouteHandlers:
         svc.get_audit_log = AsyncMock(return_value=[])
         return svc
 
+    def _not_revoked_token_revocation_service(self) -> AsyncMock:
+        """A TokenRevocationService double whose is_revoked() reports "not revoked"."""
+        trs = AsyncMock()
+        trs.is_revoked = AsyncMock(return_value=False)
+        return trs
+
     async def test_list_admins_returns_list(self) -> None:
         from src.api.routes.admin_management import AdminManagementController
 
@@ -519,6 +525,8 @@ class TestAdminManagementRouteHandlers:
             session=session,
             product_id="vex",
             admin_mgmt=mgmt,
+            token_payload=MagicMock(),
+            token_revocation_service=self._not_revoked_token_revocation_service(),
         )
         assert "granted" in result["message"]
 
@@ -542,6 +550,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_grant_role_raises_validation_on_invalid_transition(self) -> None:
@@ -564,6 +574,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_grant_role_raises_not_found_on_mgmt_error(self) -> None:
@@ -586,6 +598,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_revoke_role_success(self) -> None:
@@ -695,6 +709,8 @@ class TestAdminManagementRouteHandlers:
             session=session,
             product_id="vex",
             admin_mgmt=mgmt,
+            token_payload=MagicMock(),
+            token_revocation_service=self._not_revoked_token_revocation_service(),
         )
         assert "granted" in result["message"]
 
@@ -718,6 +734,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_grant_permission_raises_not_found_on_mgmt_error(self) -> None:
@@ -740,6 +758,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_revoke_permission_success(self) -> None:
@@ -2200,6 +2220,8 @@ class TestOrganizationRouteHandlers:
         data.user_id = uuid4()
         data.role = "member"
 
+        token_revocation_service = AsyncMock()
+        token_revocation_service.is_revoked = AsyncMock(return_value=False)
         response = await OrganizationController.add_member.fn(  # type: ignore[attr-defined]
             MagicMock(),
             current_user_id=uuid4(),
@@ -2208,6 +2230,8 @@ class TestOrganizationRouteHandlers:
             session=AsyncMock(),
             organization_service=org_service,
             product_id="vex",
+            token_payload=MagicMock(),
+            token_revocation_service=token_revocation_service,
         )
         assert response.status_code == 201
 
@@ -2267,6 +2291,8 @@ class TestOrganizationRouteHandlers:
         data = MagicMock()
         data.role = "admin"
 
+        token_revocation_service = AsyncMock()
+        token_revocation_service.is_revoked = AsyncMock(return_value=False)
         response = await OrganizationController.change_member_role.fn(  # type: ignore[attr-defined]
             MagicMock(),
             current_user_id=uuid4(),
@@ -2275,6 +2301,8 @@ class TestOrganizationRouteHandlers:
             data=data,
             session=AsyncMock(),
             organization_service=org_service,
+            token_payload=MagicMock(),
+            token_revocation_service=token_revocation_service,
         )
         assert response.status_code == 200
 

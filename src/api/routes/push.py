@@ -12,7 +12,6 @@ from uuid import UUID
 
 from litestar import Controller, Response, delete, get, post
 from litestar.di import Provide
-from litestar.exceptions import NotAuthorizedException
 from litestar.status_codes import HTTP_204_NO_CONTENT, HTTP_503_SERVICE_UNAVAILABLE
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,12 +23,11 @@ from src.api.schemas.push import (
     PushSubscriptionResponse,
     VapidPublicKeyResponse,
 )
-from src.api.security import auth_guard
+from src.api.security import auth_guard, recheck_revocation_or_raise
 from src.api.security.jwt import TokenPayload
 from src.api.services.push import PushService
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import get_settings
-from src.db.repositories import UserRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -89,30 +87,25 @@ class PushController(Controller):
         user row that conflicts with the ``FOR UPDATE`` every bulk-revocation
         path takes via ``lock_user_for_session_change`` — meaning a revoked
         request could still block until the bulk transaction commits and then
-        insert anyway, leaving the row the revocation meant to delete. Taking
-        the same lock explicitly, then re-checking revocation, makes both
-        interleavings safe: if this insert wins the lock, the bulk path's
-        subsequent snapshot (taken after it acquires the lock) includes the
-        new row and deletes it; if the bulk path wins, this request blocks
-        until it commits, then observes the epoch it just wrote and 401s
-        instead of inserting.
-
-        Lock ordering: this handler acquires the user row only (never a
-        refresh-token row afterward), so it cannot invert the user-row ->
-        refresh-token-row ordering documented on
-        ``lock_user_for_session_change`` — no deadlock risk. Do not add a
-        second lock acquisition to this handler without re-reading that
-        ordering rule first.
-
-        Fails open on Redis unavailability, consistent with every other
-        revocation check in this codebase (see TokenRevocationService's
-        module docstring, D3): if ``is_revoked`` can't reach Redis, the
-        subscription is created anyway rather than blocking registration on
-        a cache outage. Do not change this to fail-closed.
+        insert anyway, leaving the row the revocation meant to delete.
+        ``recheck_revocation_or_raise`` (src/api/security/revocation_recheck.py)
+        takes the same lock explicitly, then re-checks revocation, making
+        both interleavings safe: if this insert wins the lock, the bulk
+        path's subsequent snapshot (taken after it acquires the lock)
+        includes the new row and deletes it; if the bulk path wins, this
+        request blocks until it commits, then observes the epoch it just
+        wrote and 401s instead of inserting. See that helper's module
+        docstring for the general pattern (also used by admin role/permission
+        grants and organization membership changes) and the lock-ordering
+        rule — do not add a second lock acquisition to this handler without
+        reading it first.
         """
-        await UserRepository(session).lock_user_for_session_change(current_user_id)
-        if await token_revocation_service.is_revoked(token_payload):
-            raise NotAuthorizedException(detail="Session has been revoked")
+        await recheck_revocation_or_raise(
+            session=session,
+            actor_id=current_user_id,
+            token_payload=token_payload,
+            token_revocation_service=token_revocation_service,
+        )
         subscription = await push_service.upsert_subscription(
             user_id=current_user_id,
             product_id=product_id,

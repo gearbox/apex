@@ -14,7 +14,7 @@ from litestar.di import Provide
 from litestar.exceptions import NotFoundException, PermissionDeniedException, ValidationException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies.auth import get_current_superadmin_user
+from src.api.dependencies.auth import get_current_superadmin_user, get_current_token_payload
 from src.api.schemas.admin import (
     AdminRoleResponse,
     AuditLogEntry,
@@ -22,7 +22,8 @@ from src.api.schemas.admin import (
     GrantRoleRequest,
 )
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
-from src.api.security import auth_guard
+from src.api.security import auth_guard, recheck_revocation_or_raise
+from src.api.security.jwt import TokenPayload
 from src.api.services.admin_management import (
     AdminManagementError,
     AdminManagementService,
@@ -30,6 +31,7 @@ from src.api.services.admin_management import (
     LastSuperadminError,
     SelfModificationError,
 )
+from src.api.services.token_revocation import TokenRevocationService
 from src.db.models import User
 
 if TYPE_CHECKING:
@@ -46,6 +48,7 @@ class AdminManagementController(Controller):
     guards = [auth_guard]  # noqa: RUF012
     dependencies = {  # noqa: RUF012
         "superadmin": Provide(get_current_superadmin_user),
+        "token_payload": Provide(get_current_token_payload),
         "admin_mgmt": Provide(AdminManagementService, sync_to_thread=False),
     }
 
@@ -85,9 +88,24 @@ class AdminManagementController(Controller):
         session: AsyncSession,
         product_id: str,
         admin_mgmt: AdminManagementService,
+        token_payload: TokenPayload,
+        token_revocation_service: TokenRevocationService,
     ) -> dict[str, str]:
-        """Grant admin or superadmin role to a user."""
+        """Grant admin or superadmin role to a user.
+
+        Re-checks revocation of the *granting* superadmin's own session
+        immediately before committing (src/api/security/revocation_recheck.py)
+        — a persistent role grant must not survive a revocation of the
+        credentials that authorized it, the same durable-side-effect
+        concern that first motivated this pattern for push subscriptions.
+        """
         try:
+            await recheck_revocation_or_raise(
+                session=session,
+                actor_id=superadmin.id,
+                token_payload=token_payload,
+                token_revocation_service=token_revocation_service,
+            )
             await admin_mgmt.grant_role(
                 actor_id=superadmin.id,
                 target_user_id=user_id,
@@ -145,9 +163,22 @@ class AdminManagementController(Controller):
         session: AsyncSession,
         product_id: str,
         admin_mgmt: AdminManagementService,
+        token_payload: TokenPayload,
+        token_revocation_service: TokenRevocationService,
     ) -> dict[str, str]:
-        """Grant a specific permission to an admin user."""
+        """Grant a specific permission to an admin user.
+
+        Re-checks revocation of the granting superadmin's own session first
+        — see ``grant_role`` above and
+        ``src/api/security/revocation_recheck.py`` for why.
+        """
         try:
+            await recheck_revocation_or_raise(
+                session=session,
+                actor_id=superadmin.id,
+                token_payload=token_payload,
+                token_revocation_service=token_revocation_service,
+            )
             await admin_mgmt.grant_permission(
                 actor_id=superadmin.id,
                 target_user_id=user_id,

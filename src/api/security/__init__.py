@@ -21,6 +21,7 @@ from .jwt import (
 )
 from .password import PasswordService
 from .response_headers import CLEAR_SITE_DATA_HEADER
+from .revocation_recheck import recheck_revocation_or_raise
 from .utils import generate_token, hash_token
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "generate_token",
     "hash_token",
     "optional_auth_guard",
+    "recheck_revocation_or_raise",
 ]
