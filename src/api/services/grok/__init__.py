@@ -18,9 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.core.enums import AspectRatio, ModelType, VideoResolution
 
 from .enums import ResponseImageFormat
+from .failure_classifier import GrokFailureClassifier
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
     from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
+_failure_classifier = GrokFailureClassifier()
 
 
 class GrokClientError(Exception):
@@ -52,25 +55,95 @@ class GrokAPIError(GrokClientError):
         message: str,
         *,
         grpc_code: str | None = None,
+        failure: ProviderFailure | None = None,
     ) -> None:
         super().__init__(message)
         self.grpc_code = grpc_code
+        self.failure = failure or _failure_classifier.classify(
+            {"message": message, "grpc_code": grpc_code}
+        )
 
 
 class GrokModerationError(GrokAPIError):
     """Raised when content is rejected by moderation."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        grpc_code: str | None = None,
+        failure: ProviderFailure | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            grpc_code=grpc_code,
+            failure=failure
+            or _failure_classifier.classify(
+                {"code": "MODERATION_REJECTED", "message": message},
+                provider_request_accepted=True,
+            ),
+        )
+
 
 class GrokRateLimitError(GrokAPIError):
     """Raised when rate limited by xAI API."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        grpc_code: str | None = None,
+        failure: ProviderFailure | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            grpc_code=grpc_code,
+            failure=failure
+            or _failure_classifier.classify(
+                {"code": "RATE_LIMITED", "message": message},
+            ),
+        )
 
 
 class GrokInvalidRequestError(GrokAPIError):
     """Raised when request is invalid."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        grpc_code: str | None = None,
+        failure: ProviderFailure | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            grpc_code=grpc_code,
+            failure=failure
+            or _failure_classifier.classify(
+                {"code": "INVALID_REQUEST", "message": message},
+                provider_request_accepted=False,
+            ),
+        )
+
 
 class GrokTimeoutError(GrokAPIError):
     """Raised when request times out."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        grpc_code: str | None = None,
+        failure: ProviderFailure | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            grpc_code=grpc_code,
+            failure=failure
+            or _failure_classifier.classify(
+                {"code": "TIMEOUT", "message": message},
+            ),
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -94,7 +167,7 @@ class GrokImageResult:
     @property
     def has_url(self) -> bool:
         """Check if result has a URL."""
-        return self.url is not None
+        return bool(self.url)
 
     @property
     def has_data(self) -> bool:
@@ -263,10 +336,15 @@ class GrokClient:
                 aspect_ratio=aspect_ratio.value if aspect_ratio is not None else None,
                 image_format=image_format.value,
             )
-            return [self._parse_image_response(r, image_format) for r in responses]
 
+        except GrokClientError:
+            raise
         except Exception as e:
             raise self._convert_exception(e) from e
+        else:
+            results = [self._parse_image_response(r, image_format) for r in responses]
+            self._validate_image_results(results, image_format=image_format)
+            return results
 
     async def edit_image(
         self,
@@ -321,10 +399,15 @@ class GrokClient:
                 aspect_ratio=aspect_ratio.value if aspect_ratio is not None else None,
                 image_format=image_format.value,
             )
-            return [self._parse_image_response(r, image_format) for r in responses]
 
+        except GrokClientError:
+            raise
         except Exception as e:
             raise self._convert_exception(e) from e
+        else:
+            results = [self._parse_image_response(r, image_format) for r in responses]
+            self._validate_image_results(results, image_format=image_format)
+            return results
 
     @staticmethod
     def _validate_edit_image_inputs(
@@ -405,6 +488,8 @@ class GrokClient:
 
             return GrokVideoResult(url=response.url)
 
+        except GrokClientError:
+            raise
         except Exception as e:
             raise self._convert_exception(e) from e
 
@@ -464,6 +549,8 @@ class GrokClient:
 
             return GrokVideoJobStarted(request_id=response.request_id)
 
+        except GrokClientError:
+            raise
         except Exception as e:
             raise self._convert_exception(e) from e
 
@@ -509,14 +596,33 @@ class GrokClient:
         match response.status:
             case deferred_status.DONE:
                 if not response.HasField("response"):
-                    raise GrokAPIError("Deferred request completed but no response returned")
+                    failure = _failure_classifier.classify(
+                        {"code": "MALFORMED_RESPONSE"},
+                        provider_request_accepted=True,
+                        provider_request_id=request_id,
+                    )
+                    raise GrokAPIError(
+                        "Deferred request completed but no response returned", failure=failure
+                    )
                 video_url = response.response.video.url
                 if not video_url:
                     # respect_moderation=True means the content passed review.
                     # When False the video was flagged and the URL is withheld.
                     if not response.response.video.respect_moderation:
-                        raise GrokModerationError("Video flagged by moderation; URL not available")
-                    raise GrokAPIError("Video URL missing from completed response")
+                        failure = _failure_classifier.classify(
+                            {"code": "MODERATION_REJECTED"},
+                            provider_request_accepted=True,
+                            provider_request_id=request_id,
+                        )
+                        raise GrokModerationError(
+                            "Video flagged by moderation; URL not available", failure=failure
+                        )
+                    failure = _failure_classifier.classify(
+                        {"code": "MALFORMED_RESPONSE"},
+                        provider_request_accepted=True,
+                        provider_request_id=request_id,
+                    )
+                    raise GrokAPIError("Video URL missing from completed response", failure=failure)
                 return GrokVideoResult(url=video_url)
 
             case deferred_status.PENDING:
@@ -524,13 +630,27 @@ class GrokClient:
 
             case deferred_status.FAILED:
                 error_msg = "Video generation failed"
+                provider_error: object | None = None
                 if response.HasField("response") and response.response.HasField("error"):
                     error = response.response.error
+                    provider_error = error
                     error_msg = f"Video generation failed: [{error.code}] {error.message}"
-                raise GrokAPIError(error_msg)
+                failure = _failure_classifier.classify(
+                    provider_error or {"message": error_msg},
+                    provider_request_accepted=True,
+                    provider_request_id=request_id,
+                )
+                raise GrokClient._exception_for_failure(failure, diagnostic_message=error_msg)
 
             case deferred_status.EXPIRED:
-                raise GrokAPIError("Deferred video request expired before completion")
+                failure = _failure_classifier.classify(
+                    {"code": "PROVIDER_UNAVAILABLE"},
+                    provider_request_accepted=True,
+                    provider_request_id=request_id,
+                )
+                raise GrokAPIError(
+                    "Deferred video request expired before completion", failure=failure
+                )
 
             case _:
                 logger.warning(
@@ -614,6 +734,28 @@ class GrokClient:
             revised_prompt=revised_prompt,
         )
 
+    @staticmethod
+    def _validate_image_results(
+        results: list[GrokImageResult],
+        *,
+        image_format: ResponseImageFormat,
+    ) -> None:
+        """Reject incomplete successful image responses before storage/billing settles."""
+        if not results:
+            failure = _failure_classifier.classify(
+                {"code": "MALFORMED_RESPONSE"},
+                provider_request_accepted=True,
+            )
+            raise GrokAPIError("Image response did not contain any results", failure=failure)
+        if image_format == ResponseImageFormat.URL and any(
+            not result.has_url for result in results
+        ):
+            failure = _failure_classifier.classify(
+                {"code": "MALFORMED_RESPONSE"},
+                provider_request_accepted=True,
+            )
+            raise GrokAPIError("Image response did not contain an output URL", failure=failure)
+
     def _convert_exception(self, e: Exception) -> GrokAPIError:
         """Convert xai-sdk/gRPC exceptions to our error types.
 
@@ -634,20 +776,61 @@ class GrokClient:
             with contextlib.suppress(Exception):
                 code = code_method()
                 grpc_code = getattr(code, "name", None)
-        # Check for specific error types
-        error_lower = error_msg.lower()
+        failure = _failure_classifier.classify(e)
+        logger.info(
+            "grok.failure_classified",
+            provider=failure.provider.value,
+            failure_kind=failure.kind.value,
+            provider_status=failure.provider_status_code,
+            provider_error_code=failure.provider_error_code,
+            retryable=failure.retryable,
+            provider_request_accepted=failure.provider_request_accepted,
+        )
+        return self._exception_for_failure(
+            failure,
+            diagnostic_message=error_msg,
+            grpc_code=grpc_code,
+        )
 
-        if "resource_exhausted" in error_lower or "rate" in error_lower:
-            return GrokRateLimitError(error_msg, grpc_code=grpc_code)
-
-        if "invalid_argument" in error_lower or "invalid" in error_lower:
-            return GrokInvalidRequestError(error_msg, grpc_code=grpc_code)
-
-        if "deadline_exceeded" in error_lower or "timeout" in error_lower:
-            return GrokTimeoutError(error_msg, grpc_code=grpc_code)
-
-        # Generic API error
-        return GrokAPIError(error_msg, grpc_code=grpc_code)
+    @staticmethod
+    def _exception_for_failure(
+        failure: ProviderFailure,
+        *,
+        diagnostic_message: str,
+        grpc_code: str | None = None,
+    ) -> GrokAPIError:
+        """Build a typed Grok exception from one centralized classification."""
+        match failure.kind:
+            case ProviderFailureKind.MODERATION_REJECTED:
+                return GrokModerationError(
+                    diagnostic_message,
+                    grpc_code=grpc_code,
+                    failure=failure,
+                )
+            case ProviderFailureKind.INVALID_REQUEST:
+                return GrokInvalidRequestError(
+                    diagnostic_message,
+                    grpc_code=grpc_code,
+                    failure=failure,
+                )
+            case ProviderFailureKind.RATE_LIMITED:
+                return GrokRateLimitError(
+                    diagnostic_message,
+                    grpc_code=grpc_code,
+                    failure=failure,
+                )
+            case ProviderFailureKind.TIMEOUT:
+                return GrokTimeoutError(
+                    diagnostic_message,
+                    grpc_code=grpc_code,
+                    failure=failure,
+                )
+            case _:
+                return GrokAPIError(
+                    diagnostic_message,
+                    grpc_code=grpc_code,
+                    failure=failure,
+                )
 
 
 # -----------------------------------------------------------------------------

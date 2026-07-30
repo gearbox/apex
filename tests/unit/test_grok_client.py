@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
@@ -350,3 +351,16 @@ class TestImageGeneration:
             aspect_ratio=None,
             image_format="url",
         )
+
+    async def test_missing_output_url_is_a_malformed_provider_response(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ImageResponse(url="")]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError) as exc_info:
+            await client.generate_image(
+                "a cat",
+                model=ModelType.GROK_IMAGINE_IMAGE,
+                image_format=ResponseImageFormat.URL,
+            )
+
+        assert exc_info.value.failure.kind == ProviderFailureKind.MALFORMED_RESPONSE

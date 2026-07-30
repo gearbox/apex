@@ -15,6 +15,11 @@ import pytest
 
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
+from src.api.services.generation.provider_failures import (
+    ProviderFailure,
+    ProviderFailureKind,
+    ProviderModerationRejectedError,
+)
 from src.api.services.generation.service import (
     FeatureNotSupportedError,
     GenerationError,
@@ -23,6 +28,7 @@ from src.api.services.generation.service import (
 from src.core.enums import (
     GenerationType,
     ModelType,
+    Provider,
     Resolution,
     Sampler,
     Scheduler,
@@ -208,6 +214,44 @@ class TestRouteHandlerReturns400:
         assert response.status_code == 400
         assert response.content.error == "not_implemented"
         idempotency.fail.assert_awaited_once()
+
+    async def test_billable_provider_moderation_returns_safe_422(self) -> None:
+        failure = ProviderFailure(
+            kind=ProviderFailureKind.MODERATION_REJECTED,
+            provider=Provider.GROK,
+            sanitized_message=(
+                "The requested content was rejected by the AI provider's safety system. "
+                "Modify the prompt or input and try again."
+            ),
+            provider_request_accepted=True,
+            billable=True,
+        )
+        moderation_error = ProviderModerationRejectedError(
+            failure=failure,
+            job_id=uuid4(),
+            balance_event=None,
+        )
+        svc, idempotency, session = _make_route_handler_mocks(generate_side_effect=moderation_error)
+        request = UnifiedGenerationRequest(
+            prompt="unsafe provider input",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+
+        response = await self._call_handler(
+            request,
+            generation_service=svc,
+            idempotency_service=idempotency,
+            session=session,
+        )
+
+        assert response.status_code == 422
+        assert response.content.error == "provider_moderation_rejected"
+        assert response.content.message == moderation_error.public_message
+        assert "Image did not respect" not in response.content.message
+        idempotency.complete.assert_awaited_once()
+        idempotency.fail.assert_not_awaited()
+        session.commit.assert_awaited_once()
 
     async def test_bare_not_implemented_error_is_not_swallowed_as_400(self) -> None:
         svc, idempotency, session = _make_route_handler_mocks(

@@ -9,7 +9,8 @@ from uuid import uuid4
 
 import pytest
 
-from src.api.services.grok import GrokClient, GrokImageResult
+from src.api.services.generation.provider_failures import ProviderModerationRejectedError
+from src.api.services.grok import GrokClient, GrokImageResult, GrokModerationError
 from src.api.services.grok.enums import ResponseImageFormat
 from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import AspectRatio, GenerationType, JobStatus, ModelType
@@ -165,6 +166,47 @@ async def test_create_image_job_i2i_without_resolved_input_url_fails_and_refunds
     billing_service.refund.assert_awaited_once()
     assert billing_service.refund.await_args.args[0] == job_repo.job.id
     assert billing_service.refund.await_args.kwargs["product_id"] == "grok-image"
+
+
+async def test_create_image_job_moderation_rejection_is_billable_and_safe() -> None:
+    job_repo = _FakeJobRepository()
+    session = SimpleNamespace(flush=AsyncMock())
+    raw_provider_message = (
+        "Image did not respect moderation rules; URL is not available. xai-key=secret"
+    )
+    grok = SimpleNamespace(
+        edit_image=AsyncMock(),
+        generate_image=AsyncMock(side_effect=GrokModerationError(raw_provider_message)),
+    )
+    billing_service = _billing_stub()
+    service = GrokJobService(cast("GrokClient", grok), MagicMock())
+
+    with (
+        patch("src.api.services.grok.job_service.JobRepository", return_value=job_repo),
+        patch(
+            "src.api.services.grok.job_service.OutputRepository",
+            return_value=SimpleNamespace(),
+        ),
+        pytest.raises(ProviderModerationRejectedError) as exc_info,
+    ):
+        await service.create_image_job(
+            cast("AsyncSession", session),
+            user_id=uuid4(),
+            prompt="unsafe request",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            generation_type=GenerationType.T2I,
+            billing_service=cast("BillingService", billing_service),
+            account_id=uuid4(),
+            token_cost=25,
+            product_id="grok-image",
+        )
+
+    assert job_repo.job is not None
+    assert job_repo.job.status == JobStatus.FAILED
+    assert job_repo.job.failure_code == "provider_moderation_rejected"
+    assert job_repo.job.error_message == exc_info.value.public_message
+    assert raw_provider_message not in job_repo.job.error_message
+    assert billing_service.refund.await_count == 0
 
 
 def _billing_stub() -> SimpleNamespace:

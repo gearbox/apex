@@ -240,4 +240,5 @@ class UnifiedJobService:
             completed_at=job.completed_at,
             outputs=output_items,
             error=job.error_message,
+            failure_code=job.failure_code,
         )

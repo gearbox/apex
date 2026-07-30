@@ -17,8 +17,9 @@ from uuid import uuid4
 
 import pytest
 
+from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.grok import GrokModerationError, GrokRateLimitError, GrokTimeoutError
-from src.api.services.grok.job_service import GrokJobService, VideoPollOutcome
+from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import JobStatus, VideoPollStatus
 
 
@@ -79,9 +80,14 @@ class TestPollVideoJobForWorkerTransientPropagation:
         with patcher:
             outcome = await service.poll_video_job_for_worker(AsyncMock(), job.id)
 
-        assert outcome == VideoPollOutcome(
-            status=VideoPollStatus.FAILED, error_message="content rejected"
+        assert outcome.status == VideoPollStatus.FAILED
+        assert outcome.error_message == (
+            "The requested content was rejected by the AI provider's safety system. "
+            "Modify the prompt or input and try again."
         )
+        assert outcome.failure is not None
+        assert outcome.failure.kind == ProviderFailureKind.MODERATION_REJECTED
+        assert outcome.failure.billable is True
 
 
 class TestReadThroughTransientMapping:

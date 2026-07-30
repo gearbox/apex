@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
 from src.api.services.grok.job_service import VideoPollOutcome
 from src.api.services.grok.video_worker import GrokVideoWorker
@@ -126,6 +127,39 @@ class TestCompletedTransition:
 
 
 class TestFailedProviderRefundPolicy:
+    async def test_billable_moderation_failure_is_not_refunded(self) -> None:
+        job = _make_job(status=JobStatus.RUNNING.value)
+        failure = ProviderFailure(
+            kind=ProviderFailureKind.MODERATION_REJECTED,
+            provider=Provider.GROK,
+            sanitized_message=(
+                "The requested content was rejected by the AI provider's safety system. "
+                "Modify the prompt or input and try again."
+            ),
+            provider_request_accepted=True,
+            billable=True,
+            provider_request_id="grok-request-1",
+        )
+        job_service = AsyncMock()
+        job_service.poll_video_job_for_worker.return_value = VideoPollOutcome(
+            status=VideoPollStatus.FAILED,
+            error_message=failure.sanitized_message,
+            failure=failure,
+        )
+        worker = _make_worker(job_service=job_service)
+        patcher, mock_ts = _patched_transition_service()
+
+        with patcher:
+            await worker._poll_one(job, AsyncMock())
+
+        mock_ts.transition_to_failed.assert_awaited_once_with(
+            job.id,
+            error_message=failure.sanitized_message,
+            failure_code="provider_moderation_rejected",
+            refund=False,
+            product_id="vex",
+        )
+
     async def test_failed_provider_result_refund_policy(self) -> None:
         """poll_video_job_for_worker's failure path (GrokAPIError from
         get_video_result) has never been refunded upstream — unlike the

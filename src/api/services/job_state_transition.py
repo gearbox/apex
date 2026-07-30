@@ -216,6 +216,7 @@ class JobStateTransitionService:
         job_id: UUID,
         *,
         error_message: str,
+        failure_code: str | None = None,
         refund: bool = True,
         product_id: str,
     ) -> tuple[GenerationJob, bool]:
@@ -250,6 +251,7 @@ class JobStateTransitionService:
                     status=JobStatus.FAILED.value,
                     completed_at=func.now(),
                     error_message=error_message[:2000],
+                    failure_code=failure_code[:100] if failure_code is not None else None,
                 )
                 .execution_options(synchronize_session=False)
             ),
@@ -266,7 +268,8 @@ class JobStateTransitionService:
         logger.warning(
             "job.transition.failed",
             job_id=str(job_id),
-            error=error_message[:200],
+            failure_code=failure_code,
+            refund=refund,
         )
         await self._ops_event_bus.publish(
             event_type=OpsEventType.GENERATION_FAILED,
@@ -298,6 +301,8 @@ class JobStateTransitionService:
                 previous_status=old_status,
                 generation_type=str(job.generation_type),
                 provider=str(job.provider),
+                failure_code=job.failure_code,
+                error_message=job.error_message,
             )
             await self._event_bus.publish(
                 user_id=job.user_id,

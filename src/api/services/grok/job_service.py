@@ -17,6 +17,11 @@ import httpx
 import structlog
 
 from src.api.services.generation.base import ProviderSubmitResult
+from src.api.services.generation.provider_billing_policy import apply_provider_billing_policy
+from src.api.services.generation.provider_failures import (
+    ProviderFailure,
+    ProviderModerationRejectedError,
+)
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
@@ -68,6 +73,7 @@ class VideoPollOutcome:
 
     status: VideoPollStatus
     error_message: str | None = None
+    failure: ProviderFailure | None = None
 
 
 class GrokJobError(Exception):
@@ -250,6 +256,7 @@ class GrokJobService:
             job.negative_prompt = negative_prompt
             await session.flush()
 
+        reserve_event = None
         try:
             # Update status to running
             job = await job_repo.update_status(
@@ -276,6 +283,7 @@ class GrokJobService:
             if job is not None:
                 job.token_cost = token_cost
                 job.debit_transaction_id = reserve_result.txn.id
+            reserve_event = reserve_result.event
             await session.flush()
 
             # Call Grok API
@@ -333,33 +341,68 @@ class GrokJobService:
                 balance_event=reserve_result.event,
             )
 
-        except GrokAPIError as e:
-            logger.exception("grok.api_error", job_id=str(job_id), error=str(e))
-            job = await job_repo.update_status(
-                job_id,
-                JobStatus.FAILED,
-                completed_at=datetime.now(UTC),
+        except GrokAPIError as exc:
+            failure = apply_provider_billing_policy(exc.failure)
+            job = await self._mark_provider_failure(
+                job_repo,
+                job_id=job_id,
+                failure=failure,
             )
-            if job is not None:
-                job.error_message = str(e)
-                await session.flush()
+            self._log_provider_failure(
+                failure,
+                job_id=job_id,
+                user_id=user_id,
+                product_id=product_id,
+            )
 
-            # --- SAGA: Compensation on API Error ---
+            if failure.billable:
+                logger.warning(
+                    "grok.moderation_rejected",
+                    provider=failure.provider.value,
+                    job_id=str(job_id),
+                    user_id=str(user_id),
+                    product_id=product_id,
+                    provider_job_id=failure.provider_request_id,
+                    failure_kind=failure.kind.value,
+                    provider_status=failure.provider_status_code,
+                    retryable=failure.retryable,
+                    billable=True,
+                )
+                logger.info(
+                    "billing.charge_finalized",
+                    job_id=str(job_id),
+                    product_id=product_id,
+                    tokens_reserved=token_cost,
+                    tokens_finalized=token_cost,
+                )
+                logger.info(
+                    "billing.refund_skipped",
+                    job_id=str(job_id),
+                    product_id=product_id,
+                    failure_kind=failure.kind.value,
+                    billable=True,
+                    refund_applied=False,
+                )
+                raise ProviderModerationRejectedError(
+                    failure=failure,
+                    job_id=job.id,
+                    balance_event=reserve_event,
+                ) from exc
+
+            # --- SAGA: Compensation on non-billable provider failure ---
             try:
                 await billing_service.refund(
                     job_id,
                     description="Generation failed — tokens refunded",
-                    metadata={"refund_reason": "provider_error"},
+                    metadata={"refund_reason": failure.kind.value},
                     session=session,
                     product_id=product_id,
                 )
                 await session.flush()
-            except Exception as refund_error:
-                logger.exception(
-                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
-                )
+            except Exception:
+                logger.exception("grok.compensation_refund_failed", job_id=str(job_id))
 
-            raise GrokJobError(f"Image generation failed: {e}") from e
+            raise GrokJobError("Image generation failed") from exc
 
         except Exception as e:
             logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
@@ -390,6 +433,48 @@ class GrokJobService:
             if isinstance(e, ValueError):
                 raise
             raise GrokJobError(f"Unexpected error: {e}") from e
+
+    async def _mark_provider_failure(
+        self,
+        job_repo: JobRepository,
+        *,
+        job_id: UUID,
+        failure: ProviderFailure,
+    ) -> GenerationJob:
+        """Persist only the normalized public failure fields for a Grok job."""
+        job = await job_repo.update_status(
+            job_id,
+            JobStatus.FAILED,
+            completed_at=datetime.now(UTC),
+        )
+        if job is None:
+            raise GrokJobError("Generation job disappeared while recording provider failure")
+        job.failure_code = failure.public_code
+        job.error_message = failure.sanitized_message
+        return job
+
+    @staticmethod
+    def _log_provider_failure(
+        failure: ProviderFailure,
+        *,
+        job_id: UUID,
+        user_id: UUID,
+        product_id: str,
+    ) -> None:
+        """Log normalized provider diagnostics without raw provider payloads."""
+        logger.warning(
+            "grok.failure_classified",
+            provider=failure.provider.value,
+            job_id=str(job_id),
+            user_id=str(user_id),
+            product_id=product_id,
+            provider_job_id=failure.provider_request_id,
+            failure_kind=failure.kind.value,
+            provider_status=failure.provider_status_code,
+            provider_error_code=failure.provider_error_code,
+            retryable=failure.retryable,
+            billable=failure.billable,
+        )
 
     async def _store_image_result(
         self,
@@ -632,6 +717,7 @@ class GrokJobService:
             source_output_id=source_output_id,
         )
 
+        reserve_event = None
         try:
             # --- SAGA: Pre-flight token deduction ---
             reserve_result = await billing_service.check_and_reserve(
@@ -651,6 +737,7 @@ class GrokJobService:
             if job is not None:
                 job.token_cost = token_cost
                 job.debit_transaction_id = reserve_result.txn.id
+            reserve_event = reserve_result.event
             await session.flush()
 
             # Start async video generation
@@ -681,33 +768,68 @@ class GrokJobService:
                 balance_event=reserve_result.event,
             )
 
-        except GrokAPIError as e:
-            logger.exception("grok.video_job_start_failed", job_id=str(job_id), error=str(e))
-            job = await job_repo.update_status(
-                job_id,
-                JobStatus.FAILED,
-                completed_at=datetime.now(UTC),
+        except GrokAPIError as exc:
+            failure = apply_provider_billing_policy(exc.failure)
+            job = await self._mark_provider_failure(
+                job_repo,
+                job_id=job_id,
+                failure=failure,
             )
-            if job is not None:
-                job.error_message = str(e)
-                await session.flush()
+            self._log_provider_failure(
+                failure,
+                job_id=job_id,
+                user_id=user_id,
+                product_id=product_id,
+            )
 
-            # --- SAGA: Compensation on API Error ---
+            if failure.billable:
+                logger.warning(
+                    "grok.moderation_rejected",
+                    provider=failure.provider.value,
+                    job_id=str(job_id),
+                    user_id=str(user_id),
+                    product_id=product_id,
+                    provider_job_id=failure.provider_request_id,
+                    failure_kind=failure.kind.value,
+                    provider_status=failure.provider_status_code,
+                    retryable=failure.retryable,
+                    billable=True,
+                )
+                logger.info(
+                    "billing.charge_finalized",
+                    job_id=str(job_id),
+                    product_id=product_id,
+                    tokens_reserved=token_cost,
+                    tokens_finalized=token_cost,
+                )
+                logger.info(
+                    "billing.refund_skipped",
+                    job_id=str(job_id),
+                    product_id=product_id,
+                    failure_kind=failure.kind.value,
+                    billable=True,
+                    refund_applied=False,
+                )
+                raise ProviderModerationRejectedError(
+                    failure=failure,
+                    job_id=job.id,
+                    balance_event=reserve_event,
+                ) from exc
+
+            # --- SAGA: Compensation on non-billable provider failure ---
             try:
                 await billing_service.refund(
                     job_id,
                     description="Generation failed — tokens refunded",
-                    metadata={"refund_reason": "provider_error"},
+                    metadata={"refund_reason": failure.kind.value},
                     session=session,
                     product_id=product_id,
                 )
                 await session.flush()
-            except Exception as refund_error:
-                logger.exception(
-                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
-                )
+            except Exception:
+                logger.exception("grok.compensation_refund_failed", job_id=str(job_id))
 
-            raise GrokJobError(f"Failed to start video generation: {e}") from e
+            raise GrokJobError("Failed to start video generation") from exc
 
         except Exception as e:
             logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
@@ -781,8 +903,18 @@ class GrokJobService:
         was_queued = job.status == JobStatus.QUEUED.value
         try:
             outcome = await self._poll_video_result(session, job)
-        except (GrokRateLimitError, GrokTimeoutError) as e:
-            logger.warning("grok.video_poll_transient", job_id=str(job.id), error=str(e))
+        except (GrokRateLimitError, GrokTimeoutError) as exc:
+            failure = exc.failure
+            logger.warning(
+                "grok.video_poll_transient",
+                job_id=str(job.id),
+                user_id=str(job.user_id),
+                product_id=job.product_id,
+                provider_job_id=job.external_request_id,
+                failure_kind=failure.kind.value,
+                provider_status=failure.provider_status_code,
+                retryable=failure.retryable,
+            )
             return job
 
         if outcome.status == VideoPollStatus.STILL_RUNNING:
@@ -797,16 +929,12 @@ class GrokJobService:
                 completed_at=datetime.now(UTC),
             )
 
-        # FAILED
-        job = await job_repo.update_status(
-            job_id,
-            JobStatus.FAILED,
-            completed_at=datetime.now(UTC),
-        )
-        if job is not None:
-            job.error_message = outcome.error_message
-            await session.flush()
-        raise GrokJobError(f"Video polling failed: {outcome.error_message}")
+        # FAILED results are settled by GrokVideoWorker, which owns the
+        # atomic status/refund-or-charge transition and post-commit events.
+        # A read-through request must not mutate a terminal state without the
+        # matching billing decision.
+        logger.info("grok.video_poll_terminal_deferred_to_worker", job_id=str(job_id))
+        return job
 
     async def poll_video_job_for_worker(
         self,
@@ -888,9 +1016,19 @@ class GrokJobService:
             # job. Re-raise; each entry point decides (worker: skip this
             # tick; read-through: report STILL_RUNNING). See D1.
             raise
-        except GrokAPIError as e:
-            logger.exception("grok.video_job_poll_failed", job_id=str(job.id), error=str(e))
-            return VideoPollOutcome(status=VideoPollStatus.FAILED, error_message=str(e))
+        except GrokAPIError as exc:
+            failure = apply_provider_billing_policy(exc.failure)
+            self._log_provider_failure(
+                failure,
+                job_id=job.id,
+                user_id=job.user_id,
+                product_id=job.product_id,
+            )
+            return VideoPollOutcome(
+                status=VideoPollStatus.FAILED,
+                error_message=failure.sanitized_message,
+                failure=failure,
+            )
 
     async def _store_video_result(
         self,

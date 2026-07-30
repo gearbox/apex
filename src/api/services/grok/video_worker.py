@@ -146,11 +146,17 @@ class GrokVideoWorker(PeriodicWorker):
 
         try:
             outcome = await self._job_service.poll_video_job_for_worker(session, job.id)
-        except (GrokRateLimitError, GrokTimeoutError) as e:
+        except (GrokRateLimitError, GrokTimeoutError) as exc:
+            failure = exc.failure
             logger.warning(
                 "grok.video_poll_transient",
                 job_id=str(job.id),
-                error=str(e),
+                user_id=str(job.user_id),
+                product_id=product_id,
+                provider_job_id=failure.provider_request_id or job.external_request_id,
+                failure_kind=failure.kind.value,
+                provider_status=failure.provider_status_code,
+                retryable=failure.retryable,
             )
             return  # no transition, no progress emit; retried next tick (D2)
 
@@ -170,15 +176,53 @@ class GrokVideoWorker(PeriodicWorker):
             await ts.transition_to_completed(job.id, outputs=[], product_id=product_id)
             return
 
-        # FAILED. poll_video_job_for_worker's only failure source is
-        # GrokAPIError from get_video_result — unlike the synchronous
-        # submission paths in job_service (create_image_job/start_video_job),
-        # which already refund via billing_service.refund on GrokAPIError,
-        # this polling-failure path has never refunded. refund=True is
-        # correct here: there is no double-charge risk.
-        await ts.transition_to_failed(
-            job.id,
-            error_message=outcome.error_message or "Video polling failed",
-            refund=True,
-            product_id=product_id,
-        )
+        # FAILED. The normalized failure retains both the user-safe status
+        # message and the billing decision. Most terminal polling failures
+        # preserve the historical refund behavior; accepted Grok moderation
+        # rejections retain the reservation because Grok bills them.
+        terminal_failure = outcome.failure
+        refund = not terminal_failure.billable if terminal_failure is not None else True
+        error_message = outcome.error_message or "Video polling failed"
+        if terminal_failure is not None and terminal_failure.billable:
+            logger.warning(
+                "grok.moderation_rejected",
+                provider=terminal_failure.provider.value,
+                job_id=str(job.id),
+                user_id=str(job.user_id),
+                product_id=product_id,
+                provider_job_id=(terminal_failure.provider_request_id or job.external_request_id),
+                failure_kind=terminal_failure.kind.value,
+                provider_status=terminal_failure.provider_status_code,
+                retryable=terminal_failure.retryable,
+                billable=True,
+            )
+            logger.info(
+                "billing.charge_finalized",
+                job_id=str(job.id),
+                product_id=product_id,
+                tokens_reserved=job.token_cost,
+                tokens_finalized=job.token_cost,
+            )
+            logger.info(
+                "billing.refund_skipped",
+                job_id=str(job.id),
+                product_id=product_id,
+                failure_kind=terminal_failure.kind.value,
+                billable=True,
+                refund_applied=False,
+            )
+        if terminal_failure is not None:
+            await ts.transition_to_failed(
+                job.id,
+                error_message=error_message,
+                refund=refund,
+                product_id=product_id,
+                failure_code=terminal_failure.public_code,
+            )
+        else:
+            await ts.transition_to_failed(
+                job.id,
+                error_message=error_message,
+                refund=refund,
+                product_id=product_id,
+            )

@@ -343,6 +343,36 @@ class TestCreditAndAdminAdjustShareTargetResolution:
         assert credit_result.event.user_ids == admin_result.event.user_ids == member_ids
 
 
+class TestGenerationBillingEventTargets:
+    async def test_reservation_targets_all_organization_members_from_account(self) -> None:
+        service = BillingService()
+        session = AsyncMock()
+        org_id = uuid4()
+        member_ids = [uuid4(), uuid4()]
+        account = _make_account(account_type="enterprise", organization_id=org_id)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_account_for_update = AsyncMock(return_value=account)
+            repo.get_balance = AsyncMock(return_value=100)
+            repo.create_transaction = AsyncMock(return_value=_make_txn())
+            repo.get_member_user_ids = AsyncMock(return_value=member_ids)
+
+            result = await service.check_and_reserve(
+                account.id,
+                10,
+                uuid4(),
+                metadata={"provider": "grok"},
+                session=session,
+                product_id="vex",
+                user_id=uuid4(),
+            )
+
+        assert result.event is not None
+        assert result.event.user_ids == member_ids
+        repo.get_member_user_ids.assert_awaited_once_with(org_id)
+
+
 def test_credit_requires_typed_payment_provider() -> None:
     """D-A5: payment_provider is keyword-only and typed — no silent
     empty-string default on a financial write path.

@@ -629,7 +629,7 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 rate_limited, 503 service_unavailable
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from Library" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
@@ -663,6 +663,18 @@ Note:     source_output_id enables "remix from Library" — the backend resolves
           operation from generating a fresh canvas from scratch. An unsupported value on either path
           returns 400 validation_error with an actionable message (e.g. "omit aspect_ratio to preserve
           the source aspect"); no job is created and no tokens are charged.
+
+          Provider moderation: a synchronous Grok safety rejection returns 422
+          provider_moderation_rejected with a safe actionable message. It differs from Apex's own
+          pre-submission moderation (`moderation`): Grok already accepted and production-observed
+          billing applies to this rejected generation, so the reservation remains spent. Re-use the
+          same Idempotency-Key to replay this 422 safely; do not submit the same intent again.
+
+          Grok video is asynchronous. Its worker stores `failure_code: "provider_moderation_rejected"`
+          plus the same safe message on the failed job and emits job.status_changed after commit. A
+          retryable rate limit/timeout is not terminal; other terminal provider failures preserve the
+          existing refund behavior. Provider acceptance that cannot be established remains non-billable
+          under the existing safe compensation policy.
 ```
 
 ### JobCreatedResponse Schema
@@ -864,6 +876,7 @@ interface UnifiedJobResponse {
   completed_at: string | null;
   outputs: JobOutputItem[]; // empty while processing
   error: string | null;
+  failure_code: string | null; // stable code, e.g. "provider_moderation_rejected"
 }
 
 interface JobOutputItem {
@@ -2577,6 +2590,8 @@ interface JobStatusPayload {
   previous_status: string;  // previous status (or "none" on first publish)
   generation_type: string;  // e.g. "t2v"
   provider: string;         // e.g. "grok"
+  failure_code: string | null; // set for normalized terminal failures
+  error_message: string | null; // safe displayable terminal-failure message
 }
 
 // job.progress
@@ -3298,7 +3313,7 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 403 | `forbidden`, `account_inactive`, `permission_denied`, `model_not_allowed`, `age_verification_required` | — |
 | 404 | `not_found`, `account_not_found`, `price_not_found` | — |
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero`, `no_active_gpu_session`, `session_already_exists`, `invalid_state`, `jobs_in_flight` | `balance`, `in_flight_count` |
-| 422 | `validation_error`, `moderation` | `provider`, `policy` |
+| 422 | `validation_error`, `moderation`, `provider_moderation_rejected` | `provider`, `policy` (Apex moderation only) |
 | 429 | `too_many_requests`, `rate_limited` | `retry_after` |
 | 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed` | — |
 
@@ -3316,6 +3331,9 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 
 // 422
 { "error": "moderation", "message": "Content moderated by grok (policy: nsfw)", "status_code": 422, "detail": { "provider": "grok", "policy": "nsfw" } }
+
+// 422 — provider-side Grok moderation; upstream text is never exposed
+{ "error": "provider_moderation_rejected", "message": "The requested content was rejected by the AI provider's safety system. Modify the prompt or input and try again.", "status_code": 422, "detail": null }
 ```
 
 Provider disablement is the one deliberately compact compatibility response used by both top-up

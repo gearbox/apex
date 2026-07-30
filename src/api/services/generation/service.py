@@ -9,6 +9,7 @@ import structlog
 
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
+from src.api.services.generation.provider_failures import ProviderModerationRejectedError
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.core.model_registry import get_model_meta
@@ -274,6 +275,26 @@ class GenerationService:
             reserve_event = submit_result.balance_event
             await session.commit()
 
+        except ProviderModerationRejectedError as exc:
+            # The Grok job service deliberately left the accepted moderation
+            # reservation in this transaction. Commit the failed job + debit
+            # together, then publish the corresponding events post-commit.
+            await session.commit()
+            logger.warning(
+                "generation.failed",
+                provider=exc.failure.provider.value,
+                job_id=str(exc.job_id),
+                user_id=str(user_id),
+                product_id=product_id,
+                failure_kind=exc.failure.kind.value,
+                billable=exc.failure.billable,
+            )
+            await self._publish_moderation_rejection(
+                exc,
+                user_id=user_id,
+                request=request,
+            )
+            raise
         except GenerationError:
             # Domain errors carry user-safe messages by contract (see
             # ProviderResponseError's docstring) — refund if a debit was
@@ -380,6 +401,40 @@ class GenerationService:
         if self._event_bus is not None:
             await self._event_bus.publish_balance(reserve_event)
             await self._event_bus.publish_balance(refund_result.event)
+
+    async def _publish_moderation_rejection(
+        self,
+        exc: ProviderModerationRejectedError,
+        *,
+        user_id: UUID,
+        request: UnifiedGenerationRequest,
+    ) -> None:
+        """Emit safe terminal job and balance events after the moderation commit."""
+        if self._event_bus is None:
+            return
+        try:
+            await self._event_bus.publish_balance(exc.balance_event)
+
+            from src.api.schemas.events import EventType, JobStatusPayload
+
+            await self._event_bus.publish(
+                user_id=user_id,
+                event_type=EventType.JOB_STATUS_CHANGED,
+                payload=JobStatusPayload(
+                    job_id=exc.job_id,
+                    status=JobStatus.FAILED.value,
+                    previous_status=JobStatus.RUNNING.value,
+                    generation_type=request.generation_type.value,
+                    provider=exc.failure.provider.value,
+                    failure_code=exc.public_code,
+                    error_message=exc.public_message,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "generation.moderation_post_commit_publish_failed",
+                job_id=str(exc.job_id),
+            )
 
     @staticmethod
     def _validate_inputs(request: UnifiedGenerationRequest) -> None:

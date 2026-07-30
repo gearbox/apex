@@ -15,6 +15,7 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_403_FORBIDDEN,
     HTTP_409_CONFLICT,
+    HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
@@ -25,6 +26,7 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.security import auth_guard
+from src.api.services.generation.provider_failures import ProviderModerationRejectedError
 from src.api.services.generation.rate_limiter import RateLimitExceededError
 from src.api.services.generation.service import (
     AgeVerificationRequiredError,
@@ -233,6 +235,32 @@ class UnifiedGenerationController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
+
+        except ProviderModerationRejectedError as exc:
+            error = ErrorEnvelope(
+                error=exc.public_code,
+                message=exc.public_message,
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+            # This is a completed, billable request, despite the 422 response.
+            # Cache the safe response to prevent an idempotent retry from
+            # submitting and charging the same generation again.
+            await idempotency_service.complete(
+                record_id,
+                resource_id=exc.job_id,
+                response_status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                response_body=msgspec.to_builtins(error),
+                session=session,
+            )
+            await session.commit()
+            logger.warning(
+                "generation.failed",
+                provider=exc.failure.provider.value,
+                job_id=str(exc.job_id),
+                failure_kind=exc.failure.kind.value,
+                billable=exc.failure.billable,
+            )
+            return Response(content=error, status_code=HTTP_422_UNPROCESSABLE_ENTITY)
 
         except GenerationError as exc:
             await _mark_failed(idempotency_service, record_id, session)

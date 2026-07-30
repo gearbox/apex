@@ -110,3 +110,6 @@ class UnifiedJobResponse(msgspec.Struct, kw_only=True):
 
     error: str | None = None
     """Error message for failed jobs."""
+
+    failure_code: str | None = None
+    """Stable public failure code for failed jobs, when available."""
