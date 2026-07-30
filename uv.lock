@@ -218,7 +218,7 @@ wheels = [
 
 [[package]]
 name = "apex"
-version = "0.39.14"
+version = "0.39.15"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
