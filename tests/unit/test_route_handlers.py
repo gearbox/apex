@@ -488,6 +488,12 @@ class TestAdminManagementRouteHandlers:
         svc.get_audit_log = AsyncMock(return_value=[])
         return svc
 
+    def _not_revoked_token_revocation_service(self) -> AsyncMock:
+        """A TokenRevocationService double whose is_revoked() reports "not revoked"."""
+        trs = AsyncMock()
+        trs.is_revoked = AsyncMock(return_value=False)
+        return trs
+
     async def test_list_admins_returns_list(self) -> None:
         from src.api.routes.admin_management import AdminManagementController
 
@@ -519,6 +525,8 @@ class TestAdminManagementRouteHandlers:
             session=session,
             product_id="vex",
             admin_mgmt=mgmt,
+            token_payload=MagicMock(),
+            token_revocation_service=self._not_revoked_token_revocation_service(),
         )
         assert "granted" in result["message"]
 
@@ -542,6 +550,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_grant_role_raises_validation_on_invalid_transition(self) -> None:
@@ -564,6 +574,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_grant_role_raises_not_found_on_mgmt_error(self) -> None:
@@ -586,6 +598,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_revoke_role_success(self) -> None:
@@ -695,6 +709,8 @@ class TestAdminManagementRouteHandlers:
             session=session,
             product_id="vex",
             admin_mgmt=mgmt,
+            token_payload=MagicMock(),
+            token_revocation_service=self._not_revoked_token_revocation_service(),
         )
         assert "granted" in result["message"]
 
@@ -718,6 +734,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_grant_permission_raises_not_found_on_mgmt_error(self) -> None:
@@ -740,6 +758,8 @@ class TestAdminManagementRouteHandlers:
                 session=session,
                 product_id="vex",
                 admin_mgmt=mgmt,
+                token_payload=MagicMock(),
+                token_revocation_service=self._not_revoked_token_revocation_service(),
             )
 
     async def test_revoke_permission_success(self) -> None:
@@ -1557,7 +1577,6 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = None
         jwt_service = MagicMock()
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1565,26 +1584,27 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
         assert response.status_code == 200
         assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
-        # No Authorization header presented — nothing to denylist.
+        # No Authorization header presented — nothing to decode or denylist.
         jwt_service.decode_access_token.assert_not_called()
-        token_revocation_service.revoke_token.assert_not_called()
+        auth_service.logout.assert_awaited_once_with("ref", token_payload=None)
 
-    async def test_logout_with_bearer_denylists_presenting_token_jti(self) -> None:
-        """issue #142 — POST /v1/auth/logout denylists the presenting access
-        token's own jti alongside the existing refresh-token revocation."""
+    async def test_logout_with_bearer_passes_decoded_payload_to_auth_service(self) -> None:
+        """issue #142 / review r1 E1 — the route decodes the presenting
+        access token and hands the payload to ``AuthService.logout``, which
+        now owns the jti-denylist write (and the row lock that serializes
+        it) itself — see test_auth_service.py for that behavior."""
         from src.api.routes.auth import AuthController
         from src.api.security.jwt import JWTConfig, JWTService
 
         real_jwt_service = JWTService(
             JWTConfig(secret_key="test_secret_key_for_testing_only_256bits_long")
         )
-        token, expires_at = real_jwt_service.create_access_token(uuid4(), product_id="vex")
+        token, _expires_at = real_jwt_service.create_access_token(uuid4(), product_id="vex")
         payload = real_jwt_service.decode_access_token(token)
         assert payload is not None
 
@@ -1598,7 +1618,6 @@ class TestAuthRouteHandlers:
         settings.content_cookie_secure = True
         request = MagicMock()
         request.headers.get.return_value = f"Bearer {token}"
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1606,19 +1625,15 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=real_jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
 
         assert response.status_code == 200
         assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
-        auth_service.logout.assert_awaited_once_with("ref")
-        token_revocation_service.revoke_token.assert_awaited_once_with(
-            payload.jti, int(expires_at.timestamp())
-        )
+        auth_service.logout.assert_awaited_once_with("ref", token_payload=payload)
 
-    async def test_logout_with_expired_bearer_skips_jti_denylist(self) -> None:
+    async def test_logout_with_expired_bearer_passes_no_payload(self) -> None:
         """An already-expired presenting token decodes to None — nothing to
         denylist, only the refresh token is revoked (pre-#142 behavior)."""
         from src.api.routes.auth import AuthController
@@ -1642,7 +1657,6 @@ class TestAuthRouteHandlers:
         settings.content_cookie_secure = True
         request = MagicMock()
         request.headers.get.return_value = f"Bearer {token}"
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1650,14 +1664,13 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=expired_jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
 
         assert response.status_code == 200
         assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
-        token_revocation_service.revoke_token.assert_not_called()
+        auth_service.logout.assert_awaited_once_with("ref", token_payload=None)
 
     async def test_logout_with_unknown_refresh_token_still_returns_200_with_header(self) -> None:
         """D4 — AuthService.logout returning False (unknown/already-revoked
@@ -1677,7 +1690,6 @@ class TestAuthRouteHandlers:
         request = MagicMock()
         request.headers.get.return_value = None
         jwt_service = MagicMock()
-        token_revocation_service = AsyncMock()
 
         response = await AuthController.logout.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -1685,7 +1697,6 @@ class TestAuthRouteHandlers:
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
-            token_revocation_service=token_revocation_service,
             product_config=product_config,
             settings=settings,
         )
@@ -2200,6 +2211,8 @@ class TestOrganizationRouteHandlers:
         data.user_id = uuid4()
         data.role = "member"
 
+        token_revocation_service = AsyncMock()
+        token_revocation_service.is_revoked = AsyncMock(return_value=False)
         response = await OrganizationController.add_member.fn(  # type: ignore[attr-defined]
             MagicMock(),
             current_user_id=uuid4(),
@@ -2208,6 +2221,8 @@ class TestOrganizationRouteHandlers:
             session=AsyncMock(),
             organization_service=org_service,
             product_id="vex",
+            token_payload=MagicMock(),
+            token_revocation_service=token_revocation_service,
         )
         assert response.status_code == 201
 
@@ -2267,6 +2282,8 @@ class TestOrganizationRouteHandlers:
         data = MagicMock()
         data.role = "admin"
 
+        token_revocation_service = AsyncMock()
+        token_revocation_service.is_revoked = AsyncMock(return_value=False)
         response = await OrganizationController.change_member_role.fn(  # type: ignore[attr-defined]
             MagicMock(),
             current_user_id=uuid4(),
@@ -2275,6 +2292,8 @@ class TestOrganizationRouteHandlers:
             data=data,
             session=AsyncMock(),
             organization_service=org_service,
+            token_payload=MagicMock(),
+            token_revocation_service=token_revocation_service,
         )
         assert response.status_code == 200
 

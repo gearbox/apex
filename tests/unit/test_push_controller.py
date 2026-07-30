@@ -286,10 +286,10 @@ class TestCreateSubscriptionRevocationRecheck:
         revoked.is_revoked.return_value = True
 
         with (
-            patch("src.api.routes.push.UserRepository") as mock_repo_cls,
+            patch("src.api.security.revocation_recheck.UserRepository") as mock_repo_cls,
             pytest.raises(NotAuthorizedException, match="Session has been revoked"),
         ):
-            mock_repo_cls.return_value.lock_user_for_session_change = AsyncMock()
+            mock_repo_cls.return_value.lock_users_for_session_change = AsyncMock()
             await self._call_handler(
                 push_service=mock_push_service, token_revocation_service=revoked
             )
@@ -310,8 +310,8 @@ class TestCreateSubscriptionRevocationRecheck:
         not_revoked = AsyncMock(spec=TokenRevocationService)
         not_revoked.is_revoked.return_value = False
 
-        with patch("src.api.routes.push.UserRepository") as mock_repo_cls:
-            mock_repo_cls.return_value.lock_user_for_session_change = AsyncMock()
+        with patch("src.api.security.revocation_recheck.UserRepository") as mock_repo_cls:
+            mock_repo_cls.return_value.lock_users_for_session_change = AsyncMock()
             session, result = await self._call_handler(
                 push_service=mock_push_service, token_revocation_service=not_revoked
             )
@@ -332,10 +332,10 @@ class TestCreateSubscriptionRevocationRecheck:
         broken.is_revoked.side_effect = RuntimeError("redis unreachable")
 
         with (
-            patch("src.api.routes.push.UserRepository") as mock_repo_cls,
+            patch("src.api.security.revocation_recheck.UserRepository") as mock_repo_cls,
             pytest.raises(RuntimeError, match="redis unreachable"),
         ):
-            mock_repo_cls.return_value.lock_user_for_session_change = AsyncMock()
+            mock_repo_cls.return_value.lock_users_for_session_change = AsyncMock()
             await self._call_handler(
                 push_service=mock_push_service, token_revocation_service=broken
             )
@@ -401,12 +401,12 @@ class TestCreateSubscriptionRevocationRecheck:
 
         token_revocation_service.is_revoked.side_effect = _record_is_revoked
 
-        with patch("src.api.routes.push.UserRepository") as mock_repo_cls:
+        with patch("src.api.security.revocation_recheck.UserRepository") as mock_repo_cls:
 
             async def _record_lock(*_args: object, **_kwargs: object) -> None:
                 call_order.append("lock")
 
-            mock_repo_cls.return_value.lock_user_for_session_change = AsyncMock(
+            mock_repo_cls.return_value.lock_users_for_session_change = AsyncMock(
                 side_effect=_record_lock
             )
             await self._call_handler(

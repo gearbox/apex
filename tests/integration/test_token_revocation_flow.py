@@ -414,7 +414,6 @@ class TestSingleDeviceLogoutDenylistsOnlyThatToken:
             data=MagicMock(refresh_token="device-a-refresh"),
             auth_service=auth_service,
             jwt_service=jwt_service,
-            token_revocation_service=token_revocation,
             product_config=product_config,
             settings=settings,
         )
@@ -471,7 +470,6 @@ class TestUnknownRefreshTokenLogoutStillPurgesCache:
             data=MagicMock(refresh_token="never-issued-or-already-revoked"),
             auth_service=auth_service,
             jwt_service=jwt_service,
-            token_revocation_service=token_revocation,
             product_config=product_config,
             settings=settings,
         )

@@ -603,10 +603,12 @@ class TestAuthGuardUncoveredBranches:
         from litestar.handlers import BaseRouteHandler
 
         from src.api.security.guards import auth_guard
+        from src.api.security.jwt import TokenPayload
 
-        fake_payload = MagicMock()
-        fake_payload.sub = "not-a-uuid"
-        fake_payload.product_id = None
+        # A real TokenPayload (not a MagicMock) — user_id is a computed
+        # property, so a mock's auto-generated attribute would be
+        # non-None and defeat the assertion this test exists for.
+        fake_payload = TokenPayload(sub="not-a-uuid", exp=9999999999, iat=0, jti="jti-x")
 
         conn = self._make_connection(jwt_service=jwt_service, authorization="Bearer tok")
         with (

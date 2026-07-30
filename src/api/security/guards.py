@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 import structlog
 from litestar.exceptions import NotAuthorizedException
@@ -13,6 +12,7 @@ from src.core.config import get_settings
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from uuid import UUID
 
     from litestar.connection import ASGIConnection
     from litestar.handlers import BaseRouteHandler
@@ -87,10 +87,8 @@ def _identity_from_token(
     payload = decode(raw)
     if payload is None:
         return None
-    try:
-        return UUID(payload.sub), payload
-    except ValueError:
-        return None
+    user_id = payload.user_id
+    return None if user_id is None else (user_id, payload)
 
 
 def _enforce_product(

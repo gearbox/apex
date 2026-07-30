@@ -15,7 +15,7 @@ from litestar.status_codes import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies.auth import get_current_user_id
+from src.api.dependencies.auth import get_current_token_payload, get_current_user_id
 from src.api.schemas.organization import (
     AccountSummary,
     AddMemberRequest,
@@ -26,9 +26,11 @@ from src.api.schemas.organization import (
     OrgDetailResponse,
     OrgResponse,
 )
-from src.api.security import auth_guard
+from src.api.security import auth_guard, recheck_revocation_or_raise
+from src.api.security.jwt import TokenPayload
 from src.api.services.billing import BillingService
 from src.api.services.organization import OrganizationService
+from src.api.services.token_revocation import TokenRevocationService
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -42,7 +44,10 @@ class OrganizationController(Controller):
     path = "/v1/organizations"
     tags: Sequence[str] | None = ("Organizations",)
     guards = [auth_guard]  # noqa: RUF012
-    dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
+    dependencies = {  # noqa: RUF012
+        "current_user_id": Provide(get_current_user_id),
+        "token_payload": Provide(get_current_token_payload),
+    }
 
     @post("/")
     async def create_organization(
@@ -209,8 +214,28 @@ class OrganizationController(Controller):
         session: AsyncSession,
         organization_service: OrganizationService,
         product_id: str,
+        token_payload: TokenPayload,
+        token_revocation_service: TokenRevocationService,
     ) -> Response[MemberResponse]:
-        """Add a member. Requires admin or owner role."""
+        """Add a member. Requires admin or owner role.
+
+        Re-checks revocation of the acting member's own session first
+        (src/api/security/revocation_recheck.py) — membership grants
+        persistent access to a shared, org-billed token account, the same
+        durable-side-effect concern that first motivated this pattern for
+        push subscriptions. ``also_lock`` the new member (``data.user_id``,
+        not the path's ``org_id``): the membership INSERT references
+        ``user_id`` and takes a ``FOR KEY SHARE`` lock on that row via the
+        FK, which deadlocks against a mirrored add the same way an explicit
+        ``UPDATE`` does.
+        """
+        await recheck_revocation_or_raise(
+            session=session,
+            actor_id=current_user_id,
+            token_payload=token_payload,
+            token_revocation_service=token_revocation_service,
+            also_lock=(data.user_id,),
+        )
         member = await organization_service.add_member(
             org_id,
             data.user_id,
@@ -285,8 +310,28 @@ class OrganizationController(Controller):
         data: ChangeMemberRoleRequest,
         session: AsyncSession,
         organization_service: OrganizationService,
+        token_payload: TokenPayload,
+        token_revocation_service: TokenRevocationService,
     ) -> Response[MemberResponse]:
-        """Change member role. Requires owner role only."""
+        """Change member role. Requires owner role only.
+
+        Re-checks revocation of the acting owner's own session first — see
+        ``add_member`` above and ``src/api/security/revocation_recheck.py``
+        for why: a role change persistently escalates or demotes access to
+        the shared org-billed account. No ``also_lock`` here: unlike
+        ``add_member``, ``OrganizationService.change_role`` only assigns
+        ``member.role`` on an already-loaded ``OrganizationMember`` and
+        flushes — the FK column (``user_id``) is unchanged, so SQLAlchemy
+        emits an ``UPDATE`` of the changed column only and never re-checks
+        the FK. Nothing here takes a second lock on a ``users`` row.
+        """
+        await recheck_revocation_or_raise(
+            session=session,
+            actor_id=current_user_id,
+            token_payload=token_payload,
+            token_revocation_service=token_revocation_service,
+            # no also_lock: change_role only updates the role column, no users-row lock downstream
+        )
         member = await organization_service.change_role(
             org_id,
             user_id,

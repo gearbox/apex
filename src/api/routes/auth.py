@@ -51,7 +51,6 @@ from src.api.services.email_verification import (
     InvalidTokenError,
     UserNotFoundError,
 )
-from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import Settings
 from src.core.product import ProductConfig
 from src.db.repositories.user import UserRepository
@@ -429,7 +428,6 @@ class AuthController(Controller):
         data: Annotated[RefreshTokenRequest, Body()],
         auth_service: AuthService,
         jwt_service: JWTService,
-        token_revocation_service: TokenRevocationService,
         product_config: ProductConfig,
         settings: Settings,
     ) -> Response[MessageResponse]:
@@ -476,19 +474,19 @@ class AuthController(Controller):
         recovery path and leak whether a given refresh token was ever
         valid — the uniform 200 is also the correct privacy posture. Do not
         "fix" this by 401ing on an unknown/invalid token.
-        """
-        await auth_service.logout(data.refresh_token)
 
+        The bearer is decoded here (not in ``AuthService``) because that's
+        where ``extract_token_from_header``/``JWTService`` already live for
+        this route; the jti write itself — and the row lock that serializes
+        it against a concurrent mutation — happens inside
+        ``auth_service.logout`` so both share one transaction. See that
+        method's docstring for why the lock matters.
+        """
+        payload = None
         if raw_bearer := extract_token_from_header(request.headers.get("authorization")):
             payload = jwt_service.decode_access_token(raw_bearer)
-            if payload is not None and not await token_revocation_service.revoke_token(
-                payload.jti, payload.exp
-            ):
-                # Redis is configured but the write failed — a genuine
-                # degradation, not the documented Redis-unset no-op (F5).
-                # Logout still succeeds: the refresh token is already
-                # revoked above, which is the primary guarantee.
-                logger.error("auth.jti_denylist_failed", jti=payload.jti)
+
+        await auth_service.logout(data.refresh_token, token_payload=payload)
 
         return Response(
             content=MessageResponse(message="Successfully logged out"),
