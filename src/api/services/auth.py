@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import structlog
 
@@ -28,6 +27,8 @@ from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.security.jwt import TokenPayload
@@ -453,9 +454,19 @@ class AuthService:
         """Revoke the refresh token and, when an access token was presented,
         deny-list its jti.
 
-        The jti write takes ``lock_user_for_session_change`` first, for the
-        same reason every bulk revocation does: a mutating request that
-        passed ``recheck_revocation_or_raise`` holds that row lock until it
+        The user-row lock is taken **first**, before either refresh-token
+        operation below. G1 lock ordering is user row -> refresh-token row
+        in every path that acquires both: ``revoke_refresh_token`` below
+        issues an ``UPDATE`` that locks the refresh-token row, and
+        ``AuthService.refresh_tokens``/``revoke_all_user_tokens``/
+        ``revoke_all_refresh_tokens`` all take the user row first.
+        Acquiring the user-row lock after the token row (as this method
+        used to) inverts that order and deadlocks against every one of
+        them — see ``UserRepository.lock_user_for_session_change``.
+
+        With the lock held first, the jti write is also serialized the
+        same way every bulk revocation is: a mutating request that passed
+        ``recheck_revocation_or_raise`` holds that row lock until it
         commits, so this blocks behind it and the two outcomes are
         deterministic. Without the lock the Redis write cannot be observed
         by an in-flight mutation and the grant lands after logout returns —
@@ -471,11 +482,25 @@ class AuthService:
                 refresh token, if any. Only present when the caller had a
                 valid, unexpired bearer token — logout is reachable with an
                 expired or absent one, and only then is there a jti (and a
-                ``sub`` to lock) to act on.
+                ``sub`` to lock) to act on. A payload whose ``sub`` isn't a
+                valid UUID (only reachable with the JWT signing key) skips
+                both the lock and the jti denylist — there is no user row
+                to serialize against.
 
         Returns:
             True if the refresh token was revoked, False if not found.
         """
+        # G1 lock ordering: user row -> refresh-token row, in every path
+        # that acquires both. revoke_refresh_token below UPDATEs (and so
+        # locks) the refresh-token row, and AuthService.refresh_tokens /
+        # revoke_all_user_tokens / revoke_all_refresh_tokens all take the
+        # user row first — acquiring it after the token row here would
+        # deadlock against every one of them. See
+        # UserRepository.lock_user_for_session_change.
+        actor_id = token_payload.user_id if token_payload is not None else None
+        if actor_id is not None:
+            await self._repo.lock_user_for_session_change(actor_id)
+
         token_hash = hash_token(refresh_token)
         stored_token = await self._repo.get_refresh_token_by_hash(token_hash)
 
@@ -487,14 +512,16 @@ class AuthService:
             logger.debug("auth.logged_out", user_id=str(stored_token.user_id))
             revoked = True
 
-        if token_payload is not None:
-            await self._repo.lock_user_for_session_change(UUID(token_payload.sub))
-            if not await self._token_revocation.revoke_token(token_payload.jti, token_payload.exp):
-                # Redis is configured but the write failed — a genuine
-                # degradation, not the documented Redis-unset no-op (F5).
-                # Logout still succeeds: the refresh token is already
-                # revoked above, which is the primary guarantee.
-                logger.error("auth.jti_denylist_failed", jti=token_payload.jti)
+        if (
+            token_payload is not None
+            and actor_id is not None
+            and not await self._token_revocation.revoke_token(token_payload.jti, token_payload.exp)
+        ):
+            # Redis is configured but the write failed — a genuine
+            # degradation, not the documented Redis-unset no-op (F5).
+            # Logout still succeeds: the refresh token is already
+            # revoked above, which is the primary guarantee.
+            logger.error("auth.jti_denylist_failed", jti=token_payload.jti)
 
         return revoked
 

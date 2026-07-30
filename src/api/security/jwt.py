@@ -23,6 +23,22 @@ class TokenPayload:
     type: str = "access"  # Token type
     product_id: str | None = None  # Product scope (optional for backward compat)
 
+    @property
+    def user_id(self) -> UUID | None:
+        """The `sub` claim as a UUID, or None if it isn't one.
+
+        Tokens are signature-verified before a TokenPayload exists and
+        `create_access_token` always mints `str(user_id)`, so a non-UUID
+        `sub` implies a token minted by something else holding the signing
+        key. Treated the same way `auth_guard` has always treated it — as
+        not-authenticated — rather than as a crash: callers on the
+        unguarded logout path have no guard to fall back on.
+        """
+        try:
+            return UUID(self.sub)
+        except ValueError:
+            return None
+
 
 @dataclass(frozen=True)
 class JWTConfig:
@@ -237,12 +253,7 @@ class JWTService:
             User UUID if valid, None otherwise.
         """
         payload = self.decode_access_token(token)
-        if payload is None:
-            return None
-        try:
-            return UUID(payload.sub)
-        except ValueError:
-            return None
+        return None if payload is None else payload.user_id
 
 
 class InvalidTokenError(Exception):
