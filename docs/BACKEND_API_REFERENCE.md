@@ -234,7 +234,8 @@ Four mutation endpoints require an `Idempotency-Key` header to prevent duplicate
 3. On **retry** with the same key, the server returns the **original cached response** without re-executing the operation.
 4. Keys are scoped to `(user_id, product_id)` — the same key from different users or products does not collide.
 5. Keys expire after 24 hours (configurable via `IDEMPOTENCY_KEY_TTL_HOURS`).
-6. If a key is stuck `processing` (the original request's connection dropped, its worker crashed, etc.) for longer than `IDEMPOTENCY_PROCESSING_STALE_SECONDS` (default 120s), the **next** retry with the same key reclaims it and proceeds — it does not need to wait out the full 24h TTL. A retry within that window still gets `409 idempotency_conflict` (treated as a genuinely concurrent in-flight request).
+6. Generation's synchronous final results (201, billable 422, and normalized provider failures) persist the job state, billing ledger result, resource ID, HTTP status, response body, and completed idempotency key in one transaction. A crash cannot leave a durable debit behind a reclaimable `processing` key.
+7. A key stuck `processing` before a final outcome (the original request's connection dropped, its worker crashed, etc.) for longer than `IDEMPOTENCY_PROCESSING_STALE_SECONDS` (default 120s) can be reclaimed by the next retry. A retry within that window gets `409 idempotency_conflict`.
 
 ### Error responses
 
@@ -629,7 +630,7 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented | provider_invalid_request), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 (rate_limited | provider_rate_limited), 502 provider_malformed_response, 503 (service_unavailable | provider_timeout | provider_provider_unavailable | provider_authentication_failed | provider_unknown)
+Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented | provider_invalid_request), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 (rate_limited | provider_rate_limited), 502 provider_malformed_response, 503 (service_unavailable | provider_timeout | provider_unavailable | provider_authentication_failed | provider_unknown)
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from Library" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
@@ -671,20 +672,25 @@ Note:     source_output_id enables "remix from Library" — the backend resolves
           same Idempotency-Key to replay this 422 safely; do not submit the same intent again.
 
           Grok video is asynchronous. Both its worker and poll-on-read `GET /v1/jobs/{id}` use the
-          same terminal settlement path: the first caller conditionally transitions the job, persists
-          its normalized `failure_code` and safe public message, commits, then publishes the terminal
-          job/balance events. A worker is therefore optional for correctness. Repeated GETs and a
-          worker/read-through race do not replace terminal states, duplicate outputs/events, or refund
-          more than once. Completed video outputs and the completed status commit together.
+          same terminal settlement path.  On completion the first caller takes a short PostgreSQL
+          finalization lease before downloading or writing R2 objects; it then commits the output rows
+          and completed status together.  A crashed claimant is recoverable after the lease expires;
+          losing callers write no outputs and remove any objects if their claim expires mid-flight.
+          Partial unique indexes enforce one full output per job/index and one thumbnail per
+          parent/size bucket. A worker is optional for correctness and recommended for proactive
+          completion. Repeated GETs and worker/read-through races publish one terminal event and
+          settle billing once.
 
           A deferred xAI `FAILED` state is authoritative even if its normalized failure kind is
           `provider_rate_limited` or `provider_timeout`; it is settled immediately. By contrast, a
           transport-level rate limit/timeout while calling xAI's poll API is transient and leaves the
           job in progress for the next poll.
 
-          A Grok moderation rejection after provider acceptance remains billable: the reservation is
-          retained. Other normalized provider failures refund once unless an explicit provider policy
-          says otherwise; ambiguous acceptance is non-billable. Synchronous provider failures are
+          The active `GROK_MODERATION_BILLING_POLICY` controls an accepted moderation rejection:
+          `charge` retains the reservation and `refund` compensates it. Only exact moderation results
+          or call sites with a confirmed accepted deferred request can use that policy; ambiguous or
+          moderation-service infrastructure failures are non-billable. Other normalized provider failures refund once unless an explicit provider policy
+          says otherwise. Synchronous provider failures are
           returned with stable normalized codes: invalid request 400, provider rate limit 429,
           malformed response 502, and timeout/unavailable/authentication/unknown 503. Their messages
           are fixed safe messages, never provider diagnostics.
@@ -860,9 +866,11 @@ Response: CursorPage<UnifiedJobResponse>
 ```
 Response: UnifiedJobResponse
 Errors:   404
-Note:     For queued/running Grok video jobs this is poll-on-read. Terminal provider outcomes use
-          the same settlement path as the Grok video worker, so no background worker is required
-          for a job to become completed/failed and receive its one-time billing settlement.
+Note:     For queued/running Grok video jobs this is poll-on-read. It also enforces
+          GROK_VIDEO_MAX_POLL_TIME from the immutable submission timestamp: an overdue job is
+          failed with provider_timeout and refunded once. Terminal provider outcomes use the same
+          settlement path as the Grok video worker, so no background worker is required for
+          correctness.
 ```
 
 #### `DELETE /v1/jobs/{job_id}`
@@ -3337,7 +3345,7 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 422 | `validation_error`, `moderation`, `provider_moderation_rejected` | `provider`, `policy` (Apex moderation only) |
 | 429 | `too_many_requests`, `rate_limited`, `provider_rate_limited` | `retry_after` (global rate limit only) |
 | 502 | `provider_malformed_response` | — |
-| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_provider_unavailable`, `provider_authentication_failed`, `provider_unknown` | — |
+| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_unavailable`, `provider_authentication_failed`, `provider_unknown` | — |
 
 **Example responses:**
 

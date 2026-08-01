@@ -12,14 +12,22 @@ from __future__ import annotations
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, NoReturn
+from uuid import uuid4
 
 import httpx
 import structlog
+from sqlalchemy import func, or_, update
+from sqlalchemy.exc import IntegrityError
 
 from src.api.services.generation.base import ProviderSubmitResult
-from src.api.services.generation.provider_billing_policy import apply_provider_billing_policy
+from src.api.services.generation.provider_billing_policy import (
+    DEFAULT_PROVIDER_BILLING_POLICIES,
+    ProviderBillingPolicyRegistry,
+    apply_provider_billing_policy,
+)
 from src.api.services.generation.provider_failures import (
     ProviderFailure,
+    ProviderFailureKind,
     ProviderModerationRejectedError,
     ProviderSubmissionFailedError,
 )
@@ -33,7 +41,7 @@ from src.api.services.grok import (
     GrokVideoResult,
 )
 from src.api.services.image_thumbnail import make_image_thumbnails
-from src.api.services.job_state_transition import JobStateTransitionService
+from src.api.services.job_state_transition import GenerationOutputData, JobStateTransitionService
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
@@ -47,6 +55,7 @@ from src.core.enums import (
     VideoResolution,
 )
 from src.core.uid import new_id
+from src.db.models import GenerationJob
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 
@@ -61,8 +70,6 @@ if TYPE_CHECKING:
     from src.api.services.billing import BalanceEvent, BillingService
     from src.api.services.event_bus import EventBus
     from src.api.services.ops_event_bus import OpsEventBus
-    from src.db.models import GenerationJob
-
 logger = structlog.get_logger(__name__)
 
 
@@ -78,6 +85,15 @@ class VideoPollOutcome:
     status: VideoPollStatus
     error_message: str | None = None
     failure: ProviderFailure | None = None
+    result: GrokVideoResult | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _MaterializedVideo:
+    """R2 objects ready to be attached by the claim-owning transaction."""
+
+    outputs: list[GenerationOutputData]
+    storage_keys: list[str]
 
 
 class GrokJobError(Exception):
@@ -124,6 +140,9 @@ class GrokJobService:
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         ops_event_bus: OpsEventBus | None = None,
+        max_poll_time: int = 600,
+        finalization_lease_seconds: int = 120,
+        billing_policy: ProviderBillingPolicyRegistry | None = None,
     ) -> None:
         """Initialize Grok job service.
 
@@ -138,6 +157,9 @@ class GrokJobService:
         self._billing = billing_service
         self._event_bus = event_bus
         self._ops_event_bus = ops_event_bus
+        self._max_poll_time = max_poll_time
+        self._finalization_lease_seconds = finalization_lease_seconds
+        self._billing_policy = billing_policy or DEFAULT_PROVIDER_BILLING_POLICIES
         self._http_client: httpx.AsyncClient | None = None
 
     async def connect(self) -> None:
@@ -186,7 +208,6 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-        defer_submission_failure_settlement: bool = False,
     ) -> ProviderSubmitResult:
         """Create and execute an image generation job.
 
@@ -244,6 +265,8 @@ class GrokJobService:
             if generation_type == GenerationType.I2I
             else (aspect_ratio or AspectRatio.RATIO_1_1)
         )
+        if generation_type == GenerationType.I2I:
+            _require_i2i_input_url(input_image_url, input_image_urls)
 
         # Create job record
         job_id = new_id()
@@ -300,7 +323,6 @@ class GrokJobService:
 
             # Call Grok API
             if generation_type == GenerationType.I2I:
-                _require_i2i_input_url(input_image_url, input_image_urls)
                 # Image input references are resolved to provider-readable URLs upstream.
                 results = await self._grok.edit_image(
                     prompt=prompt,
@@ -357,73 +379,39 @@ class GrokJobService:
             await self._handle_submission_failure(
                 exc,
                 job=job,
-                job_repo=job_repo,
                 job_id=job_id,
                 user_id=user_id,
                 product_id=product_id,
                 reserve_event=reserve_event,
-                session=session,
-                billing_service=billing_service,
-                token_cost=token_cost,
-                defer_settlement=defer_submission_failure_settlement,
-                direct_failure_message="Image generation failed",
             )
 
-        except Exception as e:
-            logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
-            job = await job_repo.update_status(
-                job_id,
-                JobStatus.FAILED,
-                completed_at=datetime.now(UTC),
+        except Exception as exc:
+            self._raise_unexpected_submission_failure(
+                exc,
+                job=job,
+                job_id=job_id,
+                user_id=user_id,
+                product_id=product_id,
+                reserve_event=reserve_event,
             )
-            if job is not None:
-                job.error_message = str(e)
-                await session.flush()
-
-            # --- SAGA: Compensation on Unexpected Error ---
-            try:
-                await billing_service.refund(
-                    job_id,
-                    description="Generation failed — tokens refunded",
-                    metadata={"refund_reason": "internal_error"},
-                    session=session,
-                    product_id=product_id,
-                )
-                await session.flush()
-            except Exception as refund_error:
-                logger.exception(
-                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
-                )
-
-            if isinstance(e, ValueError):
-                raise
-            raise GrokJobError(f"Unexpected error: {e}") from e
 
     async def _handle_submission_failure(
         self,
         exc: GrokAPIError,
         *,
         job: GenerationJob | None,
-        job_repo: JobRepository,
         job_id: UUID,
         user_id: UUID,
         product_id: str,
         reserve_event: BalanceEvent | None,
-        session: AsyncSession,
-        billing_service: BillingService,
-        token_cost: int,
-        defer_settlement: bool,
-        direct_failure_message: str,
     ) -> NoReturn:
-        """Classify a submission failure and settle it at the owning layer.
+        """Classify and raise; GenerationService is the sole settler.
 
-        ``GenerationService`` opts into deferred settlement so it can use the
-        shared transition service to atomically commit the job, billing, and
-        notifications. Direct callers retain the established local behavior:
-        write normalized safe fields and refund non-billable failures in their
-        current transaction.
+        Provider adapters never commit a terminal state or compensation.  The
+        request-level orchestrator owns the job, ledger, idempotency record,
+        and post-commit notifications in one unit of work.
         """
-        failure = apply_provider_billing_policy(exc.failure)
+        failure = apply_provider_billing_policy(exc.failure, registry=self._billing_policy)
         self._log_provider_failure(
             failure,
             job_id=job_id,
@@ -431,61 +419,6 @@ class GrokJobService:
             product_id=product_id,
         )
         previous_status = str(job.status) if job is not None else JobStatus.PENDING.value
-        if not defer_settlement:
-            failed_job = await self._mark_provider_failure(
-                job_repo,
-                job_id=job_id,
-                failure=failure,
-            )
-            if failure.billable:
-                logger.warning(
-                    "grok.moderation_rejected",
-                    provider=failure.provider.value,
-                    job_id=str(job_id),
-                    user_id=str(user_id),
-                    product_id=product_id,
-                    provider_job_id=failure.provider_request_id,
-                    failure_kind=failure.kind.value,
-                    provider_status=failure.provider_status_code,
-                    retryable=failure.retryable,
-                    billable=True,
-                )
-                logger.info(
-                    "billing.charge_finalized",
-                    job_id=str(job_id),
-                    product_id=product_id,
-                    tokens_reserved=token_cost,
-                    tokens_finalized=token_cost,
-                )
-                logger.info(
-                    "billing.refund_skipped",
-                    job_id=str(job_id),
-                    product_id=product_id,
-                    failure_kind=failure.kind.value,
-                    billable=True,
-                    refund_applied=False,
-                )
-                raise ProviderModerationRejectedError(
-                    failure=failure,
-                    job_id=failed_job.id,
-                    previous_status=previous_status,
-                    balance_event=reserve_event,
-                ) from exc
-
-            try:
-                await billing_service.refund(
-                    job_id,
-                    description="Generation failed — tokens refunded",
-                    metadata={"refund_reason": failure.kind.value},
-                    session=session,
-                    product_id=product_id,
-                )
-                await session.flush()
-            except Exception:
-                logger.exception("grok.compensation_refund_failed", job_id=str(job_id))
-
-            raise GrokJobError(direct_failure_message) from exc
-
         error_type = (
             ProviderModerationRejectedError
             if failure.kind.value == "moderation_rejected"
@@ -498,25 +431,37 @@ class GrokJobService:
             balance_event=reserve_event,
         ) from exc
 
-    async def _mark_provider_failure(
+    def _raise_unexpected_submission_failure(
         self,
-        job_repo: JobRepository,
+        exc: Exception,
         *,
+        job: GenerationJob | None,
         job_id: UUID,
-        failure: ProviderFailure,
-    ) -> GenerationJob:
-        """Persist normalized failure fields for a direct service caller."""
-        job = await job_repo.update_status(
-            job_id,
-            JobStatus.FAILED,
-            completed_at=datetime.now(UTC),
+        user_id: UUID,
+        product_id: str,
+        reserve_event: BalanceEvent | None,
+    ) -> NoReturn:
+        """Convert non-provider submission faults into the shared settlement path."""
+        failure = ProviderFailure(
+            kind=ProviderFailureKind.UNKNOWN,
+            provider=Provider.GROK,
+            sanitized_message=ProviderFailure.safe_message_for_kind(ProviderFailureKind.UNKNOWN),
+            retryable=True,
         )
-        if job is None:
-            raise GrokJobError("Generation job disappeared while recording provider failure")
-        job.failure_code = failure.public_code
-        job.error_message = failure.sanitized_message
-        job.public_error_message = failure.sanitized_message
-        return job
+        self._log_provider_failure(
+            failure,
+            job_id=job_id,
+            user_id=user_id,
+            product_id=product_id,
+        )
+        logger.exception("grok.unexpected_submission_error", job_id=str(job_id))
+        previous_status = str(job.status) if job is not None else JobStatus.PENDING.value
+        raise ProviderSubmissionFailedError(
+            failure=failure,
+            job_id=job_id,
+            previous_status=previous_status,
+            balance_event=reserve_event,
+        ) from exc
 
     @staticmethod
     def _log_provider_failure(
@@ -724,7 +669,6 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
-        defer_submission_failure_settlement: bool = False,
     ) -> ProviderSubmitResult:
         """Start an async video generation job.
 
@@ -838,45 +782,21 @@ class GrokJobService:
             await self._handle_submission_failure(
                 exc,
                 job=job,
-                job_repo=job_repo,
                 job_id=job_id,
                 user_id=user_id,
                 product_id=product_id,
                 reserve_event=reserve_event,
-                session=session,
-                billing_service=billing_service,
-                token_cost=token_cost,
-                defer_settlement=defer_submission_failure_settlement,
-                direct_failure_message="Failed to start video generation",
             )
 
-        except Exception as e:
-            logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
-            job = await job_repo.update_status(
-                job_id,
-                JobStatus.FAILED,
-                completed_at=datetime.now(UTC),
+        except Exception as exc:
+            self._raise_unexpected_submission_failure(
+                exc,
+                job=job,
+                job_id=job_id,
+                user_id=user_id,
+                product_id=product_id,
+                reserve_event=reserve_event,
             )
-            if job is not None:
-                job.error_message = str(e)
-                await session.flush()
-
-            # --- SAGA: Compensation on Unexpected Error ---
-            try:
-                await billing_service.refund(
-                    job_id,
-                    description="Generation failed — tokens refunded",
-                    metadata={"refund_reason": "internal_error"},
-                    session=session,
-                    product_id=product_id,
-                )
-                await session.flush()
-            except Exception as refund_error:
-                logger.exception(
-                    "grok.compensation_refund_failed", job_id=str(job_id), error=str(refund_error)
-                )
-
-            raise GrokJobError(f"Unexpected error: {e}") from e
 
     async def poll_video_job(
         self,
@@ -916,8 +836,19 @@ class GrokJobService:
         if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
             return job
 
+        # The submission timestamp is never reset by queued→running status
+        # transitions, unlike ``started_at``.  This keeps poll-on-read and the
+        # periodic worker on the same authoritative maximum-age rule.
+        if self._is_video_job_overdue(job):
+            return await self.settle_video_poll_outcome(
+                session,
+                job_id=job_id,
+                outcome=self._timeout_outcome(),
+                product_id=str(job.product_id),
+            )
+
         try:
-            outcome = await self._poll_video_result(session, job)
+            outcome = await self._poll_video_result(job)
         except (GrokRateLimitError, GrokTimeoutError) as exc:
             failure = exc.failure
             logger.warning(
@@ -958,12 +889,16 @@ class GrokJobService:
         if outcome.status == VideoPollStatus.STILL_RUNNING:
             return await transition_service.transition_to_running(job_id)
         if outcome.status == VideoPollStatus.COMPLETED:
-            # ``_poll_video_result`` has flushed any downloaded outputs into
-            # this session. The transition commit makes those rows and the
-            # completed state durable together.
-            return await transition_service.transition_to_completed(
-                job_id,
-                outputs=[],
+            if outcome.result is None:
+                # Compatibility for a synthetic outcome in a unit test or a
+                # future provider that has already materialized its outputs.
+                return await transition_service.transition_to_completed(
+                    job_id, outputs=[], product_id=product_id
+                )
+            return await self._finalize_completed_video(
+                session,
+                job_id=job_id,
+                result=outcome.result,
                 product_id=product_id,
             )
 
@@ -1034,14 +969,13 @@ class GrokJobService:
         if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
             return VideoPollOutcome(status=VideoPollStatus.STILL_RUNNING)
 
-        return await self._poll_video_result(session, job)
+        if self._is_video_job_overdue(job):
+            return self._timeout_outcome()
 
-    async def _poll_video_result(
-        self,
-        session: AsyncSession,
-        job: GenerationJob,
-    ) -> VideoPollOutcome:
-        """Poll xAI for one job's result; download+store on completion.
+        return await self._poll_video_result(job)
+
+    async def _poll_video_result(self, job: GenerationJob) -> VideoPollOutcome:
+        """Poll xAI for one job's result without materializing outputs.
 
         Does not mutate job.status — shared by the read-through
         (``poll_video_job``) and worker (``poll_video_job_for_worker``)
@@ -1051,24 +985,13 @@ class GrokJobService:
         if not request_id:
             raise GrokJobError(f"Job {job.id} has no xAI request ID")
 
-        output_repo = OutputRepository(session)
-
         try:
             result: GrokVideoResult | None = await self._grok.get_video_result(request_id)
 
             if result is None:
                 return VideoPollOutcome(status=VideoPollStatus.STILL_RUNNING)
 
-            await self._store_video_result(
-                session=session,
-                output_repo=output_repo,
-                user_id=job.user_id,
-                job_id=job.id,
-                result=result,
-                product_id=job.product_id,
-            )
-            logger.info("grok.video_job_completed", job_id=str(job.id))
-            return VideoPollOutcome(status=VideoPollStatus.COMPLETED)
+            return VideoPollOutcome(status=VideoPollStatus.COMPLETED, result=result)
 
         except (GrokRateLimitError, GrokTimeoutError):
             # Transient: rate limits and deadline-exceeded must not fail the
@@ -1076,7 +999,7 @@ class GrokJobService:
             # tick; read-through: report STILL_RUNNING). See D1.
             raise
         except GrokAPIError as exc:
-            failure = apply_provider_billing_policy(exc.failure)
+            failure = apply_provider_billing_policy(exc.failure, registry=self._billing_policy)
             self._log_provider_failure(
                 failure,
                 job_id=job.id,
@@ -1092,74 +1015,285 @@ class GrokJobService:
     async def _store_video_result(
         self,
         *,
-        session: AsyncSession,
+        session: AsyncSession,  # noqa: ARG002
         output_repo: OutputRepository,
         user_id: UUID,
         job_id: UUID,
         result: GrokVideoResult,
         product_id: str,
     ) -> None:
-        """Download, store a video result in R2, and extract a thumbnail frame."""
-        # Download video from xAI CDN
+        """Legacy helper used by image/video storage unit tests.
+
+        Production polling uses ``_finalize_completed_video`` so that it owns
+        a durable claim before calling the materializer below.  Keeping this
+        thin wrapper preserves the independently useful storage helper while
+        ensuring its rows mirror the claim-owned path.
+        """
+        materialized = await self._materialize_video_result(
+            user_id=user_id,
+            job_id=job_id,
+            result=result,
+        )
+        try:
+            for output in sorted(materialized.outputs, key=lambda item: item.is_thumbnail):
+                await output_repo.create(
+                    id=output.id,
+                    user_id=user_id,
+                    job_id=job_id,
+                    storage_key=output.storage_key,
+                    content_type=output.content_type,
+                    size_bytes=output.size_bytes,
+                    format=output.format,
+                    output_index=output.output_index,
+                    expires_at=output.expires_at,
+                    input_image_id=None,
+                    is_thumbnail=output.is_thumbnail,
+                    parent_output_id=output.parent_output_id,
+                    thumbnail_max_edge=output.thumbnail_max_edge,
+                    width=output.width,
+                    height=output.height,
+                    product_id=product_id,
+                )
+        except Exception:
+            await self._cleanup_materialized_objects(materialized.storage_keys)
+            raise
+
+    def _is_video_job_overdue(self, job: GenerationJob) -> bool:
+        """Use submission time, never a status-transition timestamp, for TTL."""
+        created_at = job.created_at
+        if not isinstance(created_at, datetime):
+            return False
+        return (datetime.now(UTC) - created_at).total_seconds() > self._max_poll_time
+
+    @staticmethod
+    def _timeout_outcome() -> VideoPollOutcome:
+        failure = ProviderFailure(
+            kind=ProviderFailureKind.TIMEOUT,
+            provider=Provider.GROK,
+            sanitized_message=ProviderFailure.safe_message_for_kind(ProviderFailureKind.TIMEOUT),
+        )
+        return VideoPollOutcome(
+            status=VideoPollStatus.FAILED,
+            error_message=failure.sanitized_message,
+            failure=failure,
+        )
+
+    async def _finalize_completed_video(
+        self,
+        session: AsyncSession,
+        *,
+        job_id: UUID,
+        result: GrokVideoResult,
+        product_id: str,
+    ) -> GenerationJob:
+        """Claim, materialize, and attach one completed Grok video.
+
+        The claim transaction is intentionally separate and committed before
+        the CDN/R2 work.  A process crash leaves a short, durable lease that a
+        later poller can recover; a losing poller has no R2 write or output
+        row to commit.
+        """
+        claim_token = await self._claim_video_finalization(session, job_id)
+        if claim_token is None:
+            return await self._refresh_authoritative_job(session, job_id)
+
+        materialized: _MaterializedVideo | None = None
+        try:
+            materialized = await self._materialize_video_result(
+                user_id=(await self._refresh_authoritative_job(session, job_id)).user_id,
+                job_id=job_id,
+                result=result,
+            )
+            transition_service = self._make_transition_service(session)
+            (
+                settled_job,
+                did_transition,
+            ) = await transition_service.transition_claimed_video_to_completed(
+                job_id,
+                claim_token=claim_token,
+                outputs=materialized.outputs,
+                product_id=product_id,
+            )
+            if did_transition:
+                logger.info(
+                    "grok.video_job_completed",
+                    job_id=str(job_id),
+                    output_count=len(materialized.outputs),
+                )
+            else:
+                # Claim expired or another terminal transition won.  The loser
+                # has not committed any output rows, so remove every object it
+                # uploaded before returning the authoritative job.
+                await self._cleanup_materialized_objects(materialized.storage_keys)
+        except IntegrityError:
+            await session.rollback()
+            if materialized is not None:
+                await self._cleanup_materialized_objects(materialized.storage_keys)
+            await self._release_video_finalization_claim(session, job_id, claim_token)
+            return await self._refresh_authoritative_job(session, job_id)
+        except Exception:
+            await session.rollback()
+            if materialized is not None:
+                await self._cleanup_materialized_objects(materialized.storage_keys)
+            await self._release_video_finalization_claim(session, job_id, claim_token)
+            raise
+        else:
+            return settled_job
+
+    async def _claim_video_finalization(self, session: AsyncSession, job_id: UUID) -> str | None:
+        """Durably acquire a recoverable PostgreSQL claim for one video job."""
+        token = str(uuid4())
+        lease_expires_at = datetime.now(UTC) + timedelta(seconds=self._finalization_lease_seconds)
+        result = await session.execute(
+            update(GenerationJob)
+            .where(
+                GenerationJob.id == job_id,
+                GenerationJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                or_(
+                    GenerationJob.finalization_claim_token.is_(None),
+                    GenerationJob.finalization_lease_expires_at <= func.now(),
+                ),
+            )
+            .values(
+                finalization_claim_token=token,
+                finalization_lease_expires_at=lease_expires_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:  # type: ignore[attr-defined]
+            return None
+        await session.commit()
+        return token
+
+    async def _release_video_finalization_claim(
+        self, session: AsyncSession, job_id: UUID, claim_token: str
+    ) -> None:
+        """Release a failed materializer's claim so retries need not await TTL."""
+        try:
+            await session.execute(
+                update(GenerationJob)
+                .where(
+                    GenerationJob.id == job_id,
+                    GenerationJob.finalization_claim_token == claim_token,
+                )
+                .values(finalization_claim_token=None, finalization_lease_expires_at=None)
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.warning("grok.video_finalization_claim_release_failed", job_id=str(job_id))
+
+    async def _refresh_authoritative_job(
+        self, session: AsyncSession, job_id: UUID
+    ) -> GenerationJob:
+        job = await session.get(GenerationJob, job_id)
+        if job is None:
+            raise GrokJobNotFoundError(f"Job {job_id} not found")
+        await session.refresh(job)
+        return job
+
+    async def _materialize_video_result(
+        self,
+        *,
+        user_id: UUID,
+        job_id: UUID,
+        result: GrokVideoResult,
+    ) -> _MaterializedVideo:
+        """Download/upload video artifacts but do not write permanent DB rows."""
         response = await self.http_client.get(result.url)
         response.raise_for_status()
         video_data = response.content
+        expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
+        uploaded_keys: list[str] = []
+        try:
+            output_id = new_id()
+            storage_key = self._storage.build_storage_key(
+                user_id=user_id,
+                file_id=output_id,
+                storage_type=StorageType.OUTPUT,
+                format=MediaFormat.MP4,
+                job_id=job_id,
+            )
+            await self._put_output_object(storage_key, video_data, MediaFormat.MP4.content_type)
+            uploaded_keys.append(storage_key)
+            outputs = [
+                GenerationOutputData(
+                    id=output_id,
+                    storage_key=storage_key,
+                    content_type=MediaFormat.MP4.content_type,
+                    size_bytes=len(video_data),
+                    format=MediaFormat.MP4.value,
+                    output_index=0,
+                    expires_at=expires_at,
+                )
+            ]
 
-        # Upload to R2
-        output_id = new_id()
-        storage_key = self._storage.build_storage_key(
-            user_id=user_id,
-            file_id=output_id,
-            storage_type=StorageType.OUTPUT,
-            format=MediaFormat.MP4,
-            job_id=job_id,
-        )
+            frame_bytes = await extract_video_thumbnail(video_data)
+            if frame_bytes:
+                for generated in await make_image_thumbnails(frame_bytes):
+                    thumbnail_id = new_id()
+                    thumbnail_key = self._storage.build_storage_key(
+                        user_id=user_id,
+                        file_id=thumbnail_id,
+                        storage_type=StorageType.OUTPUT,
+                        format=MediaFormat.WEBP,
+                        job_id=job_id,
+                    )
+                    try:
+                        await self._put_output_object(
+                            thumbnail_key,
+                            generated.result.data,
+                            MediaFormat.WEBP.content_type,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "grok.thumbnail_skipped",
+                            job_id=str(job_id),
+                            max_edge=generated.spec.max_edge,
+                        )
+                        continue
+                    uploaded_keys.append(thumbnail_key)
+                    outputs.append(
+                        GenerationOutputData(
+                            id=thumbnail_id,
+                            storage_key=thumbnail_key,
+                            content_type=MediaFormat.WEBP.content_type,
+                            size_bytes=len(generated.result.data),
+                            format=MediaFormat.WEBP.value,
+                            output_index=0,
+                            expires_at=expires_at,
+                            is_thumbnail=True,
+                            parent_output_id=output_id,
+                            thumbnail_max_edge=generated.spec.max_edge,
+                            width=generated.result.width,
+                            height=generated.result.height,
+                        )
+                    )
+            else:
+                logger.warning("grok.thumbnail_skipped", job_id=str(job_id))
+            return _MaterializedVideo(outputs=outputs, storage_keys=uploaded_keys)
+        except Exception:
+            await self._cleanup_materialized_objects(uploaded_keys)
+            raise
 
-        # Upload directly using the storage key
-        # TODO: migrate to put_raw (see video-frame-extraction review F5)
+    async def _put_output_object(self, key: str, data: bytes, content_type: str) -> None:
         async with self._storage._get_client() as client:
             await client.put_object(
                 Bucket=self._storage._settings.bucket_name,
-                Key=storage_key,
-                Body=video_data,
-                ContentType=MediaFormat.MP4.content_type,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
             )
 
-        # Create output record
-        expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
-        await output_repo.create(
-            id=output_id,
-            user_id=user_id,
-            job_id=job_id,
-            storage_key=storage_key,
-            content_type=MediaFormat.MP4.content_type,
-            size_bytes=len(video_data),
-            format=MediaFormat.MP4.value,
-            output_index=0,
-            expires_at=expires_at,
-            input_image_id=None,
-            is_thumbnail=False,
-            product_id=product_id,
-        )
-
-        logger.debug("grok.video_output_stored", output_id=str(output_id), job_id=str(job_id))
-
-        # Extract first frame and generate sm + md WEBP poster variants
-        frame_bytes = await extract_video_thumbnail(video_data)
-        if frame_bytes:
-            await self._store_output_thumbnails(
-                session=session,
-                output_repo=output_repo,
-                user_id=user_id,
-                job_id=job_id,
-                parent_output_id=output_id,
-                parent_output_index=0,
-                source_bytes=frame_bytes,
-                expires_at=expires_at,
-                product_id=product_id,
-            )
-        else:
-            logger.warning("grok.thumbnail_skipped", job_id=str(job_id))
+    async def _cleanup_materialized_objects(self, storage_keys: list[str]) -> None:
+        if not storage_keys:
+            return
+        try:
+            await self._storage.delete_many(storage_keys)
+        except Exception:
+            # Do not hide an already-known DB/materialization failure.  The
+            # retention/orphan worker remains the final safety net.
+            logger.exception("grok.video_materialization_cleanup_failed", count=len(storage_keys))
 
     # -------------------------------------------------------------------------
     # Job Status

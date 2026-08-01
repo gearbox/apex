@@ -26,6 +26,7 @@ from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
 from src.api.services.frames.service import FrameExtractionService
 from src.api.services.frames.worker import FrameExtractionWorker
+from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.service import GenerationService
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
@@ -823,6 +824,11 @@ async def init_services(settings: Settings) -> JWTService:
             billing_service=get_billing_service(),
             event_bus=_services.event_bus,
             ops_event_bus=_services.ops_event_bus,
+            max_poll_time=settings.grok_video_max_poll_time,
+            finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
+            billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
+                settings.grok_moderation_billing_policy
+            ),
         )
         await _services.grok_job_service.connect()
         logger.info("grok.initialized")
@@ -845,8 +851,11 @@ async def init_services(settings: Settings) -> JWTService:
             logger.info("grok.video_worker_in_process_started")
         else:
             logger.info(
-                "grok.video_worker_external_required",
-                hint="Run 'python -m src.workers.grok_video' as a separate process",
+                "grok.video_worker_external_recommended",
+                hint=(
+                    "Poll-on-read settles videos safely without a worker; run "
+                    "'python -m src.workers.grok_video' for proactive completion"
+                ),
             )
 
     # Initialize authentication services

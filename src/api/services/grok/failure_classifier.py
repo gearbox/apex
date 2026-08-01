@@ -12,7 +12,17 @@ from collections.abc import Mapping
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.core.enums import Provider
 
-_MODERATION_CODE_MARKERS = ("MODERATION", "SAFETY", "CONTENT_POLICY", "POLICY_VIOLATION")
+# Only these *exact* structured results establish a content rejection.  Broad
+# words such as MODERATION, SAFETY, or CONTENT_POLICY occur in infrastructure
+# error names too (for example MODERATION_SERVICE_UNAVAILABLE).
+_MODERATION_REJECTION_CODES = frozenset(
+    {
+        "MODERATION_REJECTED",
+        "SAFETY_REJECTED",
+        "CONTENT_POLICY_VIOLATION",
+        "POLICY_VIOLATION",
+    }
+)
 _INVALID_CODE_MARKERS = ("INVALID_ARGUMENT", "INVALID_REQUEST", "BAD_REQUEST")
 _RATE_LIMIT_CODE_MARKERS = ("RESOURCE_EXHAUSTED", "RATE_LIMIT", "TOO_MANY_REQUESTS")
 _AUTH_CODE_MARKERS = ("UNAUTHENTICATED", "UNAUTHORIZED", "PERMISSION_DENIED", "FORBIDDEN")
@@ -35,10 +45,16 @@ class GrokFailureClassifier:
         codes, messages, status_code = self._extract(source)
         kind = self._classify_kind(codes, messages, status_code)
 
-        # A Grok moderation rejection is a definitive post-processing result.
-        # The production billing policy therefore treats it as accepted unless
-        # a caller supplied a more precise provider-acceptance value.
-        if kind == ProviderFailureKind.MODERATION_REJECTED and provider_request_accepted is None:
+        # The documented ``URL is not available`` moderation response is the
+        # one free-text signal that proves a request reached provider
+        # moderation.  Other moderation-labelled errors remain ambiguous and
+        # are deliberately non-billable unless their call site proves
+        # acceptance (for example a deferred request ID).
+        if (
+            kind == ProviderFailureKind.MODERATION_REJECTED
+            and provider_request_accepted is None
+            and self._has_confirmed_moderation_result(messages)
+        ):
             provider_request_accepted = True
 
         return ProviderFailure(
@@ -132,14 +148,15 @@ class GrokFailureClassifier:
     @staticmethod
     def _kind_from_code(code: str) -> ProviderFailureKind | None:
         upper_code = code.upper()
+        # Infrastructure semantics win when a compound code contains both an
+        # moderation-ish word and an outage marker.
         marker_sets: tuple[tuple[tuple[str, ...], ProviderFailureKind], ...] = (
-            (_MODERATION_CODE_MARKERS, ProviderFailureKind.MODERATION_REJECTED),
-            (_INVALID_CODE_MARKERS, ProviderFailureKind.INVALID_REQUEST),
-            (_RATE_LIMIT_CODE_MARKERS, ProviderFailureKind.RATE_LIMITED),
-            (_AUTH_CODE_MARKERS, ProviderFailureKind.AUTHENTICATION_FAILED),
             (_TIMEOUT_CODE_MARKERS, ProviderFailureKind.TIMEOUT),
-            (_MALFORMED_CODE_MARKERS, ProviderFailureKind.MALFORMED_RESPONSE),
+            (_RATE_LIMIT_CODE_MARKERS, ProviderFailureKind.RATE_LIMITED),
             (_UNAVAILABLE_CODE_MARKERS, ProviderFailureKind.PROVIDER_UNAVAILABLE),
+            (_AUTH_CODE_MARKERS, ProviderFailureKind.AUTHENTICATION_FAILED),
+            (_INVALID_CODE_MARKERS, ProviderFailureKind.INVALID_REQUEST),
+            (_MALFORMED_CODE_MARKERS, ProviderFailureKind.MALFORMED_RESPONSE),
         )
         return next(
             (
@@ -147,8 +164,17 @@ class GrokFailureClassifier:
                 for markers, kind in marker_sets
                 if any(marker in upper_code for marker in markers)
             ),
-            None,
+            (
+                ProviderFailureKind.MODERATION_REJECTED
+                if upper_code in _MODERATION_REJECTION_CODES
+                else None
+            ),
         )
+
+    @staticmethod
+    def _has_confirmed_moderation_result(messages: list[str]) -> bool:
+        normalized = " ".join(" ".join(messages).casefold().split())
+        return "respect moderation rules" in normalized and "url is not available" in normalized
 
     def _extract(self, source: object) -> tuple[list[str], list[str], int | None]:
         codes: list[str] = []

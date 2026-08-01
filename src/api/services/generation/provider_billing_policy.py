@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Literal
 
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.core.enums import Provider
@@ -27,15 +28,44 @@ class ProviderBillingPolicy:
         )
 
 
-_DEFAULT_POLICY = ProviderBillingPolicy()
-_POLICIES: dict[Provider, ProviderBillingPolicy] = {
-    # Production observation: Grok bills moderation rejections after it has
-    # accepted the request. Keep the debit instead of issuing compensation.
-    Provider.GROK: ProviderBillingPolicy(charge_on_moderation_rejection=True),
-}
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProviderBillingPolicyRegistry:
+    """Request/worker-injected provider billing rules.
+
+    Financial behaviour must not come from a module-global default: API
+    processes and the standalone poller must use the setting they were started
+    with.  The registry also keeps providers independent as more policies are
+    added.
+    """
+
+    policies: dict[Provider, ProviderBillingPolicy]
+
+    @classmethod
+    def with_grok_moderation_policy(
+        cls, moderation_billing_policy: Literal["charge", "refund"]
+    ) -> ProviderBillingPolicyRegistry:
+        return cls(
+            policies={
+                Provider.GROK: ProviderBillingPolicy(
+                    charge_on_moderation_rejection=moderation_billing_policy == "charge"
+                )
+            }
+        )
+
+    def apply(self, failure: ProviderFailure) -> ProviderFailure:
+        policy = self.policies.get(failure.provider, ProviderBillingPolicy())
+        return dataclasses.replace(failure, billable=policy.is_failure_billable(failure))
 
 
-def apply_provider_billing_policy(failure: ProviderFailure) -> ProviderFailure:
+DEFAULT_PROVIDER_BILLING_POLICIES = ProviderBillingPolicyRegistry.with_grok_moderation_policy(
+    "charge"
+)
+
+
+def apply_provider_billing_policy(
+    failure: ProviderFailure,
+    *,
+    registry: ProviderBillingPolicyRegistry | None = None,
+) -> ProviderFailure:
     """Return ``failure`` annotated with the applicable billing decision."""
-    policy = _POLICIES.get(failure.provider, _DEFAULT_POLICY)
-    return dataclasses.replace(failure, billable=policy.is_failure_billable(failure))
+    return (registry or DEFAULT_PROVIDER_BILLING_POLICIES).apply(failure)

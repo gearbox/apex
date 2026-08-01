@@ -138,6 +138,7 @@ async def _create_output(
     job: GenerationJob,
     expires_at: datetime,
     with_thumbnail: bool = False,
+    output_index: int = 0,
 ) -> tuple[GenerationOutput, GenerationOutput | None]:
     async with session_factory() as session:
         out_id = uuid4()
@@ -150,7 +151,7 @@ async def _create_output(
             content_type="image/png",
             size_bytes=100,
             format="png",
-            output_index=0,
+            output_index=output_index,
             expires_at=expires_at,
         )
         session.add(output)
@@ -168,7 +169,7 @@ async def _create_output(
                 content_type="image/webp",
                 size_bytes=20,
                 format="webp",
-                output_index=0,
+                output_index=output_index,
                 is_thumbnail=True,
                 parent_output_id=out_id,
                 thumbnail_max_edge=150,
@@ -342,7 +343,13 @@ async def test_sweep_keeps_job_with_live_output(
     user = await _create_user(retention_session_factory)
     job = await _create_job(retention_session_factory, user=user)
     await _create_output(retention_session_factory, user=user, job=job, expires_at=_past())
-    await _create_output(retention_session_factory, user=user, job=job, expires_at=_future())
+    await _create_output(
+        retention_session_factory,
+        user=user,
+        job=job,
+        expires_at=_future(),
+        output_index=1,
+    )
 
     storage = FakeR2Storage()
     service = ContentRetentionService(

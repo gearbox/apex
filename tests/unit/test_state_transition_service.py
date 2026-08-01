@@ -238,15 +238,16 @@ class TestTransitionToFailed:
 
         billing.refund.assert_not_awaited()
 
-    async def test_refund_failure_does_not_raise(self) -> None:
+    async def test_refund_failure_rolls_back_the_terminal_transition(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
         svc, session, billing = _make_service(job)
         billing.refund.side_effect = RuntimeError("billing down")
 
-        _, _ = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+        with pytest.raises(RuntimeError, match="billing down"):
+            await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
 
-        # Job is still transitioned; rollback was called
         session.rollback.assert_awaited()
+        session.commit.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "status",
@@ -265,14 +266,14 @@ class TestTransitionToFailed:
         async def refresh_job(refreshed: MagicMock) -> None:
             refreshed.status = JobStatus.FAILED.value
             refreshed.public_error_message = "The AI provider is temporarily unavailable."
-            refreshed.failure_code = "provider_provider_unavailable"
+            refreshed.failure_code = "provider_unavailable"
 
         session.refresh.side_effect = refresh_job
         await svc.transition_to_failed(
             job.id,
             error_message=job.error_message,
             public_error_message="The AI provider is temporarily unavailable.",
-            failure_code="provider_provider_unavailable",
+            failure_code="provider_unavailable",
             refund=False,
             product_id="vex",
         )

@@ -45,6 +45,17 @@ _PUBLIC_MESSAGES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.UNKNOWN: "The AI provider could not complete the request.",
 }
 
+_PUBLIC_CODES: dict[ProviderFailureKind, str] = {
+    ProviderFailureKind.MODERATION_REJECTED: "provider_moderation_rejected",
+    ProviderFailureKind.INVALID_REQUEST: "provider_invalid_request",
+    ProviderFailureKind.RATE_LIMITED: "provider_rate_limited",
+    ProviderFailureKind.AUTHENTICATION_FAILED: "provider_authentication_failed",
+    ProviderFailureKind.PROVIDER_UNAVAILABLE: "provider_unavailable",
+    ProviderFailureKind.TIMEOUT: "provider_timeout",
+    ProviderFailureKind.MALFORMED_RESPONSE: "provider_malformed_response",
+    ProviderFailureKind.UNKNOWN: "provider_unknown",
+}
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class ProviderFailure:
@@ -69,9 +80,7 @@ class ProviderFailure:
     @property
     def public_code(self) -> str:
         """Stable client-visible error code for this failure."""
-        if self.kind == ProviderFailureKind.MODERATION_REJECTED:
-            return "provider_moderation_rejected"
-        return f"provider_{self.kind.value}"
+        return _PUBLIC_CODES[self.kind]
 
     @classmethod
     def safe_message_for_kind(cls, kind: ProviderFailureKind) -> str:

@@ -19,9 +19,12 @@ from typing import NoReturn
 import structlog
 
 from src.api.services.billing import BillingService
+from src.api.services.event_bus import EventBus
+from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.grok.video_worker import GrokVideoWorker
+from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
@@ -98,6 +101,10 @@ class GrokVideoWorkerCLI:
 
         # Billing service is stateless — see src.api.services.billing docstring.
         billing_service = BillingService()
+        # Match the in-process topology.  Disabled instances are intentional
+        # no-ops, so standalone polling remains safe without Redis.
+        event_bus = EventBus(enabled=self._settings.redis_url is not None)
+        ops_event_bus = OpsEventBus(enabled=self._settings.redis_url is not None)
 
         # Initialize job service
         job_service = GrokJobService(
@@ -105,6 +112,13 @@ class GrokVideoWorkerCLI:
             storage=r2_storage,
             retention_days=self._settings.retention_days,
             billing_service=billing_service,
+            event_bus=event_bus,
+            ops_event_bus=ops_event_bus,
+            max_poll_time=self._settings.grok_video_max_poll_time,
+            finalization_lease_seconds=self._settings.grok_video_finalization_lease_seconds,
+            billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
+                self._settings.grok_moderation_billing_policy
+            ),
         )
         await job_service.connect()
         logger.info("grok_worker.job_service_initialized")
@@ -117,6 +131,8 @@ class GrokVideoWorkerCLI:
             job_service=job_service,
             billing_service=billing_service,
             settings=self._settings,
+            event_bus=event_bus,
+            ops_event_bus=ops_event_bus,
             redis_enabled=self._settings.redis_url is not None,
         )
         await self._worker.start()

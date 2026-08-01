@@ -79,16 +79,25 @@ class TestTimeoutRefund:
         worker = _make_worker(
             job_service=job_service, settings=_make_settings(grok_video_max_poll_time=600)
         )
-        patcher, mock_ts = _patched_transition_service()
+        timeout_failure = ProviderFailure(
+            kind=ProviderFailureKind.TIMEOUT,
+            provider=Provider.GROK,
+            sanitized_message="The AI provider timed out while processing the request.",
+        )
+        job_service.poll_video_job_for_worker.return_value = VideoPollOutcome(
+            status=VideoPollStatus.FAILED,
+            failure=timeout_failure,
+        )
+        session = AsyncMock()
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
+        await worker._poll_one(job, session)
 
-        mock_ts.transition_to_failed.assert_awaited_once()
-        _, kwargs = mock_ts.transition_to_failed.call_args
-        assert kwargs["refund"] is True
-        assert kwargs["product_id"] == "vex"
-        job_service.poll_video_job_for_worker.assert_not_awaited()
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
+            product_id="vex",
+        )
 
     async def test_below_timeout_does_not_fail(self) -> None:
         job = _make_job(started_at=datetime.now(UTC) - timedelta(seconds=10))
@@ -369,24 +378,30 @@ class TestTransientPollErrors:
         )
 
     async def test_timeout_ceiling_precedes_poll(self) -> None:
-        """A job past max_poll_time is failed via the timeout branch without
-        ever invoking the poll — even if that poll would have raised a
-        transient error."""
+        """The worker delegates maximum-age evaluation to GrokJobService."""
         job = _make_job(started_at=datetime.now(UTC) - timedelta(seconds=1000))
         job_service = AsyncMock()
-        job_service.poll_video_job_for_worker.side_effect = GrokRateLimitError("rate limited")
+        timeout_failure = ProviderFailure(
+            kind=ProviderFailureKind.TIMEOUT,
+            provider=Provider.GROK,
+            sanitized_message="The AI provider timed out while processing the request.",
+        )
+        job_service.poll_video_job_for_worker.return_value = VideoPollOutcome(
+            status=VideoPollStatus.FAILED,
+            failure=timeout_failure,
+        )
         worker = _make_worker(
             job_service=job_service, settings=_make_settings(grok_video_max_poll_time=600)
         )
-        patcher, mock_ts = _patched_transition_service()
+        session = AsyncMock()
+        await worker._poll_one(job, session)
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_failed.assert_awaited_once()
-        _, kwargs = mock_ts.transition_to_failed.call_args
-        assert kwargs["refund"] is True
-        job_service.poll_video_job_for_worker.assert_not_awaited()
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
+            product_id="vex",
+        )
 
 
 class TestManagerRemoved:

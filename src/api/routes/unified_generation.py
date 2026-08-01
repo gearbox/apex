@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
@@ -120,12 +121,15 @@ class UnifiedGenerationController(Controller):
             )
 
         record_id = check_result
+        post_commit_callbacks: list[Callable[[], Awaitable[None]]] = []
         try:
             result = await generation_service.generate(
                 data,
                 user_id=current_user_id,
                 session=session,
                 product_config=product_config,
+                defer_commit=True,
+                post_commit_callbacks=post_commit_callbacks,
             )
 
             response_body = msgspec.to_builtins(result)
@@ -137,6 +141,8 @@ class UnifiedGenerationController(Controller):
                 session=session,
             )
             await session.commit()
+            for callback in post_commit_callbacks:
+                await callback()
             return Response(content=result, status_code=HTTP_201_CREATED)
 
         except NoActiveSessionError as exc:
@@ -258,6 +264,8 @@ class UnifiedGenerationController(Controller):
                 session=session,
             )
             await session.commit()
+            for callback in post_commit_callbacks:
+                await callback()
             logger.warning(
                 "generation.failed",
                 provider=exc.failure.provider.value,
@@ -268,16 +276,29 @@ class UnifiedGenerationController(Controller):
             return Response(content=error, status_code=HTTP_422_UNPROCESSABLE_ENTITY)
 
         except ProviderSubmissionFailedError as exc:
-            # Settlement already committed the failed job and any required
-            # refund. Mark this idempotency attempt failed (rather than caching
-            # it as a billable completed operation) and return only normalized,
-            # public-safe provider failure data.
-            await _mark_failed(idempotency_service, record_id, session)
+            # The failed state, debit/refund result, idempotency resource and
+            # cached response share this one transaction.  Replaying the key
+            # therefore cannot run the provider or create a second debit.
             status_code = {
                 ProviderFailureKind.INVALID_REQUEST: HTTP_400_BAD_REQUEST,
                 ProviderFailureKind.RATE_LIMITED: HTTP_429_TOO_MANY_REQUESTS,
                 ProviderFailureKind.MALFORMED_RESPONSE: HTTP_502_BAD_GATEWAY,
             }.get(exc.failure.kind, HTTP_503_SERVICE_UNAVAILABLE)
+            error = ErrorEnvelope(
+                error=exc.public_code,
+                message=exc.public_message,
+                status_code=status_code,
+            )
+            await idempotency_service.complete(
+                record_id,
+                resource_id=exc.job_id,
+                response_status_code=status_code,
+                response_body=msgspec.to_builtins(error),
+                session=session,
+            )
+            await session.commit()
+            for callback in post_commit_callbacks:
+                await callback()
             logger.warning(
                 "generation.provider_submission_failed",
                 provider=exc.failure.provider.value,
@@ -286,11 +307,7 @@ class UnifiedGenerationController(Controller):
                 status_code=status_code,
             )
             return Response(
-                content=ErrorEnvelope(
-                    error=exc.public_code,
-                    message=exc.public_message,
-                    status_code=status_code,
-                ),
+                content=error,
                 status_code=status_code,
             )
 

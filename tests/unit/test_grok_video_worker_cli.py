@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -195,6 +195,8 @@ class TestGrokVideoWorkerCLIRun:
             job_service=mock_job_service,
             billing_service=mock_billing_service,
             settings=settings,
+            event_bus=ANY,
+            ops_event_bus=ANY,
             redis_enabled=False,
         )
 

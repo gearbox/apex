@@ -10,14 +10,16 @@ refunds are settled inside the transition.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 
 from src.api.schemas.events import EventType, JobProgressPayload
 from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
-from src.api.services.job_state_transition import JobStateTransitionService
+
+# Retained as a module symbol for downstream test/extension imports. Terminal
+# transitions themselves are now owned by GrokJobService.
+from src.api.services.job_state_transition import JobStateTransitionService  # noqa: F401
 from src.core.enums import JobStatus, Provider, VideoPollStatus
 from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
@@ -74,18 +76,9 @@ class GrokVideoWorker(PeriodicWorker):
         self._db_manager = db_manager
         self._job_service = job_service
         self._billing = billing_service
-        self._max_poll_time = settings.grok_video_max_poll_time
         self._event_bus = event_bus
         self._ops_event_bus = ops_event_bus
         self._max_concurrent_polls = settings.grok_video_max_concurrent_polls
-
-    def _make_transition_service(self, session: AsyncSession) -> JobStateTransitionService:
-        return JobStateTransitionService(
-            session=session,
-            event_bus=self._event_bus,
-            billing_service=self._billing,
-            ops_event_bus=self._ops_event_bus,
-        )
 
     async def _emit_progress(self, job: GenerationJob, progress_pct: int) -> None:
         if not self._event_bus:
@@ -124,25 +117,8 @@ class GrokVideoWorker(PeriodicWorker):
         await asyncio.gather(*(guarded(j) for j in jobs))
 
     async def _poll_one(self, job: GenerationJob, session: AsyncSession) -> None:
-        """Poll one job and drive its state transition through JobStateTransitionService."""
-        ts = self._make_transition_service(session)
+        """Poll one job; GrokJobService owns every terminal settlement."""
         product_id = str(job.product_id)
-
-        # Timeout check first — a job past the ceiling is failed regardless
-        # of what xAI currently reports.
-        if job.started_at is not None:
-            elapsed = (datetime.now(UTC) - job.started_at).total_seconds()
-            if elapsed > self._max_poll_time:
-                logger.warning("grok.video_job_timeout", job_id=str(job.id), elapsed_s=int(elapsed))
-                # Refund policy: the timeout path had NO refund before this
-                # rewrite (F2) — refund=True here adds the missing one.
-                await ts.transition_to_failed(
-                    job.id,
-                    error_message=f"Video generation timed out after {elapsed:.0f} seconds",
-                    refund=True,
-                    product_id=product_id,
-                )
-                return
 
         try:
             outcome = await self._job_service.poll_video_job_for_worker(session, job.id)

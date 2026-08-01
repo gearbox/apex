@@ -299,7 +299,11 @@ class TestRouteHandlerReturns400:
         assert response.content.error == failure.public_code
         assert response.content.message == failure.sanitized_message
         assert "sentinel-secret" not in response.content.message
-        idempotency.fail.assert_awaited_once()
+        # Failure settlement, the safe response, and the idempotency record
+        # share one transaction.  A retry must replay this result instead of
+        # submitting to the provider and charging again.
+        idempotency.complete.assert_awaited_once()
+        idempotency.fail.assert_not_awaited()
 
     async def test_bare_not_implemented_error_is_not_swallowed_as_400(self) -> None:
         svc, idempotency, session = _make_route_handler_mocks(

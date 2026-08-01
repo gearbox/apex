@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 
+from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.grok.failure_classifier import GrokFailureClassifier
 
@@ -80,3 +83,39 @@ def test_sanitized_failure_never_exposes_provider_payload_or_secret(
     assert secret not in failure.sanitized_message
     assert secret not in failure.public_code
     assert _CONFIRMED_MESSAGE not in failure.sanitized_message
+
+
+@pytest.mark.parametrize(
+    ("code", "kind"),
+    [
+        ("MODERATION_SERVICE_UNAVAILABLE", ProviderFailureKind.PROVIDER_UNAVAILABLE),
+        ("SAFETY_SERVICE_INTERNAL", ProviderFailureKind.PROVIDER_UNAVAILABLE),
+        ("CONTENT_POLICY_TIMEOUT", ProviderFailureKind.TIMEOUT),
+        ("MODERATION_RATE_LIMITED", ProviderFailureKind.RATE_LIMITED),
+    ],
+)
+def test_compound_moderation_infrastructure_codes_are_non_billable(
+    classifier: GrokFailureClassifier,
+    code: str,
+    kind: ProviderFailureKind,
+) -> None:
+    failure = classifier.classify({"code": code})
+
+    assert failure.kind == kind
+    assert failure.provider_request_accepted is None
+    assert failure.billable is False
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected_billable"),
+    [("charge", True), ("refund", False)],
+)
+def test_grok_moderation_billing_policy_is_injected(
+    classifier: GrokFailureClassifier,
+    setting: Literal["charge", "refund"],
+    expected_billable: bool,
+) -> None:
+    failure = classifier.classify({"code": "MODERATION_REJECTED"}, provider_request_accepted=True)
+    registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy(setting)
+
+    assert registry.apply(failure).billable is expected_billable

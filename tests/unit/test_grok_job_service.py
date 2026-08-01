@@ -115,7 +115,7 @@ async def test_create_image_job_i2i_preserves_requested_output_count() -> None:
     assert result.balance_after == 75
 
 
-async def test_create_image_job_i2i_without_resolved_input_url_fails_and_refunds() -> None:
+async def test_create_image_job_i2i_without_resolved_input_url_fails_before_reserving() -> None:
     job_repo = _FakeJobRepository()
     session = SimpleNamespace(flush=AsyncMock())
     grok = SimpleNamespace(
@@ -160,12 +160,9 @@ async def test_create_image_job_i2i_without_resolved_input_url_fails_and_refunds
     grok.edit_image.assert_not_awaited()
     grok.generate_image.assert_not_awaited()
     store_image_result.assert_not_awaited()
-    assert job_repo.job is not None
-    assert job_repo.job.status == JobStatus.FAILED
-    assert job_repo.job.error_message == "I2I generation requires a resolved input image URL"
-    billing_service.refund.assert_awaited_once()
-    assert billing_service.refund.await_args.args[0] == job_repo.job.id
-    assert billing_service.refund.await_args.kwargs["product_id"] == "grok-image"
+    assert job_repo.job is None
+    billing_service.check_and_reserve.assert_not_awaited()
+    billing_service.refund.assert_not_awaited()
 
 
 async def test_create_image_job_moderation_rejection_is_billable_and_safe() -> None:
@@ -187,7 +184,7 @@ async def test_create_image_job_moderation_rejection_is_billable_and_safe() -> N
             "src.api.services.grok.job_service.OutputRepository",
             return_value=SimpleNamespace(),
         ),
-        pytest.raises(ProviderModerationRejectedError) as exc_info,
+        pytest.raises(ProviderModerationRejectedError),
     ):
         await service.create_image_job(
             cast("AsyncSession", session),
@@ -202,10 +199,9 @@ async def test_create_image_job_moderation_rejection_is_billable_and_safe() -> N
         )
 
     assert job_repo.job is not None
-    assert job_repo.job.status == JobStatus.FAILED
-    assert job_repo.job.failure_code == "provider_moderation_rejected"
-    assert job_repo.job.error_message == exc_info.value.public_message
-    assert raw_provider_message not in job_repo.job.error_message
+    # The provider adapter classifies and retains the safe context only; the
+    # request-level GenerationService owns terminal state and billing.
+    assert job_repo.job.status == JobStatus.RUNNING
     assert billing_service.refund.await_count == 0
 
 

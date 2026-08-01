@@ -226,6 +226,13 @@ class GenerationJob(Base):
     # Explicitly public-safe text for user-facing REST/SSE failure payloads.
     public_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Durable, cross-process ownership of Grok video result materialization.
+    # A claim is committed before R2 writes and expires so a crashed poller can
+    # be recovered without relying on Redis or process-local locks.
+    finalization_claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    finalization_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_deleted: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -357,6 +364,11 @@ class GenerationJob(Base):
         Index("ix_generation_jobs_user_status", "user_id", "status"),
         Index("ix_generation_jobs_user_created", "user_id", "created_at"),
         Index("ix_generation_jobs_provider_status", "provider", "status"),
+        Index(
+            "ix_generation_jobs_finalization_lease",
+            "finalization_lease_expires_at",
+            postgresql_where=text("finalization_claim_token IS NOT NULL"),
+        ),
         Index("ix_generation_jobs_gallery", "user_id", "product_id", "status", "created_at"),
         Index(
             "ix_generation_jobs_deleted",
@@ -488,6 +500,20 @@ class GenerationOutput(Base):
         Index("ix_generation_outputs_user_created", "user_id", "created_at"),
         Index("ix_generation_outputs_cleanup", "expires_at"),
         Index("ix_generation_outputs_thumbnail", "job_id", "is_thumbnail"),
+        Index(
+            "uq_generation_outputs_full_job_index",
+            "job_id",
+            "output_index",
+            unique=True,
+            postgresql_where=text("is_thumbnail = FALSE"),
+        ),
+        Index(
+            "uq_generation_outputs_thumbnail_parent_bucket",
+            "parent_output_id",
+            "thumbnail_max_edge",
+            unique=True,
+            postgresql_where=text("is_thumbnail = TRUE"),
+        ),
     )
 
     def __repr__(self) -> str:

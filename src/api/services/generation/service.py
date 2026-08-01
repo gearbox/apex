@@ -19,6 +19,7 @@ from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -120,6 +121,8 @@ class GenerationService:
         user_id: UUID,
         session: AsyncSession,
         product_config: ProductConfig,
+        defer_commit: bool = False,
+        post_commit_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
     ) -> JobCreatedResponse:
         """Execute the full generation pipeline."""
         # 1. Model-generation_type compatibility (declarative, enum-driven)
@@ -274,7 +277,8 @@ class GenerationService:
             )
             job = submit_result.job
             reserve_event = submit_result.balance_event
-            await session.commit()
+            if not defer_commit:
+                await session.commit()
 
         except ProviderSubmissionFailedError as exc:
             # Provider adapters only classify and preserve the submission
@@ -294,7 +298,19 @@ class GenerationService:
                 refund=not exc.failure.billable,
                 product_id=product_id,
                 reserve_event=exc.balance_event,
+                commit=not defer_commit,
             )
+            if defer_commit and did_transition:
+                publication = transition_service.deferred_failure
+                if publication is None:
+                    raise RuntimeError("Missing deferred failure publication") from None
+                if post_commit_callbacks is None:
+                    raise RuntimeError(
+                        "Deferred generation requires post-commit callbacks"
+                    ) from None
+                post_commit_callbacks.append(
+                    lambda: transition_service.publish_deferred_failure(publication)
+                )
             logger.warning(
                 "generation.failed",
                 provider=exc.failure.provider.value,
@@ -334,8 +350,46 @@ class GenerationService:
             # the client — only this fixed message may.
             raise GenerationError("Generation failed due to an internal error.") from exc
 
-        # Post-commit, best-effort notifications — a publish failure must never
-        # affect the already-committed billing/job state (no refund, no client error).
+        async def callback() -> None:
+            await self._publish_generation_created(
+                job=job,
+                user_id=user_id,
+                product_id=product_id,
+                generation_type=request.generation_type.value,
+                provider=request.model.provider.value,
+                reserve_event=reserve_event,
+            )
+
+        if defer_commit:
+            if post_commit_callbacks is None:
+                raise RuntimeError("Deferred generation requires post-commit callbacks")
+            post_commit_callbacks.append(callback)
+        else:
+            await callback()
+
+        # 10. Build response
+        return JobCreatedResponse(
+            job_id=job.id,
+            status=JobStatus(job.status),
+            name=job.name,
+            model=request.model.value,
+            generation_type=request.generation_type,
+            created_at=job.created_at,
+            tokens_charged=token_cost,
+            balance_remaining=submit_result.balance_after,
+        )
+
+    async def _publish_generation_created(
+        self,
+        *,
+        job: GenerationJob,
+        user_id: UUID,
+        product_id: str,
+        generation_type: str,
+        provider: str,
+        reserve_event: BalanceEvent | None,
+    ) -> None:
+        """Emit success events only after the request-level transaction commits."""
         if self._event_bus is not None:
             try:
                 await self._event_bus.publish_balance(reserve_event)
@@ -349,8 +403,8 @@ class GenerationService:
                         job_id=job.id,
                         status=job.status if isinstance(job.status, str) else job.status.value,
                         previous_status="none",
-                        generation_type=request.generation_type.value,
-                        provider=request.model.provider.value,
+                        generation_type=generation_type,
+                        provider=provider,
                     ),
                 )
             except Exception:
@@ -362,21 +416,9 @@ class GenerationService:
             payload=GenerationCreatedOpsPayload(
                 job_id=job.id,
                 user_id=user_id,
-                provider=request.model.provider.value,
-                generation_type=request.generation_type.value,
+                provider=provider,
+                generation_type=generation_type,
             ),
-        )
-
-        # 10. Build response
-        return JobCreatedResponse(
-            job_id=job.id,
-            status=JobStatus(job.status),
-            name=job.name,
-            model=request.model.value,
-            generation_type=request.generation_type,
-            created_at=job.created_at,
-            tokens_charged=token_cost,
-            balance_remaining=submit_result.balance_after,
         )
 
     async def _resolve_submit_failure(

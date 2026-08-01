@@ -217,7 +217,6 @@ class GrokGenerationProvider:
             product_id=product_id,
             source_job_id=source_job_id,
             source_output_id=source_output_id,
-            defer_submission_failure_settlement=True,
         )
 
     async def _submit_video(
@@ -254,5 +253,4 @@ class GrokGenerationProvider:
             product_id=product_id,
             source_job_id=source_job_id,
             source_output_id=source_output_id,
-            defer_submission_failure_settlement=True,
         )

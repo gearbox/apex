@@ -495,6 +495,15 @@ class Settings(BaseSettings):
         le=1800,
         description="Maximum seconds to poll for video completion",
     )
+    grok_video_finalization_lease_seconds: int = Field(
+        default=120,
+        ge=30,
+        le=900,
+        description=(
+            "Bounded PostgreSQL finalization lease for Grok video outputs. "
+            "Allows recovery if a poller crashes while materializing a completed video."
+        ),
+    )
     grok_video_worker_in_process: bool = Field(
         default=False,
         description=(
