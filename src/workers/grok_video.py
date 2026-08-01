@@ -141,6 +141,8 @@ class GrokVideoWorkerCLI:
             "grok_worker.running",
             poll_interval=self._settings.grok_video_poll_interval,
             max_poll_time=self._settings.grok_video_max_poll_time,
+            finalization_lease_seconds=self._settings.grok_video_finalization_lease_seconds,
+            moderation_billing_policy=self._settings.grok_moderation_billing_policy,
         )
         logger.info("grok_worker.ready", hint="Press Ctrl+C to stop")
 

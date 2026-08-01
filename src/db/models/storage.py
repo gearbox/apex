@@ -25,6 +25,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, backref, mapped_column, relationship
 
@@ -355,6 +356,10 @@ class GenerationJob(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "(finalization_claim_token IS NULL) = (finalization_lease_expires_at IS NULL)",
+            name="ck_generation_jobs_finalization_claim_pair",
+        ),
         Index(
             "ix_generation_jobs_gpu_session_id_status",
             "gpu_session_id",
@@ -512,9 +517,86 @@ class GenerationOutput(Base):
             "parent_output_id",
             "thumbnail_max_edge",
             unique=True,
-            postgresql_where=text("is_thumbnail = TRUE"),
+            postgresql_where=text(
+                "is_thumbnail = TRUE "
+                "AND parent_output_id IS NOT NULL "
+                "AND thumbnail_max_edge IS NOT NULL"
+            ),
         ),
     )
 
     def __repr__(self) -> str:
         return f"<GenerationOutput {self.id} job={self.job_id} index={self.output_index}>"
+
+
+class GenerationMaterializationAttempt(Base):
+    """Durable record of a Grok video R2 materialization attempt.
+
+    Planned keys are written before the first upload.  A later worker can
+    therefore reconcile a crash or cancellation without an in-memory list.
+    """
+
+    __tablename__ = "generation_materialization_attempts"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    job_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("generation_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    claim_token: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, server_default=text("'planned'"))
+    planned_storage_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    uploaded_storage_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    reconciliation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('planned', 'uploading', 'committed', 'cleanup_pending', 'cleaned', 'ambiguous')",
+            name="ck_generation_materialization_attempt_state",
+        ),
+        Index(
+            "ix_generation_materialization_attempts_reconcile",
+            "state",
+            "updated_at",
+            postgresql_where=text(
+                "state IN ('planned', 'uploading', 'cleanup_pending', 'ambiguous')"
+            ),
+        ),
+    )
+
+
+class StorageCleanupRecord(Base):
+    """Outbox item for an object that may be deleted only after DB commit."""
+
+    __tablename__ = "storage_cleanup_records"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    reason: Mapped[str] = mapped_column(String(80), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("state IN ('pending', 'deleted')", name="ck_storage_cleanup_records_state"),
+        Index(
+            "ix_storage_cleanup_records_pending",
+            "created_at",
+            postgresql_where=text("state = 'pending'"),
+        ),
+    )

@@ -9,6 +9,7 @@ Handles the full lifecycle of Grok generation jobs:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, NoReturn
@@ -16,7 +17,7 @@ from uuid import uuid4
 
 import httpx
 import structlog
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from src.api.services.generation.base import ProviderSubmitResult
@@ -55,7 +56,7 @@ from src.core.enums import (
     VideoResolution,
 )
 from src.core.uid import new_id
-from src.db.models import GenerationJob
+from src.db.models import GenerationJob, GenerationMaterializationAttempt, GenerationOutput
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 
@@ -94,6 +95,7 @@ class _MaterializedVideo:
 
     outputs: list[GenerationOutputData]
     storage_keys: list[str]
+    attempt_id: UUID | None = None
 
 
 class GrokJobError(Exception):
@@ -292,6 +294,9 @@ class GrokJobService:
             await session.flush()
 
         reserve_event = None
+        reservation_created = False
+        provider_attempted = False
+        provider_accepted = False
         try:
             # Update status to running
             job = await job_repo.update_status(
@@ -301,20 +306,28 @@ class GrokJobService:
             )
 
             # --- SAGA: Pre-flight token deduction ---
-            reserve_result = await billing_service.check_and_reserve(
-                account_id,
-                token_cost,
-                job_id,
-                metadata={
-                    "type": "generation",
-                    "provider": "grok",
-                    "generation_type": generation_type.value,
-                    "model": model.value,
-                },
-                description="Generation charge",
-                session=session,
-                product_id=product_id,
-            )
+            try:
+                reserve_result = await billing_service.check_and_reserve(
+                    account_id,
+                    token_cost,
+                    job_id,
+                    metadata={
+                        "type": "generation",
+                        "provider": "grok",
+                        "generation_type": generation_type.value,
+                        "model": model.value,
+                    },
+                    description="Generation charge",
+                    session=session,
+                    product_id=product_id,
+                )
+            except Exception:
+                # Billing/domain failures are not provider failures.  The
+                # caller rolls back the uncommitted job and preserves the
+                # billing exception's HTTP contract.
+                await session.rollback()
+                raise
+            reservation_created = True
             if job is not None:
                 job.token_cost = token_cost
                 job.debit_transaction_id = reserve_result.txn.id
@@ -322,6 +335,7 @@ class GrokJobService:
             await session.flush()
 
             # Call Grok API
+            provider_attempted = True
             if generation_type == GenerationType.I2I:
                 # Image input references are resolved to provider-readable URLs upstream.
                 results = await self._grok.edit_image(
@@ -342,6 +356,7 @@ class GrokJobService:
                     aspect_ratio=resolved_aspect_ratio,
                     image_format=ResponseImageFormat.URL,
                 )
+            provider_accepted = True
 
             # Store revised prompt if available
             if results and results[0].revised_prompt and job is not None:
@@ -386,14 +401,19 @@ class GrokJobService:
             )
 
         except Exception as exc:
-            self._raise_unexpected_submission_failure(
-                exc,
-                job=job,
-                job_id=job_id,
-                user_id=user_id,
-                product_id=product_id,
-                reserve_event=reserve_event,
-            )
+            if provider_attempted and not provider_accepted and reservation_created:
+                self._raise_unexpected_submission_failure(
+                    exc,
+                    job=job,
+                    job_id=job_id,
+                    user_id=user_id,
+                    product_id=product_id,
+                    reserve_event=reserve_event,
+                )
+            # R2/database/local faults after acceptance remain internal
+            # failures.  Do not invent a provider UNKNOWN result or refund a
+            # reservation which may not exist.
+            raise
 
     async def _handle_submission_failure(
         self,
@@ -529,15 +549,7 @@ class GrokJobService:
             job_id=job_id,
         )
 
-        # Upload directly using the storage key
-        # TODO: migrate to put_raw (see video-frame-extraction review F5)
-        async with self._storage._get_client() as client:
-            await client.put_object(
-                Bucket=self._storage._settings.bucket_name,
-                Key=storage_key,
-                Body=image_data,
-                ContentType=image_format.content_type,
-            )
+        await self._put_output_object(storage_key, image_data, image_format.content_type)
 
         # Create output record
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
@@ -599,13 +611,11 @@ class GrokJobService:
                 job_id=job_id,
             )
             try:
-                async with self._storage._get_client() as client:
-                    await client.put_object(
-                        Bucket=self._storage._settings.bucket_name,
-                        Key=thumb_key,
-                        Body=generated.result.data,
-                        ContentType=MediaFormat.WEBP.content_type,
-                    )
+                await self._put_output_object(
+                    thumb_key,
+                    generated.result.data,
+                    MediaFormat.WEBP.content_type,
+                )
                 # SAVEPOINT: OutputRepository.create flushes immediately; without the
                 # nested transaction a failed INSERT aborts the whole outer transaction
                 # (parent output row, job state) and poisons the session for the rest
@@ -728,22 +738,30 @@ class GrokJobService:
         )
 
         reserve_event = None
+        reservation_created = False
+        provider_attempted = False
+        provider_accepted = False
         try:
             # --- SAGA: Pre-flight token deduction ---
-            reserve_result = await billing_service.check_and_reserve(
-                account_id,
-                token_cost,
-                job_id,
-                metadata={
-                    "type": "generation",
-                    "provider": "grok",
-                    "generation_type": generation_type.value,
-                    "model": model.value,
-                },
-                description="Generation charge",
-                session=session,
-                product_id=product_id,
-            )
+            try:
+                reserve_result = await billing_service.check_and_reserve(
+                    account_id,
+                    token_cost,
+                    job_id,
+                    metadata={
+                        "type": "generation",
+                        "provider": "grok",
+                        "generation_type": generation_type.value,
+                        "model": model.value,
+                    },
+                    description="Generation charge",
+                    session=session,
+                    product_id=product_id,
+                )
+            except Exception:
+                await session.rollback()
+                raise
+            reservation_created = True
             if job is not None:
                 job.token_cost = token_cost
                 job.debit_transaction_id = reserve_result.txn.id
@@ -751,6 +769,7 @@ class GrokJobService:
             await session.flush()
 
             # Start async video generation
+            provider_attempted = True
             started: GrokVideoJobStarted = await self._grok.start_video_generation(
                 prompt=prompt,
                 model=model,
@@ -760,6 +779,7 @@ class GrokJobService:
                 image_url=input_image_url,
                 video_url=input_video_url,
             )
+            provider_accepted = True
 
             # Store xAI request ID for polling
             job = await job_repo.update_status(
@@ -789,14 +809,16 @@ class GrokJobService:
             )
 
         except Exception as exc:
-            self._raise_unexpected_submission_failure(
-                exc,
-                job=job,
-                job_id=job_id,
-                user_id=user_id,
-                product_id=product_id,
-                reserve_event=reserve_event,
-            )
+            if provider_attempted and not provider_accepted and reservation_created:
+                self._raise_unexpected_submission_failure(
+                    exc,
+                    job=job,
+                    job_id=job_id,
+                    user_id=user_id,
+                    product_id=product_id,
+                    reserve_event=reserve_event,
+                )
+            raise
 
     async def poll_video_job(
         self,
@@ -1103,6 +1125,8 @@ class GrokJobService:
                 user_id=(await self._refresh_authoritative_job(session, job_id)).user_id,
                 job_id=job_id,
                 result=result,
+                session=session,
+                claim_token=claim_token,
             )
             transition_service = self._make_transition_service(session)
             (
@@ -1113,6 +1137,7 @@ class GrokJobService:
                 claim_token=claim_token,
                 outputs=materialized.outputs,
                 product_id=product_id,
+                materialization_attempt_id=materialized.attempt_id,
             )
             if did_transition:
                 logger.info(
@@ -1121,21 +1146,55 @@ class GrokJobService:
                     output_count=len(materialized.outputs),
                 )
             else:
-                # Claim expired or another terminal transition won.  The loser
-                # has not committed any output rows, so remove every object it
-                # uploaded before returning the authoritative job.
-                await self._cleanup_materialized_objects(materialized.storage_keys)
+                # Another terminal transition won.  Never delete based on a
+                # stale in-memory list: first reconcile DB references, then
+                # queue only the proven-unreferenced attempt keys.
+                await self._reconcile_materialization_attempt(
+                    session,
+                    job_id=job_id,
+                    materialized=materialized,
+                )
+        except asyncio.CancelledError:
+            # Cancellation is a BaseException, so it must be handled before
+            # the ordinary error path.  Shield cleanup/release so the task is
+            # still discoverable even while shutdown is cancelling workers.
+            if materialized is not None:
+                await asyncio.shield(
+                    self._reconcile_materialization_attempt(
+                        session,
+                        job_id=job_id,
+                        materialized=materialized,
+                    )
+                )
+            else:
+                await asyncio.shield(
+                    self._release_video_finalization_claim(session, job_id, claim_token)
+                )
+            raise
         except IntegrityError:
             await session.rollback()
             if materialized is not None:
-                await self._cleanup_materialized_objects(materialized.storage_keys)
-            await self._release_video_finalization_claim(session, job_id, claim_token)
+                await self._reconcile_materialization_attempt(
+                    session,
+                    job_id=job_id,
+                    materialized=materialized,
+                )
+            else:
+                await self._release_video_finalization_claim(session, job_id, claim_token)
             return await self._refresh_authoritative_job(session, job_id)
         except Exception:
+            # ``commit()`` can raise after PostgreSQL has committed, and a
+            # post-commit refresh can fail too.  Re-read in a new transaction
+            # before deciding whether any R2 key is safe to remove.
             await session.rollback()
             if materialized is not None:
-                await self._cleanup_materialized_objects(materialized.storage_keys)
-            await self._release_video_finalization_claim(session, job_id, claim_token)
+                await self._reconcile_materialization_attempt(
+                    session,
+                    job_id=job_id,
+                    materialized=materialized,
+                )
+            else:
+                await self._release_video_finalization_claim(session, job_id, claim_token)
             raise
         else:
             return settled_job
@@ -1143,7 +1202,6 @@ class GrokJobService:
     async def _claim_video_finalization(self, session: AsyncSession, job_id: UUID) -> str | None:
         """Durably acquire a recoverable PostgreSQL claim for one video job."""
         token = str(uuid4())
-        lease_expires_at = datetime.now(UTC) + timedelta(seconds=self._finalization_lease_seconds)
         result = await session.execute(
             update(GenerationJob)
             .where(
@@ -1156,7 +1214,15 @@ class GrokJobService:
             )
             .values(
                 finalization_claim_token=token,
-                finalization_lease_expires_at=lease_expires_at,
+                # PostgreSQL time is authoritative for both the takeover
+                # predicate and expiry.  Host-clock skew cannot create an
+                # immediately expired (or unexpectedly long) lease.
+                finalization_lease_expires_at=(
+                    func.now()
+                    + text("(:lease_seconds * interval '1 second')").bindparams(
+                        lease_seconds=self._finalization_lease_seconds
+                    )
+                ),
             )
             .execution_options(synchronize_session=False)
         )
@@ -1198,25 +1264,30 @@ class GrokJobService:
         user_id: UUID,
         job_id: UUID,
         result: GrokVideoResult,
+        session: AsyncSession | None = None,
+        claim_token: str | None = None,
     ) -> _MaterializedVideo:
-        """Download/upload video artifacts but do not write permanent DB rows."""
+        """Download/upload artifacts after recording their planned R2 keys.
+
+        The durable attempt is inserted and committed before the first R2
+        upload.  It contains every planned key, not just successful uploads,
+        because a process can die after R2 accepts ``put_raw`` but before the
+        following database acknowledgement reaches this process.
+        """
         response = await self.http_client.get(result.url)
         response.raise_for_status()
         video_data = response.content
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
-        uploaded_keys: list[str] = []
-        try:
-            output_id = new_id()
-            storage_key = self._storage.build_storage_key(
-                user_id=user_id,
-                file_id=output_id,
-                storage_type=StorageType.OUTPUT,
-                format=MediaFormat.MP4,
-                job_id=job_id,
-            )
-            await self._put_output_object(storage_key, video_data, MediaFormat.MP4.content_type)
-            uploaded_keys.append(storage_key)
-            outputs = [
+        output_id = new_id()
+        storage_key = self._storage.build_storage_key(
+            user_id=user_id,
+            file_id=output_id,
+            storage_type=StorageType.OUTPUT,
+            format=MediaFormat.MP4,
+            job_id=job_id,
+        )
+        artifacts: list[tuple[GenerationOutputData, bytes]] = [
+            (
                 GenerationOutputData(
                     id=output_id,
                     storage_key=storage_key,
@@ -1225,35 +1296,27 @@ class GrokJobService:
                     format=MediaFormat.MP4.value,
                     output_index=0,
                     expires_at=expires_at,
-                )
-            ]
+                ),
+                video_data,
+            )
+        ]
 
-            frame_bytes = await extract_video_thumbnail(video_data)
-            if frame_bytes:
-                for generated in await make_image_thumbnails(frame_bytes):
-                    thumbnail_id = new_id()
-                    thumbnail_key = self._storage.build_storage_key(
-                        user_id=user_id,
-                        file_id=thumbnail_id,
-                        storage_type=StorageType.OUTPUT,
-                        format=MediaFormat.WEBP,
-                        job_id=job_id,
-                    )
-                    try:
-                        await self._put_output_object(
-                            thumbnail_key,
-                            generated.result.data,
-                            MediaFormat.WEBP.content_type,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "grok.thumbnail_skipped",
-                            job_id=str(job_id),
-                            max_edge=generated.spec.max_edge,
-                        )
-                        continue
-                    uploaded_keys.append(thumbnail_key)
-                    outputs.append(
+        # Derive all thumbnails before the first upload so their keys are also
+        # durable before they can exist in R2. Thumbnail generation is still
+        # best-effort; a failed upload merely omits that output record.
+        frame_bytes = await extract_video_thumbnail(video_data)
+        if frame_bytes:
+            for generated in await make_image_thumbnails(frame_bytes):
+                thumbnail_id = new_id()
+                thumbnail_key = self._storage.build_storage_key(
+                    user_id=user_id,
+                    file_id=thumbnail_id,
+                    storage_type=StorageType.OUTPUT,
+                    format=MediaFormat.WEBP,
+                    job_id=job_id,
+                )
+                artifacts.append(
+                    (
                         GenerationOutputData(
                             id=thumbnail_id,
                             storage_key=thumbnail_key,
@@ -1267,23 +1330,231 @@ class GrokJobService:
                             thumbnail_max_edge=generated.spec.max_edge,
                             width=generated.result.width,
                             height=generated.result.height,
-                        )
+                        ),
+                        generated.result.data,
                     )
+                )
+        else:
+            logger.warning("grok.thumbnail_skipped", job_id=str(job_id))
+
+        attempt_id: UUID | None = None
+        if session is not None and claim_token is not None:
+            attempt_id = await self._create_materialization_attempt(
+                session,
+                job_id=job_id,
+                claim_token=claim_token,
+                planned_storage_keys=[artifact.storage_key for artifact, _ in artifacts],
+            )
+
+        uploaded_keys: list[str] = []
+        persisted_outputs: list[GenerationOutputData] = []
+        try:
+            for position, (artifact, payload) in enumerate(artifacts):
+                try:
+                    await self._put_output_object(
+                        artifact.storage_key,
+                        payload,
+                        artifact.content_type,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if position == 0:
+                        raise
+                    logger.warning(
+                        "grok.thumbnail_skipped",
+                        job_id=str(job_id),
+                        max_edge=artifact.thumbnail_max_edge,
+                    )
+                    continue
+                uploaded_keys.append(artifact.storage_key)
+                persisted_outputs.append(artifact)
+                if attempt_id is not None and session is not None:
+                    await self._record_materialization_upload(session, attempt_id, uploaded_keys)
+            return _MaterializedVideo(
+                outputs=persisted_outputs,
+                storage_keys=uploaded_keys,
+                attempt_id=attempt_id,
+            )
+        except BaseException:
+            if attempt_id is not None and session is not None:
+                await asyncio.shield(
+                    self._mark_materialization_attempt_cleanup_pending(
+                        session,
+                        attempt_id=attempt_id,
+                        error="materialization interrupted before outputs were committed",
+                    )
+                )
+                # No output transition has started on this path, so every
+                # uploaded key is provably unreferenced.  Try immediately,
+                # but keep the durable attempt pending if R2 is unavailable.
+                await asyncio.shield(self._cleanup_materialized_objects(uploaded_keys))
             else:
-                logger.warning("grok.thumbnail_skipped", job_id=str(job_id))
-            return _MaterializedVideo(outputs=outputs, storage_keys=uploaded_keys)
-        except Exception:
-            await self._cleanup_materialized_objects(uploaded_keys)
+                await self._cleanup_materialized_objects(uploaded_keys)
             raise
 
     async def _put_output_object(self, key: str, data: bytes, content_type: str) -> None:
-        async with self._storage._get_client() as client:
-            await client.put_object(
-                Bucket=self._storage._settings.bucket_name,
-                Key=key,
-                Body=data,
-                ContentType=content_type,
+        """Store a generated artifact through R2's public service boundary."""
+        await self._storage.put_raw(key, data, content_type=content_type)
+
+    async def _create_materialization_attempt(
+        self,
+        session: AsyncSession,
+        *,
+        job_id: UUID,
+        claim_token: str,
+        planned_storage_keys: list[str],
+    ) -> UUID:
+        """Commit attempt evidence before the first external storage write."""
+        attempt_id = new_id()
+        session.add(
+            GenerationMaterializationAttempt(
+                id=attempt_id,
+                job_id=job_id,
+                claim_token=claim_token,
+                state="planned",
+                planned_storage_keys=planned_storage_keys,
+                uploaded_storage_keys=[],
             )
+        )
+        await session.commit()
+        return attempt_id
+
+    async def _record_materialization_upload(
+        self,
+        session: AsyncSession,
+        attempt_id: UUID,
+        uploaded_storage_keys: list[str],
+    ) -> None:
+        """Persist upload progress; planned keys cover acknowledgement loss."""
+        await session.execute(
+            update(GenerationMaterializationAttempt)
+            .where(GenerationMaterializationAttempt.id == attempt_id)
+            .values(
+                state="uploading",
+                uploaded_storage_keys=list(uploaded_storage_keys),
+                updated_at=func.now(),
+            )
+        )
+        await session.commit()
+
+    async def _mark_materialization_attempt_cleanup_pending(
+        self,
+        session: AsyncSession,
+        *,
+        attempt_id: UUID,
+        error: str | None = None,
+    ) -> None:
+        """Leave durable cleanup work for a restart-safe reconciliation pass."""
+        try:
+            await session.rollback()
+            await session.execute(
+                update(GenerationMaterializationAttempt)
+                .where(GenerationMaterializationAttempt.id == attempt_id)
+                .values(
+                    state="cleanup_pending",
+                    reconciliation_error=error,
+                    updated_at=func.now(),
+                )
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "grok.video_materialization_attempt_mark_cleanup_failed",
+                attempt_id=str(attempt_id),
+            )
+
+    async def _reconcile_materialization_attempt(
+        self,
+        session: AsyncSession,
+        *,
+        job_id: UUID,
+        materialized: _MaterializedVideo,
+    ) -> None:
+        """Use DB truth before deleting objects after an uncertain transition.
+
+        The caller may have lost a commit acknowledgement or failed while
+        refreshing a committed row.  Referenced keys are preserved.  When the
+        transaction outcome is not provable, the attempt remains ``ambiguous``
+        for the reconciliation worker instead of deleting media optimistically.
+        """
+        if materialized.attempt_id is None:
+            # Compatibility with direct unit-test helpers: without a durable
+            # attempt we can still safely delete only after a DB reference
+            # query, but cannot promise restart recovery.
+            attempt_keys = materialized.storage_keys
+        else:
+            await session.rollback()
+            attempt = await session.get(
+                GenerationMaterializationAttempt,
+                materialized.attempt_id,
+            )
+            attempt_keys = list(attempt.planned_storage_keys) if attempt is not None else []
+
+        try:
+            job = await self._refresh_authoritative_job(session, job_id)
+            referenced_keys = set(
+                (
+                    await session.scalars(
+                        select(GenerationOutput.storage_key).where(
+                            GenerationOutput.job_id == job_id
+                        )
+                    )
+                ).all()
+            )
+        except Exception:
+            if materialized.attempt_id is not None:
+                await self._mark_materialization_attempt_cleanup_pending(
+                    session,
+                    attempt_id=materialized.attempt_id,
+                    error="could not establish database commit outcome",
+                )
+                await session.execute(
+                    update(GenerationMaterializationAttempt)
+                    .where(GenerationMaterializationAttempt.id == materialized.attempt_id)
+                    .values(state="ambiguous", updated_at=func.now())
+                )
+                await session.commit()
+            logger.exception("grok.video_materialization_reconcile_unknown", job_id=str(job_id))
+            return
+
+        unreferenced = [key for key in attempt_keys if key not in referenced_keys]
+        if job.status == JobStatus.COMPLETED.value and not unreferenced:
+            if materialized.attempt_id is not None:
+                await session.execute(
+                    update(GenerationMaterializationAttempt)
+                    .where(GenerationMaterializationAttempt.id == materialized.attempt_id)
+                    .values(state="committed", completed_at=func.now(), updated_at=func.now())
+                )
+                await session.commit()
+            return
+
+        if materialized.attempt_id is not None:
+            await self._mark_materialization_attempt_cleanup_pending(
+                session,
+                attempt_id=materialized.attempt_id,
+                error=None if not referenced_keys else "attempt has unreferenced artifact keys",
+            )
+        # These keys are proven not to be attached to an output row in the
+        # authoritative read.  A failure remains durable through the attempt.
+        try:
+            await self._storage.delete_many(unreferenced)
+        except Exception:
+            logger.exception(
+                "grok.video_materialization_cleanup_failed",
+                count=len(unreferenced),
+                job_id=str(job_id),
+            )
+            return
+
+        if materialized.attempt_id is not None:
+            await session.execute(
+                update(GenerationMaterializationAttempt)
+                .where(GenerationMaterializationAttempt.id == materialized.attempt_id)
+                .values(state="cleaned", reconciliation_error=None, updated_at=func.now())
+            )
+            await session.commit()
 
     async def _cleanup_materialized_objects(self, storage_keys: list[str]) -> None:
         if not storage_keys:

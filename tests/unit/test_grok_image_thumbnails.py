@@ -47,14 +47,8 @@ def _make_session() -> MagicMock:
 def _make_service() -> tuple[GrokJobService, MagicMock]:
     storage = MagicMock()
     storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/f.jpg")
-    storage._settings = MagicMock()
-    storage._settings.bucket_name = "bucket"
-
-    client_ctx = AsyncMock()
-    client_mock = AsyncMock()
-    client_ctx.__aenter__ = AsyncMock(return_value=client_mock)
-    client_ctx.__aexit__ = AsyncMock(return_value=False)
-    storage._get_client = MagicMock(return_value=client_ctx)
+    put_raw_mock = AsyncMock()
+    storage.put_raw = put_raw_mock
 
     grok_client = MagicMock()
     svc = GrokJobService(grok_client=grok_client, storage=storage, retention_days=7)
@@ -67,11 +61,11 @@ def _make_service() -> tuple[GrokJobService, MagicMock]:
     response_mock.headers = {"content-type": "image/jpeg"}
     http_mock.get = AsyncMock(return_value=response_mock)
     svc._http_client = http_mock
-    return svc, client_mock
+    return svc, put_raw_mock
 
 
 async def test_store_image_result_creates_sm_and_md_thumbnails() -> None:
-    svc, client_mock = _make_service()
+    svc, put_raw_mock = _make_service()
 
     output_id = uuid4()
     sm_thumb_id = uuid4()
@@ -132,7 +126,7 @@ async def test_store_image_result_creates_sm_and_md_thumbnails() -> None:
     assert md_create["thumbnail_max_edge"] == 512
     assert md_create["expires_at"] == parent_create["expires_at"]
 
-    assert client_mock.put_object.await_count == 3
+    assert put_raw_mock.await_count == 3
 
 
 async def test_store_image_result_batch_thumbnails_inherit_parent_index() -> None:
@@ -254,7 +248,7 @@ async def test_store_image_result_db_failure_rolls_back_to_savepoint() -> None:
 
 
 async def test_store_image_result_thumbnail_failure_does_not_fail_parent() -> None:
-    svc, client_mock = _make_service()
+    svc, put_raw_mock = _make_service()
 
     created: list[dict[str, object]] = []
 
@@ -267,11 +261,13 @@ async def test_store_image_result_thumbnail_failure_does_not_fail_parent() -> No
     output_repo = MagicMock()
     output_repo.create = capture_create
 
-    # First put_object call (the parent output) succeeds; subsequent calls
+    # First put_raw call (the parent output) succeeds; subsequent calls
     # (thumbnail variants) raise.
-    client_mock.put_object = AsyncMock(
-        side_effect=[None, RuntimeError("r2 down"), RuntimeError("r2 down")]
-    )
+    put_raw_mock.side_effect = [
+        None,
+        RuntimeError("r2 down"),
+        RuntimeError("r2 down"),
+    ]
 
     result = GrokImageResult(
         url="https://cdn.xai.com/image.jpg", base64_data=None, revised_prompt=None

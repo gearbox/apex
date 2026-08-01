@@ -238,6 +238,8 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 | `XAI_TIMEOUT` | `300` | `int (30–900)` | gRPC call timeout in seconds. Video generation can be slow; the default 5 min is generous but safe. |
 | `GROK_VIDEO_POLL_INTERVAL` | `5` | `int (1–60)` | Seconds between polls when the Grok video worker checks async job status. Lower reduces latency; higher reduces API call volume. |
 | `GROK_VIDEO_MAX_POLL_TIME` | `600` | `int (60–1800)` | Maximum total seconds the video worker polls before marking a job as timed out. |
+| `GROK_VIDEO_FINALIZATION_LEASE_SECONDS` | `120` | `int (30–900)` | PostgreSQL-time takeover lease for completed-video materialization. Expiry permits a new claimant, but does not invalidate the current token by itself. |
+| `GROK_MODERATION_BILLING_POLICY` | `charge` | `charge` \| `refund` | Whether an accepted xAI moderation rejection retains the debit or receives a refund. This is applied by both in-process and standalone video workers. |
 
 ---
 

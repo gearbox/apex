@@ -34,14 +34,7 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
 
     storage = MagicMock()
     storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/f.mp4")
-    storage._settings = MagicMock()
-    storage._settings.bucket_name = "bucket"
-
-    client_ctx = AsyncMock()
-    client_mock = AsyncMock()
-    client_ctx.__aenter__ = AsyncMock(return_value=client_mock)
-    client_ctx.__aexit__ = AsyncMock(return_value=False)
-    storage._get_client = MagicMock(return_value=client_ctx)
+    storage.put_raw = AsyncMock()
 
     grok_client = MagicMock()
     svc = GrokJobService(grok_client=grok_client, storage=storage, retention_days=7)
@@ -140,14 +133,7 @@ async def test_no_poster_frames_when_extract_fails() -> None:
 
     storage = MagicMock()
     storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/f.mp4")
-    storage._settings = MagicMock()
-    storage._settings.bucket_name = "bucket"
-
-    client_ctx = AsyncMock()
-    client_mock = AsyncMock()
-    client_ctx.__aenter__ = AsyncMock(return_value=client_mock)
-    client_ctx.__aexit__ = AsyncMock(return_value=False)
-    storage._get_client = MagicMock(return_value=client_ctx)
+    storage.put_raw = AsyncMock()
 
     grok_client = MagicMock()
     svc = GrokJobService(grok_client=grok_client, storage=storage, retention_days=7)

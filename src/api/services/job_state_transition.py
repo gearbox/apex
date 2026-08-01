@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
-from sqlalchemy import CursorResult, func
+from sqlalchemy import CursorResult, func, or_
 from sqlalchemy import update as sa_update
 
 from src.api.schemas.events import EventType, JobStatusPayload
@@ -33,7 +33,7 @@ from src.api.services.generation.public_errors import (
 )
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import JobStatus
-from src.db.models.storage import GenerationJob
+from src.db.models.storage import GenerationJob, GenerationMaterializationAttempt
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 
@@ -181,6 +181,7 @@ class JobStateTransitionService:
         claim_token: str,
         outputs: list[GenerationOutputData],
         product_id: str,
+        materialization_attempt_id: UUID | None = None,
     ) -> tuple[GenerationJob, bool]:
         """Complete a Grok video only while holding its durable DB lease.
 
@@ -193,6 +194,7 @@ class JobStateTransitionService:
             outputs=outputs,
             product_id=product_id,
             claim_token=claim_token,
+            materialization_attempt_id=materialization_attempt_id,
         )
 
     async def _transition_to_completed(
@@ -202,6 +204,7 @@ class JobStateTransitionService:
         outputs: list[GenerationOutputData],
         product_id: str,
         claim_token: str | None = None,
+        materialization_attempt_id: UUID | None = None,
     ) -> tuple[GenerationJob, bool]:
         job = await self._session.get(GenerationJob, job_id)
         if job is None:
@@ -218,17 +221,16 @@ class JobStateTransitionService:
         values: dict[str, object] = {
             "status": JobStatus.COMPLETED.value,
             "completed_at": func.now(),
+            # Terminal rows never retain a claim pair, including ordinary
+            # non-video completions and compatibility paths.
+            "finalization_claim_token": None,
+            "finalization_lease_expires_at": None,
         }
         if claim_token is not None:
             conditions.extend(
                 [
                     GenerationJob.finalization_claim_token == claim_token,
-                    GenerationJob.finalization_lease_expires_at > func.now(),
                 ]
-            )
-            values.update(
-                finalization_claim_token=None,
-                finalization_lease_expires_at=None,
             )
 
         result = cast(
@@ -265,6 +267,15 @@ class JobStateTransitionService:
                 thumbnail_max_edge=out.thumbnail_max_edge,
                 width=out.width,
                 height=out.height,
+            )
+
+        if materialization_attempt_id is not None:
+            # This update shares the output/job commit.  A completed job can
+            # never look like an abandoned R2 attempt after a restart.
+            await self._session.execute(
+                sa_update(GenerationMaterializationAttempt)
+                .where(GenerationMaterializationAttempt.id == materialization_attempt_id)
+                .values(state="committed", completed_at=func.now(), updated_at=func.now())
             )
 
         await self._session.commit()
@@ -328,6 +339,15 @@ class JobStateTransitionService:
                 .where(
                     GenerationJob.id == job_id,
                     GenerationJob.status.in_(in_flight_statuses),
+                    # A live finalizer owns this job until its database-time
+                    # lease expires.  Once expired, failure and completion
+                    # race on the same conditional update; the winner is
+                    # authoritative.  The claim pair is cleared below for
+                    # every terminal result.
+                    or_(
+                        GenerationJob.finalization_claim_token.is_(None),
+                        GenerationJob.finalization_lease_expires_at <= func.now(),
+                    ),
                 )
                 .values(
                     status=JobStatus.FAILED.value,
@@ -335,6 +355,8 @@ class JobStateTransitionService:
                     error_message=error_message[:2000] if error_message is not None else None,
                     public_error_message=safe_message[:2000],
                     failure_code=failure_code[:100] if failure_code is not None else None,
+                    finalization_claim_token=None,
+                    finalization_lease_expires_at=None,
                 )
                 .execution_options(synchronize_session=False)
             ),
@@ -346,7 +368,7 @@ class JobStateTransitionService:
             return job, False
 
         refund_event: BalanceEvent | None = None
-        if refund:
+        if refund and job.debit_transaction_id is not None:
             try:
                 refund_result = await self._billing.refund(
                     job_id=job_id,
@@ -364,6 +386,11 @@ class JobStateTransitionService:
                     job_id=str(job_id),
                 )
                 raise
+        elif refund:
+            # A pre-reservation/billing failure can still have a job row in
+            # the unit of work.  Never turn that into RefundNotEligibleError:
+            # there is no confirmed debit to compensate.
+            logger.info("job.transition.refund_skipped_no_debit", job_id=str(job_id))
 
         if not commit:
             await self._session.refresh(job)

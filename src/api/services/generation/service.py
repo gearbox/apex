@@ -9,6 +9,7 @@ import structlog
 
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
+from src.api.services.billing_errors import BillingError
 from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
@@ -331,6 +332,12 @@ class GenerationService:
                     tokens_finalized=settled_job.token_cost,
                 )
             raise
+        except BillingError:
+            # A locked reservation can fail after the optimistic preflight.
+            # It is a billing-domain response, not provider UNKNOWN, and no
+            # refund is valid because check_and_reserve did not create a debit.
+            await session.rollback()
+            raise
         except GenerationError:
             # Domain errors carry user-safe messages by contract (see
             # ProviderResponseError's docstring) — refund if a debit was
@@ -445,7 +452,7 @@ class GenerationService:
         reserve's event and the refund's event describe rows that just
         committed together in this one transaction — publish both.
         """
-        if job is None:
+        if job is None or job.debit_transaction_id is None:
             await session.rollback()
             return
         try:

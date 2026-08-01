@@ -68,6 +68,50 @@ async def _mark_failed(
     await session.commit()
 
 
+async def _commit_completed_or_replay(
+    idempotency_service: IdempotencyService,
+    record_id: UUID,
+    session: AsyncSession,
+) -> IdempotencyReplayResult | None:
+    """Commit a completed outcome, recovering a lost acknowledgement safely.
+
+    The business row and idempotency result are written in one transaction.
+    If ``commit`` raises, PostgreSQL may nevertheless have committed it.  A
+    rollback followed by an authoritative read distinguishes that case before
+    any code can release the key for retry.
+    """
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        # Do not trust the connection whose commit acknowledgement was lost.
+        # The next ORM read checks out a fresh connection from the pool.
+        await session.invalidate()
+        replay = await idempotency_service.replay_completed(record_id, session=session)
+        if replay is not None:
+            logger.warning("generation.idempotency_commit_ack_lost", record_id=str(record_id))
+            return replay
+        # A still-processing row means the atomic business transaction did
+        # not commit. Conditional fail is safe here and cannot downgrade a
+        # completed row if a concurrent acknowledgement arrives.
+        await idempotency_service.fail(record_id, session=session)
+        await session.commit()
+        raise
+    else:
+        return None
+
+
+async def _run_post_commit_callbacks(
+    callbacks: list[Callable[[], Awaitable[None]]],
+) -> None:
+    """Callbacks are notification side effects, never transaction outcomes."""
+    for callback in callbacks:
+        try:
+            await callback()
+        except Exception:
+            logger.exception("generation.post_commit_callback_failed")
+
+
 class UnifiedGenerationController(Controller):
     """Single endpoint for all generation types and providers."""
 
@@ -140,9 +184,10 @@ class UnifiedGenerationController(Controller):
                 response_body=response_body,
                 session=session,
             )
-            await session.commit()
-            for callback in post_commit_callbacks:
-                await callback()
+            replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
+            if replay is not None:
+                return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
+            await _run_post_commit_callbacks(post_commit_callbacks)
             return Response(content=result, status_code=HTTP_201_CREATED)
 
         except NoActiveSessionError as exc:
@@ -263,9 +308,10 @@ class UnifiedGenerationController(Controller):
                 response_body=msgspec.to_builtins(error),
                 session=session,
             )
-            await session.commit()
-            for callback in post_commit_callbacks:
-                await callback()
+            replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
+            if replay is not None:
+                return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
+            await _run_post_commit_callbacks(post_commit_callbacks)
             logger.warning(
                 "generation.failed",
                 provider=exc.failure.provider.value,
@@ -296,9 +342,10 @@ class UnifiedGenerationController(Controller):
                 response_body=msgspec.to_builtins(error),
                 session=session,
             )
-            await session.commit()
-            for callback in post_commit_callbacks:
-                await callback()
+            replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
+            if replay is not None:
+                return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
+            await _run_post_commit_callbacks(post_commit_callbacks)
             logger.warning(
                 "generation.provider_submission_failed",
                 provider=exc.failure.provider.value,

@@ -222,6 +222,21 @@ class IdempotencyService:
         repo = IdempotencyRepository(session)
         await repo.mark_failed(record_id)
 
+    async def replay_completed(
+        self,
+        record_id: UUID,
+        *,
+        session: AsyncSession,
+    ) -> IdempotencyReplayResult | None:
+        """Return the authoritative cached result after an uncertain commit."""
+        record = await IdempotencyRepository(session).get_by_id(record_id)
+        if record is None or record.status != "completed":
+            return None
+        return IdempotencyReplayResult(
+            status_code=record.response_status_code or 200,
+            body=record.response_body or {},
+        )
+
     async def cleanup_expired(self, session: AsyncSession) -> int:
         """Remove expired idempotency records. Returns count deleted."""
         repo = IdempotencyRepository(session)

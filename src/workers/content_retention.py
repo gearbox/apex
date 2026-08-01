@@ -42,3 +42,4 @@ class ContentRetentionWorker(PeriodicWorker):
         DB-level failure that should surface.
         """
         await self._service.sweep()
+        await self._service.reconcile_storage_artifacts()

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.services.billing import BillingService
@@ -251,7 +251,7 @@ async def test_refund_write_failure_rolls_back_the_terminal_transition(
     db_engine: AsyncEngine,
 ) -> None:
     """A failed refund leaves the real PostgreSQL job eligible for retry."""
-    seed = await _seed_video_job(db_engine)
+    seed = await _seed_video_job(db_engine, with_debit=True)
     event_bus = AsyncMock()
 
     class FailingBilling:
@@ -374,5 +374,100 @@ async def test_workerless_read_through_settles_an_overdue_video_once(
             assert (
                 await BillingService().get_balance(seed.account_id, session=verify_session) == 100
             )
+    finally:
+        await _cleanup(db_engine, seed)
+
+
+async def test_current_claim_owner_completes_after_lease_expiry_without_takeover(
+    db_engine: AsyncEngine,
+) -> None:
+    """Lease expiry permits takeover; it does not invalidate the same token."""
+    seed = await _seed_video_job(db_engine)
+    service = GrokJobService(MagicMock(), MagicMock(), billing_service=BillingService())
+    materializer_started = asyncio.Event()
+    allow_materializer_to_finish = asyncio.Event()
+
+    async def materialize(**_: object) -> _MaterializedVideo:
+        materializer_started.set()
+        await allow_materializer_to_finish.wait()
+        return _materialized_video(seed.job_id)
+
+    async def finalize() -> GenerationJob:
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            return await service._finalize_completed_video(
+                session,
+                job_id=seed.job_id,
+                result=GrokVideoResult(url="https://provider.invalid/video.mp4"),
+                product_id="vex",
+            )
+
+    try:
+        with patch.object(service, "_materialize_video_result", new=materialize):
+            owner = asyncio.create_task(finalize())
+            await asyncio.wait_for(materializer_started.wait(), timeout=2)
+            async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+                await session.execute(
+                    update(GenerationJob)
+                    .where(GenerationJob.id == seed.job_id)
+                    .values(finalization_lease_expires_at=func.now() - text("interval '1 second'"))
+                )
+                await session.commit()
+            allow_materializer_to_finish.set()
+            completed = await asyncio.wait_for(owner, timeout=2)
+
+        assert completed.status == JobStatus.COMPLETED.value
+    finally:
+        await _cleanup(db_engine, seed)
+
+
+async def test_live_claim_blocks_failure_and_expired_claim_failure_clears_pair(
+    db_engine: AsyncEngine,
+) -> None:
+    """Timeout/provider failure cannot preempt a live finalizer claim."""
+    seed = await _seed_video_job(
+        db_engine,
+        finalization_claim_token="live-owner",
+        finalization_lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    try:
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            job, did_transition = await JobStateTransitionService(
+                session=session,
+                event_bus=None,
+                billing_service=BillingService(),
+            ).transition_to_failed(
+                seed.job_id,
+                public_error_message="The AI provider timed out while processing the request.",
+                failure_code="provider_timeout",
+                refund=False,
+                product_id="vex",
+            )
+            assert not did_transition
+            assert job.status == JobStatus.RUNNING.value
+
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            await session.execute(
+                update(GenerationJob)
+                .where(GenerationJob.id == seed.job_id)
+                .values(finalization_lease_expires_at=func.now() - text("interval '1 second'"))
+            )
+            await session.commit()
+
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            job, did_transition = await JobStateTransitionService(
+                session=session,
+                event_bus=None,
+                billing_service=BillingService(),
+            ).transition_to_failed(
+                seed.job_id,
+                public_error_message="The AI provider timed out while processing the request.",
+                failure_code="provider_timeout",
+                refund=False,
+                product_id="vex",
+            )
+            assert did_transition
+            assert job.status == JobStatus.FAILED.value
+            assert job.finalization_claim_token is None
+            assert job.finalization_lease_expires_at is None
     finally:
         await _cleanup(db_engine, seed)
