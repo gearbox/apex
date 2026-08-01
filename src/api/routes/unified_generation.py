@@ -17,6 +17,7 @@ from litestar.status_codes import (
     HTTP_409_CONFLICT,
     HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_429_TOO_MANY_REQUESTS,
+    HTTP_502_BAD_GATEWAY,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +27,11 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.security import auth_guard
-from src.api.services.generation.provider_failures import ProviderModerationRejectedError
+from src.api.services.generation.provider_failures import (
+    ProviderFailureKind,
+    ProviderModerationRejectedError,
+    ProviderSubmissionFailedError,
+)
 from src.api.services.generation.rate_limiter import RateLimitExceededError
 from src.api.services.generation.service import (
     AgeVerificationRequiredError,
@@ -261,6 +266,33 @@ class UnifiedGenerationController(Controller):
                 billable=exc.failure.billable,
             )
             return Response(content=error, status_code=HTTP_422_UNPROCESSABLE_ENTITY)
+
+        except ProviderSubmissionFailedError as exc:
+            # Settlement already committed the failed job and any required
+            # refund. Mark this idempotency attempt failed (rather than caching
+            # it as a billable completed operation) and return only normalized,
+            # public-safe provider failure data.
+            await _mark_failed(idempotency_service, record_id, session)
+            status_code = {
+                ProviderFailureKind.INVALID_REQUEST: HTTP_400_BAD_REQUEST,
+                ProviderFailureKind.RATE_LIMITED: HTTP_429_TOO_MANY_REQUESTS,
+                ProviderFailureKind.MALFORMED_RESPONSE: HTTP_502_BAD_GATEWAY,
+            }.get(exc.failure.kind, HTTP_503_SERVICE_UNAVAILABLE)
+            logger.warning(
+                "generation.provider_submission_failed",
+                provider=exc.failure.provider.value,
+                job_id=str(exc.job_id),
+                failure_kind=exc.failure.kind.value,
+                status_code=status_code,
+            )
+            return Response(
+                content=ErrorEnvelope(
+                    error=exc.public_code,
+                    message=exc.public_message,
+                    status_code=status_code,
+                ),
+                status_code=status_code,
+            )
 
         except GenerationError as exc:
             await _mark_failed(idempotency_service, record_id, session)

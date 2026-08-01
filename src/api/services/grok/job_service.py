@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import httpx
 import structlog
@@ -21,6 +21,7 @@ from src.api.services.generation.provider_billing_policy import apply_provider_b
 from src.api.services.generation.provider_failures import (
     ProviderFailure,
     ProviderModerationRejectedError,
+    ProviderSubmissionFailedError,
 )
 from src.api.services.grok import (
     GrokAPIError,
@@ -32,6 +33,7 @@ from src.api.services.grok import (
     GrokVideoResult,
 )
 from src.api.services.image_thumbnail import make_image_thumbnails
+from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
@@ -56,7 +58,9 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.services.billing import BillingService
+    from src.api.services.billing import BalanceEvent, BillingService
+    from src.api.services.event_bus import EventBus
+    from src.api.services.ops_event_bus import OpsEventBus
     from src.db.models import GenerationJob
 
 logger = structlog.get_logger(__name__)
@@ -116,6 +120,10 @@ class GrokJobService:
         grok_client: GrokClient,
         storage: R2StorageService,
         retention_days: int = 7,
+        *,
+        billing_service: BillingService | None = None,
+        event_bus: EventBus | None = None,
+        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         """Initialize Grok job service.
 
@@ -127,6 +135,9 @@ class GrokJobService:
         self._grok = grok_client
         self._storage = storage
         self._retention_days = retention_days
+        self._billing = billing_service
+        self._event_bus = event_bus
+        self._ops_event_bus = ops_event_bus
         self._http_client: httpx.AsyncClient | None = None
 
     async def connect(self) -> None:
@@ -175,6 +186,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
+        defer_submission_failure_settlement: bool = False,
     ) -> ProviderSubmitResult:
         """Create and execute an image generation job.
 
@@ -342,67 +354,20 @@ class GrokJobService:
             )
 
         except GrokAPIError as exc:
-            failure = apply_provider_billing_policy(exc.failure)
-            job = await self._mark_provider_failure(
-                job_repo,
-                job_id=job_id,
-                failure=failure,
-            )
-            self._log_provider_failure(
-                failure,
+            await self._handle_submission_failure(
+                exc,
+                job=job,
+                job_repo=job_repo,
                 job_id=job_id,
                 user_id=user_id,
                 product_id=product_id,
+                reserve_event=reserve_event,
+                session=session,
+                billing_service=billing_service,
+                token_cost=token_cost,
+                defer_settlement=defer_submission_failure_settlement,
+                direct_failure_message="Image generation failed",
             )
-
-            if failure.billable:
-                logger.warning(
-                    "grok.moderation_rejected",
-                    provider=failure.provider.value,
-                    job_id=str(job_id),
-                    user_id=str(user_id),
-                    product_id=product_id,
-                    provider_job_id=failure.provider_request_id,
-                    failure_kind=failure.kind.value,
-                    provider_status=failure.provider_status_code,
-                    retryable=failure.retryable,
-                    billable=True,
-                )
-                logger.info(
-                    "billing.charge_finalized",
-                    job_id=str(job_id),
-                    product_id=product_id,
-                    tokens_reserved=token_cost,
-                    tokens_finalized=token_cost,
-                )
-                logger.info(
-                    "billing.refund_skipped",
-                    job_id=str(job_id),
-                    product_id=product_id,
-                    failure_kind=failure.kind.value,
-                    billable=True,
-                    refund_applied=False,
-                )
-                raise ProviderModerationRejectedError(
-                    failure=failure,
-                    job_id=job.id,
-                    balance_event=reserve_event,
-                ) from exc
-
-            # --- SAGA: Compensation on non-billable provider failure ---
-            try:
-                await billing_service.refund(
-                    job_id,
-                    description="Generation failed — tokens refunded",
-                    metadata={"refund_reason": failure.kind.value},
-                    session=session,
-                    product_id=product_id,
-                )
-                await session.flush()
-            except Exception:
-                logger.exception("grok.compensation_refund_failed", job_id=str(job_id))
-
-            raise GrokJobError("Image generation failed") from exc
 
         except Exception as e:
             logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
@@ -434,6 +399,105 @@ class GrokJobService:
                 raise
             raise GrokJobError(f"Unexpected error: {e}") from e
 
+    async def _handle_submission_failure(
+        self,
+        exc: GrokAPIError,
+        *,
+        job: GenerationJob | None,
+        job_repo: JobRepository,
+        job_id: UUID,
+        user_id: UUID,
+        product_id: str,
+        reserve_event: BalanceEvent | None,
+        session: AsyncSession,
+        billing_service: BillingService,
+        token_cost: int,
+        defer_settlement: bool,
+        direct_failure_message: str,
+    ) -> NoReturn:
+        """Classify a submission failure and settle it at the owning layer.
+
+        ``GenerationService`` opts into deferred settlement so it can use the
+        shared transition service to atomically commit the job, billing, and
+        notifications. Direct callers retain the established local behavior:
+        write normalized safe fields and refund non-billable failures in their
+        current transaction.
+        """
+        failure = apply_provider_billing_policy(exc.failure)
+        self._log_provider_failure(
+            failure,
+            job_id=job_id,
+            user_id=user_id,
+            product_id=product_id,
+        )
+        previous_status = str(job.status) if job is not None else JobStatus.PENDING.value
+        if not defer_settlement:
+            failed_job = await self._mark_provider_failure(
+                job_repo,
+                job_id=job_id,
+                failure=failure,
+            )
+            if failure.billable:
+                logger.warning(
+                    "grok.moderation_rejected",
+                    provider=failure.provider.value,
+                    job_id=str(job_id),
+                    user_id=str(user_id),
+                    product_id=product_id,
+                    provider_job_id=failure.provider_request_id,
+                    failure_kind=failure.kind.value,
+                    provider_status=failure.provider_status_code,
+                    retryable=failure.retryable,
+                    billable=True,
+                )
+                logger.info(
+                    "billing.charge_finalized",
+                    job_id=str(job_id),
+                    product_id=product_id,
+                    tokens_reserved=token_cost,
+                    tokens_finalized=token_cost,
+                )
+                logger.info(
+                    "billing.refund_skipped",
+                    job_id=str(job_id),
+                    product_id=product_id,
+                    failure_kind=failure.kind.value,
+                    billable=True,
+                    refund_applied=False,
+                )
+                raise ProviderModerationRejectedError(
+                    failure=failure,
+                    job_id=failed_job.id,
+                    previous_status=previous_status,
+                    balance_event=reserve_event,
+                ) from exc
+
+            try:
+                await billing_service.refund(
+                    job_id,
+                    description="Generation failed — tokens refunded",
+                    metadata={"refund_reason": failure.kind.value},
+                    session=session,
+                    product_id=product_id,
+                )
+                await session.flush()
+            except Exception:
+                logger.exception("grok.compensation_refund_failed", job_id=str(job_id))
+
+            raise GrokJobError(direct_failure_message) from exc
+
+        error_type = (
+            ProviderModerationRejectedError
+            if failure.kind.value == "moderation_rejected"
+            else ProviderSubmissionFailedError
+        )
+        raise error_type(
+            failure=failure,
+            job_id=job_id,
+            previous_status=previous_status,
+            balance_event=reserve_event,
+        ) from exc
+
     async def _mark_provider_failure(
         self,
         job_repo: JobRepository,
@@ -441,7 +505,7 @@ class GrokJobService:
         job_id: UUID,
         failure: ProviderFailure,
     ) -> GenerationJob:
-        """Persist only the normalized public failure fields for a Grok job."""
+        """Persist normalized failure fields for a direct service caller."""
         job = await job_repo.update_status(
             job_id,
             JobStatus.FAILED,
@@ -451,6 +515,7 @@ class GrokJobService:
             raise GrokJobError("Generation job disappeared while recording provider failure")
         job.failure_code = failure.public_code
         job.error_message = failure.sanitized_message
+        job.public_error_message = failure.sanitized_message
         return job
 
     @staticmethod
@@ -659,6 +724,7 @@ class GrokJobService:
         product_id: str,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
+        defer_submission_failure_settlement: bool = False,
     ) -> ProviderSubmitResult:
         """Start an async video generation job.
 
@@ -769,67 +835,20 @@ class GrokJobService:
             )
 
         except GrokAPIError as exc:
-            failure = apply_provider_billing_policy(exc.failure)
-            job = await self._mark_provider_failure(
-                job_repo,
-                job_id=job_id,
-                failure=failure,
-            )
-            self._log_provider_failure(
-                failure,
+            await self._handle_submission_failure(
+                exc,
+                job=job,
+                job_repo=job_repo,
                 job_id=job_id,
                 user_id=user_id,
                 product_id=product_id,
+                reserve_event=reserve_event,
+                session=session,
+                billing_service=billing_service,
+                token_cost=token_cost,
+                defer_settlement=defer_submission_failure_settlement,
+                direct_failure_message="Failed to start video generation",
             )
-
-            if failure.billable:
-                logger.warning(
-                    "grok.moderation_rejected",
-                    provider=failure.provider.value,
-                    job_id=str(job_id),
-                    user_id=str(user_id),
-                    product_id=product_id,
-                    provider_job_id=failure.provider_request_id,
-                    failure_kind=failure.kind.value,
-                    provider_status=failure.provider_status_code,
-                    retryable=failure.retryable,
-                    billable=True,
-                )
-                logger.info(
-                    "billing.charge_finalized",
-                    job_id=str(job_id),
-                    product_id=product_id,
-                    tokens_reserved=token_cost,
-                    tokens_finalized=token_cost,
-                )
-                logger.info(
-                    "billing.refund_skipped",
-                    job_id=str(job_id),
-                    product_id=product_id,
-                    failure_kind=failure.kind.value,
-                    billable=True,
-                    refund_applied=False,
-                )
-                raise ProviderModerationRejectedError(
-                    failure=failure,
-                    job_id=job.id,
-                    balance_event=reserve_event,
-                ) from exc
-
-            # --- SAGA: Compensation on non-billable provider failure ---
-            try:
-                await billing_service.refund(
-                    job_id,
-                    description="Generation failed — tokens refunded",
-                    metadata={"refund_reason": failure.kind.value},
-                    session=session,
-                    product_id=product_id,
-                )
-                await session.flush()
-            except Exception:
-                logger.exception("grok.compensation_refund_failed", job_id=str(job_id))
-
-            raise GrokJobError("Failed to start video generation") from exc
 
         except Exception as e:
             logger.exception("grok.unexpected_error", job_id=str(job_id), error=str(e))
@@ -867,12 +886,9 @@ class GrokJobService:
         """Poll a video job for completion (read-through path).
 
         Used by GrokGenerationProvider.refresh_job to poll-on-read within a
-        request. Mutates job.status directly via JobRepository — this path
-        predates JobStateTransitionService and returns the job synchronously
-        for the caller to serialize into the API response, so it is kept as
-        a thin wrapper around ``_poll_video_result`` rather than migrated.
-        The periodic worker uses ``poll_video_job_for_worker`` instead, which
-        drives every transition through JobStateTransitionService.
+        request. Terminal states are settled through the same
+        ``settle_video_poll_outcome`` entry point as the periodic worker, so
+        this path remains correct in deployments with no video worker.
 
         Args:
             session: Database session.
@@ -900,7 +916,6 @@ class GrokJobService:
         if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
             return job
 
-        was_queued = job.status == JobStatus.QUEUED.value
         try:
             outcome = await self._poll_video_result(session, job)
         except (GrokRateLimitError, GrokTimeoutError) as exc:
@@ -917,24 +932,68 @@ class GrokJobService:
             )
             return job
 
-        if outcome.status == VideoPollStatus.STILL_RUNNING:
-            if was_queued:
-                job = await job_repo.update_status(job_id, JobStatus.RUNNING)
-            return job
+        return await self.settle_video_poll_outcome(
+            session,
+            job_id=job_id,
+            outcome=outcome,
+            product_id=str(job.product_id),
+        )
 
+    async def settle_video_poll_outcome(
+        self,
+        session: AsyncSession,
+        *,
+        job_id: UUID,
+        outcome: VideoPollOutcome,
+        product_id: str,
+    ) -> GenerationJob:
+        """Apply a video poll result exactly once through shared transitions.
+
+        Both polling callers reach this method. Conditional state updates in
+        ``JobStateTransitionService`` make repeated reads and worker/read
+        races no-ops after the first terminal settlement, including its refund
+        and terminal event.
+        """
+        transition_service = self._make_transition_service(session)
+        if outcome.status == VideoPollStatus.STILL_RUNNING:
+            return await transition_service.transition_to_running(job_id)
         if outcome.status == VideoPollStatus.COMPLETED:
-            return await job_repo.update_status(
+            # ``_poll_video_result`` has flushed any downloaded outputs into
+            # this session. The transition commit makes those rows and the
+            # completed state durable together.
+            return await transition_service.transition_to_completed(
                 job_id,
-                JobStatus.COMPLETED,
-                completed_at=datetime.now(UTC),
+                outputs=[],
+                product_id=product_id,
             )
 
-        # FAILED results are settled by GrokVideoWorker, which owns the
-        # atomic status/refund-or-charge transition and post-commit events.
-        # A read-through request must not mutate a terminal state without the
-        # matching billing decision.
-        logger.info("grok.video_poll_terminal_deferred_to_worker", job_id=str(job_id))
+        terminal_failure = outcome.failure
+        refund = not terminal_failure.billable if terminal_failure is not None else True
+        public_error_message = (
+            terminal_failure.sanitized_message
+            if terminal_failure is not None
+            else "The AI provider could not complete the request."
+        )
+        failure_code = terminal_failure.public_code if terminal_failure is not None else None
+        job, _ = await transition_service.transition_to_failed(
+            job_id,
+            public_error_message=public_error_message,
+            failure_code=failure_code,
+            refund=refund,
+            product_id=product_id,
+        )
         return job
+
+    def _make_transition_service(self, session: AsyncSession) -> JobStateTransitionService:
+        """Create the one settlement primitive used by read-through and workers."""
+        from src.api.services.billing import BillingService
+
+        return JobStateTransitionService(
+            session=session,
+            event_bus=self._event_bus,
+            billing_service=self._billing or BillingService(),
+            ops_event_bus=self._ops_event_bus,
+        )
 
     async def poll_video_job_for_worker(
         self,

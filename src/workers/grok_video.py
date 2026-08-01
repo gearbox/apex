@@ -96,17 +96,18 @@ class GrokVideoWorkerCLI:
         await grok_client.connect()
         logger.info("grok_worker.client_initialized")
 
+        # Billing service is stateless — see src.api.services.billing docstring.
+        billing_service = BillingService()
+
         # Initialize job service
         job_service = GrokJobService(
             grok_client=grok_client,
             storage=r2_storage,
             retention_days=self._settings.retention_days,
+            billing_service=billing_service,
         )
         await job_service.connect()
         logger.info("grok_worker.job_service_initialized")
-
-        # Billing service is stateless — see src.api.services.billing docstring.
-        billing_service = BillingService()
 
         # Create and start worker. redis_enabled lets this standalone process
         # share the same leader lease key as any in-process worker, so

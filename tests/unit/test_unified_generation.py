@@ -718,6 +718,25 @@ class TestGenerationServiceGenerate:
         pricing.quote = AsyncMock(return_value=50)
         event_bus = AsyncMock()
         session = AsyncMock()
+        settled_job = MagicMock(
+            id=job_id,
+            user_id=uuid4(),
+            status=JobStatus.RUNNING.value,
+            provider=Provider.GROK.value,
+            generation_type=GenerationType.T2I.value,
+            token_cost=50,
+            public_error_message=None,
+        )
+        session.get.return_value = settled_job
+        update_result = MagicMock(rowcount=1)
+        session.execute.return_value = update_result
+
+        async def refresh_job(job: MagicMock) -> None:
+            job.status = JobStatus.FAILED.value
+            job.public_error_message = failure.sanitized_message
+            job.failure_code = failure.public_code
+
+        session.refresh.side_effect = refresh_job
         service = GenerationService(
             providers={Provider.GROK: mock_provider},
             billing_service=billing,
@@ -746,7 +765,7 @@ class TestGenerationServiceGenerate:
             )
 
         session.commit.assert_awaited_once()
-        event_bus.publish_balance.assert_awaited_once_with(None)
+        event_bus.publish_balance.assert_not_awaited()
         event_bus.publish.assert_awaited_once()
 
     async def test_asyncpg_style_db_error_does_not_leak_into_response(self) -> None:

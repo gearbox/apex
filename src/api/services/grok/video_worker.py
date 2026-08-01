@@ -161,68 +161,33 @@ class GrokVideoWorker(PeriodicWorker):
             return  # no transition, no progress emit; retried next tick (D2)
 
         if outcome.status == VideoPollStatus.STILL_RUNNING:
-            if job.status == JobStatus.QUEUED:
-                await ts.transition_to_running(job.id)
-            else:
+            if job.status == JobStatus.RUNNING:
                 # xAI does not expose granular progress.
                 await self._emit_progress(job, progress_pct=50)
+            else:
+                await self._job_service.settle_video_poll_outcome(
+                    session,
+                    job_id=job.id,
+                    outcome=outcome,
+                    product_id=product_id,
+                )
             return
 
         if outcome.status == VideoPollStatus.COMPLETED:
-            # Outputs were already persisted (flushed, not committed) inside
-            # poll_video_job_for_worker's session — passing outputs=[] here
-            # means the transition only performs the status update, and its
-            # commit() covers both atomically.
-            await ts.transition_to_completed(job.id, outputs=[], product_id=product_id)
+            await self._job_service.settle_video_poll_outcome(
+                session,
+                job_id=job.id,
+                outcome=outcome,
+                product_id=product_id,
+            )
             return
 
-        # FAILED. The normalized failure retains both the user-safe status
-        # message and the billing decision. Most terminal polling failures
-        # preserve the historical refund behavior; accepted Grok moderation
-        # rejections retain the reservation because Grok bills them.
-        terminal_failure = outcome.failure
-        refund = not terminal_failure.billable if terminal_failure is not None else True
-        error_message = outcome.error_message or "Video polling failed"
-        if terminal_failure is not None and terminal_failure.billable:
-            logger.warning(
-                "grok.moderation_rejected",
-                provider=terminal_failure.provider.value,
-                job_id=str(job.id),
-                user_id=str(job.user_id),
-                product_id=product_id,
-                provider_job_id=(terminal_failure.provider_request_id or job.external_request_id),
-                failure_kind=terminal_failure.kind.value,
-                provider_status=terminal_failure.provider_status_code,
-                retryable=terminal_failure.retryable,
-                billable=True,
-            )
-            logger.info(
-                "billing.charge_finalized",
-                job_id=str(job.id),
-                product_id=product_id,
-                tokens_reserved=job.token_cost,
-                tokens_finalized=job.token_cost,
-            )
-            logger.info(
-                "billing.refund_skipped",
-                job_id=str(job.id),
-                product_id=product_id,
-                failure_kind=terminal_failure.kind.value,
-                billable=True,
-                refund_applied=False,
-            )
-        if terminal_failure is not None:
-            await ts.transition_to_failed(
-                job.id,
-                error_message=error_message,
-                refund=refund,
-                product_id=product_id,
-                failure_code=terminal_failure.public_code,
-            )
-        else:
-            await ts.transition_to_failed(
-                job.id,
-                error_message=error_message,
-                refund=refund,
-                product_id=product_id,
-            )
+        # FAILED is settled by the same GrokJobService entry point used by
+        # poll-on-read. It owns the normalized public failure, billing policy,
+        # conditional terminal state update, commit, and post-commit events.
+        await self._job_service.settle_video_poll_outcome(
+            session,
+            job_id=job.id,
+            outcome=outcome,
+            product_id=product_id,
+        )

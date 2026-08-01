@@ -820,6 +820,9 @@ async def init_services(settings: Settings) -> JWTService:
             grok_client=grok_client,
             storage=_services.r2_storage,
             retention_days=settings.retention_days,
+            billing_service=get_billing_service(),
+            event_bus=_services.event_bus,
+            ops_event_bus=_services.ops_event_bus,
         )
         await _services.grok_job_service.connect()
         logger.info("grok.initialized")

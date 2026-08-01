@@ -1,4 +1,4 @@
-"""Tests for GrokVideoWorker — session-per-job polling driven by JobStateTransitionService."""
+"""Tests for GrokVideoWorker — worker/read-through shared settlement."""
 
 from __future__ import annotations
 
@@ -108,22 +108,22 @@ class TestTimeoutRefund:
 
 
 class TestCompletedTransition:
-    async def test_completed_goes_through_transition_service(self) -> None:
+    async def test_completed_goes_through_shared_settlement(self) -> None:
         job = _make_job(status=JobStatus.RUNNING.value)
         job_service = AsyncMock()
         job_service.poll_video_job_for_worker.return_value = VideoPollOutcome(
             status=VideoPollStatus.COMPLETED
         )
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        session = AsyncMock()
+        await worker._poll_one(job, session)
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_completed.assert_awaited_once_with(
-            job.id, outputs=[], product_id="vex"
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
+            product_id="vex",
         )
-        mock_ts.transition_to_failed.assert_not_awaited()
 
 
 class TestFailedProviderRefundPolicy:
@@ -147,16 +147,13 @@ class TestFailedProviderRefundPolicy:
             failure=failure,
         )
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        session = AsyncMock()
+        await worker._poll_one(job, session)
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_failed.assert_awaited_once_with(
-            job.id,
-            error_message=failure.sanitized_message,
-            failure_code="provider_moderation_rejected",
-            refund=False,
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
             product_id="vex",
         )
 
@@ -172,15 +169,13 @@ class TestFailedProviderRefundPolicy:
             status=VideoPollStatus.FAILED, error_message="xAI said no"
         )
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        session = AsyncMock()
+        await worker._poll_one(job, session)
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_failed.assert_awaited_once_with(
-            job.id,
-            error_message="xAI said no",
-            refund=True,
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
             product_id="vex",
         )
 
@@ -191,13 +186,15 @@ class TestFailedProviderRefundPolicy:
             status=VideoPollStatus.FAILED, error_message=None
         )
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        session = AsyncMock()
+        await worker._poll_one(job, session)
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        _, kwargs = mock_ts.transition_to_failed.call_args
-        assert kwargs["error_message"] == "Video polling failed"
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
+            product_id="vex",
+        )
 
 
 class TestQueuedToRunningTransition:
@@ -208,12 +205,15 @@ class TestQueuedToRunningTransition:
             status=VideoPollStatus.STILL_RUNNING
         )
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        session = AsyncMock()
+        await worker._poll_one(job, session)
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_running.assert_awaited_once_with(job.id)
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
+            product_id="vex",
+        )
 
     async def test_already_running_emits_progress_not_transition(self) -> None:
         job = _make_job(status=JobStatus.RUNNING.value)
@@ -358,15 +358,13 @@ class TestTransientPollErrors:
             status=VideoPollStatus.FAILED, error_message="moderation rejected"
         )
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        session = AsyncMock()
+        await worker._poll_one(job, session)
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_failed.assert_awaited_once_with(
-            job.id,
-            error_message="moderation rejected",
-            refund=True,
+        job_service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=job_service.poll_video_job_for_worker.return_value,
             product_id="vex",
         )
 

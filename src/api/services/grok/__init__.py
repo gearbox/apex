@@ -85,6 +85,15 @@ class GrokModerationError(GrokAPIError):
         )
 
 
+class GrokDeferredTerminalError(GrokAPIError):
+    """A provider job that authoritatively reached terminal ``FAILED``.
+
+    This intentionally does not inherit the transient rate-limit or timeout
+    poll exceptions. Its normalized ``failure`` may still be RATE_LIMITED or
+    TIMEOUT; terminality and failure kind are independent concerns.
+    """
+
+
 class GrokRateLimitError(GrokAPIError):
     """Raised when rate limited by xAI API."""
 
@@ -640,7 +649,9 @@ class GrokClient:
                     provider_request_accepted=True,
                     provider_request_id=request_id,
                 )
-                raise GrokClient._exception_for_failure(failure, diagnostic_message=error_msg)
+                if failure.kind == ProviderFailureKind.MODERATION_REJECTED:
+                    raise GrokModerationError(error_msg, failure=failure)
+                raise GrokDeferredTerminalError(error_msg, failure=failure)
 
             case deferred_status.EXPIRED:
                 failure = _failure_classifier.classify(
@@ -842,6 +853,7 @@ __all__ = [
     "GrokClient",
     "GrokClientError",
     "GrokConnectionError",
+    "GrokDeferredTerminalError",
     "GrokImageResult",
     "GrokInvalidRequestError",
     "GrokModerationError",

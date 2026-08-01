@@ -248,6 +248,40 @@ class TestTransitionToFailed:
         # Job is still transitioned; rollback was called
         session.rollback.assert_awaited()
 
+    @pytest.mark.parametrize(
+        "status",
+        [JobStatus.RUNNING.value, JobStatus.PENDING.value],
+    )
+    async def test_publishes_actual_previous_status_and_only_public_message(
+        self,
+        status: str,
+    ) -> None:
+        job = _make_job(status)
+        job.error_message = "internal-host.example.test sentinel-secret"
+        job.public_error_message = None
+        bus = AsyncMock()
+        svc, session, _ = _make_service(job, event_bus=bus)
+
+        async def refresh_job(refreshed: MagicMock) -> None:
+            refreshed.status = JobStatus.FAILED.value
+            refreshed.public_error_message = "The AI provider is temporarily unavailable."
+            refreshed.failure_code = "provider_provider_unavailable"
+
+        session.refresh.side_effect = refresh_job
+        await svc.transition_to_failed(
+            job.id,
+            error_message=job.error_message,
+            public_error_message="The AI provider is temporarily unavailable.",
+            failure_code="provider_provider_unavailable",
+            refund=False,
+            product_id="vex",
+        )
+
+        payload = bus.publish.await_args.kwargs["payload"]
+        assert payload.previous_status == status
+        assert payload.error_message == "The AI provider is temporarily unavailable."
+        assert "sentinel-secret" not in payload.error_message
+
 
 # ---------------------------------------------------------------------------
 # make_output_expires_at

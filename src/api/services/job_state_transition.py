@@ -27,6 +27,10 @@ from sqlalchemy import update as sa_update
 
 from src.api.schemas.events import EventType, JobStatusPayload
 from src.api.schemas.ops_events import GenerationFailedOpsPayload, OpsEventType
+from src.api.services.generation.public_errors import (
+    LEGACY_FAILED_JOB_MESSAGE,
+    public_error_for_job,
+)
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import JobStatus
 from src.db.models.storage import GenerationJob
@@ -38,7 +42,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.services.billing import BillingService
+    from src.api.services.billing import BalanceEvent, BillingService
     from src.api.services.event_bus import EventBus
 
 logger = structlog.get_logger(__name__)
@@ -215,12 +219,14 @@ class JobStateTransitionService:
         self,
         job_id: UUID,
         *,
-        error_message: str,
+        error_message: str | None = None,
+        public_error_message: str | None = None,
         failure_code: str | None = None,
         refund: bool = True,
         product_id: str,
+        reserve_event: BalanceEvent | None = None,
     ) -> tuple[GenerationJob, bool]:
-        """QUEUED|RUNNING → FAILED.
+        """PENDING|QUEUED|RUNNING → FAILED.
 
         Issues a billing refund when ``refund=True`` and a debit reservation
         exists. Refund failures are logged but do not roll back the status
@@ -236,8 +242,18 @@ class JobStateTransitionService:
             raise ValueError(f"Job {job_id} not found")
 
         old_status = str(job.status)
-        if old_status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+        in_flight_statuses = (
+            JobStatus.PENDING.value,
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+        )
+        if old_status not in in_flight_statuses:
             return job, False
+
+        # ``error_message`` remains internal diagnostics for legacy call
+        # sites. It is deliberately kept separate from the public column and
+        # event payload; new paths pass ``public_error_message`` instead.
+        safe_message = public_error_message or LEGACY_FAILED_JOB_MESSAGE
 
         result = cast(
             "CursorResult[Any]",
@@ -245,12 +261,13 @@ class JobStateTransitionService:
                 sa_update(GenerationJob)
                 .where(
                     GenerationJob.id == job_id,
-                    GenerationJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                    GenerationJob.status.in_(in_flight_statuses),
                 )
                 .values(
                     status=JobStatus.FAILED.value,
                     completed_at=func.now(),
-                    error_message=error_message[:2000],
+                    error_message=error_message[:2000] if error_message is not None else None,
+                    public_error_message=safe_message[:2000],
                     failure_code=failure_code[:100] if failure_code is not None else None,
                 )
                 .execution_options(synchronize_session=False)
@@ -282,6 +299,12 @@ class JobStateTransitionService:
             ),
         )
 
+        # The debit event was built by the submitter in this same transaction.
+        # The status commit above makes it durable before this best-effort SSE
+        # publish, including synchronous submission failures.
+        if self._event_bus is not None and reserve_event is not None:
+            await self._event_bus.publish_balance(reserve_event)
+
         if refund:
             await self._try_refund(job_id, product_id=product_id)
 
@@ -302,7 +325,10 @@ class JobStateTransitionService:
                 generation_type=str(job.generation_type),
                 provider=str(job.provider),
                 failure_code=job.failure_code,
-                error_message=job.error_message,
+                error_message=public_error_for_job(
+                    status=str(job.status),
+                    public_error_message=job.public_error_message,
+                ),
             )
             await self._event_bus.publish(
                 user_id=job.user_id,

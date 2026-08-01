@@ -9,7 +9,8 @@ import structlog
 
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
-from src.api.services.generation.provider_failures import ProviderModerationRejectedError
+from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
+from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.core.model_registry import get_model_meta
@@ -275,11 +276,25 @@ class GenerationService:
             reserve_event = submit_result.balance_event
             await session.commit()
 
-        except ProviderModerationRejectedError as exc:
-            # The Grok job service deliberately left the accepted moderation
-            # reservation in this transaction. Commit the failed job + debit
-            # together, then publish the corresponding events post-commit.
-            await session.commit()
+        except ProviderSubmissionFailedError as exc:
+            # Provider adapters only classify and preserve the submission
+            # context. This single layer settles the terminal job, debit/refund
+            # choice, commit, and post-commit events so no outer error handler
+            # can roll the normalized failure back.
+            transition_service = JobStateTransitionService(
+                session=session,
+                event_bus=self._event_bus,
+                billing_service=self._billing,
+                ops_event_bus=self._ops_event_bus,
+            )
+            settled_job, did_transition = await transition_service.transition_to_failed(
+                exc.job_id,
+                public_error_message=exc.public_message,
+                failure_code=exc.public_code,
+                refund=not exc.failure.billable,
+                product_id=product_id,
+                reserve_event=exc.balance_event,
+            )
             logger.warning(
                 "generation.failed",
                 provider=exc.failure.provider.value,
@@ -288,12 +303,17 @@ class GenerationService:
                 product_id=product_id,
                 failure_kind=exc.failure.kind.value,
                 billable=exc.failure.billable,
+                previous_status=exc.previous_status,
+                did_transition=did_transition,
             )
-            await self._publish_moderation_rejection(
-                exc,
-                user_id=user_id,
-                request=request,
-            )
+            if exc.failure.billable and did_transition:
+                logger.info(
+                    "billing.charge_finalized",
+                    job_id=str(settled_job.id),
+                    product_id=product_id,
+                    tokens_reserved=settled_job.token_cost,
+                    tokens_finalized=settled_job.token_cost,
+                )
             raise
         except GenerationError:
             # Domain errors carry user-safe messages by contract (see
@@ -401,40 +421,6 @@ class GenerationService:
         if self._event_bus is not None:
             await self._event_bus.publish_balance(reserve_event)
             await self._event_bus.publish_balance(refund_result.event)
-
-    async def _publish_moderation_rejection(
-        self,
-        exc: ProviderModerationRejectedError,
-        *,
-        user_id: UUID,
-        request: UnifiedGenerationRequest,
-    ) -> None:
-        """Emit safe terminal job and balance events after the moderation commit."""
-        if self._event_bus is None:
-            return
-        try:
-            await self._event_bus.publish_balance(exc.balance_event)
-
-            from src.api.schemas.events import EventType, JobStatusPayload
-
-            await self._event_bus.publish(
-                user_id=user_id,
-                event_type=EventType.JOB_STATUS_CHANGED,
-                payload=JobStatusPayload(
-                    job_id=exc.job_id,
-                    status=JobStatus.FAILED.value,
-                    previous_status=JobStatus.RUNNING.value,
-                    generation_type=request.generation_type.value,
-                    provider=exc.failure.provider.value,
-                    failure_code=exc.public_code,
-                    error_message=exc.public_message,
-                ),
-            )
-        except Exception:
-            logger.exception(
-                "generation.moderation_post_commit_publish_failed",
-                job_id=str(exc.job_id),
-            )
 
     @staticmethod
     def _validate_inputs(request: UnifiedGenerationRequest) -> None:

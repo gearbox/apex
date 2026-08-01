@@ -629,7 +629,7 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented | provider_invalid_request), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 (rate_limited | provider_rate_limited), 502 provider_malformed_response, 503 (service_unavailable | provider_timeout | provider_provider_unavailable | provider_authentication_failed | provider_unknown)
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from Library" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
@@ -670,11 +670,24 @@ Note:     source_output_id enables "remix from Library" — the backend resolves
           billing applies to this rejected generation, so the reservation remains spent. Re-use the
           same Idempotency-Key to replay this 422 safely; do not submit the same intent again.
 
-          Grok video is asynchronous. Its worker stores `failure_code: "provider_moderation_rejected"`
-          plus the same safe message on the failed job and emits job.status_changed after commit. A
-          retryable rate limit/timeout is not terminal; other terminal provider failures preserve the
-          existing refund behavior. Provider acceptance that cannot be established remains non-billable
-          under the existing safe compensation policy.
+          Grok video is asynchronous. Both its worker and poll-on-read `GET /v1/jobs/{id}` use the
+          same terminal settlement path: the first caller conditionally transitions the job, persists
+          its normalized `failure_code` and safe public message, commits, then publishes the terminal
+          job/balance events. A worker is therefore optional for correctness. Repeated GETs and a
+          worker/read-through race do not replace terminal states, duplicate outputs/events, or refund
+          more than once. Completed video outputs and the completed status commit together.
+
+          A deferred xAI `FAILED` state is authoritative even if its normalized failure kind is
+          `provider_rate_limited` or `provider_timeout`; it is settled immediately. By contrast, a
+          transport-level rate limit/timeout while calling xAI's poll API is transient and leaves the
+          job in progress for the next poll.
+
+          A Grok moderation rejection after provider acceptance remains billable: the reservation is
+          retained. Other normalized provider failures refund once unless an explicit provider policy
+          says otherwise; ambiguous acceptance is non-billable. Synchronous provider failures are
+          returned with stable normalized codes: invalid request 400, provider rate limit 429,
+          malformed response 502, and timeout/unavailable/authentication/unknown 503. Their messages
+          are fixed safe messages, never provider diagnostics.
 ```
 
 ### JobCreatedResponse Schema
@@ -847,6 +860,9 @@ Response: CursorPage<UnifiedJobResponse>
 ```
 Response: UnifiedJobResponse
 Errors:   404
+Note:     For queued/running Grok video jobs this is poll-on-read. Terminal provider outcomes use
+          the same settlement path as the Grok video worker, so no background worker is required
+          for a job to become completed/failed and receive its one-time billing settlement.
 ```
 
 #### `DELETE /v1/jobs/{job_id}`
@@ -875,7 +891,7 @@ interface UnifiedJobResponse {
   started_at: string | null;
   completed_at: string | null;
   outputs: JobOutputItem[]; // empty while processing
-  error: string | null;
+  error: string | null;       // public-safe failure text only
   failure_code: string | null; // stable code, e.g. "provider_moderation_rejected"
 }
 
@@ -890,6 +906,11 @@ interface JobOutputItem {
 > `format`, `size_bytes`, `thumbnail_url`, or `is_thumbnail`. The full media envelope
 > (`original` + `variants`) is in `media: MediaObject`. Jobs API URLs are now stable
 > content-proxy paths — **no presigned URLs**. `UnifiedJobResponse.thumbnail_url` is removed.
+
+`error` is populated only from the public-safe failure-message boundary. The legacy/internal
+`GenerationJob.error_message` column is never returned by this endpoint. A legacy failed row that
+does not yet have a public-safe message returns `"Generation failed. Please try again."`; it never
+falls back to raw diagnostics.
 
 ---
 
@@ -2587,11 +2608,11 @@ data: <JSON-encoded inner payload>
 interface JobStatusPayload {
   job_id: string;           // UUID
   status: JobStatus;        // new status
-  previous_status: string;  // previous status (or "none" on first publish)
+  previous_status: string;  // actual persisted pre-transition status (or "none" on first publish)
   generation_type: string;  // e.g. "t2v"
   provider: string;         // e.g. "grok"
   failure_code: string | null; // set for normalized terminal failures
-  error_message: string | null; // safe displayable terminal-failure message
+  error_message: string | null; // public-safe terminal-failure message, never backend diagnostics
 }
 
 // job.progress
@@ -3082,7 +3103,7 @@ Values: `"sfw"`, `"permissive"`
 | `cancelled` | Yes | User or system cancelled |
 | `moderated` | Yes | Content moderated by provider |
 
-**Polling strategy:** Poll `GET /v1/jobs/{id}` every 2s while status is `pending`, `queued`, or `running`. Stop on any terminal status. For real-time updates without polling, subscribe to the SSE `job.status_changed` event (see [§15 Real-Time Events](#15-real-time-events-sse--pubsub)).
+**Polling strategy:** Poll `GET /v1/jobs/{id}` every 2s while status is `pending`, `queued`, or `running`. Stop on any terminal status. A Grok video GET settles terminal provider results itself using the same guarded path as the worker, so this remains correct when no worker is deployed. For real-time updates without polling, subscribe to the SSE `job.status_changed` event (see [§15 Real-Time Events](#15-real-time-events-sse--pubsub)).
 
 ### GpuSessionStatus
 
@@ -3307,15 +3328,16 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 
 | HTTP | `error` | `detail` keys |
 |------|---------|---------------|
-| 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed`, `unknown_product` | — |
+| 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed`, `provider_invalid_request`, `unknown_product` | — |
 | 401 | `unauthorized`, `invalid_credentials`, `account_inactive`, `token_reuse_detected` | — |
 | 402 | `insufficient_balance` | `balance`, `required` |
 | 403 | `forbidden`, `account_inactive`, `permission_denied`, `model_not_allowed`, `age_verification_required` | — |
 | 404 | `not_found`, `account_not_found`, `price_not_found` | — |
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero`, `no_active_gpu_session`, `session_already_exists`, `invalid_state`, `jobs_in_flight` | `balance`, `in_flight_count` |
 | 422 | `validation_error`, `moderation`, `provider_moderation_rejected` | `provider`, `policy` (Apex moderation only) |
-| 429 | `too_many_requests`, `rate_limited` | `retry_after` |
-| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed` | — |
+| 429 | `too_many_requests`, `rate_limited`, `provider_rate_limited` | `retry_after` (global rate limit only) |
+| 502 | `provider_malformed_response` | — |
+| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_provider_unavailable`, `provider_authentication_failed`, `provider_unknown` | — |
 
 **Example responses:**
 

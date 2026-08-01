@@ -52,6 +52,25 @@ def test_structured_provider_code_takes_precedence_over_message(
     assert failure.provider_request_accepted is None
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "moderation service unavailable",
+        "moderation endpoint timed out",
+        "content policy service connection failed",
+        "safety system internal error",
+    ],
+)
+def test_moderation_service_failures_are_not_billable_rejections(
+    classifier: GrokFailureClassifier,
+    message: str,
+) -> None:
+    failure = classifier.classify({"message": message})
+
+    assert failure.kind != ProviderFailureKind.MODERATION_REJECTED
+    assert failure.provider_request_accepted is None
+
+
 def test_sanitized_failure_never_exposes_provider_payload_or_secret(
     classifier: GrokFailureClassifier,
 ) -> None:

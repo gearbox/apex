@@ -81,10 +81,38 @@ class GrokFailureClassifier:
 
         combined = " ".join(messages).casefold()
         normalized = " ".join(combined.replace(";", " ").replace(".", " ").split())
+        # The known production response is a definitive user-content rejection.
         if "respect moderation rules" in normalized and "url is not available" in normalized:
             return ProviderFailureKind.MODERATION_REJECTED
+        # Do not turn an outage in a moderation-related service into a
+        # billable user-content rejection. Structured codes above remain
+        # authoritative; this is only defensive free-text fallback logic.
         if any(
-            marker in normalized for marker in ("moderation", "safety system", "content policy")
+            marker in normalized
+            for marker in (
+                "service unavailable",
+                "service failure",
+                "service connection failed",
+                "connection failed",
+                "internal error",
+                "timed out",
+                "timeout",
+                "unavailable",
+                "outage",
+            )
+        ):
+            if any(marker in normalized for marker in ("timed out", "timeout")):
+                return ProviderFailureKind.TIMEOUT
+            return ProviderFailureKind.PROVIDER_UNAVAILABLE
+        if any(
+            marker in normalized
+            for marker in (
+                "moderation rejected",
+                "rejected by moderation",
+                "rejected by the safety system",
+                "rejected by content policy",
+                "content policy violation",
+            )
         ):
             return ProviderFailureKind.MODERATION_REJECTED
         if any(marker in normalized for marker in ("deadline exceeded", "timed out", "timeout")):

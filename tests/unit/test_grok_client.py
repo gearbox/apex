@@ -13,6 +13,7 @@ from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
+    GrokDeferredTerminalError,
     GrokInvalidRequestError,
     GrokModerationError,
     GrokVideoResult,
@@ -116,12 +117,40 @@ class TestParseDeferredVideoResult:
             _DeferredPayload(error=_Error(code="E42", message="upstream failed")),
         )
 
-        with pytest.raises(GrokAPIError, match=r"\[E42\] upstream failed"):
+        with pytest.raises(GrokDeferredTerminalError, match=r"\[E42\] upstream failed"):
             GrokClient._parse_deferred_video_result(
                 response,
                 _DeferredStatus,
                 request_id="req-1",
             )
+
+    @pytest.mark.parametrize(
+        ("code", "kind"),
+        [
+            ("RATE_LIMITED", ProviderFailureKind.RATE_LIMITED),
+            ("RESOURCE_EXHAUSTED", ProviderFailureKind.RATE_LIMITED),
+            ("TIMEOUT", ProviderFailureKind.TIMEOUT),
+            ("DEADLINE_EXCEEDED", ProviderFailureKind.TIMEOUT),
+        ],
+    )
+    def test_failed_terminal_status_is_not_transient_even_for_retryable_kind(
+        self,
+        code: str,
+        kind: ProviderFailureKind,
+    ) -> None:
+        response = _DeferredResponse(
+            _DeferredStatus.FAILED,
+            _DeferredPayload(error=_Error(code=code, message="provider terminal failure")),
+        )
+
+        with pytest.raises(GrokDeferredTerminalError) as exc_info:
+            GrokClient._parse_deferred_video_result(
+                response,
+                _DeferredStatus,
+                request_id="req-terminal",
+            )
+
+        assert exc_info.value.failure.kind == kind
 
     def test_expired_raises_api_error(self) -> None:
         with pytest.raises(GrokAPIError, match="expired before completion"):

@@ -221,7 +221,10 @@ class GenerationJob(Base):
     )
     worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Legacy/internal diagnostics. Never serialize this column to API or SSE.
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Explicitly public-safe text for user-facing REST/SSE failure payloads.
+    public_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_deleted: Mapped[bool] = mapped_column(
         Boolean,

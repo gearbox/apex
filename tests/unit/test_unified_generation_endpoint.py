@@ -19,6 +19,7 @@ from src.api.services.generation.provider_failures import (
     ProviderFailure,
     ProviderFailureKind,
     ProviderModerationRejectedError,
+    ProviderSubmissionFailedError,
 )
 from src.api.services.generation.service import (
     FeatureNotSupportedError,
@@ -252,6 +253,53 @@ class TestRouteHandlerReturns400:
         idempotency.complete.assert_awaited_once()
         idempotency.fail.assert_not_awaited()
         session.commit.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("kind", "status_code"),
+        [
+            (ProviderFailureKind.INVALID_REQUEST, 400),
+            (ProviderFailureKind.RATE_LIMITED, 429),
+            (ProviderFailureKind.TIMEOUT, 503),
+            (ProviderFailureKind.PROVIDER_UNAVAILABLE, 503),
+            (ProviderFailureKind.AUTHENTICATION_FAILED, 503),
+            (ProviderFailureKind.MALFORMED_RESPONSE, 502),
+            (ProviderFailureKind.UNKNOWN, 503),
+        ],
+    )
+    async def test_normalized_provider_submission_failure_uses_stable_public_mapping(
+        self,
+        kind: ProviderFailureKind,
+        status_code: int,
+    ) -> None:
+        failure = ProviderFailure(
+            kind=kind,
+            provider=Provider.GROK,
+            sanitized_message=ProviderFailure.safe_message_for_kind(kind),
+        )
+        provider_error = ProviderSubmissionFailedError(
+            failure=failure,
+            job_id=uuid4(),
+            balance_event=None,
+        )
+        svc, idempotency, session = _make_route_handler_mocks(generate_side_effect=provider_error)
+        request = UnifiedGenerationRequest(
+            prompt="provider transport sentinel-secret",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+
+        response = await self._call_handler(
+            request,
+            generation_service=svc,
+            idempotency_service=idempotency,
+            session=session,
+        )
+
+        assert response.status_code == status_code
+        assert response.content.error == failure.public_code
+        assert response.content.message == failure.sanitized_message
+        assert "sentinel-secret" not in response.content.message
+        idempotency.fail.assert_awaited_once()
 
     async def test_bare_not_implemented_error_is_not_swallowed_as_400(self) -> None:
         svc, idempotency, session = _make_route_handler_mocks(

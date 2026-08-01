@@ -79,8 +79,35 @@ class ProviderFailure:
         return _PUBLIC_MESSAGES[kind]
 
 
-class ProviderModerationRejectedError(Exception):
-    """A billable provider moderation rejection with committed job context.
+class ProviderSubmissionFailedError(Exception):
+    """A normalized provider submission failure with durable job context.
+
+    The provider adapter raises this after it has created the job and reserved
+    its debit, but before it mutates either.  The generation orchestrator owns
+    the single settlement decision (failed state, charge/refund, commit, and
+    post-commit events), so it cannot accidentally roll back the normalized
+    terminal record.
+    """
+
+    def __init__(
+        self,
+        *,
+        failure: ProviderFailure,
+        job_id: UUID,
+        previous_status: str = "unknown",
+        balance_event: BalanceEvent | None,
+    ) -> None:
+        self.failure = failure
+        self.job_id = job_id
+        self.previous_status = previous_status
+        self.balance_event = balance_event
+        self.public_code = failure.public_code
+        self.public_message = failure.sanitized_message
+        super().__init__(self.public_message)
+
+
+class ProviderModerationRejectedError(ProviderSubmissionFailedError):
+    """A billable provider moderation rejection with submission context.
 
     This exception intentionally has a fixed public message. The original
     provider message remains diagnostic-only and is never made part of the
@@ -95,11 +122,14 @@ class ProviderModerationRejectedError(Exception):
         *,
         failure: ProviderFailure,
         job_id: UUID,
+        previous_status: str = "unknown",
         balance_event: BalanceEvent | None,
     ) -> None:
         if failure.kind != ProviderFailureKind.MODERATION_REJECTED:
             raise ValueError("ProviderModerationRejectedError requires a moderation failure")
-        self.failure = failure
-        self.job_id = job_id
-        self.balance_event = balance_event
-        super().__init__(self.public_message)
+        super().__init__(
+            failure=failure,
+            job_id=job_id,
+            previous_status=previous_status,
+            balance_event=balance_event,
+        )
