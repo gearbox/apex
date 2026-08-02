@@ -168,7 +168,7 @@ class GrokImageResult:
     """URL of the generated image on xAI storage (if image_format=url)."""
 
     base64_data: bytes | None
-    """Raw image bytes (if image_format=base64)."""
+    """Decoded image bytes (if image_format=base64)."""
 
     revised_prompt: str | None
     """The prompt after revision by the model."""
@@ -345,15 +345,13 @@ class GrokClient:
                 aspect_ratio=aspect_ratio.value if aspect_ratio is not None else None,
                 image_format=image_format.value,
             )
-
+            results = [self._parse_image_response(r, image_format) for r in responses]
+            self._validate_image_results(results, image_format=image_format)
+            return results  # noqa: TRY300 - SDK response properties can raise during parsing.
         except GrokClientError:
             raise
         except Exception as e:
             raise self._convert_exception(e) from e
-        else:
-            results = [self._parse_image_response(r, image_format) for r in responses]
-            self._validate_image_results(results, image_format=image_format)
-            return results
 
     async def edit_image(
         self,
@@ -408,15 +406,13 @@ class GrokClient:
                 aspect_ratio=aspect_ratio.value if aspect_ratio is not None else None,
                 image_format=image_format.value,
             )
-
+            results = [self._parse_image_response(r, image_format) for r in responses]
+            self._validate_image_results(results, image_format=image_format)
+            return results  # noqa: TRY300 - SDK response properties can raise during parsing.
         except GrokClientError:
             raise
         except Exception as e:
             raise self._convert_exception(e) from e
-        else:
-            results = [self._parse_image_response(r, image_format) for r in responses]
-            self._validate_image_results(results, image_format=image_format)
-            return results
 
     @staticmethod
     def _validate_edit_image_inputs(
@@ -734,8 +730,11 @@ class GrokClient:
         if image_format == ResponseImageFormat.URL:
             url = getattr(response, "url", None)
         else:
-            # For base64 format, SDK returns raw bytes in .image attribute
-            base64_data = getattr(response, "image", None)
+            # The SDK exposes an encoded string through ``.base64``. Decode it
+            # at the provider boundary so callers consistently receive bytes.
+            encoded_data = getattr(response, "base64", None)
+            if encoded_data is not None:
+                base64_data = base64.b64decode(encoded_data, validate=True)
 
         revised_prompt = getattr(response, "revised_prompt", None)
 

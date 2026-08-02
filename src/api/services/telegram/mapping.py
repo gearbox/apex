@@ -95,10 +95,15 @@ def _map_generation_created(envelope: OpsEventEnvelope) -> OpsNotification:
 
 def _map_generation_failed(envelope: OpsEventEnvelope) -> OpsNotification:
     payload = msgspec.json.decode(envelope.payload, type=GenerationFailedOpsPayload)
+    failure_detail = (
+        " · provider authentication failed"
+        if payload.failure_code == "provider_authentication_failed"
+        else ""
+    )
     text = (
         f"{_tag(envelope.product_id)} ❌ <b>Generation failed</b>\n"
         f"job <code>{escape(str(payload.job_id))}</code> · "
-        f"{escape(payload.provider)}/{escape(payload.generation_type)}"
+        f"{escape(payload.provider)}/{escape(payload.generation_type)}{failure_detail}"
     )
     return OpsNotification(
         notification_class=NotificationClass.GENERATION_FAILED,

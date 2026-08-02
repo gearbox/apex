@@ -442,7 +442,7 @@ class GrokJobService:
         previous_status = str(job.status) if job is not None else JobStatus.PENDING.value
         error_type = (
             ProviderModerationRejectedError
-            if failure.kind.value == "moderation_rejected"
+            if failure.kind is ProviderFailureKind.MODERATION_REJECTED
             else ProviderSubmissionFailedError
         )
         raise error_type(
@@ -859,9 +859,9 @@ class GrokJobService:
         if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
             return job
 
-        # The submission timestamp is never reset by queued→running status
-        # transitions, unlike ``started_at``.  This keeps poll-on-read and the
-        # periodic worker on the same authoritative maximum-age rule.
+        # ``started_at`` records provider acceptance and is write-once across
+        # queued→running transitions. It is therefore the authoritative poll
+        # TTL basis for both read-through and periodic polling.
         if self._is_video_job_overdue(job):
             return await self.settle_video_poll_outcome(
                 session,
@@ -928,7 +928,7 @@ class GrokJobService:
         terminal_failure = outcome.failure
         refund = not terminal_failure.billable if terminal_failure is not None else True
         public_error_message = (
-            terminal_failure.sanitized_message
+            ProviderFailure.public_message_for_failure(terminal_failure)
             if terminal_failure is not None
             else "The AI provider could not complete the request."
         )
@@ -1083,11 +1083,11 @@ class GrokJobService:
             raise
 
     def _is_video_job_overdue(self, job: GenerationJob) -> bool:
-        """Use submission time, never a status-transition timestamp, for TTL."""
-        created_at = job.created_at
-        if not isinstance(created_at, datetime):
+        """TTL runs from provider acceptance, falling back to submission time."""
+        basis = job.started_at or job.created_at
+        if not isinstance(basis, datetime):
             return False
-        return (datetime.now(UTC) - created_at).total_seconds() > self._max_poll_time
+        return (datetime.now(UTC) - basis).total_seconds() > self._max_poll_time
 
     @staticmethod
     def _timeout_outcome() -> VideoPollOutcome:

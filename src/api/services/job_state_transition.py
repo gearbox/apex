@@ -111,6 +111,7 @@ class JobStateTransitionService:
         )
         self._job_repo = JobRepository(session)
         self._output_repo = OutputRepository(session)
+        self._deferred_failure: _DeferredFailurePublication | None = None
 
     # -------------------------------------------------------------------------
     # Public transition methods
@@ -135,7 +136,7 @@ class JobStateTransitionService:
 
         update_values: dict[str, object] = {
             "status": JobStatus.RUNNING.value,
-            "started_at": func.now(),
+            "started_at": func.coalesce(GenerationJob.started_at, func.now()),
         }
 
         result = cast(
@@ -323,6 +324,7 @@ class JobStateTransitionService:
             the job from QUEUED|RUNNING to FAILED. False if the job was already
             terminal (idempotent no-op — no publish, no refund).
         """
+        self._deferred_failure = None
         job = await self._session.get(GenerationJob, job_id)
         if job is None:
             raise ValueError(f"Job {job_id} not found")
@@ -433,7 +435,7 @@ class JobStateTransitionService:
     @property
     def deferred_failure(self) -> _DeferredFailurePublication | None:
         """Post-commit events captured by ``transition_to_failed(commit=False)``."""
-        return getattr(self, "_deferred_failure", None)
+        return self._deferred_failure
 
     async def publish_deferred_failure(self, publication: _DeferredFailurePublication) -> None:
         """Publish an already-committed failure settlement exactly once."""
@@ -461,6 +463,7 @@ class JobStateTransitionService:
                 user_id=publication.user_id,
                 provider=publication.provider,
                 generation_type=publication.generation_type,
+                failure_code=publication.failure_code,
             ),
         )
         if self._event_bus is not None:

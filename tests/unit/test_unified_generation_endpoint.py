@@ -432,6 +432,7 @@ class TestCommitAcknowledgementRecovery:
         assert response.status_code == 422
         assert response.content.error == "provider_moderation_rejected"
         assert response.content.message == moderation_error.public_message
+        assert "This generation was charged" in response.content.message
         assert "Image did not respect" not in response.content.message
         idempotency.complete.assert_awaited_once()
         idempotency.fail.assert_not_awaited()
@@ -442,7 +443,7 @@ class TestCommitAcknowledgementRecovery:
         [
             (ProviderFailureKind.INVALID_REQUEST, 400),
             (ProviderFailureKind.RATE_LIMITED, 429),
-            (ProviderFailureKind.TIMEOUT, 503),
+            (ProviderFailureKind.TIMEOUT, 504),
             (ProviderFailureKind.PROVIDER_UNAVAILABLE, 503),
             (ProviderFailureKind.AUTHENTICATION_FAILED, 503),
             (ProviderFailureKind.MALFORMED_RESPONSE, 502),

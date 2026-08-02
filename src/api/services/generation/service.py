@@ -99,6 +99,8 @@ class GenerationService:
         ops_event_bus: OpsEventBus | None = None,
         *,
         retention_days: int = 7,
+        transition_service_factory: Callable[[AsyncSession], JobStateTransitionService]
+        | None = None,
     ) -> None:
         self._providers = providers
         self._billing = billing_service
@@ -109,11 +111,28 @@ class GenerationService:
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
         )
         self._retention_days = retention_days
+        self._transition_service_factory = (
+            transition_service_factory or self._default_transition_service_factory
+        )
 
     @property
     def configured_providers(self) -> frozenset[Provider]:
         """Providers that are fully wired and able to serve requests."""
         return frozenset(self._providers)
+
+    def _make_transition_service(self, session: AsyncSession) -> JobStateTransitionService:
+        """Build the state-transition service for this transactional scope."""
+        return self._transition_service_factory(session)
+
+    def _default_transition_service_factory(
+        self, session: AsyncSession
+    ) -> JobStateTransitionService:
+        return JobStateTransitionService(
+            session=session,
+            event_bus=self._event_bus,
+            billing_service=self._billing,
+            ops_event_bus=self._ops_event_bus,
+        )
 
     async def generate(
         self,
@@ -286,12 +305,7 @@ class GenerationService:
             # context. This single layer settles the terminal job, debit/refund
             # choice, commit, and post-commit events so no outer error handler
             # can roll the normalized failure back.
-            transition_service = JobStateTransitionService(
-                session=session,
-                event_bus=self._event_bus,
-                billing_service=self._billing,
-                ops_event_bus=self._ops_event_bus,
-            )
+            transition_service = self._make_transition_service(session)
             settled_job, did_transition = await transition_service.transition_to_failed(
                 exc.job_id,
                 public_error_message=exc.public_message,

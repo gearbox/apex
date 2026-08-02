@@ -46,6 +46,15 @@ _INFRASTRUCTURE_PHRASES = (
     "unavailable",
     "outage",
 )
+_MODERATION_SIGNATURE_RE = re.compile(
+    r"respect(?:s|ed)?\s+moderation\s+rules",
+    re.IGNORECASE,
+)
+_OUTPUT_WITHHELD_RE = re.compile(
+    r"\b(?:url|base64)\s+(?:is\s+)?"
+    r"(?:not\s+available|unavailable|withheld|not\s+provided|not\s+returned)\b",
+    re.IGNORECASE,
+)
 
 
 class GrokFailureClassifier:
@@ -62,15 +71,17 @@ class GrokFailureClassifier:
         codes, messages, status_code = self._extract(source)
         kind = self._classify_kind(codes, messages, status_code)
 
-        # The documented ``URL is not available`` moderation response is the
-        # one free-text signal that proves a request reached provider
-        # moderation.  Other moderation-labelled errors remain ambiguous and
-        # are deliberately non-billable unless their call site proves
-        # acceptance (for example a deferred request ID).
+        # A definitive structured rejection or documented SDK output-withheld
+        # response proves that the provider reached content moderation. Other
+        # moderation-labelled errors remain ambiguous and non-billable unless
+        # their call site proves acceptance (for example a deferred request ID).
         if (
             kind == ProviderFailureKind.MODERATION_REJECTED
             and provider_request_accepted is None
-            and self._has_confirmed_moderation_result(messages)
+            and (
+                self._has_definitive_moderation_code(codes)
+                or self._has_confirmed_moderation_result(messages)
+            )
         ):
             provider_request_accepted = True
 
@@ -114,18 +125,18 @@ class GrokFailureClassifier:
 
         combined = " ".join(messages).casefold()
         normalized = " ".join(combined.replace(";", " ").replace(".", " ").split())
+        # An SDK result that withholds its URL/base64 because moderation was
+        # not respected is definitive. It must win over the loose
+        # ``unavailable`` infrastructure marker below.
+        if self._has_confirmed_moderation_result(messages):
+            return ProviderFailureKind.MODERATION_REJECTED
+        if any(marker in normalized for marker in ("deadline exceeded", "timed out", "timeout")):
+            return ProviderFailureKind.TIMEOUT
         # Do not turn an outage in a moderation-related service into a
         # billable user-content rejection. Structured codes above remain
         # authoritative; this is only defensive free-text fallback logic.
-        if any(marker in normalized for marker in _INFRASTRUCTURE_PHRASES) or any(
-            marker in normalized for marker in ("timed out", "timeout")
-        ):
-            if any(marker in normalized for marker in ("timed out", "timeout")):
-                return ProviderFailureKind.TIMEOUT
+        if any(marker in normalized for marker in _INFRASTRUCTURE_PHRASES):
             return ProviderFailureKind.PROVIDER_UNAVAILABLE
-        # The known production response is a definitive user-content rejection.
-        if "respect moderation rules" in normalized and "url is not available" in normalized:
-            return ProviderFailureKind.MODERATION_REJECTED
         if any(
             marker in normalized
             for marker in (
@@ -137,8 +148,6 @@ class GrokFailureClassifier:
             )
         ):
             return ProviderFailureKind.MODERATION_REJECTED
-        if any(marker in normalized for marker in ("deadline exceeded", "timed out", "timeout")):
-            return ProviderFailureKind.TIMEOUT
         if any(marker in normalized for marker in ("rate limit", "resource exhausted")) or (
             _RATE_LIMIT_PROSE_RE.search(combined) is not None
         ):
@@ -153,8 +162,6 @@ class GrokFailureClassifier:
             return ProviderFailureKind.INVALID_REQUEST
         if any(marker in normalized for marker in ("malformed", "parse error", "invalid response")):
             return ProviderFailureKind.MALFORMED_RESPONSE
-        if any(marker in normalized for marker in _INFRASTRUCTURE_PHRASES):
-            return ProviderFailureKind.PROVIDER_UNAVAILABLE
         return ProviderFailureKind.UNKNOWN
 
     @staticmethod
@@ -184,9 +191,16 @@ class GrokFailureClassifier:
         )
 
     @staticmethod
+    def _has_definitive_moderation_code(codes: list[str]) -> bool:
+        return any(code.upper() in _MODERATION_REJECTION_CODES for code in codes)
+
+    @staticmethod
     def _has_confirmed_moderation_result(messages: list[str]) -> bool:
-        normalized = " ".join(" ".join(messages).casefold().split())
-        return "respect moderation rules" in normalized and "url is not available" in normalized
+        message = " ".join(messages)
+        return (
+            _MODERATION_SIGNATURE_RE.search(message) is not None
+            and _OUTPUT_WITHHELD_RE.search(message) is not None
+        )
 
     def _extract(self, source: object) -> tuple[list[str], list[str], int | None]:
         codes: list[str] = []
@@ -221,6 +235,8 @@ class GrokFailureClassifier:
 
         if isinstance(value, Mapping):
             for key, nested in value.items():
+                if nested is None:
+                    continue
                 self._consume_field(
                     str(key),
                     nested,
@@ -245,7 +261,7 @@ class GrokFailureClassifier:
             "data",
         ):
             nested = getattr(value, field_name, None)
-            if callable(nested):
+            if callable(nested) and field_name in {"code", "details", "grpc_code"}:
                 try:
                     nested = nested()
                 except Exception:

@@ -73,6 +73,16 @@ class TestTransitionToRunning:
         session.execute.assert_awaited_once()
         session.commit.assert_awaited_once()
 
+    async def test_queued_to_running_preserves_existing_started_at(self) -> None:
+        job = _make_job(JobStatus.QUEUED.value)
+        job.started_at = datetime.now(UTC) - timedelta(minutes=5)
+        svc, session, _ = _make_service(job)
+
+        await svc.transition_to_running(job.id)
+
+        statement = session.execute.await_args.args[0]
+        assert "coalesce(generation_jobs.started_at, now())" in str(statement)
+
     async def test_already_running_is_noop(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
         svc, session, _ = _make_service(job)
@@ -218,6 +228,16 @@ class TestTransitionToFailed:
 
         assert did is False
         bus.publish.assert_not_awaited()
+
+    async def test_noop_failure_clears_previous_deferred_publication(self) -> None:
+        job = _make_job(JobStatus.FAILED.value)
+        svc, _, _ = _make_service(job)
+        svc._deferred_failure = MagicMock()
+
+        _, did = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+
+        assert did is False
+        assert svc.deferred_failure is None
 
     async def test_did_false_does_not_refund(self) -> None:
         job = _make_job(JobStatus.COMPLETED.value)

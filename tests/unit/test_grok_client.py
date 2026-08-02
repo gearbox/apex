@@ -48,6 +48,31 @@ class _ImageResponse:
     revised_prompt: str = ""
 
 
+class _ModeratedImageResponse:
+    @property
+    def url(self) -> str:
+        raise ValueError("Image did not respect moderation rules; URL is not available.")
+
+    @property
+    def revised_prompt(self) -> None:
+        return None
+
+
+class _ModeratedBase64ImageResponse:
+    @property
+    def base64(self) -> str:
+        raise ValueError("Image did not respect moderation rules; base64 is not available.")
+
+    @property
+    def revised_prompt(self) -> None:
+        return None
+
+
+class _Base64ImageResponse:
+    base64 = "aGVsbG8="
+    revised_prompt = None
+
+
 class _DeferredPayload:
     def __init__(self, *, video: _Video | None = None, error: _Error | None = None) -> None:
         self.video = video
@@ -349,6 +374,16 @@ class TestImageEditing:
             image_format="url",
         )
 
+    async def test_edit_image_classifies_raising_url_property(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ModeratedImageResponse()]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokModerationError) as exc_info:
+            await client.edit_image("unsafe edit", "https://example.test/input.png")
+
+        assert exc_info.value.failure.kind is ProviderFailureKind.MODERATION_REJECTED
+        assert exc_info.value.failure.provider_request_accepted is True
+
 
 class TestImageGeneration:
     @staticmethod
@@ -393,3 +428,33 @@ class TestImageGeneration:
             )
 
         assert exc_info.value.failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
+
+    async def test_generate_image_classifies_raising_url_property(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ModeratedImageResponse()]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokModerationError) as exc_info:
+            await client.generate_image("unsafe image")
+
+        assert exc_info.value.failure.kind is ProviderFailureKind.MODERATION_REJECTED
+        assert exc_info.value.failure.provider_request_accepted is True
+
+    async def test_generate_image_decodes_sdk_base64_response(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_Base64ImageResponse()]))
+        client = self._client_with_image(image)
+
+        results = await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        assert results[0].base64_data == b"hello"
+
+    async def test_generate_image_classifies_raising_base64_property(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(return_value=[_ModeratedBase64ImageResponse()])
+        )
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokModerationError) as exc_info:
+            await client.generate_image("unsafe image", image_format=ResponseImageFormat.BASE64)
+
+        assert exc_info.value.failure.kind is ProviderFailureKind.MODERATION_REJECTED
+        assert exc_info.value.failure.provider_request_accepted is True

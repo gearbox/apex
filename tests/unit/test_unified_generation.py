@@ -383,6 +383,21 @@ def _make_service(
     )
 
 
+def test_generation_service_uses_injected_transition_factory() -> None:
+    factory = MagicMock()
+    service = GenerationService(
+        providers={},
+        billing_service=MagicMock(),
+        pricing_service=MagicMock(),
+        rate_limiter=MagicMock(spec=ModelRateLimiter),
+        transition_service_factory=factory,
+    )
+    session = AsyncMock()
+
+    assert service._make_transition_service(session) is factory.return_value
+    factory.assert_called_once_with(session)
+
+
 class TestGenerationServiceValidation:
     def test_validate_i2i_requires_image_id(self) -> None:
         service = _make_service()

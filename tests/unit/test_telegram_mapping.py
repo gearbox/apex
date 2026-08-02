@@ -89,6 +89,25 @@ class TestGenerationFailed:
         assert "Generation failed" in notification.text
         assert "aisha/i2v" in notification.text
 
+    def test_authentication_failure_uses_existing_generation_failed_class(self) -> None:
+        envelope = _envelope(
+            OpsEventType.GENERATION_FAILED,
+            "vex",
+            GenerationFailedOpsPayload(
+                job_id=uuid4(),
+                user_id=uuid4(),
+                provider="grok",
+                generation_type="t2i",
+                failure_code="provider_authentication_failed",
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert notification.notification_class is NotificationClass.GENERATION_FAILED
+        assert "provider authentication failed" in notification.text
+
 
 class TestGpuNodeStarted:
     def test_maps_session_and_model_type(self) -> None:

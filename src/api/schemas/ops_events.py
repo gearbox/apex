@@ -71,6 +71,7 @@ class GenerationFailedOpsPayload(msgspec.Struct, kw_only=True):
     user_id: UUID
     provider: str
     generation_type: str
+    failure_code: str | None = None
 
 
 class GpuNodeStartedOpsPayload(msgspec.Struct, kw_only=True):

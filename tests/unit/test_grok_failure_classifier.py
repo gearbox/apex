@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from typing import Literal
+from uuid import uuid4
 
 import pytest
 
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
-from src.api.services.generation.provider_failures import ProviderFailureKind
+from src.api.services.generation.provider_failures import (
+    ProviderFailure,
+    ProviderFailureKind,
+    ProviderModerationRejectedError,
+)
 from src.api.services.grok.failure_classifier import GrokFailureClassifier
+from src.core.enums import Provider
 
 _CONFIRMED_MESSAGE = "Image did not respect moderation rules; URL is not available."
 
@@ -19,29 +25,61 @@ def classifier() -> GrokFailureClassifier:
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "message",
     [
-        {"message": _CONFIRMED_MESSAGE},
-        {"message": "  image DID NOT respect moderation rules; url IS not available.  "},
-        {"message": f"xAI rejected the request: {_CONFIRMED_MESSAGE} Please try again."},
-        {"error": {"detail": _CONFIRMED_MESSAGE}},
+        _CONFIRMED_MESSAGE,
+        "Image did not respect moderation rules; URL is unavailable.",
+        "Image did not respect moderation rules; base64 is not available.",
+        "  image DID NOT respect moderation rules; url IS not available.  ",
+        f"xAI rejected the request: {_CONFIRMED_MESSAGE} Please try again.",
     ],
 )
 def test_classifies_confirmed_moderation_message(
     classifier: GrokFailureClassifier,
-    payload: dict[str, object],
+    message: str,
 ) -> None:
-    failure = classifier.classify(payload)
+    failure = classifier.classify({"error": {"detail": message}})
 
     assert failure.kind == ProviderFailureKind.MODERATION_REJECTED
     assert failure.provider_request_accepted is True
     assert failure.public_code == "provider_moderation_rejected"
 
 
+def test_structured_moderation_code_proves_request_accepted(
+    classifier: GrokFailureClassifier,
+) -> None:
+    failure = classifier.classify({"code": "CONTENT_POLICY_VIOLATION"})
+    registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge")
+
+    assert failure.kind is ProviderFailureKind.MODERATION_REJECTED
+    assert failure.provider_request_accepted is True
+    assert registry.apply(failure).billable is True
+
+
 def test_unrelated_provider_error_is_not_moderation(classifier: GrokFailureClassifier) -> None:
     failure = classifier.classify({"error": {"code": "UPSTREAM_UNAVAILABLE", "message": "retry"}})
 
     assert failure.kind == ProviderFailureKind.PROVIDER_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("payload", "kind"),
+    [
+        ({"status_code": 401}, ProviderFailureKind.AUTHENTICATION_FAILED),
+        ({"status_code": 429}, ProviderFailureKind.RATE_LIMITED),
+        ({"status_code": 503}, ProviderFailureKind.PROVIDER_UNAVAILABLE),
+        ({"status_code": 400}, ProviderFailureKind.INVALID_REQUEST),
+        ({"message": "content policy violation"}, ProviderFailureKind.MODERATION_REJECTED),
+        ({"message": "unauthenticated"}, ProviderFailureKind.AUTHENTICATION_FAILED),
+        ({"message": "malformed response"}, ProviderFailureKind.MALFORMED_RESPONSE),
+    ],
+)
+def test_classifies_remaining_status_and_prose_branches(
+    classifier: GrokFailureClassifier,
+    payload: dict[str, object],
+    kind: ProviderFailureKind,
+) -> None:
+    assert classifier.classify(payload).kind is kind
 
 
 def test_structured_provider_code_takes_precedence_over_message(
@@ -96,6 +134,7 @@ def test_structured_code_wins_over_conflicting_precise_prose(
     "message",
     [
         "moderation service unavailable",
+        "moderation service is unavailable",
         "moderation endpoint timed out",
         "content policy service connection failed",
         "safety system internal error",
@@ -156,3 +195,38 @@ def test_grok_moderation_billing_policy_is_injected(
     registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy(setting)
 
     assert registry.apply(failure).billable is expected_billable
+
+
+def test_refunded_moderation_message_does_not_claim_a_charge() -> None:
+    error = ProviderModerationRejectedError(
+        failure=ProviderFailure(
+            kind=ProviderFailureKind.MODERATION_REJECTED,
+            provider=Provider.GROK,
+            sanitized_message=ProviderFailure.safe_message_for_kind(
+                ProviderFailureKind.MODERATION_REJECTED
+            ),
+            billable=False,
+        ),
+        job_id=uuid4(),
+        balance_event=None,
+    )
+
+    assert "This generation was charged" not in error.public_message
+
+
+def test_mapping_with_none_code_does_not_emit_string_none(
+    classifier: GrokFailureClassifier,
+) -> None:
+    failure = classifier.classify({"message": "x", "grpc_code": None})
+
+    assert failure.provider_error_code is None
+
+
+def test_non_grpc_callable_fields_are_not_invoked(classifier: GrokFailureClassifier) -> None:
+    class _FailurePayload:
+        def response(self) -> object:
+            raise AssertionError("response access must not execute")
+
+    failure = classifier.classify(_FailurePayload())
+
+    assert failure.kind is ProviderFailureKind.UNKNOWN

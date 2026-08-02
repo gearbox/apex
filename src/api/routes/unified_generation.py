@@ -20,6 +20,7 @@ from litestar.status_codes import (
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_502_BAD_GATEWAY,
     HTTP_503_SERVICE_UNAVAILABLE,
+    HTTP_504_GATEWAY_TIMEOUT,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -331,6 +332,7 @@ class UnifiedGenerationController(Controller):
                 ProviderFailureKind.INVALID_REQUEST: HTTP_400_BAD_REQUEST,
                 ProviderFailureKind.RATE_LIMITED: HTTP_429_TOO_MANY_REQUESTS,
                 ProviderFailureKind.MALFORMED_RESPONSE: HTTP_502_BAD_GATEWAY,
+                ProviderFailureKind.TIMEOUT: HTTP_504_GATEWAY_TIMEOUT,
             }.get(exc.failure.kind, HTTP_503_SERVICE_UNAVAILABLE)
             error = ErrorEnvelope(
                 error=exc.public_code,

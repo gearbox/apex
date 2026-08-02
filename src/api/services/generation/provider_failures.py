@@ -34,6 +34,7 @@ class ProviderFailureKind(StrEnum):
 _PUBLIC_MESSAGES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.MODERATION_REJECTED: (
         "The requested content was rejected by the AI provider's safety system. "
+        "This generation was charged because the provider processed the request. "
         "Modify the prompt or input and try again."
     ),
     ProviderFailureKind.INVALID_REQUEST: "The AI provider could not process this request.",
@@ -87,6 +88,16 @@ class ProviderFailure:
         """Return the client-safe message for a normalized failure kind."""
         return _PUBLIC_MESSAGES[kind]
 
+    @classmethod
+    def public_message_for_failure(cls, failure: ProviderFailure) -> str:
+        """Return the safe message after the resolved billing policy is known."""
+        if failure.kind is ProviderFailureKind.MODERATION_REJECTED and not failure.billable:
+            return (
+                "The requested content was rejected by the AI provider's safety system. "
+                "Modify the prompt or input and try again."
+            )
+        return cls.safe_message_for_kind(failure.kind)
+
 
 class ProviderSubmissionFailedError(Exception):
     """A normalized provider submission failure with durable job context.
@@ -114,20 +125,16 @@ class ProviderSubmissionFailedError(Exception):
         # ``sanitized_message`` is retained for compatibility with existing
         # normalized provider adapters, but callers must never be able to
         # make a free-form string public by constructing ProviderFailure.
-        self.public_message = ProviderFailure.safe_message_for_kind(failure.kind)
+        self.public_message = ProviderFailure.public_message_for_failure(failure)
         super().__init__(self.public_message)
 
 
 class ProviderModerationRejectedError(ProviderSubmissionFailedError):
-    """A billable provider moderation rejection with submission context.
+    """A normalized provider moderation rejection with submission context.
 
-    This exception intentionally has a fixed public message. The original
-    provider message remains diagnostic-only and is never made part of the
-    exception text, persisted job fields, or API response.
+    The original provider message remains diagnostic-only and is never made
+    part of the exception text, persisted job fields, or API response.
     """
-
-    public_code = "provider_moderation_rejected"
-    public_message = _PUBLIC_MESSAGES[ProviderFailureKind.MODERATION_REJECTED]
 
     def __init__(
         self,

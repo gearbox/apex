@@ -11,6 +11,7 @@ point reacts differently:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -53,6 +54,15 @@ def _patched_job_repository(job: object) -> tuple[Any, AsyncMock]:
     return patcher, mock_repo
 
 
+def test_video_job_with_missing_started_at_uses_created_at_for_ttl() -> None:
+    service = GrokJobService(grok_client=AsyncMock(), storage=MagicMock(), max_poll_time=60)
+    job = _make_job()
+    job.started_at = None
+    job.created_at = datetime.now(UTC) - timedelta(seconds=61)
+
+    assert service._is_video_job_overdue(job) is True
+
+
 class TestPollVideoJobForWorkerTransientPropagation:
     async def test_poll_video_result_reraises_rate_limit(self) -> None:
         job = _make_job()
@@ -88,6 +98,7 @@ class TestPollVideoJobForWorkerTransientPropagation:
         assert outcome.status == VideoPollStatus.FAILED
         assert outcome.error_message == (
             "The requested content was rejected by the AI provider's safety system. "
+            "This generation was charged because the provider processed the request. "
             "Modify the prompt or input and try again."
         )
         assert outcome.failure is not None
