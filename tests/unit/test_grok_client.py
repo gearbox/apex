@@ -154,7 +154,7 @@ class TestParseDeferredVideoResult:
             is False
         )
 
-    def test_video_missing_url_is_not_billable(self) -> None:
+    def test_video_missing_url_billing_matches_product_decision(self) -> None:
         response = _DeferredResponse(
             _DeferredStatus.DONE,
             _DeferredPayload(video=_Video(respect_moderation=True)),
@@ -528,7 +528,29 @@ class TestImageGeneration:
 
         assert results[0].base64_data == b"hello"
 
-    async def test_whitespace_wrapped_base64_decodes(self) -> None:
+    @pytest.mark.parametrize("payload", ["!!!", "", "   "])
+    async def test_empty_base64_payloads_are_malformed_and_not_billable(self, payload: str) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[SimpleNamespace(base64=payload, revised_prompt=None)]
+            )
+        )
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError, match="did not contain image bytes") as exc_info:
+            await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert failure.billable is False
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    async def test_whitespace_wrapped_base64_still_decodes(self) -> None:
         image = SimpleNamespace(
             sample_batch=AsyncMock(return_value=[_WhitespaceWrappedBase64ImageResponse()])
         )
@@ -537,6 +559,23 @@ class TestImageGeneration:
         results = await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
 
         assert results[0].base64_data == b"hello"
+
+    async def test_no_format_returns_an_empty_payload(self) -> None:
+        for image_format in ResponseImageFormat:
+            response = (
+                _ImageResponse(url="https://example.test/generated.png")
+                if image_format is ResponseImageFormat.URL
+                else _Base64ImageResponse()
+            )
+            image = SimpleNamespace(sample_batch=AsyncMock(return_value=[response]))
+            client = self._client_with_image(image)
+
+            results = await client.generate_image("a cat", image_format=image_format)
+
+            if image_format is ResponseImageFormat.URL:
+                assert all(result.has_url for result in results)
+            else:
+                assert all(result.has_base64 for result in results)
 
     async def test_corrupt_base64_is_malformed_and_not_billable(self) -> None:
         """An undecodable payload is a corrupt response, not a proven delivery

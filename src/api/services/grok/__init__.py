@@ -180,6 +180,11 @@ class GrokImageResult:
         return bool(self.url)
 
     @property
+    def has_base64(self) -> bool:
+        """Check if result carries decoded image bytes."""
+        return bool(self.base64_data)
+
+    @property
     def has_data(self) -> bool:
         """Check if result has binary data."""
         return self.base64_data is not None
@@ -623,6 +628,11 @@ class GrokClient:
                         raise GrokModerationError(
                             "Video flagged by moderation; URL not available", failure=failure
                         )
+                    # Deliberately remains MALFORMED_RESPONSE/non-billable. Unlike the
+                    # image SDK's documented "not returned via URL/base64" result,
+                    # this path has no direct evidence that xAI completed the video
+                    # but failed to deliver it. Product sign-off is required before
+                    # making video delivery failures billable.
                     failure = _failure_classifier.classify(
                         {"code": "MALFORMED_RESPONSE"},
                         provider_request_accepted=True,
@@ -730,21 +740,19 @@ class GrokClient:
 
         if image_format == ResponseImageFormat.URL:
             url = getattr(response, "url", None)
-        else:
-            # The SDK exposes an encoded string through ``.base64``. Decode it
-            # at the provider boundary so callers consistently receive bytes.
-            encoded_data = getattr(response, "base64", None)
-            if encoded_data is not None:
-                try:
-                    base64_data = base64.b64decode("".join(str(encoded_data).split()))
-                except (binascii.Error, ValueError) as exc:
-                    raise GrokAPIError(
-                        "Provider returned an undecodable base64 image payload.",
-                        failure=_failure_classifier.classify(
-                            {"code": "MALFORMED_RESPONSE", "message": str(exc)},
-                            provider_request_accepted=True,
-                        ),
-                    ) from exc
+        # The SDK exposes an encoded string through ``.base64``. Decode it
+        # at the provider boundary so callers consistently receive bytes.
+        elif encoded_data := getattr(response, "base64", None):
+            try:
+                base64_data = base64.b64decode("".join(str(encoded_data).split()))
+            except (binascii.Error, ValueError) as exc:
+                raise GrokAPIError(
+                    "Provider returned an undecodable base64 image payload.",
+                    failure=_failure_classifier.classify(
+                        {"code": "MALFORMED_RESPONSE", "message": str(exc)},
+                        provider_request_accepted=True,
+                    ),
+                ) from exc
 
         revised_prompt = getattr(response, "revised_prompt", None)
 
@@ -775,6 +783,14 @@ class GrokClient:
                 provider_request_accepted=True,
             )
             raise GrokAPIError("Image response did not contain an output URL", failure=failure)
+        if image_format == ResponseImageFormat.BASE64 and any(
+            not result.has_base64 for result in results
+        ):
+            failure = _failure_classifier.classify(
+                {"code": "MALFORMED_RESPONSE"},
+                provider_request_accepted=True,
+            )
+            raise GrokAPIError("Image response did not contain image bytes", failure=failure)
 
     def _convert_exception(self, e: Exception) -> GrokAPIError:
         """Convert xai-sdk/gRPC exceptions to our error types.
