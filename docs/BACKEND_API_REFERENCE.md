@@ -631,7 +631,7 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented | provider_invalid_request), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 (rate_limited | provider_rate_limited), 502 provider_malformed_response, 503 (service_unavailable | provider_timeout | provider_unavailable | provider_authentication_failed | provider_unknown)
+Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented | provider_invalid_request), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 (rate_limited | provider_rate_limited), 502 (provider_malformed_response | provider_output_not_delivered), 503 (service_unavailable | provider_timeout | provider_unavailable | provider_authentication_failed | provider_unknown)
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from Library" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
@@ -2951,15 +2951,16 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `user.registered` | product | A new user registers on the admin's own product |
 | `generation.created` | product | A new generation job is submitted |
 | `gpu_node.started` | product | A GPU node finishes provisioning — `provisioning → active` only; resuming a paused session does **not** count as "started" |
-| `generation.failed` | product | A generation job transitions to `failed` |
+| `generation.failed` | product | A generation job transitions to `failed`. Provider-authentication failures are reported separately under `provider_authentication.failed`, not here — see below. |
+| `provider_authentication.failed` | platform | A generation provider rejected its API key/authentication — fires once per failed generation for as long as the credentials are broken, so it's seeded with a 300s throttle (not the usual 0) rather than flooding on every request during an incident |
 | `health.degraded` | platform | A platform health subsystem becomes `degraded`, `unhealthy`, or `unknown` |
 | `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
 | `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup (`delete_all_for_user`) failed — the affected user's devices that should have been unsubscribed may still receive push notifications |
 
-- **Product-scoped** classes (the first four) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
-- **Platform-scoped** classes (`health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
-- `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` has no second, preference-independent channel (no health checker watches it), which is why seeding — not just a release note — was judged necessary here.
+- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
+- **Platform-scoped** classes (`provider_authentication.failed`, `health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
+- `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`); `provider_authentication.failed` ships the same way in migration `034` (kept separate from the `033` migration that introduced the class's schema/mapping, because Alembic never re-runs an already-applied revision — appending the seed to `033` would silently skip any environment already at `033`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` and `provider_authentication.failed` have no second, preference-independent channel (no health checker watches them), which is why seeding — not just a release note — was judged necessary there.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
 - Each subscribed class carries an optional `min_interval_seconds` throttle (default `0` = unthrottled, max `86400`). Messages suppressed during the cooldown are counted; the next delivered message for that class appends `(+N suppressed)` to the text.
 
@@ -3258,7 +3259,8 @@ Values: `"billing_adjust"`
 | `user.registered` | product | New user registration |
 | `generation.created` | product | New generation job submitted |
 | `gpu_node.started` | product | GPU node finishes provisioning (`provisioning → active` only) |
-| `generation.failed` | product | Generation job transitions to `failed` |
+| `generation.failed` | product | Generation job transitions to `failed` (excludes provider-authentication failures, reported separately below) |
+| `provider_authentication.failed` | platform | A generation provider rejected its API key/authentication |
 | `health.degraded` | platform | A health subsystem becomes `degraded`/`unhealthy`/`unknown` |
 | `health.restored` | platform | A health subsystem recovers |
 | `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
@@ -3366,7 +3368,7 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero`, `no_active_gpu_session`, `session_already_exists`, `invalid_state`, `jobs_in_flight` | `balance`, `in_flight_count` |
 | 422 | `validation_error`, `moderation`, `provider_moderation_rejected` | `provider`, `policy` (Apex moderation only) |
 | 429 | `too_many_requests`, `rate_limited`, `provider_rate_limited` | `retry_after` (global rate limit only) |
-| 502 | `provider_malformed_response` | — |
+| 502 | `provider_malformed_response`, `provider_output_not_delivered` | — |
 | 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_unavailable`, `provider_execution_failed`, `generation_session_terminated`, `provider_authentication_failed`, `provider_unknown` | — |
 
 **Example responses:**

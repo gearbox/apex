@@ -827,7 +827,8 @@ async def init_services(settings: Settings) -> JWTService:
             max_poll_time=settings.grok_video_max_poll_time,
             finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
             billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-                settings.grok_moderation_billing_policy
+                settings.grok_moderation_billing_policy,
+                settings.grok_undelivered_output_billing_policy,
             ),
         )
         await _services.grok_job_service.connect()

@@ -447,6 +447,7 @@ class TestCommitAcknowledgementRecovery:
             (ProviderFailureKind.PROVIDER_UNAVAILABLE, 503),
             (ProviderFailureKind.AUTHENTICATION_FAILED, 503),
             (ProviderFailureKind.MALFORMED_RESPONSE, 502),
+            (ProviderFailureKind.OUTPUT_NOT_DELIVERED, 502),
             (ProviderFailureKind.UNKNOWN, 503),
         ],
     )

@@ -1,4 +1,4 @@
-"""Add normalized failures, materialization guards, and auth-failure preferences.
+"""Add normalized failures and materialization guards.
 
 Revision ID: 033
 Revises: 032
@@ -12,8 +12,12 @@ they are never folded into a global duplicate group.  Rows which *can* be
 proved to be duplicates are remapped before deletion and their R2 keys are
 put in a durable outbox, processed only after this transaction commits.
 
-The dedicated provider-authentication notification class is seeded for every
-admin who already has a Telegram link, with an independent default throttle.
+The dedicated provider-authentication notification class's preference seed
+is NOT part of this revision — see ``034_seed_provider_authentication_...``.
+Alembic never re-runs an already-applied revision, so seeding preference
+rows here would silently never apply to any environment already at 033;
+``029`` established seeding as its own standalone revision for the same
+reason, and this follows it.
 """
 
 from collections.abc import Sequence
@@ -27,8 +31,6 @@ revision: str = "033"
 down_revision: str | Sequence[str] | None = "032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
-
-_NOTIFICATION_CLASS = "provider_authentication.failed"
 
 
 def _populate_duplicate_map(*, thumbnails: bool) -> None:
@@ -452,28 +454,9 @@ def upgrade() -> None:
         ),
     )
 
-    # Seed the new class for already-linked admins.  Like the other rare
-    # operational classes, this is ordinary preference state and can be
-    # removed by the admin's next full-set preference update.
-    op.execute(
-        sa.text("""
-            INSERT INTO admin_notification_preferences
-                (id, user_id, product_id, notification_class, min_interval_seconds)
-            SELECT gen_random_uuid(), atl.user_id, atl.product_id, :notification_class, 0
-            FROM admin_telegram_links atl
-            ON CONFLICT (user_id, product_id, notification_class) DO NOTHING
-        """).bindparams(notification_class=_NOTIFICATION_CLASS)
-    )
-
 
 def downgrade() -> None:
     """Remove safeguards; already-committed outbox work remains auditable."""
-    op.execute(
-        sa.text("""
-            DELETE FROM admin_notification_preferences
-            WHERE notification_class = :notification_class
-        """).bindparams(notification_class=_NOTIFICATION_CLASS)
-    )
     op.drop_index("uq_generation_outputs_thumbnail_parent_bucket", table_name="generation_outputs")
     op.drop_index("uq_generation_outputs_full_job_index", table_name="generation_outputs")
     op.drop_index("ix_storage_cleanup_records_product_id", table_name="storage_cleanup_records")

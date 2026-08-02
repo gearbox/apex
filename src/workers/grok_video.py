@@ -117,7 +117,8 @@ class GrokVideoWorkerCLI:
             max_poll_time=self._settings.grok_video_max_poll_time,
             finalization_lease_seconds=self._settings.grok_video_finalization_lease_seconds,
             billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-                self._settings.grok_moderation_billing_policy
+                self._settings.grok_moderation_billing_policy,
+                self._settings.grok_undelivered_output_billing_policy,
             ),
         )
         await job_service.connect()

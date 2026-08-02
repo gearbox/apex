@@ -1058,6 +1058,13 @@ class Settings(BaseSettings):
         default="charge",
         description="Policy for Grok moderation: 'charge' or 'refund'",
     )
+    grok_undelivered_output_billing_policy: Literal["charge", "refund"] = Field(
+        default="charge",
+        description=(
+            "Policy for Grok OUTPUT_NOT_DELIVERED failures (content generated but not "
+            "fetchable via URL/base64): 'charge' or 'refund'"
+        ),
+    )
 
     # Stripe (legacy single-product — kept for backward compatibility)
     stripe_secret_key: str = Field(

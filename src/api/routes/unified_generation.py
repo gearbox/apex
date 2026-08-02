@@ -332,6 +332,7 @@ class UnifiedGenerationController(Controller):
                 ProviderFailureKind.INVALID_REQUEST: HTTP_400_BAD_REQUEST,
                 ProviderFailureKind.RATE_LIMITED: HTTP_429_TOO_MANY_REQUESTS,
                 ProviderFailureKind.MALFORMED_RESPONSE: HTTP_502_BAD_GATEWAY,
+                ProviderFailureKind.OUTPUT_NOT_DELIVERED: HTTP_502_BAD_GATEWAY,
                 ProviderFailureKind.TIMEOUT: HTTP_504_GATEWAY_TIMEOUT,
             }.get(exc.failure.kind, HTTP_503_SERVICE_UNAVAILABLE)
             error = ErrorEnvelope(

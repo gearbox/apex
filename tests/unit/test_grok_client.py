@@ -134,6 +134,48 @@ class TestParseDeferredVideoResult:
                 request_id="req-1",
             )
 
+    def test_video_missing_response_is_not_billable(self) -> None:
+        """A truly empty deferred response is unproven malfunction, not
+        proven undelivered output — it stays MALFORMED_RESPONSE/non-billable
+        even with every charge flag on (D1, invariant 14)."""
+        with pytest.raises(GrokAPIError) as exc_info:
+            GrokClient._parse_deferred_video_result(
+                _DeferredResponse(_DeferredStatus.DONE),
+                _DeferredStatus,
+                request_id="req-1",
+            )
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    def test_video_missing_url_is_not_billable(self) -> None:
+        response = _DeferredResponse(
+            _DeferredStatus.DONE,
+            _DeferredPayload(video=_Video(respect_moderation=True)),
+        )
+
+        with pytest.raises(GrokAPIError, match="URL missing from completed response") as exc_info:
+            GrokClient._parse_deferred_video_result(
+                response,
+                _DeferredStatus,
+                request_id="req-1",
+            )
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
     def test_done_without_url_and_failed_moderation_raises_moderation_error(self) -> None:
         response = _DeferredResponse(
             _DeferredStatus.DONE,
@@ -438,7 +480,35 @@ class TestImageGeneration:
                 image_format=ResponseImageFormat.URL,
             )
 
-        assert exc_info.value.failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
+        failure = exc_info.value.failure
+        assert failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    async def test_empty_image_results_is_a_malformed_provider_response(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError) as exc_info:
+            await client.generate_image(
+                "a cat",
+                model=ModelType.GROK_IMAGINE_IMAGE,
+                n=0,
+                image_format=ResponseImageFormat.URL,
+            )
+
+        failure = exc_info.value.failure
+        assert failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
 
     async def test_generate_image_classifies_raising_url_property(self) -> None:
         image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ModeratedImageResponse()]))
@@ -468,7 +538,10 @@ class TestImageGeneration:
 
         assert results[0].base64_data == b"hello"
 
-    async def test_corrupt_base64_is_malformed_and_billable(self) -> None:
+    async def test_corrupt_base64_is_malformed_and_not_billable(self) -> None:
+        """An undecodable payload is a corrupt response, not a proven delivery
+        failure — we cannot show the user anything or prove xAI produced a
+        valid image, so it stays non-billable regardless of policy (D1)."""
         image = SimpleNamespace(
             sample_batch=AsyncMock(return_value=[_CorruptBase64ImageResponse()])
         )
@@ -481,10 +554,10 @@ class TestImageGeneration:
         assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
         assert failure.provider_request_accepted is True
         assert (
-            ProviderBillingPolicyRegistry.with_grok_moderation_policy("refund")
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
             .apply(failure)
             .billable
-            is True
+            is False
         )
 
     async def test_generate_image_classifies_raising_base64_property(self) -> None:

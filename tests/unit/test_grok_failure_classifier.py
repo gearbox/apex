@@ -229,15 +229,34 @@ def test_moderation_service_failures_are_not_billable_rejections(
     assert failure.provider_request_accepted is None
 
 
-def test_output_not_returned_is_malformed_and_accepted(
+def test_output_not_returned_is_output_not_delivered_and_accepted(
     classifier: GrokFailureClassifier,
 ) -> None:
     failure = classifier.classify({"message": "Image was not returned via URL."})
-    registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy("refund")
+    # Billability tracks the undelivered-output flag, not the moderation flag.
+    charging_registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy(
+        "refund", "charge"
+    )
+    refunding_registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy(
+        "charge", "refund"
+    )
 
-    assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+    assert failure.kind is ProviderFailureKind.OUTPUT_NOT_DELIVERED
     assert failure.provider_request_accepted is True
-    assert registry.apply(failure).billable is True
+    assert charging_registry.apply(failure).billable is True
+    assert refunding_registry.apply(failure).billable is False
+
+
+def test_output_not_returned_prose_requires_a_documented_subject(
+    classifier: GrokFailureClassifier,
+) -> None:
+    """R7: unanchored regex previously matched anywhere in a longer message."""
+    failure = classifier.classify(
+        {"message": "the request was not returned via url because the service is unavailable"}
+    )
+
+    assert failure.kind is ProviderFailureKind.PROVIDER_UNAVAILABLE
+    assert failure.provider_request_accepted is None
 
 
 def test_sanitized_failure_never_exposes_provider_payload_or_secret(

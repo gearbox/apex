@@ -57,8 +57,13 @@ _OUTPUT_WITHHELD_RE = re.compile(
     r"(?:not\s+available|unavailable|withheld|not\s+provided)\b",
     re.IGNORECASE,
 )
+# Anchored on the leading subject of the two documented SDK phrasings
+# ("Image was not returned via URL.", "Video was not returned via base64.").
+# Unanchored, this previously matched anywhere in a longer message,
+# including a hypothetical outage sentence that happens to contain the same
+# words — see R7: this regex is financially load-bearing (invariant 14).
 _OUTPUT_NOT_RETURNED_RE = re.compile(
-    r"not\s+returned\s+via\s+(?:url|base64)",
+    r"\b(?:image|video|result)\s+(?:was\s+|is\s+)?not\s+returned\s+via\s+(?:url|base64)\b",
     re.IGNORECASE,
 )
 
@@ -90,7 +95,7 @@ class GrokFailureClassifier:
                 )
             )
             or (
-                kind == ProviderFailureKind.MALFORMED_RESPONSE
+                kind == ProviderFailureKind.OUTPUT_NOT_DELIVERED
                 and self._has_output_not_returned(messages)
             )
         ):
@@ -142,7 +147,7 @@ class GrokFailureClassifier:
         if self._has_confirmed_moderation_result(messages):
             return ProviderFailureKind.MODERATION_REJECTED
         if self._has_output_not_returned(messages):
-            return ProviderFailureKind.MALFORMED_RESPONSE
+            return ProviderFailureKind.OUTPUT_NOT_DELIVERED
         if any(marker in normalized for marker in ("deadline exceeded", "timed out", "timeout")):
             return ProviderFailureKind.TIMEOUT
         # Do not turn an outage in a moderation-related service into a

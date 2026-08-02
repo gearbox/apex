@@ -28,6 +28,7 @@ class ProviderFailureKind(StrEnum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     TIMEOUT = "timeout"
     MALFORMED_RESPONSE = "malformed_response"
+    OUTPUT_NOT_DELIVERED = "output_not_delivered"
     UNKNOWN = "unknown"
 
 
@@ -35,6 +36,11 @@ _MODERATION_REJECTION_MESSAGE = (
     "The requested content was rejected by the AI provider's safety system."
 )
 _MODIFICATION_MESSAGE = "Modify the prompt or input and try again."
+_BILLED_NOTICE = "This generation was charged because the provider processed the request."
+_OUTPUT_NOT_DELIVERED_MESSAGE = (
+    "The AI provider generated the content but could not deliver it. "
+    "Contact support with this job ID if the charge is unexpected."
+)
 _PUBLIC_MESSAGES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.MODERATION_REJECTED: (
         f"{_MODERATION_REJECTION_MESSAGE} {_MODIFICATION_MESSAGE}"
@@ -45,9 +51,9 @@ _PUBLIC_MESSAGES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.PROVIDER_UNAVAILABLE: "The AI provider is temporarily unavailable.",
     ProviderFailureKind.TIMEOUT: "The AI provider timed out while processing the request.",
     ProviderFailureKind.MALFORMED_RESPONSE: "The AI provider returned an invalid response.",
+    ProviderFailureKind.OUTPUT_NOT_DELIVERED: _OUTPUT_NOT_DELIVERED_MESSAGE,
     ProviderFailureKind.UNKNOWN: "The AI provider could not complete the request.",
 }
-_BILLED_NOTICE = "This generation was charged because the provider processed the request."
 
 _PUBLIC_CODES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.MODERATION_REJECTED: "provider_moderation_rejected",
@@ -57,6 +63,7 @@ _PUBLIC_CODES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.PROVIDER_UNAVAILABLE: "provider_unavailable",
     ProviderFailureKind.TIMEOUT: "provider_timeout",
     ProviderFailureKind.MALFORMED_RESPONSE: "provider_malformed_response",
+    ProviderFailureKind.OUTPUT_NOT_DELIVERED: "provider_output_not_delivered",
     ProviderFailureKind.UNKNOWN: "provider_unknown",
 }
 
@@ -98,15 +105,21 @@ class ProviderFailure:
 
     @classmethod
     def public_message_for_failure(cls, failure: ProviderFailure) -> str:
-        """Return the safe message after the resolved billing policy is known."""
-        base = cls.safe_message_for_kind(failure.kind)
-        if failure.kind is ProviderFailureKind.MODERATION_REJECTED and failure.billable:
-            return base.replace(
-                _MODIFICATION_MESSAGE,
-                f"{_BILLED_NOTICE} {_MODIFICATION_MESSAGE}",
-                1,
-            )
-        return base
+        """Return the safe message after the resolved billing policy is known.
+
+        Composed explicitly from the same literals ``_PUBLIC_MESSAGES`` draws
+        from, rather than by substring surgery on the base message: a
+        ``str.replace`` against a needle that later drifts out of sync with
+        the catalog entry fails silently, dropping the billing disclosure
+        with no error. See invariant 12 — every billable kind must disclose.
+        """
+        if not failure.billable:
+            return cls.safe_message_for_kind(failure.kind)
+        if failure.kind is ProviderFailureKind.MODERATION_REJECTED:
+            return f"{_MODERATION_REJECTION_MESSAGE} {_BILLED_NOTICE} {_MODIFICATION_MESSAGE}"
+        if failure.kind is ProviderFailureKind.OUTPUT_NOT_DELIVERED:
+            return f"{cls.safe_message_for_kind(failure.kind)} {_BILLED_NOTICE}"
+        return cls.safe_message_for_kind(failure.kind)
 
 
 class ProviderSubmissionFailedError(Exception):
