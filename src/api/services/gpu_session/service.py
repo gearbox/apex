@@ -12,6 +12,7 @@ import msgspec
 import structlog
 from sqlalchemy.exc import IntegrityError
 
+from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.vastai.exceptions import NoCapacityError
 from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus, ModelType
 from src.core.uid import new_id
@@ -1164,7 +1165,9 @@ class GpuSessionService:
             await self._job_sweep.sweep_session_best_effort(
                 session_id=session_row.id,
                 product_id=session_row.product_id,
-                reason="GPU session stopped before job completed.",
+                failure=JobSweepFailure(
+                    internal_reason="GPU session stopped before job completed."
+                ),
                 log_event="gpu_session.stop.job_sweep",
             )
 

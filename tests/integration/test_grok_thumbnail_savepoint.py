@@ -115,7 +115,9 @@ async def test_thumbnail_insert_failure_isolated_by_savepoint(
             content_type="image/webp",
             size_bytes=1,
             format="webp",
-            output_index=0,
+            # This is a decoy used solely to reserve the primary key below;
+            # it must remain distinct from the parent full output.
+            output_index=1,
             expires_at=expires_at,
             is_thumbnail=False,
             product_id="vex",

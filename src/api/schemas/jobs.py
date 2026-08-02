@@ -109,4 +109,7 @@ class UnifiedJobResponse(msgspec.Struct, kw_only=True):
     """Ordered list of outputs. Empty while the job is processing."""
 
     error: str | None = None
-    """Error message for failed jobs."""
+    """Public-safe error message for failed jobs; never internal diagnostics."""
+
+    failure_code: str | None = None
+    """Stable public failure code for failed jobs, when available."""

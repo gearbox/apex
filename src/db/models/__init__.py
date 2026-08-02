@@ -21,7 +21,13 @@ from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
 from .library import LibraryAssetMetadata
 from .push_subscription import PushSubscription
-from .storage import GenerationJob, GenerationOutput, UserImage
+from .storage import (
+    GenerationJob,
+    GenerationMaterializationAttempt,
+    GenerationOutput,
+    StorageCleanupRecord,
+    UserImage,
+)
 from .user import RefreshToken, User
 
 __all__ = [
@@ -33,6 +39,7 @@ __all__ = [
     "EmailVerificationToken",
     "FrameExtractionJob",
     "GenerationJob",
+    "GenerationMaterializationAttempt",
     "GenerationModel",
     "GenerationOutput",
     "GpuSession",
@@ -48,6 +55,7 @@ __all__ = [
     "PricingRule",
     "PushSubscription",
     "RefreshToken",
+    "StorageCleanupRecord",
     "TokenAccount",
     "TokenTransaction",
     "User",

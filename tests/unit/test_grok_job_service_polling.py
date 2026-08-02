@@ -11,15 +11,22 @@ point reacts differently:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
-from src.api.services.grok import GrokModerationError, GrokRateLimitError, GrokTimeoutError
-from src.api.services.grok.job_service import GrokJobService, VideoPollOutcome
-from src.core.enums import JobStatus, VideoPollStatus
+from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
+from src.api.services.grok import (
+    GrokDeferredTerminalError,
+    GrokModerationError,
+    GrokRateLimitError,
+    GrokTimeoutError,
+)
+from src.api.services.grok.job_service import GrokJobService
+from src.core.enums import JobStatus, Provider, VideoPollStatus
 
 
 def _make_service() -> GrokJobService:
@@ -45,6 +52,15 @@ def _patched_job_repository(job: object) -> tuple[Any, AsyncMock]:
         return_value=mock_repo,
     )
     return patcher, mock_repo
+
+
+def test_video_job_with_missing_started_at_uses_created_at_for_ttl() -> None:
+    service = GrokJobService(grok_client=AsyncMock(), storage=MagicMock(), max_poll_time=60)
+    job = _make_job()
+    job.started_at = None
+    job.created_at = datetime.now(UTC) - timedelta(seconds=61)
+
+    assert service._is_video_job_overdue(job) is True
 
 
 class TestPollVideoJobForWorkerTransientPropagation:
@@ -79,9 +95,44 @@ class TestPollVideoJobForWorkerTransientPropagation:
         with patcher:
             outcome = await service.poll_video_job_for_worker(AsyncMock(), job.id)
 
-        assert outcome == VideoPollOutcome(
-            status=VideoPollStatus.FAILED, error_message="content rejected"
+        assert outcome.status == VideoPollStatus.FAILED
+        assert outcome.error_message == (
+            "The requested content was rejected by the AI provider's safety system. "
+            "Modify the prompt or input and try again."
         )
+        assert "This generation was charged" not in (outcome.error_message or "")
+        assert outcome.failure is not None
+        assert outcome.failure.kind == ProviderFailureKind.MODERATION_REJECTED
+        assert outcome.failure.billable is True
+
+    @pytest.mark.parametrize(
+        "kind",
+        [ProviderFailureKind.RATE_LIMITED, ProviderFailureKind.TIMEOUT],
+    )
+    async def test_terminal_deferred_retryable_kind_is_failed_outcome(
+        self,
+        kind: ProviderFailureKind,
+    ) -> None:
+        job = _make_job()
+        service = _make_service()
+        failure = ProviderFailure(
+            kind=kind,
+            provider=Provider.GROK,
+            sanitized_message=ProviderFailure.safe_message_for_kind(kind),
+            retryable=True,
+            provider_request_accepted=True,
+        )
+        service._grok.get_video_result = AsyncMock(
+            side_effect=GrokDeferredTerminalError("provider marked it failed", failure=failure)
+        )
+        patcher, _ = _patched_job_repository(job)
+
+        with patcher:
+            outcome = await service.poll_video_job_for_worker(AsyncMock(), job.id)
+
+        assert outcome.status == VideoPollStatus.FAILED
+        assert outcome.failure is not None
+        assert outcome.failure.kind == kind
 
 
 class TestReadThroughTransientMapping:
@@ -96,3 +147,28 @@ class TestReadThroughTransientMapping:
 
         assert result is job
         mock_repo.update_status.assert_not_awaited()
+
+    async def test_read_through_terminal_failure_uses_shared_settlement(self) -> None:
+        job = _make_job(status=JobStatus.QUEUED.value)
+        service = _make_service()
+        failure = ProviderFailure(
+            kind=ProviderFailureKind.PROVIDER_UNAVAILABLE,
+            provider=Provider.GROK,
+            sanitized_message="The AI provider is temporarily unavailable.",
+        )
+        outcome = MagicMock(status=VideoPollStatus.FAILED, failure=failure)
+        service._poll_video_result = AsyncMock(return_value=outcome)  # type: ignore[method-assign]
+        service.settle_video_poll_outcome = AsyncMock(return_value=job)  # type: ignore[method-assign]
+        patcher, _ = _patched_job_repository(job)
+        session = AsyncMock()
+
+        with patcher:
+            result = await service.poll_video_job(session, job.id)
+
+        assert result is job
+        service.settle_video_poll_outcome.assert_awaited_once_with(
+            session,
+            job_id=job.id,
+            outcome=outcome,
+            product_id="vex",
+        )

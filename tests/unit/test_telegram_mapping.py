@@ -19,6 +19,7 @@ from src.api.schemas.ops_events import (
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
+from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.api.services.telegram.mapping import map_ops_event
 from src.core.enums import NotificationClass
 
@@ -88,6 +89,49 @@ class TestGenerationFailed:
         assert notification.notification_class == NotificationClass.GENERATION_FAILED
         assert "Generation failed" in notification.text
         assert "aisha/i2v" in notification.text
+
+    def test_authentication_failure_uses_dedicated_notification_class(self) -> None:
+        envelope = _envelope(
+            OpsEventType.GENERATION_FAILED,
+            "vex",
+            GenerationFailedOpsPayload(
+                job_id=uuid4(),
+                user_id=uuid4(),
+                provider="grok",
+                generation_type="t2i",
+                failure_code=ProviderFailure.public_code_for_kind(
+                    ProviderFailureKind.AUTHENTICATION_FAILED
+                ),
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert notification.notification_class is NotificationClass.PROVIDER_AUTHENTICATION_FAILED
+        assert "Provider authentication failed" in notification.text
+        assert "API key" in notification.text
+        assert "all generations for this provider are failing" in notification.text
+
+    def test_non_auth_failure_keeps_generation_failed_class(self) -> None:
+        envelope = _envelope(
+            OpsEventType.GENERATION_FAILED,
+            "vex",
+            GenerationFailedOpsPayload(
+                job_id=uuid4(),
+                user_id=uuid4(),
+                provider="grok",
+                generation_type="t2i",
+                failure_code=ProviderFailure.public_code_for_kind(
+                    ProviderFailureKind.PROVIDER_UNAVAILABLE
+                ),
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert notification.notification_class is NotificationClass.GENERATION_FAILED
 
 
 class TestGpuNodeStarted:

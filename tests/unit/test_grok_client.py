@@ -9,9 +9,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
+from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.grok import (
     GrokAPIError,
     GrokClient,
+    GrokDeferredTerminalError,
     GrokInvalidRequestError,
     GrokModerationError,
     GrokVideoResult,
@@ -44,6 +47,41 @@ class _ImageResponse:
     url: str = ""
     b64_json: str = ""
     revised_prompt: str = ""
+
+
+class _ModeratedImageResponse:
+    @property
+    def url(self) -> str:
+        raise ValueError("Image did not respect moderation rules; URL is not available.")
+
+    @property
+    def revised_prompt(self) -> None:
+        return None
+
+
+class _ModeratedBase64ImageResponse:
+    @property
+    def base64(self) -> str:
+        raise ValueError("Image did not respect moderation rules; base64 is not available.")
+
+    @property
+    def revised_prompt(self) -> None:
+        return None
+
+
+class _Base64ImageResponse:
+    base64 = "aGVsbG8="
+    revised_prompt = None
+
+
+class _WhitespaceWrappedBase64ImageResponse:
+    base64 = "aGVs\n bG8=\r\n"
+    revised_prompt = None
+
+
+class _CorruptBase64ImageResponse:
+    base64 = "not valid base64 !!!"
+    revised_prompt = None
 
 
 class _DeferredPayload:
@@ -96,6 +134,48 @@ class TestParseDeferredVideoResult:
                 request_id="req-1",
             )
 
+    def test_video_missing_response_is_not_billable(self) -> None:
+        """A truly empty deferred response is unproven malfunction, not
+        proven undelivered output — it stays MALFORMED_RESPONSE/non-billable
+        even with every charge flag on (D1, invariant 14)."""
+        with pytest.raises(GrokAPIError) as exc_info:
+            GrokClient._parse_deferred_video_result(
+                _DeferredResponse(_DeferredStatus.DONE),
+                _DeferredStatus,
+                request_id="req-1",
+            )
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    def test_video_missing_url_billing_matches_product_decision(self) -> None:
+        response = _DeferredResponse(
+            _DeferredStatus.DONE,
+            _DeferredPayload(video=_Video(respect_moderation=True)),
+        )
+
+        with pytest.raises(GrokAPIError, match="URL missing from completed response") as exc_info:
+            GrokClient._parse_deferred_video_result(
+                response,
+                _DeferredStatus,
+                request_id="req-1",
+            )
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
     def test_done_without_url_and_failed_moderation_raises_moderation_error(self) -> None:
         response = _DeferredResponse(
             _DeferredStatus.DONE,
@@ -115,12 +195,40 @@ class TestParseDeferredVideoResult:
             _DeferredPayload(error=_Error(code="E42", message="upstream failed")),
         )
 
-        with pytest.raises(GrokAPIError, match=r"\[E42\] upstream failed"):
+        with pytest.raises(GrokDeferredTerminalError, match=r"\[E42\] upstream failed"):
             GrokClient._parse_deferred_video_result(
                 response,
                 _DeferredStatus,
                 request_id="req-1",
             )
+
+    @pytest.mark.parametrize(
+        ("code", "kind"),
+        [
+            ("RATE_LIMITED", ProviderFailureKind.RATE_LIMITED),
+            ("RESOURCE_EXHAUSTED", ProviderFailureKind.RATE_LIMITED),
+            ("TIMEOUT", ProviderFailureKind.TIMEOUT),
+            ("DEADLINE_EXCEEDED", ProviderFailureKind.TIMEOUT),
+        ],
+    )
+    def test_failed_terminal_status_is_not_transient_even_for_retryable_kind(
+        self,
+        code: str,
+        kind: ProviderFailureKind,
+    ) -> None:
+        response = _DeferredResponse(
+            _DeferredStatus.FAILED,
+            _DeferredPayload(error=_Error(code=code, message="provider terminal failure")),
+        )
+
+        with pytest.raises(GrokDeferredTerminalError) as exc_info:
+            GrokClient._parse_deferred_video_result(
+                response,
+                _DeferredStatus,
+                request_id="req-terminal",
+            )
+
+        assert exc_info.value.failure.kind == kind
 
     def test_expired_raises_api_error(self) -> None:
         with pytest.raises(GrokAPIError, match="expired before completion"):
@@ -319,6 +427,16 @@ class TestImageEditing:
             image_format="url",
         )
 
+    async def test_edit_image_classifies_raising_url_property(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ModeratedImageResponse()]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokModerationError) as exc_info:
+            await client.edit_image("unsafe edit", "https://example.test/input.png")
+
+        assert exc_info.value.failure.kind is ProviderFailureKind.MODERATION_REJECTED
+        assert exc_info.value.failure.provider_request_accepted is True
+
 
 class TestImageGeneration:
     @staticmethod
@@ -350,3 +468,145 @@ class TestImageGeneration:
             aspect_ratio=None,
             image_format="url",
         )
+
+    async def test_missing_output_url_is_a_malformed_provider_response(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ImageResponse(url="")]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError) as exc_info:
+            await client.generate_image(
+                "a cat",
+                model=ModelType.GROK_IMAGINE_IMAGE,
+                image_format=ResponseImageFormat.URL,
+            )
+
+        failure = exc_info.value.failure
+        assert failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    async def test_empty_image_results_is_a_malformed_provider_response(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError) as exc_info:
+            await client.generate_image(
+                "a cat",
+                model=ModelType.GROK_IMAGINE_IMAGE,
+                n=0,
+                image_format=ResponseImageFormat.URL,
+            )
+
+        failure = exc_info.value.failure
+        assert failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    async def test_generate_image_classifies_raising_url_property(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ModeratedImageResponse()]))
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokModerationError) as exc_info:
+            await client.generate_image("unsafe image")
+
+        assert exc_info.value.failure.kind is ProviderFailureKind.MODERATION_REJECTED
+        assert exc_info.value.failure.provider_request_accepted is True
+
+    async def test_generate_image_decodes_sdk_base64_response(self) -> None:
+        image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_Base64ImageResponse()]))
+        client = self._client_with_image(image)
+
+        results = await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        assert results[0].base64_data == b"hello"
+
+    @pytest.mark.parametrize("payload", ["!!!", "", "   "])
+    async def test_empty_base64_payloads_are_malformed_and_not_billable(self, payload: str) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(
+                return_value=[SimpleNamespace(base64=payload, revised_prompt=None)]
+            )
+        )
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError, match="did not contain image bytes") as exc_info:
+            await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert failure.billable is False
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    async def test_whitespace_wrapped_base64_still_decodes(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(return_value=[_WhitespaceWrappedBase64ImageResponse()])
+        )
+        client = self._client_with_image(image)
+
+        results = await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        assert results[0].base64_data == b"hello"
+
+    async def test_no_format_returns_an_empty_payload(self) -> None:
+        for image_format in ResponseImageFormat:
+            response = (
+                _ImageResponse(url="https://example.test/generated.png")
+                if image_format is ResponseImageFormat.URL
+                else _Base64ImageResponse()
+            )
+            image = SimpleNamespace(sample_batch=AsyncMock(return_value=[response]))
+            client = self._client_with_image(image)
+
+            results = await client.generate_image("a cat", image_format=image_format)
+
+            if image_format is ResponseImageFormat.URL:
+                assert all(result.has_url for result in results)
+            else:
+                assert all(result.has_base64 for result in results)
+
+    async def test_corrupt_base64_is_malformed_and_not_billable(self) -> None:
+        """An undecodable payload is a corrupt response, not a proven delivery
+        failure — we cannot show the user anything or prove xAI produced a
+        valid image, so it stays non-billable regardless of policy (D1)."""
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(return_value=[_CorruptBase64ImageResponse()])
+        )
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError) as exc_info:
+            await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert failure.provider_request_accepted is True
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+            .apply(failure)
+            .billable
+            is False
+        )
+
+    async def test_generate_image_classifies_raising_base64_property(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(return_value=[_ModeratedBase64ImageResponse()])
+        )
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokModerationError) as exc_info:
+            await client.generate_image("unsafe image", image_format=ResponseImageFormat.BASE64)
+
+        assert exc_info.value.failure.kind is ProviderFailureKind.MODERATION_REJECTED
+        assert exc_info.value.failure.provider_request_accepted is True

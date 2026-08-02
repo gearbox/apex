@@ -9,6 +9,9 @@ import structlog
 
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
+from src.api.services.billing_errors import BillingError
+from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
+from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.core.model_registry import get_model_meta
@@ -17,6 +20,7 @@ from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,6 +99,8 @@ class GenerationService:
         ops_event_bus: OpsEventBus | None = None,
         *,
         retention_days: int = 7,
+        transition_service_factory: Callable[[AsyncSession], JobStateTransitionService]
+        | None = None,
     ) -> None:
         self._providers = providers
         self._billing = billing_service
@@ -105,11 +111,28 @@ class GenerationService:
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
         )
         self._retention_days = retention_days
+        self._transition_service_factory = (
+            transition_service_factory or self._default_transition_service_factory
+        )
 
     @property
     def configured_providers(self) -> frozenset[Provider]:
         """Providers that are fully wired and able to serve requests."""
         return frozenset(self._providers)
+
+    def _make_transition_service(self, session: AsyncSession) -> JobStateTransitionService:
+        """Build the state-transition service for this transactional scope."""
+        return self._transition_service_factory(session)
+
+    def _default_transition_service_factory(
+        self, session: AsyncSession
+    ) -> JobStateTransitionService:
+        return JobStateTransitionService(
+            session=session,
+            event_bus=self._event_bus,
+            billing_service=self._billing,
+            ops_event_bus=self._ops_event_bus,
+        )
 
     async def generate(
         self,
@@ -118,6 +141,8 @@ class GenerationService:
         user_id: UUID,
         session: AsyncSession,
         product_config: ProductConfig,
+        defer_commit: bool = False,
+        post_commit_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
     ) -> JobCreatedResponse:
         """Execute the full generation pipeline."""
         # 1. Model-generation_type compatibility (declarative, enum-driven)
@@ -272,8 +297,61 @@ class GenerationService:
             )
             job = submit_result.job
             reserve_event = submit_result.balance_event
-            await session.commit()
+            if not defer_commit:
+                await session.commit()
 
+        except ProviderSubmissionFailedError as exc:
+            # Provider adapters only classify and preserve the submission
+            # context. This single layer settles the terminal job, debit/refund
+            # choice, commit, and post-commit events so no outer error handler
+            # can roll the normalized failure back.
+            transition_service = self._make_transition_service(session)
+            settled_job, did_transition = await transition_service.transition_to_failed(
+                exc.job_id,
+                public_error_message=exc.public_message,
+                failure_code=exc.public_code,
+                refund=not exc.failure.billable,
+                product_id=product_id,
+                reserve_event=exc.balance_event,
+                commit=not defer_commit,
+            )
+            if defer_commit and did_transition:
+                publication = transition_service.deferred_failure
+                if publication is None:
+                    raise RuntimeError("Missing deferred failure publication") from None
+                if post_commit_callbacks is None:
+                    raise RuntimeError(
+                        "Deferred generation requires post-commit callbacks"
+                    ) from None
+                post_commit_callbacks.append(
+                    lambda: transition_service.publish_deferred_failure(publication)
+                )
+            logger.warning(
+                "generation.failed",
+                provider=exc.failure.provider.value,
+                job_id=str(exc.job_id),
+                user_id=str(user_id),
+                product_id=product_id,
+                failure_kind=exc.failure.kind.value,
+                billable=exc.failure.billable,
+                previous_status=exc.previous_status,
+                did_transition=did_transition,
+            )
+            if exc.failure.billable and did_transition:
+                logger.info(
+                    "billing.charge_finalized",
+                    job_id=str(settled_job.id),
+                    product_id=product_id,
+                    tokens_reserved=settled_job.token_cost,
+                    tokens_finalized=settled_job.token_cost,
+                )
+            raise
+        except BillingError:
+            # A locked reservation can fail after the optimistic preflight.
+            # It is a billing-domain response, not provider UNKNOWN, and no
+            # refund is valid because check_and_reserve did not create a debit.
+            await session.rollback()
+            raise
         except GenerationError:
             # Domain errors carry user-safe messages by contract (see
             # ProviderResponseError's docstring) — refund if a debit was
@@ -293,38 +371,23 @@ class GenerationService:
             # the client — only this fixed message may.
             raise GenerationError("Generation failed due to an internal error.") from exc
 
-        # Post-commit, best-effort notifications — a publish failure must never
-        # affect the already-committed billing/job state (no refund, no client error).
-        if self._event_bus is not None:
-            try:
-                await self._event_bus.publish_balance(reserve_event)
-
-                from src.api.schemas.events import EventType, JobStatusPayload
-
-                await self._event_bus.publish(
-                    user_id=user_id,
-                    event_type=EventType.JOB_STATUS_CHANGED,
-                    payload=JobStatusPayload(
-                        job_id=job.id,
-                        status=job.status if isinstance(job.status, str) else job.status.value,
-                        previous_status="none",
-                        generation_type=request.generation_type.value,
-                        provider=request.model.provider.value,
-                    ),
-                )
-            except Exception:
-                logger.exception("generation.post_commit_publish_failed", job_id=str(job.id))
-
-        await self._ops_event_bus.publish(
-            event_type=OpsEventType.GENERATION_CREATED,
-            product_id=product_id,
-            payload=GenerationCreatedOpsPayload(
+        async def callback() -> None:
+            await self._publish_generation_created(
                 job_id=job.id,
+                status=str(job.status),
                 user_id=user_id,
-                provider=request.model.provider.value,
+                product_id=product_id,
                 generation_type=request.generation_type.value,
-            ),
-        )
+                provider=request.model.provider.value,
+                reserve_event=reserve_event,
+            )
+
+        if defer_commit:
+            if post_commit_callbacks is None:
+                raise RuntimeError("Deferred generation requires post-commit callbacks")
+            post_commit_callbacks.append(callback)
+        else:
+            await callback()
 
         # 10. Build response
         return JobCreatedResponse(
@@ -336,6 +399,49 @@ class GenerationService:
             created_at=job.created_at,
             tokens_charged=token_cost,
             balance_remaining=submit_result.balance_after,
+        )
+
+    async def _publish_generation_created(
+        self,
+        *,
+        job_id: UUID,
+        status: str,
+        user_id: UUID,
+        product_id: str,
+        generation_type: str,
+        provider: str,
+        reserve_event: BalanceEvent | None,
+    ) -> None:
+        """Emit success events only after the request-level transaction commits."""
+        if self._event_bus is not None:
+            try:
+                await self._event_bus.publish_balance(reserve_event)
+
+                from src.api.schemas.events import EventType, JobStatusPayload
+
+                await self._event_bus.publish(
+                    user_id=user_id,
+                    event_type=EventType.JOB_STATUS_CHANGED,
+                    payload=JobStatusPayload(
+                        job_id=job_id,
+                        status=status,
+                        previous_status="none",
+                        generation_type=generation_type,
+                        provider=provider,
+                    ),
+                )
+            except Exception:
+                logger.exception("generation.post_commit_publish_failed", job_id=str(job_id))
+
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.GENERATION_CREATED,
+            product_id=product_id,
+            payload=GenerationCreatedOpsPayload(
+                job_id=job_id,
+                user_id=user_id,
+                provider=provider,
+                generation_type=generation_type,
+            ),
         )
 
     async def _resolve_submit_failure(
@@ -362,7 +468,7 @@ class GenerationService:
         reserve's event and the refund's event describe rows that just
         committed together in this one transaction — publish both.
         """
-        if job is None:
+        if job is None or job.debit_transaction_id is None:
             await session.rollback()
             return
         try:

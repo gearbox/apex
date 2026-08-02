@@ -43,6 +43,7 @@ def _make_job(
     negative_prompt: str | None = None,
     token_cost: int | None = 50,
     error_message: str | None = None,
+    public_error_message: str | None = None,
     is_deleted: bool = False,
     created_at: datetime | None = None,
     started_at: datetime | None = None,
@@ -61,6 +62,7 @@ def _make_job(
     job.aspect_ratio = None
     job.token_cost = token_cost
     job.error_message = error_message
+    job.public_error_message = public_error_message
     job.is_deleted = is_deleted
     job.created_at = created_at or datetime.now(UTC)
     job.started_at = started_at
@@ -239,7 +241,7 @@ class TestGetJob:
         assert result.generation_type == GenerationType.I2I
         assert result.status == JobStatus.FAILED
         assert result.token_cost == 75
-        assert result.error == "GPU OOM"
+        assert result.error == "Generation failed. Please try again."
         assert result.created_at == created
 
     async def test_no_refresh_when_no_provider_mapped_for_job(self) -> None:

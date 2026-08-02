@@ -396,6 +396,8 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:
         "app.build_info",
         build_sha=settings.build_sha,
         environment=settings.environment,
+        grok_video_finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
+        grok_moderation_billing_policy=settings.grok_moderation_billing_policy,
     )
 
     jwt_service = await init_services(settings)

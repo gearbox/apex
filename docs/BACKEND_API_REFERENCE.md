@@ -234,7 +234,9 @@ Four mutation endpoints require an `Idempotency-Key` header to prevent duplicate
 3. On **retry** with the same key, the server returns the **original cached response** without re-executing the operation.
 4. Keys are scoped to `(user_id, product_id)` — the same key from different users or products does not collide.
 5. Keys expire after 24 hours (configurable via `IDEMPOTENCY_KEY_TTL_HOURS`).
-6. If a key is stuck `processing` (the original request's connection dropped, its worker crashed, etc.) for longer than `IDEMPOTENCY_PROCESSING_STALE_SECONDS` (default 120s), the **next** retry with the same key reclaims it and proceeds — it does not need to wait out the full 24h TTL. A retry within that window still gets `409 idempotency_conflict` (treated as a genuinely concurrent in-flight request).
+6. Generation's synchronous final results (201, billable 422, and normalized provider failures) persist the job state, billing ledger result, resource ID, HTTP status, response body, and completed idempotency key in one transaction. A crash cannot leave a durable debit behind a reclaimable `processing` key.
+7. A key stuck `processing` before a final outcome (the original request's connection dropped, its worker crashed, etc.) for longer than `IDEMPOTENCY_PROCESSING_STALE_SECONDS` (default 120s) can be reclaimed by the next retry. A retry within that window gets `409 idempotency_conflict`.
+8. If committing a completed outcome succeeded but its acknowledgement was lost, a retry returns the stored outcome and retries its post-commit notifications. Notification failures are logged and do not change the completed outcome, billing, or replay response.
 
 ### Error responses
 
@@ -629,7 +631,7 @@ Request: {
 }
 Response: JobCreatedResponse
 Status:   201 Created
-Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 429 rate_limited, 503 service_unavailable
+Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented | provider_invalid_request), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 (rate_limited | provider_rate_limited), 502 (provider_malformed_response | provider_output_not_delivered), 503 (service_unavailable | provider_timeout | provider_unavailable | provider_authentication_failed | provider_unknown)
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_output_id enables "remix from Library" — the backend resolves lineage automatically
           (source_job_id + source_output_id) and records it on the new job.
@@ -663,6 +665,48 @@ Note:     source_output_id enables "remix from Library" — the backend resolves
           operation from generating a fresh canvas from scratch. An unsupported value on either path
           returns 400 validation_error with an actionable message (e.g. "omit aspect_ratio to preserve
           the source aspect"); no job is created and no tokens are charged.
+
+          Provider moderation: a synchronous Grok safety rejection returns 422
+          provider_moderation_rejected with a safe actionable message. It differs from Apex's own
+          pre-submission moderation (`moderation`): Grok already accepted and production-observed
+          billing applies to this rejected generation, so the reservation remains spent. Re-use the
+          same Idempotency-Key to replay this 422 safely; do not submit the same intent again.
+
+          Grok video is asynchronous. Both its worker and poll-on-read `GET /v1/jobs/{id}` use the
+          same terminal settlement path.  On completion the first caller takes a short PostgreSQL
+          finalization lease before downloading or writing R2 objects; it then commits the output rows
+          and completed status together.  A crashed claimant is recoverable after the lease expires;
+          losing callers write no outputs and remove any objects if their claim expires mid-flight.
+          Partial unique indexes enforce one full output per job/index and one thumbnail per
+          parent/size bucket across both providers. A worker is optional for correctness and
+          recommended for proactive completion. Repeated GETs and worker/read-through races publish
+          one terminal event and settle billing once.
+
+          A deferred xAI `FAILED` state is authoritative even if its normalized failure kind is
+          `provider_rate_limited` or `provider_timeout`; it is settled immediately. By contrast, a
+          transport-level rate limit/timeout while calling xAI's poll API is transient and leaves the
+          job in progress for the next poll.
+
+          The active `GROK_MODERATION_BILLING_POLICY` controls an accepted moderation rejection:
+          `charge` retains the reservation and `refund` compensates it. Only exact moderation results
+          or call sites with a confirmed accepted deferred request can use that policy; ambiguous or
+          moderation-service infrastructure failures are non-billable. Other normalized provider failures refund once unless an explicit provider policy
+          says otherwise. Synchronous provider failures are
+          returned with stable normalized codes: invalid request 400, provider rate limit 429,
+          malformed response 502, and timeout/unavailable/authentication/unknown 503. Their messages
+          are fixed safe messages, never provider diagnostics.
+
+          A failed billable generation and its refund are one database transaction. If refund creation
+          fails, the terminal failure rolls back, the job stays in flight, and a later poll or sweep
+          retries settlement; workers isolate that error to the affected job.
+
+          Aisha terminal failures use public-safe codes and fixed text: infrastructure failures use
+          `provider_unavailable` / "Generation infrastructure is temporarily unavailable.", ComfyUI
+          execution failures use `provider_execution_failed` / "The generation engine could not
+          complete the request.", timeouts use `provider_timeout` / "Generation timed out before the
+          compute service returned a result.", and swept compute sessions use
+          `generation_session_terminated` / "Generation stopped because the compute session ended."
+          Raw Aisha, ComfyUI, and session diagnostics remain internal only.
 ```
 
 ### JobCreatedResponse Schema
@@ -835,6 +879,11 @@ Response: CursorPage<UnifiedJobResponse>
 ```
 Response: UnifiedJobResponse
 Errors:   404
+Note:     For queued/running Grok video jobs this is poll-on-read. It also enforces
+          GROK_VIDEO_MAX_POLL_TIME from the immutable submission timestamp: an overdue job is
+          failed with provider_timeout and refunded once. Terminal provider outcomes use the same
+          settlement path as the Grok video worker, so no background worker is required for
+          correctness.
 ```
 
 #### `DELETE /v1/jobs/{job_id}`
@@ -863,7 +912,8 @@ interface UnifiedJobResponse {
   started_at: string | null;
   completed_at: string | null;
   outputs: JobOutputItem[]; // empty while processing
-  error: string | null;
+  error: string | null;       // public-safe failure text only
+  failure_code: string | null; // stable code, e.g. "provider_moderation_rejected"
 }
 
 interface JobOutputItem {
@@ -877,6 +927,20 @@ interface JobOutputItem {
 > `format`, `size_bytes`, `thumbnail_url`, or `is_thumbnail`. The full media envelope
 > (`original` + `variants`) is in `media: MediaObject`. Jobs API URLs are now stable
 > content-proxy paths — **no presigned URLs**. `UnifiedJobResponse.thumbnail_url` is removed.
+
+`error` is populated only from the public-safe failure-message boundary. The legacy/internal
+`GenerationJob.error_message` column is never returned by this endpoint. A legacy failed row that
+does not yet have a public-safe message returns `"Generation failed. Please try again."`; it never
+falls back to raw diagnostics.
+
+Grok failure normalization checks an explicit provider/gRPC code first, then a numeric HTTP status,
+then only narrow prose markers (`too many requests`, standalone `429`, `invalid image URL` or
+`invalid image input`, and `bad request`). Other wording is classified as unknown rather than by
+broad terms such as `invalid`, `rate`, `timeout`, or `connection`.
+
+Materialization attempts and storage-cleanup records are scoped to a product. The retention worker
+reconciles each configured product independently; reconciliation, output lookup, and cleanup-outbox
+queries always include that product scope.
 
 ---
 
@@ -2574,9 +2638,11 @@ data: <JSON-encoded inner payload>
 interface JobStatusPayload {
   job_id: string;           // UUID
   status: JobStatus;        // new status
-  previous_status: string;  // previous status (or "none" on first publish)
+  previous_status: string;  // actual persisted pre-transition status (or "none" on first publish)
   generation_type: string;  // e.g. "t2v"
   provider: string;         // e.g. "grok"
+  failure_code: string | null; // set for normalized terminal failures
+  error_message: string | null; // public-safe terminal-failure message, never backend diagnostics
 }
 
 // job.progress
@@ -2885,15 +2951,16 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `user.registered` | product | A new user registers on the admin's own product |
 | `generation.created` | product | A new generation job is submitted |
 | `gpu_node.started` | product | A GPU node finishes provisioning — `provisioning → active` only; resuming a paused session does **not** count as "started" |
-| `generation.failed` | product | A generation job transitions to `failed` |
+| `generation.failed` | product | A generation job transitions to `failed`. Provider-authentication failures are reported separately under `provider_authentication.failed`, not here — see below. |
+| `provider_authentication.failed` | platform | A generation provider rejected its API key/authentication — fires once per failed generation for as long as the credentials are broken, so it's seeded with a 300s throttle (not the usual 0) rather than flooding on every request during an incident |
 | `health.degraded` | platform | A platform health subsystem becomes `degraded`, `unhealthy`, or `unknown` |
 | `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
 | `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup (`delete_all_for_user`) failed — the affected user's devices that should have been unsubscribed may still receive push notifications |
 
-- **Product-scoped** classes (the first four) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
-- **Platform-scoped** classes (`health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
-- `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` has no second, preference-independent channel (no health checker watches it), which is why seeding — not just a release note — was judged necessary here.
+- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
+- **Platform-scoped** classes (`provider_authentication.failed`, `health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
+- `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`); `provider_authentication.failed` ships the same way in migration `034` (kept separate from the `033` migration that introduced the class's schema/mapping, because Alembic never re-runs an already-applied revision — appending the seed to `033` would silently skip any environment already at `033`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` and `provider_authentication.failed` have no second, preference-independent channel (no health checker watches them), which is why seeding — not just a release note — was judged necessary there.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
 - Each subscribed class carries an optional `min_interval_seconds` throttle (default `0` = unthrottled, max `86400`). Messages suppressed during the cooldown are counted; the next delivered message for that class appends `(+N suppressed)` to the text.
 
@@ -3067,7 +3134,7 @@ Values: `"sfw"`, `"permissive"`
 | `cancelled` | Yes | User or system cancelled |
 | `moderated` | Yes | Content moderated by provider |
 
-**Polling strategy:** Poll `GET /v1/jobs/{id}` every 2s while status is `pending`, `queued`, or `running`. Stop on any terminal status. For real-time updates without polling, subscribe to the SSE `job.status_changed` event (see [§15 Real-Time Events](#15-real-time-events-sse--pubsub)).
+**Polling strategy:** Poll `GET /v1/jobs/{id}` every 2s while status is `pending`, `queued`, or `running`. Stop on any terminal status. A Grok video GET settles terminal provider results itself using the same guarded path as the worker, so this remains correct when no worker is deployed. For real-time updates without polling, subscribe to the SSE `job.status_changed` event (see [§15 Real-Time Events](#15-real-time-events-sse--pubsub)).
 
 ### GpuSessionStatus
 
@@ -3192,7 +3259,8 @@ Values: `"billing_adjust"`
 | `user.registered` | product | New user registration |
 | `generation.created` | product | New generation job submitted |
 | `gpu_node.started` | product | GPU node finishes provisioning (`provisioning → active` only) |
-| `generation.failed` | product | Generation job transitions to `failed` |
+| `generation.failed` | product | Generation job transitions to `failed` (excludes provider-authentication failures, reported separately below) |
+| `provider_authentication.failed` | platform | A generation provider rejected its API key/authentication |
 | `health.degraded` | platform | A health subsystem becomes `degraded`/`unhealthy`/`unknown` |
 | `health.restored` | platform | A health subsystem recovers |
 | `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
@@ -3292,15 +3360,16 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 
 | HTTP | `error` | `detail` keys |
 |------|---------|---------------|
-| 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed`, `unknown_product` | — |
+| 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed`, `provider_invalid_request`, `unknown_product` | — |
 | 401 | `unauthorized`, `invalid_credentials`, `account_inactive`, `token_reuse_detected` | — |
 | 402 | `insufficient_balance` | `balance`, `required` |
 | 403 | `forbidden`, `account_inactive`, `permission_denied`, `model_not_allowed`, `age_verification_required` | — |
 | 404 | `not_found`, `account_not_found`, `price_not_found` | — |
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero`, `no_active_gpu_session`, `session_already_exists`, `invalid_state`, `jobs_in_flight` | `balance`, `in_flight_count` |
-| 422 | `validation_error`, `moderation` | `provider`, `policy` |
-| 429 | `too_many_requests`, `rate_limited` | `retry_after` |
-| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed` | — |
+| 422 | `validation_error`, `moderation`, `provider_moderation_rejected` | `provider`, `policy` (Apex moderation only) |
+| 429 | `too_many_requests`, `rate_limited`, `provider_rate_limited` | `retry_after` (global rate limit only) |
+| 502 | `provider_malformed_response`, `provider_output_not_delivered` | — |
+| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_unavailable`, `provider_execution_failed`, `generation_session_terminated`, `provider_authentication_failed`, `provider_unknown` | — |
 
 **Example responses:**
 
@@ -3316,6 +3385,9 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 
 // 422
 { "error": "moderation", "message": "Content moderated by grok (policy: nsfw)", "status_code": 422, "detail": { "provider": "grok", "policy": "nsfw" } }
+
+// 422 — provider-side Grok moderation; upstream text is never exposed
+{ "error": "provider_moderation_rejected", "message": "The requested content was rejected by the AI provider's safety system. Modify the prompt or input and try again.", "status_code": 422, "detail": null }
 ```
 
 Provider disablement is the one deliberately compact compatibility response used by both top-up

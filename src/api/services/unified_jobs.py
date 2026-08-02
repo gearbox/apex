@@ -18,6 +18,7 @@ from sqlalchemy.exc import NoInspectionAvailable
 
 from src.api.schemas.jobs import JobOutputItem, UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
+from src.api.services.generation.public_errors import public_error_for_job
 from src.api.services.media import build_output_media
 from src.core.enums import GenerationType, JobStatus, Provider
 from src.db.repositories.job import JobRepository
@@ -239,5 +240,9 @@ class UnifiedJobService:
             started_at=job.started_at,
             completed_at=job.completed_at,
             outputs=output_items,
-            error=job.error_message,
+            error=public_error_for_job(
+                status=str(job.status),
+                public_error_message=job.public_error_message,
+            ),
+            failure_code=job.failure_code,
         )

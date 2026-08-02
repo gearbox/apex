@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
@@ -15,8 +16,11 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_403_FORBIDDEN,
     HTTP_409_CONFLICT,
+    HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_429_TOO_MANY_REQUESTS,
+    HTTP_502_BAD_GATEWAY,
     HTTP_503_SERVICE_UNAVAILABLE,
+    HTTP_504_GATEWAY_TIMEOUT,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +29,11 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.security import auth_guard
+from src.api.services.generation.provider_failures import (
+    ProviderFailureKind,
+    ProviderModerationRejectedError,
+    ProviderSubmissionFailedError,
+)
 from src.api.services.generation.rate_limiter import RateLimitExceededError
 from src.api.services.generation.service import (
     AgeVerificationRequiredError,
@@ -58,6 +67,50 @@ async def _mark_failed(
     await session.rollback()
     await idempotency_service.fail(record_id, session=session)
     await session.commit()
+
+
+async def _commit_completed_or_replay(
+    idempotency_service: IdempotencyService,
+    record_id: UUID,
+    session: AsyncSession,
+) -> IdempotencyReplayResult | None:
+    """Commit a completed outcome, recovering a lost acknowledgement safely.
+
+    The business row and idempotency result are written in one transaction.
+    If ``commit`` raises, PostgreSQL may nevertheless have committed it.  A
+    rollback followed by an authoritative read distinguishes that case before
+    any code can release the key for retry.
+    """
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        # Do not trust the connection whose commit acknowledgement was lost.
+        # The next ORM read checks out a fresh connection from the pool.
+        await session.invalidate()
+        replay = await idempotency_service.replay_completed(record_id, session=session)
+        if replay is not None:
+            logger.warning("generation.idempotency_commit_ack_lost", record_id=str(record_id))
+            return replay
+        # A still-processing row means the atomic business transaction did
+        # not commit. Conditional fail is safe here and cannot downgrade a
+        # completed row if a concurrent acknowledgement arrives.
+        await idempotency_service.fail(record_id, session=session)
+        await session.commit()
+        raise
+    else:
+        return None
+
+
+async def _run_post_commit_callbacks(
+    callbacks: list[Callable[[], Awaitable[None]]],
+) -> None:
+    """Callbacks are notification side effects, never transaction outcomes."""
+    for callback in callbacks:
+        try:
+            await callback()
+        except Exception:
+            logger.exception("generation.post_commit_callback_failed")
 
 
 class UnifiedGenerationController(Controller):
@@ -113,12 +166,15 @@ class UnifiedGenerationController(Controller):
             )
 
         record_id = check_result
+        post_commit_callbacks: list[Callable[[], Awaitable[None]]] = []
         try:
             result = await generation_service.generate(
                 data,
                 user_id=current_user_id,
                 session=session,
                 product_config=product_config,
+                defer_commit=True,
+                post_commit_callbacks=post_commit_callbacks,
             )
 
             response_body = msgspec.to_builtins(result)
@@ -129,7 +185,11 @@ class UnifiedGenerationController(Controller):
                 response_body=response_body,
                 session=session,
             )
-            await session.commit()
+            replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
+            if replay is not None:
+                await _run_post_commit_callbacks(post_commit_callbacks)
+                return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
+            await _run_post_commit_callbacks(post_commit_callbacks)
             return Response(content=result, status_code=HTTP_201_CREATED)
 
         except NoActiveSessionError as exc:
@@ -232,6 +292,76 @@ class UnifiedGenerationController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        except ProviderModerationRejectedError as exc:
+            error = ErrorEnvelope(
+                error=exc.public_code,
+                message=exc.public_message,
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+            # This is a completed, billable request, despite the 422 response.
+            # Cache the safe response to prevent an idempotent retry from
+            # submitting and charging the same generation again.
+            await idempotency_service.complete(
+                record_id,
+                resource_id=exc.job_id,
+                response_status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                response_body=msgspec.to_builtins(error),
+                session=session,
+            )
+            replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
+            if replay is not None:
+                await _run_post_commit_callbacks(post_commit_callbacks)
+                return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
+            await _run_post_commit_callbacks(post_commit_callbacks)
+            logger.warning(
+                "generation.failed",
+                provider=exc.failure.provider.value,
+                job_id=str(exc.job_id),
+                failure_kind=exc.failure.kind.value,
+                billable=exc.failure.billable,
+            )
+            return Response(content=error, status_code=HTTP_422_UNPROCESSABLE_ENTITY)
+
+        except ProviderSubmissionFailedError as exc:
+            # The failed state, debit/refund result, idempotency resource and
+            # cached response share this one transaction.  Replaying the key
+            # therefore cannot run the provider or create a second debit.
+            status_code = {
+                ProviderFailureKind.INVALID_REQUEST: HTTP_400_BAD_REQUEST,
+                ProviderFailureKind.RATE_LIMITED: HTTP_429_TOO_MANY_REQUESTS,
+                ProviderFailureKind.MALFORMED_RESPONSE: HTTP_502_BAD_GATEWAY,
+                ProviderFailureKind.OUTPUT_NOT_DELIVERED: HTTP_502_BAD_GATEWAY,
+                ProviderFailureKind.TIMEOUT: HTTP_504_GATEWAY_TIMEOUT,
+            }.get(exc.failure.kind, HTTP_503_SERVICE_UNAVAILABLE)
+            error = ErrorEnvelope(
+                error=exc.public_code,
+                message=exc.public_message,
+                status_code=status_code,
+            )
+            await idempotency_service.complete(
+                record_id,
+                resource_id=exc.job_id,
+                response_status_code=status_code,
+                response_body=msgspec.to_builtins(error),
+                session=session,
+            )
+            replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
+            if replay is not None:
+                await _run_post_commit_callbacks(post_commit_callbacks)
+                return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
+            await _run_post_commit_callbacks(post_commit_callbacks)
+            logger.warning(
+                "generation.provider_submission_failed",
+                provider=exc.failure.provider.value,
+                job_id=str(exc.job_id),
+                failure_kind=exc.failure.kind.value,
+                status_code=status_code,
+            )
+            return Response(
+                content=error,
+                status_code=status_code,
             )
 
         except GenerationError as exc:

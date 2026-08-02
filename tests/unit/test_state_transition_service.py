@@ -73,6 +73,16 @@ class TestTransitionToRunning:
         session.execute.assert_awaited_once()
         session.commit.assert_awaited_once()
 
+    async def test_queued_to_running_preserves_existing_started_at(self) -> None:
+        job = _make_job(JobStatus.QUEUED.value)
+        job.started_at = datetime.now(UTC) - timedelta(minutes=5)
+        svc, session, _ = _make_service(job)
+
+        await svc.transition_to_running(job.id)
+
+        statement = session.execute.await_args.args[0]
+        assert "coalesce(generation_jobs.started_at, now())" in str(statement)
+
     async def test_already_running_is_noop(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
         svc, session, _ = _make_service(job)
@@ -219,6 +229,16 @@ class TestTransitionToFailed:
         assert did is False
         bus.publish.assert_not_awaited()
 
+    async def test_noop_failure_clears_previous_deferred_publication(self) -> None:
+        job = _make_job(JobStatus.FAILED.value)
+        svc, _, _ = _make_service(job)
+        svc._deferred_failure = MagicMock()
+
+        _, did = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+
+        assert did is False
+        assert svc.deferred_failure is None
+
     async def test_did_false_does_not_refund(self) -> None:
         job = _make_job(JobStatus.COMPLETED.value)
         svc, _, billing = _make_service(job)
@@ -238,15 +258,50 @@ class TestTransitionToFailed:
 
         billing.refund.assert_not_awaited()
 
-    async def test_refund_failure_does_not_raise(self) -> None:
+    async def test_refund_failure_rolls_back_the_terminal_transition(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
         svc, session, billing = _make_service(job)
         billing.refund.side_effect = RuntimeError("billing down")
 
-        _, _ = await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
+        with pytest.raises(RuntimeError, match="billing down"):
+            await svc.transition_to_failed(job.id, error_message="x", product_id="vex")
 
-        # Job is still transitioned; rollback was called
         session.rollback.assert_awaited()
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "status",
+        [JobStatus.RUNNING.value, JobStatus.PENDING.value],
+    )
+    async def test_publishes_actual_previous_status_and_only_public_message(
+        self,
+        status: str,
+    ) -> None:
+        job = _make_job(status)
+        job.error_message = "internal-host.example.test sentinel-secret"
+        job.public_error_message = None
+        bus = AsyncMock()
+        svc, session, _ = _make_service(job, event_bus=bus)
+
+        async def refresh_job(refreshed: MagicMock) -> None:
+            refreshed.status = JobStatus.FAILED.value
+            refreshed.public_error_message = "The AI provider is temporarily unavailable."
+            refreshed.failure_code = "provider_unavailable"
+
+        session.refresh.side_effect = refresh_job
+        await svc.transition_to_failed(
+            job.id,
+            error_message=job.error_message,
+            public_error_message="The AI provider is temporarily unavailable.",
+            failure_code="provider_unavailable",
+            refund=False,
+            product_id="vex",
+        )
+
+        payload = bus.publish.await_args.kwargs["payload"]
+        assert payload.previous_status == status
+        assert payload.error_message == "The AI provider is temporarily unavailable."
+        assert "sentinel-secret" not in payload.error_message
 
 
 # ---------------------------------------------------------------------------

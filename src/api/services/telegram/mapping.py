@@ -21,6 +21,7 @@ from src.api.schemas.ops_events import (
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
 )
+from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.api.services.telegram.html import escape
 from src.core.enums import NotificationClass
 
@@ -95,13 +96,25 @@ def _map_generation_created(envelope: OpsEventEnvelope) -> OpsNotification:
 
 def _map_generation_failed(envelope: OpsEventEnvelope) -> OpsNotification:
     payload = msgspec.json.decode(envelope.payload, type=GenerationFailedOpsPayload)
+    auth_failure = payload.failure_code == ProviderFailure.public_code_for_kind(
+        ProviderFailureKind.AUTHENTICATION_FAILED
+    )
+    failure_detail = ""
+    notification_class = NotificationClass.GENERATION_FAILED
+    if auth_failure:
+        failure_detail = (
+            "\n"
+            f"<b>Provider authentication failed</b>: {escape(payload.provider)} rejected its "
+            "API key; all generations for this provider are failing until the credentials are fixed"
+        )
+        notification_class = NotificationClass.PROVIDER_AUTHENTICATION_FAILED
     text = (
         f"{_tag(envelope.product_id)} ❌ <b>Generation failed</b>\n"
         f"job <code>{escape(str(payload.job_id))}</code> · "
-        f"{escape(payload.provider)}/{escape(payload.generation_type)}"
+        f"{escape(payload.provider)}/{escape(payload.generation_type)}{failure_detail}"
     )
     return OpsNotification(
-        notification_class=NotificationClass.GENERATION_FAILED,
+        notification_class=notification_class,
         product_id=envelope.product_id,
         text=text,
     )

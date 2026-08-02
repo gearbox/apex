@@ -6,7 +6,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from src.api.services.jobs.sweep import JobSweepResult, JobSweepService
+from src.api.services.generation.aisha_failures import AishaFailure
+from src.api.services.jobs.sweep import JobSweepFailure, JobSweepResult, JobSweepService
 from src.core.enums import JobStatus
 from src.db.models.storage import GenerationJob
 
@@ -69,7 +70,9 @@ class TestSweepSession:
             MockRepo.return_value = mock_repo
             mock_repo.list_in_flight_for_session.return_value = []
 
-            result = await svc.sweep_session(uuid4(), product_id="vex", reason="session stopped")
+            result = await svc.sweep_session(
+                uuid4(), product_id="vex", failure=JobSweepFailure("session stopped")
+            )
 
         assert result == JobSweepResult(swept_count=0, error_count=0, skipped_count=0)
 
@@ -96,7 +99,7 @@ class TestSweepSession:
             result = await svc.sweep_session(
                 uuid4(),
                 product_id="vex",
-                reason="GPU session stopped before job completed.",
+                failure=JobSweepFailure("GPU session stopped before job completed."),
             )
 
         assert result.swept_count == 2
@@ -121,7 +124,9 @@ class TestSweepSession:
             mock_ts.transition_to_failed.return_value = (job, False)
 
             result = await svc.sweep_session(
-                uuid4(), product_id="vex", reason="GPU session stopped before job completed."
+                uuid4(),
+                product_id="vex",
+                failure=JobSweepFailure("GPU session stopped before job completed."),
             )
 
         assert result.swept_count == 0
@@ -148,7 +153,9 @@ class TestSweepSession:
                 (job2, False),
             ]
 
-            result = await svc.sweep_session(uuid4(), product_id="vex", reason="stopped")
+            result = await svc.sweep_session(
+                uuid4(), product_id="vex", failure=JobSweepFailure("stopped")
+            )
 
         assert result.swept_count == 1
         assert result.skipped_count == 1
@@ -184,7 +191,7 @@ class TestSweepSession:
             result = await svc.sweep_session(
                 uuid4(),
                 product_id="vex",
-                reason="GPU session stopped before job completed.",
+                failure=JobSweepFailure("GPU session stopped before job completed."),
             )
 
         assert result.error_count == 1
@@ -207,7 +214,7 @@ class TestSweepSession:
             MockTS.return_value = mock_ts
             mock_ts.transition_to_failed.side_effect = [(j, True) for j in jobs]
 
-            await svc.sweep_session(uuid4(), product_id="vex", reason="stopped")
+            await svc.sweep_session(uuid4(), product_id="vex", failure=JobSweepFailure("stopped"))
 
         # Single session for the whole sweep
         assert mocks["session_factory"].call_count == 1
@@ -228,11 +235,18 @@ class TestSweepSession:
             MockTS.return_value = mock_ts
             mock_ts.transition_to_failed.return_value = (job, True)
 
-            await svc.sweep_session(uuid4(), product_id="synthara", reason="stopped")
+            await svc.sweep_session(
+                uuid4(), product_id="synthara", failure=JobSweepFailure("stopped")
+            )
 
             mock_ts.transition_to_failed.assert_awaited_once()
             call_kwargs = mock_ts.transition_to_failed.call_args.kwargs
             assert call_kwargs["product_id"] == "synthara"
+            assert call_kwargs["failure_code"] == AishaFailure.GENERATION_SESSION_TERMINATED.value
+            assert (
+                call_kwargs["public_error_message"]
+                == AishaFailure.GENERATION_SESSION_TERMINATED.public_message
+            )
 
     async def test_sweep_truncates_reason_to_500_chars(self) -> None:
         svc, _ = _make_service()
@@ -251,7 +265,7 @@ class TestSweepSession:
             MockTS.return_value = mock_ts
             mock_ts.transition_to_failed.return_value = (job, True)
 
-            await svc.sweep_session(uuid4(), product_id="vex", reason=long_reason)
+            await svc.sweep_session(uuid4(), product_id="vex", failure=JobSweepFailure(long_reason))
 
             call_kwargs = mock_ts.transition_to_failed.call_args.kwargs
             assert len(call_kwargs["error_message"]) == 500
@@ -273,7 +287,7 @@ class TestSweepSession:
             MockTS.return_value = mock_ts
             mock_ts.transition_to_failed.return_value = (job, True)
 
-            await svc.sweep_session(uuid4(), product_id="vex", reason="stopped")
+            await svc.sweep_session(uuid4(), product_id="vex", failure=JobSweepFailure("stopped"))
 
             call_kwargs = mock_ts.transition_to_failed.call_args.kwargs
             assert call_kwargs["refund"] is True
@@ -301,7 +315,7 @@ class TestSweepSessionBestEffort:
             await svc.sweep_session_best_effort(
                 session_id=session_id,
                 product_id="vex",
-                reason="stopped",
+                failure=JobSweepFailure("stopped"),
                 log_event="gpu_session.stop.job_sweep",
             )
 
@@ -326,7 +340,7 @@ class TestSweepSessionBestEffort:
             await svc.sweep_session_best_effort(
                 session_id=uuid4(),
                 product_id="vex",
-                reason="stopped",
+                failure=JobSweepFailure("stopped"),
                 log_event="gpu_session.stop.job_sweep",
             )
 
@@ -343,12 +357,12 @@ class TestSweepSessionBestEffort:
             await svc.sweep_session_best_effort(
                 session_id=session_id,
                 product_id="synthara",
-                reason="provisioning failed",
+                failure=JobSweepFailure("provisioning failed"),
                 log_event="gpu_session.provision.job_sweep",
             )
 
         mock_sweep.assert_awaited_once_with(
             session_id,
             product_id="synthara",
-            reason="provisioning failed",
+            failure=JobSweepFailure("provisioning failed"),
         )

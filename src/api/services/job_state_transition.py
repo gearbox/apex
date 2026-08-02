@@ -22,14 +22,18 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
-from sqlalchemy import CursorResult, func
+from sqlalchemy import CursorResult, func, or_
 from sqlalchemy import update as sa_update
 
 from src.api.schemas.events import EventType, JobStatusPayload
 from src.api.schemas.ops_events import GenerationFailedOpsPayload, OpsEventType
+from src.api.services.generation.public_errors import (
+    LEGACY_FAILED_JOB_MESSAGE,
+    public_error_for_job,
+)
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import JobStatus
-from src.db.models.storage import GenerationJob
+from src.db.models.storage import GenerationJob, GenerationMaterializationAttempt
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 
@@ -37,8 +41,9 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
-    from src.api.services.billing import BillingService
+    from src.api.services.billing import BalanceEvent, BillingService
     from src.api.services.event_bus import EventBus
 
 logger = structlog.get_logger(__name__)
@@ -66,6 +71,23 @@ class GenerationOutputData:
     height: int | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class _DeferredFailurePublication:
+    """All notifications that become eligible only after a UoW commit."""
+
+    job_id: UUID
+    user_id: UUID
+    old_status: str
+    status: str
+    generation_type: str
+    provider: str
+    failure_code: str | None
+    public_error_message: str | None
+    product_id: str
+    reserve_event: BalanceEvent | None
+    refund_event: BalanceEvent | None
+
+
 class JobStateTransitionService:
     """Atomically transitions GenerationJob status and publishes events.
 
@@ -89,6 +111,7 @@ class JobStateTransitionService:
         )
         self._job_repo = JobRepository(session)
         self._output_repo = OutputRepository(session)
+        self._deferred_failure: _DeferredFailurePublication | None = None
 
     # -------------------------------------------------------------------------
     # Public transition methods
@@ -113,7 +136,7 @@ class JobStateTransitionService:
 
         update_values: dict[str, object] = {
             "status": JobStatus.RUNNING.value,
-            "started_at": func.now(),
+            "started_at": func.coalesce(GenerationJob.started_at, func.now()),
         }
 
         result = cast(
@@ -151,33 +174,85 @@ class JobStateTransitionService:
 
         Idempotent: no-op if already COMPLETED or terminal.
         """
+        job, _ = await self._transition_to_completed(
+            job_id,
+            outputs=outputs,
+            product_id=product_id,
+        )
+        return job
+
+    async def transition_claimed_video_to_completed(
+        self,
+        job_id: UUID,
+        *,
+        claim_token: str,
+        outputs: list[GenerationOutputData],
+        product_id: str,
+        materialization_attempt_id: UUID | None = None,
+    ) -> tuple[GenerationJob, bool]:
+        """Complete a Grok video only while holding its durable DB lease.
+
+        ``claim_token`` is acquired and committed before any R2 side effect.
+        The CAS below prevents an expired/replaced claimant from attaching its
+        materialized outputs to a job settled by another caller.
+        """
+        return await self._transition_to_completed(
+            job_id,
+            outputs=outputs,
+            product_id=product_id,
+            claim_token=claim_token,
+            materialization_attempt_id=materialization_attempt_id,
+        )
+
+    async def _transition_to_completed(
+        self,
+        job_id: UUID,
+        *,
+        outputs: list[GenerationOutputData],
+        product_id: str,
+        claim_token: str | None = None,
+        materialization_attempt_id: UUID | None = None,
+    ) -> tuple[GenerationJob, bool]:
         job = await self._session.get(GenerationJob, job_id)
         if job is None:
             raise ValueError(f"Job {job_id} not found")
 
         old_status = str(job.status)
         if old_status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
-            return job
+            return job, False
+
+        conditions: list[ColumnElement[bool]] = [
+            GenerationJob.id == job_id,
+            GenerationJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+        ]
+        values: dict[str, object] = {
+            "status": JobStatus.COMPLETED.value,
+            "completed_at": func.now(),
+            # Terminal rows never retain a claim pair, including ordinary
+            # non-video completions and compatibility paths.
+            "finalization_claim_token": None,
+            "finalization_lease_expires_at": None,
+        }
+        if claim_token is not None:
+            conditions.extend(
+                [
+                    GenerationJob.finalization_claim_token == claim_token,
+                ]
+            )
 
         result = cast(
             "CursorResult[Any]",
             await self._session.execute(
                 sa_update(GenerationJob)
-                .where(
-                    GenerationJob.id == job_id,
-                    GenerationJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
-                )
-                .values(
-                    status=JobStatus.COMPLETED.value,
-                    completed_at=func.now(),
-                )
+                .where(*conditions)
+                .values(**values)
                 .execution_options(synchronize_session=False)
             ),
         )
 
         if result.rowcount == 0:
             await self._session.refresh(job)
-            return job
+            return job, False
 
         # Persist outputs in same transaction — parents before children so the
         # self-FK on parent_output_id is satisfiable within a single transaction.
@@ -201,6 +276,18 @@ class JobStateTransitionService:
                 height=out.height,
             )
 
+        if materialization_attempt_id is not None:
+            # This update shares the output/job commit.  A completed job can
+            # never look like an abandoned R2 attempt after a restart.
+            await self._session.execute(
+                sa_update(GenerationMaterializationAttempt)
+                .where(
+                    GenerationMaterializationAttempt.id == materialization_attempt_id,
+                    GenerationMaterializationAttempt.product_id == product_id,
+                )
+                .values(state="committed", completed_at=func.now(), updated_at=func.now())
+            )
+
         await self._session.commit()
         await self._session.refresh(job)
         await self._publish(job, old_status=old_status)
@@ -209,34 +296,52 @@ class JobStateTransitionService:
             job_id=str(job_id),
             output_count=len(outputs),
         )
-        return job
+        return job, True
 
     async def transition_to_failed(
         self,
         job_id: UUID,
         *,
-        error_message: str,
+        error_message: str | None = None,
+        public_error_message: str | None = None,
+        failure_code: str | None = None,
         refund: bool = True,
         product_id: str,
+        reserve_event: BalanceEvent | None = None,
+        commit: bool = True,
     ) -> tuple[GenerationJob, bool]:
-        """QUEUED|RUNNING → FAILED.
+        """PENDING|QUEUED|RUNNING → FAILED.
 
-        Issues a billing refund when ``refund=True`` and a debit reservation
-        exists. Refund failures are logged but do not roll back the status
-        transition — the DB reflects FAILED even if the refund can't be processed.
+        For non-billable failures the conditional FAILED transition and its
+        refund ledger row are one database transaction.  A refund failure
+        rolls back the status transition too, leaving the job retryable.  Set
+        ``commit=False`` only for a request-level unit of work that will add
+        its idempotency result and commit before calling
+        :meth:`publish_deferred_failure`.
 
         Returns:
             (job, did_transition) where did_transition is True if THIS call moved
             the job from QUEUED|RUNNING to FAILED. False if the job was already
             terminal (idempotent no-op — no publish, no refund).
         """
+        self._deferred_failure = None
         job = await self._session.get(GenerationJob, job_id)
         if job is None:
             raise ValueError(f"Job {job_id} not found")
 
         old_status = str(job.status)
-        if old_status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+        in_flight_statuses = (
+            JobStatus.PENDING.value,
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+        )
+        if old_status not in in_flight_statuses:
             return job, False
+
+        # ``error_message`` remains internal diagnostics for legacy call
+        # sites. It is deliberately kept separate from the public column and
+        # event payload; new paths pass ``public_error_message`` instead.
+        safe_message = public_error_message or LEGACY_FAILED_JOB_MESSAGE
 
         result = cast(
             "CursorResult[Any]",
@@ -244,12 +349,25 @@ class JobStateTransitionService:
                 sa_update(GenerationJob)
                 .where(
                     GenerationJob.id == job_id,
-                    GenerationJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                    GenerationJob.status.in_(in_flight_statuses),
+                    # A live finalizer owns this job until its database-time
+                    # lease expires.  Once expired, failure and completion
+                    # race on the same conditional update; the winner is
+                    # authoritative.  The claim pair is cleared below for
+                    # every terminal result.
+                    or_(
+                        GenerationJob.finalization_claim_token.is_(None),
+                        GenerationJob.finalization_lease_expires_at <= func.now(),
+                    ),
                 )
                 .values(
                     status=JobStatus.FAILED.value,
                     completed_at=func.now(),
-                    error_message=error_message[:2000],
+                    error_message=error_message[:2000] if error_message is not None else None,
+                    public_error_message=safe_message[:2000],
+                    failure_code=failure_code[:100] if failure_code is not None else None,
+                    finalization_claim_token=None,
+                    finalization_lease_expires_at=None,
                 )
                 .execution_options(synchronize_session=False)
             ),
@@ -260,74 +378,183 @@ class JobStateTransitionService:
             await self._session.refresh(job)
             return job, False
 
+        refund_event: BalanceEvent | None = None
+        if refund and job.debit_transaction_id is not None:
+            try:
+                refund_result = await self._billing.refund(
+                    job_id=job_id,
+                    description="Job failed — tokens refunded",
+                    session=self._session,
+                    product_id=product_id,
+                )
+                refund_event = refund_result.event
+            except Exception:
+                # A terminal, non-billable job must never retain its debit
+                # merely because the compensating ledger write failed.
+                await self._session.rollback()
+                logger.exception(
+                    "job.transition.refund_failed_rolled_back",
+                    job_id=str(job_id),
+                )
+                raise
+        elif refund:
+            # A pre-reservation/billing failure can still have a job row in
+            # the unit of work.  Never turn that into RefundNotEligibleError:
+            # there is no confirmed debit to compensate.
+            logger.info("job.transition.refund_skipped_no_debit", job_id=str(job_id))
+
+        if not commit:
+            await self._session.refresh(job)
+            self._deferred_failure = self._build_deferred_failure_publication(
+                job=job,
+                old_status=old_status,
+                product_id=product_id,
+                reserve_event=reserve_event,
+                refund_event=refund_event,
+                failure_code=failure_code,
+                public_error_message=safe_message,
+            )
+            return job, True
+
         await self._session.commit()
         await self._session.refresh(job)
-        await self._publish(job, old_status=old_status)
+        await self.publish_deferred_failure(
+            self._build_deferred_failure_publication(
+                job=job,
+                old_status=old_status,
+                product_id=product_id,
+                reserve_event=reserve_event,
+                refund_event=refund_event,
+                failure_code=failure_code,
+                public_error_message=safe_message,
+            )
+        )
+
+        return job, True
+
+    @property
+    def deferred_failure(self) -> _DeferredFailurePublication | None:
+        """Post-commit events captured by ``transition_to_failed(commit=False)``."""
+        return self._deferred_failure
+
+    async def publish_deferred_failure(self, publication: _DeferredFailurePublication) -> None:
+        """Publish an already-committed failure settlement exactly once."""
+        await self._publish_status_payload(
+            job_id=publication.job_id,
+            user_id=publication.user_id,
+            status=publication.status,
+            old_status=publication.old_status,
+            generation_type=publication.generation_type,
+            provider=publication.provider,
+            failure_code=publication.failure_code,
+            public_error_message=publication.public_error_message,
+        )
         logger.warning(
             "job.transition.failed",
-            job_id=str(job_id),
-            error=error_message[:200],
+            job_id=str(publication.job_id),
+            failure_code=publication.failure_code,
+            refund=publication.refund_event is not None,
         )
         await self._ops_event_bus.publish(
             event_type=OpsEventType.GENERATION_FAILED,
-            product_id=product_id,
+            product_id=publication.product_id,
             payload=GenerationFailedOpsPayload(
-                job_id=job.id,
-                user_id=job.user_id,
-                provider=str(job.provider),
-                generation_type=str(job.generation_type),
+                job_id=publication.job_id,
+                user_id=publication.user_id,
+                provider=publication.provider,
+                generation_type=publication.generation_type,
+                failure_code=publication.failure_code,
             ),
         )
-
-        if refund:
-            await self._try_refund(job_id, product_id=product_id)
-
-        return job, True
+        if self._event_bus is not None:
+            # Do not call the transport with empty placeholders.  Besides
+            # avoiding needless work, this preserves the useful invariant
+            # that every publish_balance invocation represents a committed
+            # ledger event.
+            if publication.reserve_event is not None:
+                await self._event_bus.publish_balance(publication.reserve_event)
+            if publication.refund_event is not None:
+                await self._event_bus.publish_balance(publication.refund_event)
 
     # -------------------------------------------------------------------------
     # Internals
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _build_deferred_failure_publication(
+        *,
+        job: GenerationJob,
+        old_status: str,
+        product_id: str,
+        reserve_event: BalanceEvent | None,
+        refund_event: BalanceEvent | None,
+        failure_code: str | None,
+        public_error_message: str,
+    ) -> _DeferredFailurePublication:
+        """Capture immutable data before the request session can be released."""
+        return _DeferredFailurePublication(
+            job_id=job.id,
+            user_id=job.user_id,
+            old_status=old_status,
+            status=JobStatus.FAILED.value,
+            generation_type=str(job.generation_type),
+            provider=str(job.provider),
+            failure_code=failure_code[:100] if failure_code is not None else None,
+            public_error_message=public_error_message[:2000],
+            product_id=product_id,
+            reserve_event=reserve_event,
+            refund_event=refund_event,
+        )
+
     async def _publish(self, job: GenerationJob, *, old_status: str) -> None:
+        await self._publish_status_payload(
+            job_id=job.id,
+            user_id=job.user_id,
+            status=str(job.status),
+            old_status=old_status,
+            generation_type=str(job.generation_type),
+            provider=str(job.provider),
+            failure_code=job.failure_code,
+            public_error_message=job.public_error_message,
+        )
+
+    async def _publish_status_payload(
+        self,
+        *,
+        job_id: UUID,
+        user_id: UUID,
+        status: str,
+        old_status: str,
+        generation_type: str,
+        provider: str,
+        failure_code: str | None,
+        public_error_message: str | None,
+    ) -> None:
         if self._event_bus is None:
             return
         try:
             payload = JobStatusPayload(
-                job_id=job.id,
-                status=str(job.status),
+                job_id=job_id,
+                status=status,
                 previous_status=old_status,
-                generation_type=str(job.generation_type),
-                provider=str(job.provider),
+                generation_type=generation_type,
+                provider=provider,
+                failure_code=failure_code,
+                error_message=public_error_for_job(
+                    status=status,
+                    public_error_message=public_error_message,
+                ),
             )
             await self._event_bus.publish(
-                user_id=job.user_id,
+                user_id=user_id,
                 event_type=EventType.JOB_STATUS_CHANGED,
                 payload=payload,
             )
         except Exception:
             logger.exception(
                 "job.state_transition.publish_failed",
-                job_id=str(job.id),
-            )
-
-    async def _try_refund(self, job_id: UUID, *, product_id: str) -> None:
-        try:
-            refund_result = await self._billing.refund(
-                job_id=job_id,
-                description="Job failed — tokens refunded",
-                session=self._session,
-                product_id=product_id,
-            )
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
-            logger.exception(
-                "job.state_transition.refund_failed",
                 job_id=str(job_id),
             )
-            return
-        if self._event_bus is not None:
-            await self._event_bus.publish_balance(refund_result.event)
 
     @staticmethod
     def make_output_expires_at(retention_days: int = 7) -> datetime:

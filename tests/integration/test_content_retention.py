@@ -16,12 +16,19 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.services.content_retention import ContentRetentionService
 from src.api.services.storage.r2 import R2StorageService, R2StorageSettings
 from src.core.enums import GenerationType, JobStatus
-from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
+from src.db.models.storage import (
+    GenerationJob,
+    GenerationMaterializationAttempt,
+    GenerationOutput,
+    StorageCleanupRecord,
+    UserImage,
+)
 from src.db.models.user import User
 from src.db.repositories.library import LibraryRepository
 
@@ -48,6 +55,9 @@ class FakeR2Storage:
     async def delete_many(self, storage_keys: list[str]) -> int:
         self.deleted_keys.extend(storage_keys)
         return len(storage_keys)
+
+    async def delete(self, storage_key: str) -> None:
+        self.deleted_keys.append(storage_key)
 
 
 @pytest.fixture
@@ -94,13 +104,15 @@ def _future(days: int = 7) -> datetime:
     return datetime.now(UTC) + timedelta(days=days)
 
 
-async def _create_user(session_factory: async_sessionmaker[AsyncSession]) -> User:
+async def _create_user(
+    session_factory: async_sessionmaker[AsyncSession], *, product_id: str = "vex"
+) -> User:
     async with session_factory() as session:
         user = User(
             id=uuid4(),
             email=f"retention-{uuid4().hex[:8]}@example.com",
             password_hash="hashed",
-            product_id="vex",
+            product_id=product_id,
         )
         session.add(user)
         await session.commit()
@@ -138,6 +150,7 @@ async def _create_output(
     job: GenerationJob,
     expires_at: datetime,
     with_thumbnail: bool = False,
+    output_index: int = 0,
 ) -> tuple[GenerationOutput, GenerationOutput | None]:
     async with session_factory() as session:
         out_id = uuid4()
@@ -150,7 +163,7 @@ async def _create_output(
             content_type="image/png",
             size_bytes=100,
             format="png",
-            output_index=0,
+            output_index=output_index,
             expires_at=expires_at,
         )
         session.add(output)
@@ -168,7 +181,7 @@ async def _create_output(
                 content_type="image/webp",
                 size_bytes=20,
                 format="webp",
-                output_index=0,
+                output_index=output_index,
                 is_thumbnail=True,
                 parent_output_id=out_id,
                 thumbnail_max_edge=150,
@@ -342,7 +355,13 @@ async def test_sweep_keeps_job_with_live_output(
     user = await _create_user(retention_session_factory)
     job = await _create_job(retention_session_factory, user=user)
     await _create_output(retention_session_factory, user=user, job=job, expires_at=_past())
-    await _create_output(retention_session_factory, user=user, job=job, expires_at=_future())
+    await _create_output(
+        retention_session_factory,
+        user=user,
+        job=job,
+        expires_at=_future(),
+        output_index=1,
+    )
 
     storage = FakeR2Storage()
     service = ContentRetentionService(
@@ -422,3 +441,123 @@ async def test_sweep_thumbnail_alone_is_not_selected(
     assert storage.deleted_keys == []
     assert await db_session.get(GenerationOutput, output.id) is not None
     assert await db_session.get(GenerationOutput, thumbnail.id) is not None
+
+
+async def test_durable_storage_records_are_non_null_product_scoped(
+    db_engine: AsyncEngine,
+) -> None:
+    """The new recovery tables satisfy the repository-wide product rule."""
+    async with db_engine.connect() as connection:
+        columns = await connection.run_sync(
+            lambda sync_connection: {
+                table_name: {
+                    "columns": {
+                        column["name"]: column["nullable"]
+                        for column in inspect(sync_connection).get_columns(table_name)
+                    },
+                    "indexes": inspect(sync_connection).get_indexes(table_name),
+                }
+                for table_name in (
+                    "generation_materialization_attempts",
+                    "storage_cleanup_records",
+                )
+            }
+        )
+
+    for table_name in ("generation_materialization_attempts", "storage_cleanup_records"):
+        assert columns[table_name]["columns"]["product_id"] is False
+        assert any(
+            "product_id" in index["column_names"] for index in columns[table_name]["indexes"]
+        )
+
+
+async def test_storage_reconciliation_does_not_cross_product_boundaries(
+    retention_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A vex reconciliation can neither drain nor update synthara's records."""
+    vex_user = await _create_user(retention_session_factory, product_id="vex")
+    synthara_user = await _create_user(retention_session_factory, product_id="synthara")
+    vex_job = await _create_job(
+        retention_session_factory,
+        user=vex_user,
+        status=JobStatus.FAILED,
+    )
+    synthara_job = await _create_job(
+        retention_session_factory,
+        user=synthara_user,
+        status=JobStatus.FAILED,
+    )
+
+    vex_attempt_id = uuid4()
+    synthara_attempt_id = uuid4()
+    vex_key = f"users/{vex_user.id}/outputs/abandoned-vex.mp4"
+    synthara_key = f"users/{synthara_user.id}/outputs/abandoned-synthara.mp4"
+    vex_cleanup_key = f"users/{vex_user.id}/outputs/duplicate-vex.mp4"
+    synthara_cleanup_key = f"users/{synthara_user.id}/outputs/duplicate-synthara.mp4"
+
+    async with retention_session_factory() as session:
+        session.add_all(
+            [
+                GenerationMaterializationAttempt(
+                    id=vex_attempt_id,
+                    product_id="vex",
+                    job_id=vex_job.id,
+                    claim_token=str(uuid4()),
+                    state="planned",
+                    planned_storage_keys=[vex_key],
+                    uploaded_storage_keys=[],
+                ),
+                GenerationMaterializationAttempt(
+                    id=synthara_attempt_id,
+                    product_id="synthara",
+                    job_id=synthara_job.id,
+                    claim_token=str(uuid4()),
+                    state="planned",
+                    planned_storage_keys=[synthara_key],
+                    uploaded_storage_keys=[],
+                ),
+                StorageCleanupRecord(
+                    product_id="vex",
+                    storage_key=vex_cleanup_key,
+                    reason="test",
+                ),
+                StorageCleanupRecord(
+                    product_id="synthara",
+                    storage_key=synthara_cleanup_key,
+                    reason="test",
+                ),
+            ]
+        )
+        await session.commit()
+
+    storage = FakeR2Storage()
+    service = ContentRetentionService(
+        session_factory=retention_session_factory,
+        storage=storage,  # type: ignore[arg-type]
+        batch_size=100,
+        max_batches_per_run=1,
+    )
+
+    assert await service.reconcile_storage_artifacts(product_id="vex") == (1, 1)
+    assert set(storage.deleted_keys) == {vex_key, vex_cleanup_key}
+
+    async with retention_session_factory() as session:
+        vex_attempt = await session.get(GenerationMaterializationAttempt, vex_attempt_id)
+        synthara_attempt = await session.get(GenerationMaterializationAttempt, synthara_attempt_id)
+        records = {
+            record.product_id: record
+            for record in (
+                await session.scalars(
+                    select(StorageCleanupRecord).where(
+                        StorageCleanupRecord.storage_key.in_(
+                            [vex_cleanup_key, synthara_cleanup_key]
+                        )
+                    )
+                )
+            )
+        }
+
+    assert vex_attempt is not None and vex_attempt.state == "cleaned"
+    assert synthara_attempt is not None and synthara_attempt.state == "planned"
+    assert records["vex"].state == "deleted"
+    assert records["synthara"].state == "pending"

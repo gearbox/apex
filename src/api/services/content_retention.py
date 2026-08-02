@@ -13,12 +13,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import delete, exists, select, update
+from sqlalchemy import delete, exists, func, or_, select, update
 
 from src.api.services.storage.exceptions import StorageDeleteError
 from src.core.library_ref import LibraryAssetSource
 from src.db.models.library import LibraryAssetMetadata
-from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
+from src.db.models.storage import (
+    GenerationJob,
+    GenerationMaterializationAttempt,
+    GenerationOutput,
+    StorageCleanupRecord,
+    UserImage,
+)
 from src.db.repositories.library_tag import LibraryTagRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
@@ -100,6 +106,161 @@ class ContentRetentionService:
             duration_ms=duration_ms,
         )
         return result
+
+    async def reconcile_storage_artifacts(self, *, product_id: str) -> tuple[int, int]:
+        """Run restart-safe materialization and migration-outbox cleanup.
+
+        Kept separate from retention's normal sweep so media expiry work has
+        stable bounded behavior; ``ContentRetentionWorker`` invokes both on
+        its periodic tick.
+        """
+        reconciled_attempts = await self._reconcile_materialization_attempts(product_id=product_id)
+        cleanup_records = await self._drain_storage_cleanup_outbox(product_id=product_id)
+        logger.info(
+            "content_retention.storage_reconciliation",
+            materialization_attempts_reconciled=reconciled_attempts,
+            storage_cleanup_records_drained=cleanup_records,
+            product_id=product_id,
+        )
+        return reconciled_attempts, cleanup_records
+
+    async def _reconcile_materialization_attempts(self, *, product_id: str) -> int:
+        """Clean abandoned video attempts without invalidating a live owner.
+
+        Lease expiry alone is not abandonment: the original owner may still
+        complete while its token remains stored.  An attempt becomes eligible
+        only after a terminal job result or token replacement/clearance.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(GenerationMaterializationAttempt, GenerationJob.status)
+                .join(GenerationJob, GenerationJob.id == GenerationMaterializationAttempt.job_id)
+                .where(
+                    GenerationMaterializationAttempt.product_id == product_id,
+                    GenerationJob.product_id == product_id,
+                    GenerationMaterializationAttempt.state.in_(
+                        ["planned", "uploading", "cleanup_pending", "ambiguous"]
+                    ),
+                    or_(
+                        GenerationJob.status.in_(["completed", "failed", "cancelled"]),
+                        GenerationJob.finalization_claim_token.is_(None),
+                        GenerationJob.finalization_claim_token
+                        != GenerationMaterializationAttempt.claim_token,
+                    ),
+                )
+                .order_by(GenerationMaterializationAttempt.updated_at)
+                .limit(self._batch_size)
+            )
+            candidates = list(result.all())
+
+        reconciled = 0
+        for attempt, _status in candidates:
+            async with self._session_factory() as session:
+                referenced_keys = set(
+                    (
+                        await session.scalars(
+                            select(GenerationOutput.storage_key).where(
+                                GenerationOutput.job_id == attempt.job_id,
+                                GenerationOutput.product_id == product_id,
+                            )
+                        )
+                    ).all()
+                )
+                unreferenced = [
+                    key for key in attempt.planned_storage_keys if key not in referenced_keys
+                ]
+            try:
+                if unreferenced:
+                    await self._storage.delete_many(unreferenced)
+            except Exception as exc:
+                async with self._session_factory() as session:
+                    await session.execute(
+                        update(GenerationMaterializationAttempt)
+                        .where(
+                            GenerationMaterializationAttempt.id == attempt.id,
+                            GenerationMaterializationAttempt.product_id == product_id,
+                        )
+                        .values(
+                            state="cleanup_pending",
+                            reconciliation_error=str(exc)[:2000],
+                        )
+                    )
+                    await session.commit()
+                logger.exception(
+                    "content_retention.materialization_cleanup_failed",
+                    attempt_id=str(attempt.id),
+                )
+                continue
+
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(GenerationMaterializationAttempt)
+                    .where(
+                        GenerationMaterializationAttempt.id == attempt.id,
+                        GenerationMaterializationAttempt.product_id == product_id,
+                    )
+                    .values(
+                        state="cleaned" if unreferenced else "committed",
+                        reconciliation_error=None,
+                    )
+                )
+                await session.commit()
+            reconciled += 1
+        return reconciled
+
+    async def _drain_storage_cleanup_outbox(self, *, product_id: str) -> int:
+        """Retry post-commit R2 cleanup queued by data migrations and services."""
+        async with self._session_factory() as session:
+            records = list(
+                (
+                    await session.scalars(
+                        select(StorageCleanupRecord)
+                        .where(
+                            StorageCleanupRecord.product_id == product_id,
+                            StorageCleanupRecord.state == "pending",
+                        )
+                        .order_by(StorageCleanupRecord.created_at)
+                        .limit(self._batch_size)
+                    )
+                ).all()
+            )
+
+        deleted = 0
+        for record in records:
+            try:
+                await self._storage.delete(record.storage_key)
+            except Exception as exc:
+                async with self._session_factory() as session:
+                    await session.execute(
+                        update(StorageCleanupRecord)
+                        .where(
+                            StorageCleanupRecord.id == record.id,
+                            StorageCleanupRecord.product_id == product_id,
+                        )
+                        .values(
+                            attempts=StorageCleanupRecord.attempts + 1,
+                            last_error=str(exc)[:2000],
+                        )
+                    )
+                    await session.commit()
+                logger.exception(
+                    "content_retention.storage_cleanup_outbox_failed",
+                    cleanup_record_id=str(record.id),
+                )
+                continue
+
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(StorageCleanupRecord)
+                    .where(
+                        StorageCleanupRecord.id == record.id,
+                        StorageCleanupRecord.product_id == product_id,
+                    )
+                    .values(state="deleted", processed_at=func.now(), last_error=None)
+                )
+                await session.commit()
+            deleted += 1
+        return deleted
 
     async def _sweep_outputs(self) -> _TypeSweepResult:
         rows_deleted = 0

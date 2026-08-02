@@ -138,13 +138,26 @@ class IdempotencyRepository:
         return rowcount > 0
 
     async def mark_failed(self, record_id: UUID) -> None:
-        """Mark an idempotency record as failed (allows retry with same key)."""
-        record = await self._session.get(IdempotencyKey, record_id)
-        if record is None:
-            return
-        record.status = "failed"
-        record.completed_at = datetime.now(UTC)
+        """Release only a still-processing record.
+
+        A commit acknowledgement can be lost after the transaction has made
+        the cached response durable.  This conditional update makes the state
+        machine monotonic: a generic exception handler can never downgrade a
+        completed record and reopen a charged request for replay.
+        """
+        await self._session.execute(
+            update(IdempotencyKey)
+            .where(
+                IdempotencyKey.id == record_id,
+                IdempotencyKey.status == "processing",
+            )
+            .values(status="failed", completed_at=datetime.now(UTC))
+        )
         await self._session.flush()
+
+    async def get_by_id(self, record_id: UUID) -> IdempotencyKey | None:
+        """Read a record after an uncertain transaction outcome."""
+        return await self._session.get(IdempotencyKey, record_id)
 
     async def cleanup_expired(self) -> int:
         """Delete expired idempotency records. Returns count deleted."""

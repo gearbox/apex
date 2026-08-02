@@ -9,13 +9,15 @@ from uuid import uuid4
 
 import pytest
 
-from src.api.services.grok import GrokClient, GrokImageResult
+from src.api.services.generation.provider_failures import ProviderModerationRejectedError
+from src.api.services.grok import GrokClient, GrokImageResult, GrokModerationError
 from src.api.services.grok.enums import ResponseImageFormat
 from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import AspectRatio, GenerationType, JobStatus, ModelType
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from xai_sdk import AsyncClient as XAIAsyncClient
 
     from src.api.services.billing import BillingService
 
@@ -40,6 +42,27 @@ class _FakeJobRepository:
         for key, value in kwargs.items():
             setattr(self.job, key, value)
         return self.job
+
+
+class _ModeratedImageResponse:
+    @property
+    def url(self) -> str:
+        raise ValueError("Image did not respect moderation rules; URL is not available.")
+
+    @property
+    def revised_prompt(self) -> None:
+        return None
+
+
+def _client_with_moderated_image() -> GrokClient:
+    client = GrokClient.__new__(GrokClient)
+    client._client = cast(
+        "XAIAsyncClient",
+        SimpleNamespace(
+            image=SimpleNamespace(sample_batch=AsyncMock(return_value=[_ModeratedImageResponse()]))
+        ),
+    )
+    return client
 
 
 async def test_create_image_job_i2i_preserves_requested_output_count() -> None:
@@ -114,7 +137,7 @@ async def test_create_image_job_i2i_preserves_requested_output_count() -> None:
     assert result.balance_after == 75
 
 
-async def test_create_image_job_i2i_without_resolved_input_url_fails_and_refunds() -> None:
+async def test_create_image_job_i2i_without_resolved_input_url_fails_before_reserving() -> None:
     job_repo = _FakeJobRepository()
     session = SimpleNamespace(flush=AsyncMock())
     grok = SimpleNamespace(
@@ -159,12 +182,90 @@ async def test_create_image_job_i2i_without_resolved_input_url_fails_and_refunds
     grok.edit_image.assert_not_awaited()
     grok.generate_image.assert_not_awaited()
     store_image_result.assert_not_awaited()
+    assert job_repo.job is None
+    billing_service.check_and_reserve.assert_not_awaited()
+    billing_service.refund.assert_not_awaited()
+
+
+async def test_create_image_job_moderation_rejection_is_billable_and_safe() -> None:
+    job_repo = _FakeJobRepository()
+    session = SimpleNamespace(flush=AsyncMock())
+    raw_provider_message = (
+        "Image did not respect moderation rules; URL is not available. xai-key=secret"
+    )
+    grok = SimpleNamespace(
+        edit_image=AsyncMock(),
+        generate_image=AsyncMock(side_effect=GrokModerationError(raw_provider_message)),
+    )
+    billing_service = _billing_stub()
+    service = GrokJobService(cast("GrokClient", grok), MagicMock())
+
+    with (
+        patch("src.api.services.grok.job_service.JobRepository", return_value=job_repo),
+        patch(
+            "src.api.services.grok.job_service.OutputRepository",
+            return_value=SimpleNamespace(),
+        ),
+        pytest.raises(ProviderModerationRejectedError),
+    ):
+        await service.create_image_job(
+            cast("AsyncSession", session),
+            user_id=uuid4(),
+            prompt="unsafe request",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            generation_type=GenerationType.T2I,
+            billing_service=cast("BillingService", billing_service),
+            account_id=uuid4(),
+            token_cost=25,
+            product_id="grok-image",
+        )
+
     assert job_repo.job is not None
-    assert job_repo.job.status == JobStatus.FAILED
-    assert job_repo.job.error_message == "I2I generation requires a resolved input image URL"
-    billing_service.refund.assert_awaited_once()
-    assert billing_service.refund.await_args.args[0] == job_repo.job.id
-    assert billing_service.refund.await_args.kwargs["product_id"] == "grok-image"
+    # The provider adapter classifies and retains the safe context only; the
+    # request-level GenerationService owns terminal state and billing.
+    assert job_repo.job.status == JobStatus.RUNNING
+    assert billing_service.refund.await_count == 0
+
+
+@pytest.mark.parametrize(
+    ("generation_type", "input_image_url"),
+    [
+        (GenerationType.T2I, None),
+        (GenerationType.I2I, "https://example.test/input.png"),
+    ],
+)
+async def test_create_image_job_classifies_raising_sdk_url_property_as_billable_moderation(
+    generation_type: GenerationType,
+    input_image_url: str | None,
+) -> None:
+    job_repo = _FakeJobRepository()
+    session = SimpleNamespace(flush=AsyncMock())
+    billing_service = _billing_stub()
+    service = GrokJobService(_client_with_moderated_image(), MagicMock())
+
+    with (
+        patch("src.api.services.grok.job_service.JobRepository", return_value=job_repo),
+        patch(
+            "src.api.services.grok.job_service.OutputRepository",
+            return_value=SimpleNamespace(),
+        ),
+        pytest.raises(ProviderModerationRejectedError) as exc_info,
+    ):
+        await service.create_image_job(
+            cast("AsyncSession", session),
+            user_id=uuid4(),
+            prompt="unsafe request",
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            generation_type=generation_type,
+            input_image_url=input_image_url,
+            billing_service=cast("BillingService", billing_service),
+            account_id=uuid4(),
+            token_cost=25,
+            product_id="grok-image",
+        )
+
+    assert exc_info.value.failure.billable is True
+    assert billing_service.refund.await_count == 0
 
 
 def _billing_stub() -> SimpleNamespace:

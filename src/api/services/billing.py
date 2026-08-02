@@ -323,8 +323,14 @@ class BillingService:
             model=metadata.get("model"),
         )
 
+        target_user_ids = await self._resolve_event_targets(account, repo)
+        # ``user_id`` is retained for legacy callers whose account rows are
+        # intentionally not associated with an SSE target. Normal personal
+        # and organization accounts always resolve from the locked account.
+        if not target_user_ids and user_id is not None:
+            target_user_ids = [user_id]
         event = self._build_balance_event(
-            user_ids=[user_id] if user_id is not None else [],
+            user_ids=target_user_ids,
             account_id=account_id,
             balance=new_balance,
             delta=-token_cost,
@@ -418,8 +424,11 @@ class BillingService:
                 incurred=owed,
             )
 
+        target_user_ids = await self._resolve_event_targets(account, repo)
+        if not target_user_ids and user_id is not None:
+            target_user_ids = [user_id]
         event = self._build_balance_event(
-            user_ids=[user_id] if user_id is not None else [],
+            user_ids=target_user_ids,
             account_id=account_id,
             balance=new_balance,
             delta=-owed,
@@ -484,8 +493,11 @@ class BillingService:
             reason=description,
         )
 
+        target_user_ids = await self._resolve_event_targets(account, repo)
+        if not target_user_ids and user_id is not None:
+            target_user_ids = [user_id]
         event = self._build_balance_event(
-            user_ids=[user_id] if user_id is not None else [],
+            user_ids=target_user_ids,
             account_id=debit.account_id,
             balance=new_balance,
             delta=refund_amount,
@@ -570,8 +582,11 @@ class BillingService:
             reason=description,
         )
 
+        target_user_ids = await self._resolve_event_targets(account, repo)
+        if not target_user_ids and user_id is not None:
+            target_user_ids = [user_id]
         event = self._build_balance_event(
-            user_ids=[user_id] if user_id is not None else [],
+            user_ids=target_user_ids,
             account_id=debit.account_id,
             balance=new_balance,
             delta=amount,

@@ -24,6 +24,7 @@ import httpx
 import structlog
 
 from src.api.services.comfyui_client import ComfyUIClient
+from src.api.services.generation.aisha_failures import AishaFailure
 from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
     validate_tunnel_hostname,
@@ -202,6 +203,8 @@ class AishaJobPoller(PeriodicWorker):
             _, _ = await ts.transition_to_failed(
                 job.id,
                 error_message=f"Invalid tunnel hostname: {exc}"[:500],
+                public_error_message=AishaFailure.PROVIDER_UNAVAILABLE.public_message,
+                failure_code=AishaFailure.PROVIDER_UNAVAILABLE.value,
                 refund=True,
                 product_id=product_id,
             )
@@ -273,6 +276,8 @@ class AishaJobPoller(PeriodicWorker):
                 _, _ = await ts.transition_to_failed(
                     job.id,
                     error_message=f"ComfyUI reported error: {messages!r}"[:500],
+                    public_error_message=AishaFailure.PROVIDER_EXECUTION_FAILED.public_message,
+                    failure_code=AishaFailure.PROVIDER_EXECUTION_FAILED.value,
                     refund=True,
                     product_id=product_id,
                 )
@@ -292,6 +297,8 @@ class AishaJobPoller(PeriodicWorker):
                         "ComfyUI history entry contained no outputs and no error; "
                         "job exceeded age timeout."
                     ),
+                    public_error_message=AishaFailure.PROVIDER_TIMEOUT.public_message,
+                    failure_code=AishaFailure.PROVIDER_TIMEOUT.value,
                     refund=True,
                     product_id=product_id,
                 )
@@ -346,6 +353,8 @@ class AishaJobPoller(PeriodicWorker):
             _, _ = await ts.transition_to_failed(
                 job.id,
                 error_message="ComfyUI lost track of prompt — job timed out.",
+                public_error_message=AishaFailure.PROVIDER_TIMEOUT.public_message,
+                failure_code=AishaFailure.PROVIDER_TIMEOUT.value,
                 refund=True,
                 product_id=product_id,
             )

@@ -31,6 +31,9 @@ class JobStatusPayload(msgspec.Struct, kw_only=True):
     previous_status: str
     generation_type: str
     provider: str
+    failure_code: str | None = None
+    # Public-safe failure text only; never GenerationJob.error_message.
+    error_message: str | None = None
 
 
 class JobProgressPayload(msgspec.Struct, kw_only=True):

@@ -12,6 +12,11 @@ import pytest
 
 from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
 from src.api.services.generation.base import ProviderSubmitResult
+from src.api.services.generation.provider_failures import (
+    ProviderFailure,
+    ProviderFailureKind,
+    ProviderModerationRejectedError,
+)
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
     GenerationError,
@@ -378,6 +383,21 @@ def _make_service(
     )
 
 
+def test_generation_service_uses_injected_transition_factory() -> None:
+    factory = MagicMock()
+    service = GenerationService(
+        providers={},
+        billing_service=MagicMock(),
+        pricing_service=MagicMock(),
+        rate_limiter=MagicMock(spec=ModelRateLimiter),
+        transition_service_factory=factory,
+    )
+    session = AsyncMock()
+
+    assert service._make_transition_service(session) is factory.return_value
+    factory.assert_called_once_with(session)
+
+
 class TestGenerationServiceValidation:
     def test_validate_i2i_requires_image_id(self) -> None:
         service = _make_service()
@@ -685,6 +705,83 @@ class TestGenerationServiceGenerate:
         # discard the (empty) transaction instead of committing a charge.
         billing.refund.assert_not_awaited()
         session.rollback.assert_awaited()
+
+    async def test_billable_moderation_commits_and_publishes_after_commit(self) -> None:
+        job_id = uuid4()
+        failure = ProviderFailure(
+            kind=ProviderFailureKind.MODERATION_REJECTED,
+            provider=Provider.GROK,
+            sanitized_message=(
+                "The requested content was rejected by the AI provider's safety system. "
+                "Modify the prompt or input and try again."
+            ),
+            provider_request_accepted=True,
+            billable=True,
+        )
+        moderation_error = ProviderModerationRejectedError(
+            failure=failure,
+            job_id=job_id,
+            balance_event=None,
+        )
+        mock_provider = _make_mock_provider()
+        mock_provider.submit = AsyncMock(side_effect=moderation_error)
+
+        billing = AsyncMock()
+        billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
+        billing.assert_sufficient_balance = AsyncMock()
+        pricing = AsyncMock()
+        pricing.quote = AsyncMock(return_value=50)
+        event_bus = AsyncMock()
+        session = AsyncMock()
+        settled_job = MagicMock(
+            id=job_id,
+            user_id=uuid4(),
+            status=JobStatus.RUNNING.value,
+            provider=Provider.GROK.value,
+            generation_type=GenerationType.T2I.value,
+            token_cost=50,
+            public_error_message=None,
+        )
+        session.get.return_value = settled_job
+        update_result = MagicMock(rowcount=1)
+        session.execute.return_value = update_result
+
+        async def refresh_job(job: MagicMock) -> None:
+            job.status = JobStatus.FAILED.value
+            job.public_error_message = failure.sanitized_message
+            job.failure_code = failure.public_code
+
+        session.refresh.side_effect = refresh_job
+        service = GenerationService(
+            providers={Provider.GROK: mock_provider},
+            billing_service=billing,
+            pricing_service=pricing,
+            rate_limiter=MagicMock(spec=ModelRateLimiter),
+            event_bus=event_bus,
+        )
+        request = UnifiedGenerationRequest(
+            prompt="unsafe request",
+            generation_type=GenerationType.T2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+        )
+
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            pytest.raises(ProviderModerationRejectedError),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        session.commit.assert_awaited_once()
+        event_bus.publish_balance.assert_not_awaited()
+        event_bus.publish.assert_awaited_once()
 
     async def test_asyncpg_style_db_error_does_not_leak_into_response(self) -> None:
         """A raw DB-driver-style exception (e.g. asyncpg.PostgresError, or

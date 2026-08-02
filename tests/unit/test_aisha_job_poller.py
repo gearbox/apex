@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from src.api.services.generation.aisha_failures import AishaFailure
 from src.core.enums import JobStatus
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 
@@ -271,6 +272,10 @@ class TestPollOne:
         with patch.object(poller, "_make_transition_service", return_value=ts):
             await poller._poll_one(job, job.gpu_session, session)
             ts.transition_to_failed.assert_awaited_once()
+        kwargs = ts.transition_to_failed.call_args.kwargs
+        assert kwargs["failure_code"] == AishaFailure.PROVIDER_UNAVAILABLE.value
+        assert kwargs["public_error_message"] == AishaFailure.PROVIDER_UNAVAILABLE.public_message
+        assert "evil.com" not in kwargs["public_error_message"]
 
     async def test_skips_when_no_prompt_id(self) -> None:
         poller = _make_poller()
@@ -490,6 +495,8 @@ class TestHandleHistoryComplete:
         ts.transition_to_failed.assert_awaited_once()
         _args, kwargs = ts.transition_to_failed.call_args
         assert "no outputs" in kwargs.get("error_message", "").lower()
+        assert kwargs["failure_code"] == AishaFailure.PROVIDER_TIMEOUT.value
+        assert kwargs["public_error_message"] == AishaFailure.PROVIDER_TIMEOUT.public_message
 
     async def test_history_with_explicit_error_marks_failed_immediately(self) -> None:
         """status_str=error triggers FAILED even if job is under the age timeout."""
@@ -509,3 +516,9 @@ class TestHandleHistoryComplete:
             ts=ts,
         )
         ts.transition_to_failed.assert_awaited_once()
+        kwargs = ts.transition_to_failed.call_args.kwargs
+        assert kwargs["failure_code"] == AishaFailure.PROVIDER_EXECUTION_FAILED.value
+        assert (
+            kwargs["public_error_message"] == AishaFailure.PROVIDER_EXECUTION_FAILED.public_message
+        )
+        assert "CUDA OOM" not in kwargs["public_error_message"]
