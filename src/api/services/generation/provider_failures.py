@@ -31,11 +31,13 @@ class ProviderFailureKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+_MODERATION_REJECTION_MESSAGE = (
+    "The requested content was rejected by the AI provider's safety system."
+)
+_MODIFICATION_MESSAGE = "Modify the prompt or input and try again."
 _PUBLIC_MESSAGES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.MODERATION_REJECTED: (
-        "The requested content was rejected by the AI provider's safety system. "
-        "This generation was charged because the provider processed the request. "
-        "Modify the prompt or input and try again."
+        f"{_MODERATION_REJECTION_MESSAGE} {_MODIFICATION_MESSAGE}"
     ),
     ProviderFailureKind.INVALID_REQUEST: "The AI provider could not process this request.",
     ProviderFailureKind.RATE_LIMITED: "The AI provider is temporarily rate limited.",
@@ -45,6 +47,7 @@ _PUBLIC_MESSAGES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.MALFORMED_RESPONSE: "The AI provider returned an invalid response.",
     ProviderFailureKind.UNKNOWN: "The AI provider could not complete the request.",
 }
+_BILLED_NOTICE = "This generation was charged because the provider processed the request."
 
 _PUBLIC_CODES: dict[ProviderFailureKind, str] = {
     ProviderFailureKind.MODERATION_REJECTED: "provider_moderation_rejected",
@@ -81,7 +84,12 @@ class ProviderFailure:
     @property
     def public_code(self) -> str:
         """Stable client-visible error code for this failure."""
-        return _PUBLIC_CODES[self.kind]
+        return self.public_code_for_kind(self.kind)
+
+    @classmethod
+    def public_code_for_kind(cls, kind: ProviderFailureKind) -> str:
+        """Return the stable client-visible code for a normalized kind."""
+        return _PUBLIC_CODES[kind]
 
     @classmethod
     def safe_message_for_kind(cls, kind: ProviderFailureKind) -> str:
@@ -91,12 +99,14 @@ class ProviderFailure:
     @classmethod
     def public_message_for_failure(cls, failure: ProviderFailure) -> str:
         """Return the safe message after the resolved billing policy is known."""
-        if failure.kind is ProviderFailureKind.MODERATION_REJECTED and not failure.billable:
-            return (
-                "The requested content was rejected by the AI provider's safety system. "
-                "Modify the prompt or input and try again."
+        base = cls.safe_message_for_kind(failure.kind)
+        if failure.kind is ProviderFailureKind.MODERATION_REJECTED and failure.billable:
+            return base.replace(
+                _MODIFICATION_MESSAGE,
+                f"{_BILLED_NOTICE} {_MODIFICATION_MESSAGE}",
+                1,
             )
-        return cls.safe_message_for_kind(failure.kind)
+        return base
 
 
 class ProviderSubmissionFailedError(Exception):

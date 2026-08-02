@@ -56,6 +56,18 @@ class TestClassCatalog:
         )
         assert entry.scope == "platform"
 
+    def test_provider_authentication_failed_is_platform_scoped(self) -> None:
+        service = AdminNotificationService(sender=None, link_token_ttl_seconds=900)
+
+        catalog = service.get_class_catalog()
+
+        entry = next(
+            c
+            for c in catalog
+            if c.notification_class == NotificationClass.PROVIDER_AUTHENTICATION_FAILED.value
+        )
+        assert entry.scope == "platform"
+
 
 class TestGetPreferences:
     async def test_returns_repo_rows(self) -> None:

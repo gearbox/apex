@@ -21,10 +21,12 @@ class ProviderBillingPolicy:
         Unknown acceptance is never promoted to a charge. This preserves the
         existing compensation behavior for ambiguous infrastructure failures.
         """
-        return (
-            self.charge_on_moderation_rejection
-            and failure.kind == ProviderFailureKind.MODERATION_REJECTED
-            and failure.provider_request_accepted is True
+        return failure.provider_request_accepted is True and (
+            failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+            or (
+                self.charge_on_moderation_rejection
+                and failure.kind is ProviderFailureKind.MODERATION_REJECTED
+            )
         )
 
 

@@ -45,6 +45,9 @@ _CATALOG_DESCRIPTIONS: dict[NotificationClass, str] = {
     NotificationClass.GENERATION_CREATED: "A new generation job was submitted.",
     NotificationClass.GPU_NODE_STARTED: "A new GPU node finished provisioning.",
     NotificationClass.GENERATION_FAILED: "A generation job failed.",
+    NotificationClass.PROVIDER_AUTHENTICATION_FAILED: (
+        "A provider rejected its authentication key; all generations for that provider are failing."
+    ),
     NotificationClass.HEALTH_DEGRADED: "A platform subsystem became degraded or unhealthy.",
     NotificationClass.HEALTH_RESTORED: "A platform subsystem recovered.",
     NotificationClass.TOKEN_REVOCATION_FAILED: (

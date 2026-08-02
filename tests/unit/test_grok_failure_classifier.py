@@ -56,6 +56,85 @@ def test_structured_moderation_code_proves_request_accepted(
     assert registry.apply(failure).billable is True
 
 
+def test_callable_error_code_is_invoked(classifier: GrokFailureClassifier) -> None:
+    class _Failure(Exception):
+        def error_code(self) -> str:
+            return "UNAVAILABLE"
+
+    failure = classifier.classify(_Failure())
+
+    assert failure.kind is ProviderFailureKind.PROVIDER_UNAVAILABLE
+    assert failure.provider_error_code == "UNAVAILABLE"
+
+
+def test_callable_code_fallback_is_dropped(classifier: GrokFailureClassifier) -> None:
+    failure = classifier.classify({"code": lambda: "UNAVAILABLE"})
+
+    assert failure.provider_error_code is None
+    assert failure.kind is ProviderFailureKind.UNKNOWN
+
+
+def test_grpc_style_callable_fields_are_invoked(classifier: GrokFailureClassifier) -> None:
+    class _GrpcFailure(Exception):
+        def code(self) -> str:
+            return "UNAVAILABLE"
+
+        def details(self) -> str:
+            return "upstream unavailable"
+
+    failure = classifier.classify(_GrpcFailure())
+
+    assert failure.kind is ProviderFailureKind.PROVIDER_UNAVAILABLE
+    assert failure.provider_error_code == "UNAVAILABLE"
+
+
+def test_code_enum_like_name_is_used(classifier: GrokFailureClassifier) -> None:
+    class _EnumLike:
+        name = "UNAVAILABLE"
+
+    failure = classifier.classify({"code": _EnumLike()})
+
+    assert failure.kind is ProviderFailureKind.PROVIDER_UNAVAILABLE
+    assert failure.provider_error_code == "UNAVAILABLE"
+
+
+def test_unnamed_code_value_is_stringified(classifier: GrokFailureClassifier) -> None:
+    class _Code:
+        def __str__(self) -> str:
+            return "UNAVAILABLE"
+
+    failure = classifier.classify({"code": _Code()})
+
+    assert failure.kind is ProviderFailureKind.PROVIDER_UNAVAILABLE
+    assert failure.provider_error_code == "UNAVAILABLE"
+
+
+def test_walk_depth_guard_stops_nested_payload(classifier: GrokFailureClassifier) -> None:
+    payload: object = {"message": "too deep"}
+    for _ in range(40):
+        payload = {"nested": payload}
+
+    assert classifier.classify(payload).kind is ProviderFailureKind.UNKNOWN
+
+
+def test_walk_handles_scalars_cycles_and_faulty_fields(classifier: GrokFailureClassifier) -> None:
+    assert classifier.classify(503).kind is ProviderFailureKind.PROVIDER_UNAVAILABLE
+    assert classifier.classify(99).kind is ProviderFailureKind.UNKNOWN
+    assert classifier.classify(Exception("message from args")).kind is ProviderFailureKind.UNKNOWN
+
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    assert classifier.classify(cyclic).kind is ProviderFailureKind.UNKNOWN
+
+    class _Faulty:
+        args = "not a tuple"
+
+        def code(self) -> str:
+            raise RuntimeError("code unavailable")
+
+    assert classifier.classify(_Faulty()).kind is ProviderFailureKind.UNKNOWN
+
+
 def test_unrelated_provider_error_is_not_moderation(classifier: GrokFailureClassifier) -> None:
     failure = classifier.classify({"error": {"code": "UPSTREAM_UNAVAILABLE", "message": "retry"}})
 
@@ -150,6 +229,17 @@ def test_moderation_service_failures_are_not_billable_rejections(
     assert failure.provider_request_accepted is None
 
 
+def test_output_not_returned_is_malformed_and_accepted(
+    classifier: GrokFailureClassifier,
+) -> None:
+    failure = classifier.classify({"message": "Image was not returned via URL."})
+    registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy("refund")
+
+    assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+    assert failure.provider_request_accepted is True
+    assert registry.apply(failure).billable is True
+
+
 def test_sanitized_failure_never_exposes_provider_payload_or_secret(
     classifier: GrokFailureClassifier,
 ) -> None:
@@ -212,6 +302,25 @@ def test_refunded_moderation_message_does_not_claim_a_charge() -> None:
     )
 
     assert "This generation was charged" not in error.public_message
+
+
+def test_billable_moderation_message_includes_charge_notice() -> None:
+    failure = ProviderFailure(
+        kind=ProviderFailureKind.MODERATION_REJECTED,
+        provider=Provider.GROK,
+        sanitized_message=ProviderFailure.safe_message_for_kind(
+            ProviderFailureKind.MODERATION_REJECTED
+        ),
+        billable=True,
+    )
+
+    assert "This generation was charged" in ProviderFailure.public_message_for_failure(failure)
+
+
+def test_safe_message_for_kind_makes_no_charge_claim() -> None:
+    assert "This generation was charged" not in ProviderFailure.safe_message_for_kind(
+        ProviderFailureKind.MODERATION_REJECTED
+    )
 
 
 def test_mapping_with_none_code_does_not_emit_string_none(

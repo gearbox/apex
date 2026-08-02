@@ -30,6 +30,8 @@ _AUTH_CODE_MARKERS = ("UNAUTHENTICATED", "UNAUTHORIZED", "PERMISSION_DENIED", "F
 _UNAVAILABLE_CODE_MARKERS = ("UNAVAILABLE", "SERVICE_UNAVAILABLE", "INTERNAL", "UPSTREAM")
 _TIMEOUT_CODE_MARKERS = ("DEADLINE_EXCEEDED", "TIMEOUT", "TIMED_OUT")
 _MALFORMED_CODE_MARKERS = ("MALFORMED", "INVALID_RESPONSE", "PARSE_ERROR")
+_CODE_FIELDS = frozenset({"error_code", "code", "grpc_code"})
+_INVOCABLE_FIELDS: frozenset[str] = _CODE_FIELDS | {"details"}
 
 # Free-text recognition is deliberately narrow.  These are known xAI/SDK
 # response shapes, not broad keyword matching; a sentence about an
@@ -52,7 +54,11 @@ _MODERATION_SIGNATURE_RE = re.compile(
 )
 _OUTPUT_WITHHELD_RE = re.compile(
     r"\b(?:url|base64)\s+(?:is\s+)?"
-    r"(?:not\s+available|unavailable|withheld|not\s+provided|not\s+returned)\b",
+    r"(?:not\s+available|unavailable|withheld|not\s+provided)\b",
+    re.IGNORECASE,
+)
+_OUTPUT_NOT_RETURNED_RE = re.compile(
+    r"not\s+returned\s+via\s+(?:url|base64)",
     re.IGNORECASE,
 )
 
@@ -75,12 +81,17 @@ class GrokFailureClassifier:
         # response proves that the provider reached content moderation. Other
         # moderation-labelled errors remain ambiguous and non-billable unless
         # their call site proves acceptance (for example a deferred request ID).
-        if (
-            kind == ProviderFailureKind.MODERATION_REJECTED
-            and provider_request_accepted is None
-            and (
-                self._has_definitive_moderation_code(codes)
-                or self._has_confirmed_moderation_result(messages)
+        if provider_request_accepted is None and (
+            (
+                kind == ProviderFailureKind.MODERATION_REJECTED
+                and (
+                    self._has_definitive_moderation_code(codes)
+                    or self._has_confirmed_moderation_result(messages)
+                )
+            )
+            or (
+                kind == ProviderFailureKind.MALFORMED_RESPONSE
+                and self._has_output_not_returned(messages)
             )
         ):
             provider_request_accepted = True
@@ -130,6 +141,8 @@ class GrokFailureClassifier:
         # ``unavailable`` infrastructure marker below.
         if self._has_confirmed_moderation_result(messages):
             return ProviderFailureKind.MODERATION_REJECTED
+        if self._has_output_not_returned(messages):
+            return ProviderFailureKind.MALFORMED_RESPONSE
         if any(marker in normalized for marker in ("deadline exceeded", "timed out", "timeout")):
             return ProviderFailureKind.TIMEOUT
         # Do not turn an outage in a moderation-related service into a
@@ -202,6 +215,10 @@ class GrokFailureClassifier:
             and _OUTPUT_WITHHELD_RE.search(message) is not None
         )
 
+    @staticmethod
+    def _has_output_not_returned(messages: list[str]) -> bool:
+        return _OUTPUT_NOT_RETURNED_RE.search(" ".join(messages)) is not None
+
     def _extract(self, source: object) -> tuple[list[str], list[str], int | None]:
         codes: list[str] = []
         messages: list[str] = []
@@ -261,7 +278,7 @@ class GrokFailureClassifier:
             "data",
         ):
             nested = getattr(value, field_name, None)
-            if callable(nested) and field_name in {"code", "details", "grpc_code"}:
+            if callable(nested) and field_name in _INVOCABLE_FIELDS:
                 try:
                     nested = nested()
                 except Exception:
@@ -292,13 +309,15 @@ class GrokFailureClassifier:
         seen: set[int],
     ) -> None:
         normalized_name = field_name.casefold()
-        if normalized_name in {"error_code", "code", "grpc_code"}:
+        if normalized_name in _CODE_FIELDS:
             if isinstance(value, str):
                 codes.append(value)
                 return
             name = getattr(value, "name", None)
             if isinstance(name, str):
                 codes.append(name)
+                return
+            if callable(value):
                 return
             codes.append(str(value))
             return

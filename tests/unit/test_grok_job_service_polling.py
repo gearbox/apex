@@ -98,9 +98,9 @@ class TestPollVideoJobForWorkerTransientPropagation:
         assert outcome.status == VideoPollStatus.FAILED
         assert outcome.error_message == (
             "The requested content was rejected by the AI provider's safety system. "
-            "This generation was charged because the provider processed the request. "
             "Modify the prompt or input and try again."
         )
+        assert "This generation was charged" not in (outcome.error_message or "")
         assert outcome.failure is not None
         assert outcome.failure.kind == ProviderFailureKind.MODERATION_REJECTED
         assert outcome.failure.billable is True

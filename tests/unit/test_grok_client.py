@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.grok import (
     GrokAPIError,
@@ -70,6 +71,16 @@ class _ModeratedBase64ImageResponse:
 
 class _Base64ImageResponse:
     base64 = "aGVsbG8="
+    revised_prompt = None
+
+
+class _WhitespaceWrappedBase64ImageResponse:
+    base64 = "aGVs\n bG8=\r\n"
+    revised_prompt = None
+
+
+class _CorruptBase64ImageResponse:
+    base64 = "not valid base64 !!!"
     revised_prompt = None
 
 
@@ -446,6 +457,35 @@ class TestImageGeneration:
         results = await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
 
         assert results[0].base64_data == b"hello"
+
+    async def test_whitespace_wrapped_base64_decodes(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(return_value=[_WhitespaceWrappedBase64ImageResponse()])
+        )
+        client = self._client_with_image(image)
+
+        results = await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        assert results[0].base64_data == b"hello"
+
+    async def test_corrupt_base64_is_malformed_and_billable(self) -> None:
+        image = SimpleNamespace(
+            sample_batch=AsyncMock(return_value=[_CorruptBase64ImageResponse()])
+        )
+        client = self._client_with_image(image)
+
+        with pytest.raises(GrokAPIError) as exc_info:
+            await client.generate_image("a cat", image_format=ResponseImageFormat.BASE64)
+
+        failure = exc_info.value.failure
+        assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+        assert failure.provider_request_accepted is True
+        assert (
+            ProviderBillingPolicyRegistry.with_grok_moderation_policy("refund")
+            .apply(failure)
+            .billable
+            is True
+        )
 
     async def test_generate_image_classifies_raising_base64_property(self) -> None:
         image = SimpleNamespace(

@@ -12,6 +12,7 @@ Supports:
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -734,7 +735,16 @@ class GrokClient:
             # at the provider boundary so callers consistently receive bytes.
             encoded_data = getattr(response, "base64", None)
             if encoded_data is not None:
-                base64_data = base64.b64decode(encoded_data, validate=True)
+                try:
+                    base64_data = base64.b64decode("".join(str(encoded_data).split()))
+                except (binascii.Error, ValueError) as exc:
+                    raise GrokAPIError(
+                        "Provider returned an undecodable base64 image payload.",
+                        failure=_failure_classifier.classify(
+                            {"code": "MALFORMED_RESPONSE", "message": str(exc)},
+                            provider_request_accepted=True,
+                        ),
+                    ) from exc
 
         revised_prompt = getattr(response, "revised_prompt", None)
 
