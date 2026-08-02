@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -36,6 +37,25 @@ async def test_worker_run_once_calls_sweep() -> None:
     await worker.run_once()
 
     service.sweep.assert_awaited_once()
+
+
+async def test_worker_reconciles_each_configured_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = AsyncMock()
+    monkeypatch.setattr(
+        "src.workers.content_retention.PRODUCT_REGISTRY",
+        {
+            "vex": SimpleNamespace(slug="vex"),
+            "synthara": SimpleNamespace(slug="synthara"),
+        },
+    )
+    worker = _make_worker(service=service)
+
+    await worker.run_once()
+
+    assert service.reconcile_storage_artifacts.await_args_list == [
+        call(product_id="vex"),
+        call(product_id="synthara"),
+    ]
 
 
 async def test_worker_run_once_propagates_service_exception() -> None:

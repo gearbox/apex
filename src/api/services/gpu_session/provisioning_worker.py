@@ -26,6 +26,7 @@ import httpx
 import msgspec
 import structlog
 
+from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
@@ -849,7 +850,7 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._job_sweep.sweep_session_best_effort(
                 session_id=session.id,
                 product_id=session.product_id,
-                reason=f"GPU session failed: {reason}",
+                failure=JobSweepFailure(internal_reason=f"GPU session failed: {reason}"),
                 log_event="gpu_session.provision.job_sweep",
             )
 

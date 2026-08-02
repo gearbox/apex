@@ -539,6 +539,7 @@ class GenerationMaterializationAttempt(Base):
     __tablename__ = "generation_materialization_attempts"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     job_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("generation_jobs.id", ondelete="CASCADE"),
@@ -565,6 +566,7 @@ class GenerationMaterializationAttempt(Base):
         ),
         Index(
             "ix_generation_materialization_attempts_reconcile",
+            "product_id",
             "state",
             "updated_at",
             postgresql_where=text(
@@ -582,6 +584,7 @@ class StorageCleanupRecord(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
     reason: Mapped[str] = mapped_column(String(80), nullable=False)
     state: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'pending'"))
@@ -596,6 +599,7 @@ class StorageCleanupRecord(Base):
         CheckConstraint("state IN ('pending', 'deleted')", name="ck_storage_cleanup_records_state"),
         Index(
             "ix_storage_cleanup_records_pending",
+            "product_id",
             "created_at",
             postgresql_where=text("state = 'pending'"),
         ),

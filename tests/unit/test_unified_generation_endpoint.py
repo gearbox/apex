@@ -6,6 +6,7 @@ always produce 400 and never leave a billing reservation on the ledger.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -14,6 +15,7 @@ import msgspec
 import pytest
 
 from src.api.routes.unified_generation import UnifiedGenerationController
+from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.services.generation.provider_failures import (
     ProviderFailure,
@@ -26,8 +28,10 @@ from src.api.services.generation.service import (
     GenerationError,
     GenerationService,
 )
+from src.api.services.idempotency import IdempotencyReplayResult
 from src.core.enums import (
     GenerationType,
+    JobStatus,
     ModelType,
     Provider,
     Resolution,
@@ -174,6 +178,185 @@ class TestRouteHandlerReturns400:
         )
         assert response.status_code == 400
         idempotency.fail.assert_awaited_once()
+
+
+class TestCommitAcknowledgementRecovery:
+    """A committed replay must still trigger deferred notification work."""
+
+    async def _call_handler(
+        self,
+        request: UnifiedGenerationRequest,
+        *,
+        generation_service: MagicMock,
+        idempotency_service: AsyncMock,
+        session: AsyncMock,
+    ) -> Any:
+        with MagicMock() as controller_self:
+            return await UnifiedGenerationController.generate.fn(
+                controller_self,
+                current_user_id=uuid4(),
+                data=request,
+                session=session,
+                generation_service=generation_service,
+                product_config=MagicMock(slug="vex"),
+                product_id="vex",
+                idempotency_service=idempotency_service,
+                idempotency_key_header="commit-ack-lost",
+            )
+
+    @staticmethod
+    def _ack_lost_idempotency(replay: IdempotencyReplayResult) -> tuple[AsyncMock, AsyncMock]:
+        idempotency = AsyncMock()
+        idempotency.check.return_value = uuid4()
+        idempotency.replay_completed.return_value = replay
+        session = AsyncMock()
+        session.commit.side_effect = RuntimeError("commit acknowledgement lost")
+        return idempotency, session
+
+    async def test_success_replay_runs_notifications_once(self) -> None:
+        callback = AsyncMock()
+        job_id = uuid4()
+        result = JobCreatedResponse(
+            job_id=job_id,
+            status=JobStatus.QUEUED,
+            name="job",
+            model=ModelType.GROK_IMAGINE_IMAGE.value,
+            generation_type=GenerationType.T2I,
+            created_at=datetime.now(UTC),
+        )
+        service = MagicMock(spec=GenerationService)
+
+        async def generate(*_args: object, **kwargs: object) -> JobCreatedResponse:
+            callbacks = kwargs["post_commit_callbacks"]
+            assert isinstance(callbacks, list)
+            callbacks.append(callback)
+            return result
+
+        service.generate = AsyncMock(side_effect=generate)
+        replay = IdempotencyReplayResult(201, {"job_id": str(job_id), "status": "queued"})
+        idempotency, session = self._ack_lost_idempotency(replay)
+
+        response = await self._call_handler(
+            UnifiedGenerationRequest(
+                prompt="a cat",
+                generation_type=GenerationType.T2I,
+                model=ModelType.GROK_IMAGINE_IMAGE,
+            ),
+            generation_service=service,
+            idempotency_service=idempotency,
+            session=session,
+        )
+
+        assert response.status_code == 201
+        assert response.content == replay.body
+        callback.assert_awaited_once()
+        service.generate.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("failure", "replay_status"),
+        [
+            (
+                ProviderModerationRejectedError(
+                    failure=ProviderFailure(
+                        kind=ProviderFailureKind.MODERATION_REJECTED,
+                        provider=Provider.GROK,
+                        sanitized_message=ProviderFailure.safe_message_for_kind(
+                            ProviderFailureKind.MODERATION_REJECTED
+                        ),
+                        billable=True,
+                    ),
+                    job_id=uuid4(),
+                    balance_event=None,
+                ),
+                422,
+            ),
+            (
+                ProviderSubmissionFailedError(
+                    failure=ProviderFailure(
+                        kind=ProviderFailureKind.PROVIDER_UNAVAILABLE,
+                        provider=Provider.GROK,
+                        sanitized_message=ProviderFailure.safe_message_for_kind(
+                            ProviderFailureKind.PROVIDER_UNAVAILABLE
+                        ),
+                    ),
+                    job_id=uuid4(),
+                    balance_event=None,
+                ),
+                503,
+            ),
+        ],
+    )
+    async def test_failure_replay_runs_notifications_once(
+        self,
+        failure: ProviderSubmissionFailedError,
+        replay_status: int,
+    ) -> None:
+        callback = AsyncMock()
+        service = MagicMock(spec=GenerationService)
+
+        async def generate(*_args: object, **kwargs: object) -> JobCreatedResponse:
+            callbacks = kwargs["post_commit_callbacks"]
+            assert isinstance(callbacks, list)
+            callbacks.append(callback)
+            raise failure
+
+        service.generate = AsyncMock(side_effect=generate)
+        replay = IdempotencyReplayResult(replay_status, {"error": failure.public_code})
+        idempotency, session = self._ack_lost_idempotency(replay)
+
+        response = await self._call_handler(
+            UnifiedGenerationRequest(
+                prompt="a cat",
+                generation_type=GenerationType.T2I,
+                model=ModelType.GROK_IMAGINE_IMAGE,
+            ),
+            generation_service=service,
+            idempotency_service=idempotency,
+            session=session,
+        )
+
+        assert response.status_code == replay_status
+        assert response.content == replay.body
+        callback.assert_awaited_once()
+        idempotency.complete.assert_awaited_once()
+
+    async def test_callback_failure_does_not_change_replayed_response(self) -> None:
+        callback = AsyncMock(side_effect=RuntimeError("transport unavailable"))
+        job_id = uuid4()
+        service = MagicMock(spec=GenerationService)
+
+        async def generate(*_args: object, **kwargs: object) -> JobCreatedResponse:
+            callbacks = kwargs["post_commit_callbacks"]
+            assert isinstance(callbacks, list)
+            callbacks.append(callback)
+            return JobCreatedResponse(
+                job_id=job_id,
+                status=JobStatus.QUEUED,
+                name="job",
+                model=ModelType.GROK_IMAGINE_IMAGE.value,
+                generation_type=GenerationType.T2I,
+                created_at=datetime.now(UTC),
+            )
+
+        service.generate = AsyncMock(side_effect=generate)
+        replay = IdempotencyReplayResult(201, {"job_id": str(job_id)})
+        idempotency, session = self._ack_lost_idempotency(replay)
+
+        response = await self._call_handler(
+            UnifiedGenerationRequest(
+                prompt="a cat",
+                generation_type=GenerationType.T2I,
+                model=ModelType.GROK_IMAGINE_IMAGE,
+            ),
+            generation_service=service,
+            idempotency_service=idempotency,
+            session=session,
+        )
+
+        assert response.status_code == 201
+        assert response.content == replay.body
+        callback.assert_awaited_once()
+        idempotency.fail.assert_not_awaited()
 
     async def test_value_error_from_service_returns_400(self) -> None:
         svc, idempotency, session = _make_route_handler_mocks(

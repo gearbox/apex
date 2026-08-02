@@ -107,23 +107,24 @@ class ContentRetentionService:
         )
         return result
 
-    async def reconcile_storage_artifacts(self) -> tuple[int, int]:
+    async def reconcile_storage_artifacts(self, *, product_id: str) -> tuple[int, int]:
         """Run restart-safe materialization and migration-outbox cleanup.
 
         Kept separate from retention's normal sweep so media expiry work has
         stable bounded behavior; ``ContentRetentionWorker`` invokes both on
         its periodic tick.
         """
-        reconciled_attempts = await self._reconcile_materialization_attempts()
-        cleanup_records = await self._drain_storage_cleanup_outbox()
+        reconciled_attempts = await self._reconcile_materialization_attempts(product_id=product_id)
+        cleanup_records = await self._drain_storage_cleanup_outbox(product_id=product_id)
         logger.info(
             "content_retention.storage_reconciliation",
             materialization_attempts_reconciled=reconciled_attempts,
             storage_cleanup_records_drained=cleanup_records,
+            product_id=product_id,
         )
         return reconciled_attempts, cleanup_records
 
-    async def _reconcile_materialization_attempts(self) -> int:
+    async def _reconcile_materialization_attempts(self, *, product_id: str) -> int:
         """Clean abandoned video attempts without invalidating a live owner.
 
         Lease expiry alone is not abandonment: the original owner may still
@@ -135,6 +136,8 @@ class ContentRetentionService:
                 select(GenerationMaterializationAttempt, GenerationJob.status)
                 .join(GenerationJob, GenerationJob.id == GenerationMaterializationAttempt.job_id)
                 .where(
+                    GenerationMaterializationAttempt.product_id == product_id,
+                    GenerationJob.product_id == product_id,
                     GenerationMaterializationAttempt.state.in_(
                         ["planned", "uploading", "cleanup_pending", "ambiguous"]
                     ),
@@ -157,7 +160,8 @@ class ContentRetentionService:
                     (
                         await session.scalars(
                             select(GenerationOutput.storage_key).where(
-                                GenerationOutput.job_id == attempt.job_id
+                                GenerationOutput.job_id == attempt.job_id,
+                                GenerationOutput.product_id == product_id,
                             )
                         )
                     ).all()
@@ -172,7 +176,10 @@ class ContentRetentionService:
                 async with self._session_factory() as session:
                     await session.execute(
                         update(GenerationMaterializationAttempt)
-                        .where(GenerationMaterializationAttempt.id == attempt.id)
+                        .where(
+                            GenerationMaterializationAttempt.id == attempt.id,
+                            GenerationMaterializationAttempt.product_id == product_id,
+                        )
                         .values(
                             state="cleanup_pending",
                             reconciliation_error=str(exc)[:2000],
@@ -188,7 +195,10 @@ class ContentRetentionService:
             async with self._session_factory() as session:
                 await session.execute(
                     update(GenerationMaterializationAttempt)
-                    .where(GenerationMaterializationAttempt.id == attempt.id)
+                    .where(
+                        GenerationMaterializationAttempt.id == attempt.id,
+                        GenerationMaterializationAttempt.product_id == product_id,
+                    )
                     .values(
                         state="cleaned" if unreferenced else "committed",
                         reconciliation_error=None,
@@ -198,14 +208,17 @@ class ContentRetentionService:
             reconciled += 1
         return reconciled
 
-    async def _drain_storage_cleanup_outbox(self) -> int:
+    async def _drain_storage_cleanup_outbox(self, *, product_id: str) -> int:
         """Retry post-commit R2 cleanup queued by data migrations and services."""
         async with self._session_factory() as session:
             records = list(
                 (
                     await session.scalars(
                         select(StorageCleanupRecord)
-                        .where(StorageCleanupRecord.state == "pending")
+                        .where(
+                            StorageCleanupRecord.product_id == product_id,
+                            StorageCleanupRecord.state == "pending",
+                        )
                         .order_by(StorageCleanupRecord.created_at)
                         .limit(self._batch_size)
                     )
@@ -220,7 +233,10 @@ class ContentRetentionService:
                 async with self._session_factory() as session:
                     await session.execute(
                         update(StorageCleanupRecord)
-                        .where(StorageCleanupRecord.id == record.id)
+                        .where(
+                            StorageCleanupRecord.id == record.id,
+                            StorageCleanupRecord.product_id == product_id,
+                        )
                         .values(
                             attempts=StorageCleanupRecord.attempts + 1,
                             last_error=str(exc)[:2000],
@@ -236,7 +252,10 @@ class ContentRetentionService:
             async with self._session_factory() as session:
                 await session.execute(
                     update(StorageCleanupRecord)
-                    .where(StorageCleanupRecord.id == record.id)
+                    .where(
+                        StorageCleanupRecord.id == record.id,
+                        StorageCleanupRecord.product_id == product_id,
+                    )
                     .values(state="deleted", processed_at=func.now(), last_error=None)
                 )
                 await session.commit()

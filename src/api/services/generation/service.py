@@ -359,7 +359,8 @@ class GenerationService:
 
         async def callback() -> None:
             await self._publish_generation_created(
-                job=job,
+                job_id=job.id,
+                status=str(job.status),
                 user_id=user_id,
                 product_id=product_id,
                 generation_type=request.generation_type.value,
@@ -389,7 +390,8 @@ class GenerationService:
     async def _publish_generation_created(
         self,
         *,
-        job: GenerationJob,
+        job_id: UUID,
+        status: str,
         user_id: UUID,
         product_id: str,
         generation_type: str,
@@ -407,21 +409,21 @@ class GenerationService:
                     user_id=user_id,
                     event_type=EventType.JOB_STATUS_CHANGED,
                     payload=JobStatusPayload(
-                        job_id=job.id,
-                        status=job.status if isinstance(job.status, str) else job.status.value,
+                        job_id=job_id,
+                        status=status,
                         previous_status="none",
                         generation_type=generation_type,
                         provider=provider,
                     ),
                 )
             except Exception:
-                logger.exception("generation.post_commit_publish_failed", job_id=str(job.id))
+                logger.exception("generation.post_commit_publish_failed", job_id=str(job_id))
 
         await self._ops_event_bus.publish(
             event_type=OpsEventType.GENERATION_CREATED,
             product_id=product_id,
             payload=GenerationCreatedOpsPayload(
-                job_id=job.id,
+                job_id=job_id,
                 user_id=user_id,
                 provider=provider,
                 generation_type=generation_type,

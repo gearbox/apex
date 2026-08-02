@@ -7,6 +7,7 @@ that xAI may return through different gRPC/SDK wrappers.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
@@ -29,6 +30,22 @@ _AUTH_CODE_MARKERS = ("UNAUTHENTICATED", "UNAUTHORIZED", "PERMISSION_DENIED", "F
 _UNAVAILABLE_CODE_MARKERS = ("UNAVAILABLE", "SERVICE_UNAVAILABLE", "INTERNAL", "UPSTREAM")
 _TIMEOUT_CODE_MARKERS = ("DEADLINE_EXCEEDED", "TIMEOUT", "TIMED_OUT")
 _MALFORMED_CODE_MARKERS = ("MALFORMED", "INVALID_RESPONSE", "PARSE_ERROR")
+
+# Free-text recognition is deliberately narrow.  These are known xAI/SDK
+# response shapes, not broad keyword matching; a sentence about an
+# "invalidate cache" or a "rate card" must remain unknown.
+_RATE_LIMIT_PROSE_RE = re.compile(r"\btoo many requests\b|(?<!\d)429(?!\d)", re.IGNORECASE)
+_INVALID_IMAGE_PROSE_RE = re.compile(r"\binvalid image (?:url|input)\b", re.IGNORECASE)
+_BAD_REQUEST_PROSE_RE = re.compile(r"\b(?:400\s+)?bad request\b", re.IGNORECASE)
+_INFRASTRUCTURE_PHRASES = (
+    "service unavailable",
+    "service failure",
+    "service connection failed",
+    "connection failed",
+    "internal error",
+    "unavailable",
+    "outage",
+)
 
 
 class GrokFailureClassifier:
@@ -97,29 +114,18 @@ class GrokFailureClassifier:
 
         combined = " ".join(messages).casefold()
         normalized = " ".join(combined.replace(";", " ").replace(".", " ").split())
-        # The known production response is a definitive user-content rejection.
-        if "respect moderation rules" in normalized and "url is not available" in normalized:
-            return ProviderFailureKind.MODERATION_REJECTED
         # Do not turn an outage in a moderation-related service into a
         # billable user-content rejection. Structured codes above remain
         # authoritative; this is only defensive free-text fallback logic.
-        if any(
-            marker in normalized
-            for marker in (
-                "service unavailable",
-                "service failure",
-                "service connection failed",
-                "connection failed",
-                "internal error",
-                "timed out",
-                "timeout",
-                "unavailable",
-                "outage",
-            )
+        if any(marker in normalized for marker in _INFRASTRUCTURE_PHRASES) or any(
+            marker in normalized for marker in ("timed out", "timeout")
         ):
             if any(marker in normalized for marker in ("timed out", "timeout")):
                 return ProviderFailureKind.TIMEOUT
             return ProviderFailureKind.PROVIDER_UNAVAILABLE
+        # The known production response is a definitive user-content rejection.
+        if "respect moderation rules" in normalized and "url is not available" in normalized:
+            return ProviderFailureKind.MODERATION_REJECTED
         if any(
             marker in normalized
             for marker in (
@@ -133,15 +139,21 @@ class GrokFailureClassifier:
             return ProviderFailureKind.MODERATION_REJECTED
         if any(marker in normalized for marker in ("deadline exceeded", "timed out", "timeout")):
             return ProviderFailureKind.TIMEOUT
-        if any(marker in normalized for marker in ("rate limit", "resource exhausted")):
+        if any(marker in normalized for marker in ("rate limit", "resource exhausted")) or (
+            _RATE_LIMIT_PROSE_RE.search(combined) is not None
+        ):
             return ProviderFailureKind.RATE_LIMITED
         if any(marker in normalized for marker in ("unauthenticated", "unauthorized", "forbidden")):
             return ProviderFailureKind.AUTHENTICATION_FAILED
-        if any(marker in normalized for marker in ("invalid argument", "invalid request")):
+        if (
+            any(marker in normalized for marker in ("invalid argument", "invalid request"))
+            or (_INVALID_IMAGE_PROSE_RE.search(combined) is not None)
+            or (_BAD_REQUEST_PROSE_RE.search(combined) is not None)
+        ):
             return ProviderFailureKind.INVALID_REQUEST
         if any(marker in normalized for marker in ("malformed", "parse error", "invalid response")):
             return ProviderFailureKind.MALFORMED_RESPONSE
-        if any(marker in normalized for marker in ("unavailable", "connection", "upstream")):
+        if any(marker in normalized for marker in _INFRASTRUCTURE_PHRASES):
             return ProviderFailureKind.PROVIDER_UNAVAILABLE
         return ProviderFailureKind.UNKNOWN
 

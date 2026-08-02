@@ -77,30 +77,83 @@ def _populate_duplicate_map(*, thumbnails: bool) -> None:
 def _preflight_and_remap_duplicates() -> None:
     """Move all preservable references, queue keys, then delete mapped rows.
 
-    Metadata has a one-row-per-asset uniqueness rule.  If both candidate rows
-    carry different metadata, there is no lossless automatic merge, so fail
-    before deleting anything and require the operator repair command below.
-    Tag collisions are lossless set duplicates and are collapsed explicitly.
+    Every metadata/tag row is first resolved to its final canonical output.
+    Metadata has a one-row-per-asset uniqueness rule, so a non-lossless
+    metadata collision aborts before mutation. Tags are set memberships and
+    are instead remapped with an INSERT DISTINCT / DELETE sequence.
     """
+    # asyncpg prepares each statement individually, so keep the DROP and
+    # CREATE separate rather than sending a multi-statement string.
+    op.execute("DROP TABLE IF EXISTS _generation_output_reference_targets")
+    op.execute(
+        """
+        CREATE TEMP TABLE _generation_output_reference_targets ON COMMIT DROP AS
+        SELECT remap.source_output_id,
+               remap.canonical_output_id,
+               canonical.product_id,
+               canonical.user_id
+        FROM (
+            SELECT duplicate_id AS source_output_id,
+                   canonical_id AS canonical_output_id
+            FROM _generation_output_duplicate_map
+            UNION
+            SELECT canonical_id AS source_output_id,
+                   canonical_id AS canonical_output_id
+            FROM _generation_output_duplicate_map
+        ) remap
+        JOIN generation_outputs canonical ON canonical.id = remap.canonical_output_id
+        """
+    )
     op.execute(
         """
         DO $$
         BEGIN
             IF EXISTS (
                 SELECT 1
-                FROM _generation_output_duplicate_map map
-                JOIN library_asset_metadata duplicate_metadata
-                  ON duplicate_metadata.asset_type = 'output'
-                 AND duplicate_metadata.asset_id = map.duplicate_id
-                JOIN library_asset_metadata canonical_metadata
-                  ON canonical_metadata.asset_type = 'output'
-                 AND canonical_metadata.asset_id = map.canonical_id
-                 AND canonical_metadata.product_id = duplicate_metadata.product_id
-                 AND canonical_metadata.user_id = duplicate_metadata.user_id
+                FROM library_asset_metadata metadata
+                JOIN _generation_output_reference_targets target
+                  ON target.source_output_id = metadata.asset_id
+                WHERE metadata.asset_type = 'output'
+                  AND (metadata.product_id <> target.product_id
+                       OR metadata.user_id <> target.user_id)
+            ) THEN
+                RAISE EXCEPTION
+                    '033 preflight refused cross-scope output metadata; '
+                    'repair metadata product/user ownership before retrying';
+            END IF;
+
+            IF EXISTS (
+                SELECT 1
+                FROM library_asset_metadata metadata
+                JOIN _generation_output_reference_targets target
+                  ON target.source_output_id = metadata.asset_id
+                WHERE metadata.asset_type = 'output'
+                GROUP BY metadata.product_id,
+                         metadata.user_id,
+                         metadata.asset_type,
+                         target.canonical_output_id
+                HAVING count(*) > 1
             ) THEN
                 RAISE EXCEPTION
                     '033 preflight refused ambiguous output duplicate metadata; '
                     'run the output-duplicate repair command before retrying';
+            END IF;
+
+            IF EXISTS (
+                SELECT 1
+                FROM library_asset_tags tag
+                JOIN _generation_output_reference_targets target
+                  ON target.source_output_id = tag.asset_id
+                JOIN library_tags owner ON owner.id = tag.tag_id
+                WHERE tag.asset_type = 'output'
+                  AND (tag.product_id <> target.product_id
+                       OR tag.user_id <> target.user_id
+                       OR owner.product_id <> target.product_id
+                       OR owner.user_id <> target.user_id)
+            ) THEN
+                RAISE EXCEPTION
+                    '033 preflight refused cross-scope output tag membership; '
+                    'repair tag product/user ownership before retrying';
             END IF;
         END $$;
         """
@@ -110,8 +163,8 @@ def _preflight_and_remap_duplicates() -> None:
     # The worker never sees these records unless this migration commits.
     op.execute(
         """
-        INSERT INTO storage_cleanup_records (storage_key, reason)
-        SELECT output.storage_key, 'migration_033_duplicate_output'
+        INSERT INTO storage_cleanup_records (product_id, storage_key, reason)
+        SELECT output.product_id, output.storage_key, 'migration_033_duplicate_output'
         FROM generation_outputs output
         JOIN _generation_output_duplicate_map map ON map.duplicate_id = output.id
         ON CONFLICT (storage_key) DO NOTHING
@@ -147,31 +200,45 @@ def _preflight_and_remap_duplicates() -> None:
         """,
         """
         UPDATE library_asset_metadata metadata
-           SET asset_id = map.canonical_id
-          FROM _generation_output_duplicate_map map
+           SET asset_id = target.canonical_output_id
+          FROM _generation_output_reference_targets target
          WHERE metadata.asset_type = 'output'
-           AND metadata.asset_id = map.duplicate_id
-        """,
-        # A tag is a set membership.  Delete only the now-redundant member
-        # before remapping to avoid the composite primary-key collision.
-        """
-        DELETE FROM library_asset_tags duplicate_tag
-        USING _generation_output_duplicate_map map, library_asset_tags canonical_tag
-        WHERE duplicate_tag.asset_type = 'output'
-          AND duplicate_tag.asset_id = map.duplicate_id
-          AND canonical_tag.tag_id = duplicate_tag.tag_id
-          AND canonical_tag.asset_type = 'output'
-          AND canonical_tag.asset_id = map.canonical_id
-        """,
-        """
-        UPDATE library_asset_tags tag
-           SET asset_id = map.canonical_id
-          FROM _generation_output_duplicate_map map
-         WHERE tag.asset_type = 'output'
-           AND tag.asset_id = map.duplicate_id
+           AND metadata.asset_id = target.source_output_id
+           AND target.source_output_id <> target.canonical_output_id
         """,
     ):
         op.execute(statement)
+
+    # Tag membership is set-valued. Insert every final membership first,
+    # tolerate existing canonical memberships, then remove only source rows.
+    # A bulk UPDATE would collide when two-or-more duplicates share a tag.
+    op.execute(
+        """
+        INSERT INTO library_asset_tags (
+            tag_id, asset_type, asset_id, product_id, user_id, created_at
+        )
+        SELECT DISTINCT tag.tag_id,
+               'output',
+               target.canonical_output_id,
+               tag.product_id,
+               tag.user_id,
+               tag.created_at
+        FROM library_asset_tags tag
+        JOIN _generation_output_reference_targets target
+          ON target.source_output_id = tag.asset_id
+        WHERE tag.asset_type = 'output'
+        ON CONFLICT (tag_id, asset_type, asset_id) DO NOTHING
+        """
+    )
+    op.execute(
+        """
+        DELETE FROM library_asset_tags tag
+        USING _generation_output_reference_targets target
+        WHERE tag.asset_type = 'output'
+          AND tag.asset_id = target.source_output_id
+          AND target.source_output_id <> target.canonical_output_id
+        """
+    )
 
     op.execute(
         """
@@ -232,6 +299,7 @@ def upgrade() -> None:
     op.create_table(
         "generation_materialization_attempts",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column(
             "job_id",
             postgresql.UUID(as_uuid=True),
@@ -278,9 +346,14 @@ def upgrade() -> None:
         ["job_id"],
     )
     op.create_index(
+        "ix_generation_materialization_attempts_product_id",
+        "generation_materialization_attempts",
+        ["product_id"],
+    )
+    op.create_index(
         "ix_generation_materialization_attempts_reconcile",
         "generation_materialization_attempts",
-        ["state", "updated_at"],
+        ["product_id", "state", "updated_at"],
         postgresql_where=sa.text(
             "state IN ('planned', 'uploading', 'cleanup_pending', 'ambiguous')"
         ),
@@ -294,6 +367,7 @@ def upgrade() -> None:
             primary_key=True,
             server_default=sa.text("gen_random_uuid()"),
         ),
+        sa.Column("product_id", sa.String(32), nullable=False),
         sa.Column("storage_key", sa.String(512), nullable=False),
         sa.Column("reason", sa.String(80), nullable=False),
         sa.Column("state", sa.String(20), nullable=False, server_default=sa.text("'pending'")),
@@ -314,8 +388,13 @@ def upgrade() -> None:
     op.create_index(
         "ix_storage_cleanup_records_pending",
         "storage_cleanup_records",
-        ["created_at"],
+        ["product_id", "created_at"],
         postgresql_where=sa.text("state = 'pending'"),
+    )
+    op.create_index(
+        "ix_storage_cleanup_records_product_id",
+        "storage_cleanup_records",
+        ["product_id"],
     )
 
     # Audit incomplete legacy thumbnails before any cleanup.  They are not
@@ -373,6 +452,7 @@ def downgrade() -> None:
     """Remove safeguards; already-committed outbox work remains auditable."""
     op.drop_index("uq_generation_outputs_thumbnail_parent_bucket", table_name="generation_outputs")
     op.drop_index("uq_generation_outputs_full_job_index", table_name="generation_outputs")
+    op.drop_index("ix_storage_cleanup_records_product_id", table_name="storage_cleanup_records")
     op.drop_index("ix_storage_cleanup_records_pending", table_name="storage_cleanup_records")
     op.drop_table("storage_cleanup_records")
     op.drop_index(
@@ -381,6 +461,10 @@ def downgrade() -> None:
     )
     op.drop_index(
         "ix_generation_materialization_attempts_job_id",
+        table_name="generation_materialization_attempts",
+    )
+    op.drop_index(
+        "ix_generation_materialization_attempts_product_id",
         table_name="generation_materialization_attempts",
     )
     op.drop_table("generation_materialization_attempts")

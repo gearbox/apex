@@ -241,6 +241,13 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 | `GROK_VIDEO_FINALIZATION_LEASE_SECONDS` | `120` | `int (30–900)` | PostgreSQL-time takeover lease for completed-video materialization. Expiry permits a new claimant, but does not invalidate the current token by itself. |
 | `GROK_MODERATION_BILLING_POLICY` | `charge` | `charge` \| `refund` | Whether an accepted xAI moderation rejection retains the debit or receives a refund. This is applied by both in-process and standalone video workers. |
 
+> **Materialization migration and operations:** migration 033 adds product-scoped durable
+> materialization-attempt and storage-cleanup records. Before it remaps duplicate generation outputs,
+> it validates that metadata and tags belong to the canonical output's product and user; ambiguous
+> metadata conflicts abort the migration before persistent changes. Tag memberships are merged
+> losslessly. The retention worker must continue to run for every configured product so its scoped
+> outbox records are reconciled.
+
 ---
 
 ### Content & Upload Limits

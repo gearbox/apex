@@ -236,6 +236,7 @@ Four mutation endpoints require an `Idempotency-Key` header to prevent duplicate
 5. Keys expire after 24 hours (configurable via `IDEMPOTENCY_KEY_TTL_HOURS`).
 6. Generation's synchronous final results (201, billable 422, and normalized provider failures) persist the job state, billing ledger result, resource ID, HTTP status, response body, and completed idempotency key in one transaction. A crash cannot leave a durable debit behind a reclaimable `processing` key.
 7. A key stuck `processing` before a final outcome (the original request's connection dropped, its worker crashed, etc.) for longer than `IDEMPOTENCY_PROCESSING_STALE_SECONDS` (default 120s) can be reclaimed by the next retry. A retry within that window gets `409 idempotency_conflict`.
+8. If committing a completed outcome succeeded but its acknowledgement was lost, a retry returns the stored outcome and retries its post-commit notifications. Notification failures are logged and do not change the completed outcome, billing, or replay response.
 
 ### Error responses
 
@@ -677,9 +678,9 @@ Note:     source_output_id enables "remix from Library" — the backend resolves
           and completed status together.  A crashed claimant is recoverable after the lease expires;
           losing callers write no outputs and remove any objects if their claim expires mid-flight.
           Partial unique indexes enforce one full output per job/index and one thumbnail per
-          parent/size bucket. A worker is optional for correctness and recommended for proactive
-          completion. Repeated GETs and worker/read-through races publish one terminal event and
-          settle billing once.
+          parent/size bucket across both providers. A worker is optional for correctness and
+          recommended for proactive completion. Repeated GETs and worker/read-through races publish
+          one terminal event and settle billing once.
 
           A deferred xAI `FAILED` state is authoritative even if its normalized failure kind is
           `provider_rate_limited` or `provider_timeout`; it is settled immediately. By contrast, a
@@ -694,6 +695,18 @@ Note:     source_output_id enables "remix from Library" — the backend resolves
           returned with stable normalized codes: invalid request 400, provider rate limit 429,
           malformed response 502, and timeout/unavailable/authentication/unknown 503. Their messages
           are fixed safe messages, never provider diagnostics.
+
+          A failed billable generation and its refund are one database transaction. If refund creation
+          fails, the terminal failure rolls back, the job stays in flight, and a later poll or sweep
+          retries settlement; workers isolate that error to the affected job.
+
+          Aisha terminal failures use public-safe codes and fixed text: infrastructure failures use
+          `provider_unavailable` / "Generation infrastructure is temporarily unavailable.", ComfyUI
+          execution failures use `provider_execution_failed` / "The generation engine could not
+          complete the request.", timeouts use `provider_timeout` / "Generation timed out before the
+          compute service returned a result.", and swept compute sessions use
+          `generation_session_terminated` / "Generation stopped because the compute session ended."
+          Raw Aisha, ComfyUI, and session diagnostics remain internal only.
 ```
 
 ### JobCreatedResponse Schema
@@ -919,6 +932,15 @@ interface JobOutputItem {
 `GenerationJob.error_message` column is never returned by this endpoint. A legacy failed row that
 does not yet have a public-safe message returns `"Generation failed. Please try again."`; it never
 falls back to raw diagnostics.
+
+Grok failure normalization checks an explicit provider/gRPC code first, then a numeric HTTP status,
+then only narrow prose markers (`too many requests`, standalone `429`, `invalid image URL` or
+`invalid image input`, and `bad request`). Other wording is classified as unknown rather than by
+broad terms such as `invalid`, `rate`, `timeout`, or `connection`.
+
+Materialization attempts and storage-cleanup records are scoped to a product. The retention worker
+reconciles each configured product independently; reconciliation, output lookup, and cleanup-outbox
+queries always include that product scope.
 
 ---
 
@@ -3345,7 +3367,7 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 422 | `validation_error`, `moderation`, `provider_moderation_rejected` | `provider`, `policy` (Apex moderation only) |
 | 429 | `too_many_requests`, `rate_limited`, `provider_rate_limited` | `retry_after` (global rate limit only) |
 | 502 | `provider_malformed_response` | — |
-| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_unavailable`, `provider_authentication_failed`, `provider_unknown` | — |
+| 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_unavailable`, `provider_execution_failed`, `generation_session_terminated`, `provider_authentication_failed`, `provider_unknown` | — |
 
 **Example responses:**
 

@@ -111,7 +111,10 @@ class ProviderSubmissionFailedError(Exception):
         self.previous_status = previous_status
         self.balance_event = balance_event
         self.public_code = failure.public_code
-        self.public_message = failure.sanitized_message
+        # ``sanitized_message`` is retained for compatibility with existing
+        # normalized provider adapters, but callers must never be able to
+        # make a free-form string public by constructing ProviderFailure.
+        self.public_message = ProviderFailure.safe_message_for_kind(failure.kind)
         super().__init__(self.public_message)
 
 

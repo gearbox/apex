@@ -75,8 +75,14 @@ class GenerationOutputData:
 class _DeferredFailurePublication:
     """All notifications that become eligible only after a UoW commit."""
 
-    job: GenerationJob
+    job_id: UUID
+    user_id: UUID
     old_status: str
+    status: str
+    generation_type: str
+    provider: str
+    failure_code: str | None
+    public_error_message: str | None
     product_id: str
     reserve_event: BalanceEvent | None
     refund_event: BalanceEvent | None
@@ -274,7 +280,10 @@ class JobStateTransitionService:
             # never look like an abandoned R2 attempt after a restart.
             await self._session.execute(
                 sa_update(GenerationMaterializationAttempt)
-                .where(GenerationMaterializationAttempt.id == materialization_attempt_id)
+                .where(
+                    GenerationMaterializationAttempt.id == materialization_attempt_id,
+                    GenerationMaterializationAttempt.product_id == product_id,
+                )
                 .values(state="committed", completed_at=func.now(), updated_at=func.now())
             )
 
@@ -394,24 +403,28 @@ class JobStateTransitionService:
 
         if not commit:
             await self._session.refresh(job)
-            self._deferred_failure = _DeferredFailurePublication(
+            self._deferred_failure = self._build_deferred_failure_publication(
                 job=job,
                 old_status=old_status,
                 product_id=product_id,
                 reserve_event=reserve_event,
                 refund_event=refund_event,
+                failure_code=failure_code,
+                public_error_message=safe_message,
             )
             return job, True
 
         await self._session.commit()
         await self._session.refresh(job)
         await self.publish_deferred_failure(
-            _DeferredFailurePublication(
+            self._build_deferred_failure_publication(
                 job=job,
                 old_status=old_status,
                 product_id=product_id,
                 reserve_event=reserve_event,
                 refund_event=refund_event,
+                failure_code=failure_code,
+                public_error_message=safe_message,
             )
         )
 
@@ -424,22 +437,30 @@ class JobStateTransitionService:
 
     async def publish_deferred_failure(self, publication: _DeferredFailurePublication) -> None:
         """Publish an already-committed failure settlement exactly once."""
-        job = publication.job
-        await self._publish(job, old_status=publication.old_status)
+        await self._publish_status_payload(
+            job_id=publication.job_id,
+            user_id=publication.user_id,
+            status=publication.status,
+            old_status=publication.old_status,
+            generation_type=publication.generation_type,
+            provider=publication.provider,
+            failure_code=publication.failure_code,
+            public_error_message=publication.public_error_message,
+        )
         logger.warning(
             "job.transition.failed",
-            job_id=str(job.id),
-            failure_code=job.failure_code,
+            job_id=str(publication.job_id),
+            failure_code=publication.failure_code,
             refund=publication.refund_event is not None,
         )
         await self._ops_event_bus.publish(
             event_type=OpsEventType.GENERATION_FAILED,
             product_id=publication.product_id,
             payload=GenerationFailedOpsPayload(
-                job_id=job.id,
-                user_id=job.user_id,
-                provider=str(job.provider),
-                generation_type=str(job.generation_type),
+                job_id=publication.job_id,
+                user_id=publication.user_id,
+                provider=publication.provider,
+                generation_type=publication.generation_type,
             ),
         )
         if self._event_bus is not None:
@@ -456,31 +477,80 @@ class JobStateTransitionService:
     # Internals
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _build_deferred_failure_publication(
+        *,
+        job: GenerationJob,
+        old_status: str,
+        product_id: str,
+        reserve_event: BalanceEvent | None,
+        refund_event: BalanceEvent | None,
+        failure_code: str | None,
+        public_error_message: str,
+    ) -> _DeferredFailurePublication:
+        """Capture immutable data before the request session can be released."""
+        return _DeferredFailurePublication(
+            job_id=job.id,
+            user_id=job.user_id,
+            old_status=old_status,
+            status=JobStatus.FAILED.value,
+            generation_type=str(job.generation_type),
+            provider=str(job.provider),
+            failure_code=failure_code[:100] if failure_code is not None else None,
+            public_error_message=public_error_message[:2000],
+            product_id=product_id,
+            reserve_event=reserve_event,
+            refund_event=refund_event,
+        )
+
     async def _publish(self, job: GenerationJob, *, old_status: str) -> None:
+        await self._publish_status_payload(
+            job_id=job.id,
+            user_id=job.user_id,
+            status=str(job.status),
+            old_status=old_status,
+            generation_type=str(job.generation_type),
+            provider=str(job.provider),
+            failure_code=job.failure_code,
+            public_error_message=job.public_error_message,
+        )
+
+    async def _publish_status_payload(
+        self,
+        *,
+        job_id: UUID,
+        user_id: UUID,
+        status: str,
+        old_status: str,
+        generation_type: str,
+        provider: str,
+        failure_code: str | None,
+        public_error_message: str | None,
+    ) -> None:
         if self._event_bus is None:
             return
         try:
             payload = JobStatusPayload(
-                job_id=job.id,
-                status=str(job.status),
+                job_id=job_id,
+                status=status,
                 previous_status=old_status,
-                generation_type=str(job.generation_type),
-                provider=str(job.provider),
-                failure_code=job.failure_code,
+                generation_type=generation_type,
+                provider=provider,
+                failure_code=failure_code,
                 error_message=public_error_for_job(
-                    status=str(job.status),
-                    public_error_message=job.public_error_message,
+                    status=status,
+                    public_error_message=public_error_message,
                 ),
             )
             await self._event_bus.publish(
-                user_id=job.user_id,
+                user_id=user_id,
                 event_type=EventType.JOB_STATUS_CHANGED,
                 payload=payload,
             )
         except Exception:
             logger.exception(
                 "job.state_transition.publish_failed",
-                job_id=str(job.id),
+                job_id=str(job_id),
             )
 
     @staticmethod

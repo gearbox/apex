@@ -186,6 +186,7 @@ class UnifiedGenerationController(Controller):
             )
             replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
             if replay is not None:
+                await _run_post_commit_callbacks(post_commit_callbacks)
                 return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
             await _run_post_commit_callbacks(post_commit_callbacks)
             return Response(content=result, status_code=HTTP_201_CREATED)
@@ -310,6 +311,7 @@ class UnifiedGenerationController(Controller):
             )
             replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
             if replay is not None:
+                await _run_post_commit_callbacks(post_commit_callbacks)
                 return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
             await _run_post_commit_callbacks(post_commit_callbacks)
             logger.warning(
@@ -344,6 +346,7 @@ class UnifiedGenerationController(Controller):
             )
             replay = await _commit_completed_or_replay(idempotency_service, record_id, session)
             if replay is not None:
+                await _run_post_commit_callbacks(post_commit_callbacks)
                 return Response(content=replay.body, status_code=replay.status_code)  # type: ignore[arg-type]
             await _run_post_commit_callbacks(post_commit_callbacks)
             logger.warning(

@@ -96,6 +96,7 @@ class _MaterializedVideo:
     outputs: list[GenerationOutputData]
     storage_keys: list[str]
     attempt_id: UUID | None = None
+    product_id: str | None = None
 
 
 class GrokJobError(Exception):
@@ -1055,6 +1056,7 @@ class GrokJobService:
             user_id=user_id,
             job_id=job_id,
             result=result,
+            product_id=product_id,
         )
         try:
             for output in sorted(materialized.outputs, key=lambda item: item.is_thumbnail):
@@ -1125,6 +1127,7 @@ class GrokJobService:
                 user_id=(await self._refresh_authoritative_job(session, job_id)).user_id,
                 job_id=job_id,
                 result=result,
+                product_id=product_id,
                 session=session,
                 claim_token=claim_token,
             )
@@ -1152,6 +1155,7 @@ class GrokJobService:
                 await self._reconcile_materialization_attempt(
                     session,
                     job_id=job_id,
+                    product_id=product_id,
                     materialized=materialized,
                 )
         except asyncio.CancelledError:
@@ -1163,6 +1167,7 @@ class GrokJobService:
                     self._reconcile_materialization_attempt(
                         session,
                         job_id=job_id,
+                        product_id=product_id,
                         materialized=materialized,
                     )
                 )
@@ -1177,6 +1182,7 @@ class GrokJobService:
                 await self._reconcile_materialization_attempt(
                     session,
                     job_id=job_id,
+                    product_id=product_id,
                     materialized=materialized,
                 )
             else:
@@ -1191,6 +1197,7 @@ class GrokJobService:
                 await self._reconcile_materialization_attempt(
                     session,
                     job_id=job_id,
+                    product_id=product_id,
                     materialized=materialized,
                 )
             else:
@@ -1264,6 +1271,7 @@ class GrokJobService:
         user_id: UUID,
         job_id: UUID,
         result: GrokVideoResult,
+        product_id: str | None = None,
         session: AsyncSession | None = None,
         claim_token: str | None = None,
     ) -> _MaterializedVideo:
@@ -1339,9 +1347,12 @@ class GrokJobService:
 
         attempt_id: UUID | None = None
         if session is not None and claim_token is not None:
+            if product_id is None:
+                raise ValueError("product_id is required for durable materialization attempts")
             attempt_id = await self._create_materialization_attempt(
                 session,
                 job_id=job_id,
+                product_id=product_id,
                 claim_token=claim_token,
                 planned_storage_keys=[artifact.storage_key for artifact, _ in artifacts],
             )
@@ -1369,19 +1380,26 @@ class GrokJobService:
                     continue
                 uploaded_keys.append(artifact.storage_key)
                 persisted_outputs.append(artifact)
-                if attempt_id is not None and session is not None:
-                    await self._record_materialization_upload(session, attempt_id, uploaded_keys)
+                if attempt_id is not None and session is not None and product_id is not None:
+                    await self._record_materialization_upload(
+                        session,
+                        attempt_id,
+                        product_id=product_id,
+                        uploaded_storage_keys=uploaded_keys,
+                    )
             return _MaterializedVideo(
                 outputs=persisted_outputs,
                 storage_keys=uploaded_keys,
                 attempt_id=attempt_id,
+                product_id=product_id,
             )
         except BaseException:
-            if attempt_id is not None and session is not None:
+            if attempt_id is not None and session is not None and product_id is not None:
                 await asyncio.shield(
                     self._mark_materialization_attempt_cleanup_pending(
                         session,
                         attempt_id=attempt_id,
+                        product_id=product_id,
                         error="materialization interrupted before outputs were committed",
                     )
                 )
@@ -1402,6 +1420,7 @@ class GrokJobService:
         session: AsyncSession,
         *,
         job_id: UUID,
+        product_id: str,
         claim_token: str,
         planned_storage_keys: list[str],
     ) -> UUID:
@@ -1411,6 +1430,7 @@ class GrokJobService:
             GenerationMaterializationAttempt(
                 id=attempt_id,
                 job_id=job_id,
+                product_id=product_id,
                 claim_token=claim_token,
                 state="planned",
                 planned_storage_keys=planned_storage_keys,
@@ -1424,12 +1444,17 @@ class GrokJobService:
         self,
         session: AsyncSession,
         attempt_id: UUID,
+        *,
+        product_id: str,
         uploaded_storage_keys: list[str],
     ) -> None:
         """Persist upload progress; planned keys cover acknowledgement loss."""
         await session.execute(
             update(GenerationMaterializationAttempt)
-            .where(GenerationMaterializationAttempt.id == attempt_id)
+            .where(
+                GenerationMaterializationAttempt.id == attempt_id,
+                GenerationMaterializationAttempt.product_id == product_id,
+            )
             .values(
                 state="uploading",
                 uploaded_storage_keys=list(uploaded_storage_keys),
@@ -1443,6 +1468,7 @@ class GrokJobService:
         session: AsyncSession,
         *,
         attempt_id: UUID,
+        product_id: str,
         error: str | None = None,
     ) -> None:
         """Leave durable cleanup work for a restart-safe reconciliation pass."""
@@ -1450,7 +1476,10 @@ class GrokJobService:
             await session.rollback()
             await session.execute(
                 update(GenerationMaterializationAttempt)
-                .where(GenerationMaterializationAttempt.id == attempt_id)
+                .where(
+                    GenerationMaterializationAttempt.id == attempt_id,
+                    GenerationMaterializationAttempt.product_id == product_id,
+                )
                 .values(
                     state="cleanup_pending",
                     reconciliation_error=error,
@@ -1470,6 +1499,7 @@ class GrokJobService:
         session: AsyncSession,
         *,
         job_id: UUID,
+        product_id: str,
         materialized: _MaterializedVideo,
     ) -> None:
         """Use DB truth before deleting objects after an uncertain transition.
@@ -1486,9 +1516,11 @@ class GrokJobService:
             attempt_keys = materialized.storage_keys
         else:
             await session.rollback()
-            attempt = await session.get(
-                GenerationMaterializationAttempt,
-                materialized.attempt_id,
+            attempt = await session.scalar(
+                select(GenerationMaterializationAttempt).where(
+                    GenerationMaterializationAttempt.id == materialized.attempt_id,
+                    GenerationMaterializationAttempt.product_id == product_id,
+                )
             )
             attempt_keys = list(attempt.planned_storage_keys) if attempt is not None else []
 
@@ -1498,7 +1530,8 @@ class GrokJobService:
                 (
                     await session.scalars(
                         select(GenerationOutput.storage_key).where(
-                            GenerationOutput.job_id == job_id
+                            GenerationOutput.job_id == job_id,
+                            GenerationOutput.product_id == product_id,
                         )
                     )
                 ).all()
@@ -1508,11 +1541,15 @@ class GrokJobService:
                 await self._mark_materialization_attempt_cleanup_pending(
                     session,
                     attempt_id=materialized.attempt_id,
+                    product_id=product_id,
                     error="could not establish database commit outcome",
                 )
                 await session.execute(
                     update(GenerationMaterializationAttempt)
-                    .where(GenerationMaterializationAttempt.id == materialized.attempt_id)
+                    .where(
+                        GenerationMaterializationAttempt.id == materialized.attempt_id,
+                        GenerationMaterializationAttempt.product_id == product_id,
+                    )
                     .values(state="ambiguous", updated_at=func.now())
                 )
                 await session.commit()
@@ -1524,7 +1561,10 @@ class GrokJobService:
             if materialized.attempt_id is not None:
                 await session.execute(
                     update(GenerationMaterializationAttempt)
-                    .where(GenerationMaterializationAttempt.id == materialized.attempt_id)
+                    .where(
+                        GenerationMaterializationAttempt.id == materialized.attempt_id,
+                        GenerationMaterializationAttempt.product_id == product_id,
+                    )
                     .values(state="committed", completed_at=func.now(), updated_at=func.now())
                 )
                 await session.commit()
@@ -1534,7 +1574,8 @@ class GrokJobService:
             await self._mark_materialization_attempt_cleanup_pending(
                 session,
                 attempt_id=materialized.attempt_id,
-                error=None if not referenced_keys else "attempt has unreferenced artifact keys",
+                product_id=product_id,
+                error="attempt has unreferenced artifact keys" if referenced_keys else None,
             )
         # These keys are proven not to be attached to an output row in the
         # authoritative read.  A failure remains durable through the attempt.
@@ -1551,7 +1592,10 @@ class GrokJobService:
         if materialized.attempt_id is not None:
             await session.execute(
                 update(GenerationMaterializationAttempt)
-                .where(GenerationMaterializationAttempt.id == materialized.attempt_id)
+                .where(
+                    GenerationMaterializationAttempt.id == materialized.attempt_id,
+                    GenerationMaterializationAttempt.product_id == product_id,
+                )
                 .values(state="cleaned", reconciliation_error=None, updated_at=func.now())
             )
             await session.commit()

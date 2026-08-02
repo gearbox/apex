@@ -56,6 +56,43 @@ def test_structured_provider_code_takes_precedence_over_message(
 
 
 @pytest.mark.parametrize(
+    ("message", "kind"),
+    [
+        ("429 Too Many Requests", ProviderFailureKind.RATE_LIMITED),
+        ("HTTP 429: request quota exceeded", ProviderFailureKind.RATE_LIMITED),
+        ("invalid image url", ProviderFailureKind.INVALID_REQUEST),
+        ("invalid image input", ProviderFailureKind.INVALID_REQUEST),
+        ("400 Bad Request", ProviderFailureKind.INVALID_REQUEST),
+    ],
+)
+def test_classifies_precise_xai_prose_fallbacks(
+    classifier: GrokFailureClassifier,
+    message: str,
+    kind: ProviderFailureKind,
+) -> None:
+    assert classifier.classify({"message": message}).kind == kind
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["generate artwork", "rate card updated", "invalidate cache", "connection style"],
+)
+def test_prose_fallback_does_not_match_bare_substrings(
+    classifier: GrokFailureClassifier,
+    message: str,
+) -> None:
+    assert classifier.classify({"message": message}).kind == ProviderFailureKind.UNKNOWN
+
+
+def test_structured_code_wins_over_conflicting_precise_prose(
+    classifier: GrokFailureClassifier,
+) -> None:
+    failure = classifier.classify({"code": "UNAVAILABLE", "message": "invalid image url; HTTP 429"})
+
+    assert failure.kind == ProviderFailureKind.PROVIDER_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
     "message",
     [
         "moderation service unavailable",

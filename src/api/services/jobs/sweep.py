@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.services.generation.aisha_failures import AishaFailure
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.db.repositories.job import JobRepository
 
@@ -27,6 +28,22 @@ class JobSweepResult:
     swept_count: int
     error_count: int
     skipped_count: int
+
+
+@dataclasses.dataclass(frozen=True)
+class JobSweepFailure:
+    """Internal GPU diagnostic paired with an explicit safe public category."""
+
+    internal_reason: str
+    public_failure: AishaFailure = AishaFailure.GENERATION_SESSION_TERMINATED
+
+    @property
+    def public_failure_code(self) -> str:
+        return self.public_failure.value
+
+    @property
+    def public_error_message(self) -> str:
+        return self.public_failure.public_message
 
 
 class JobSweepService:
@@ -64,7 +81,7 @@ class JobSweepService:
         gpu_session_id: UUID,
         *,
         product_id: str,
-        reason: str,
+        failure: JobSweepFailure,
     ) -> JobSweepResult:
         """Mark all in-flight Aisha jobs for the given session as FAILED.
 
@@ -72,13 +89,13 @@ class JobSweepService:
             gpu_session_id: Session whose jobs to fail.
             product_id: Required by JobStateTransitionService for
                 refund scoping.
-            reason: Human-readable error_message stamped on each job.
-                Truncated to 500 chars.
+            failure: Internal diagnostic and an explicit safe public failure
+                category stamped on each job.
 
         Returns:
             JobSweepResult with counts. Never raises.
         """
-        truncated_reason = reason[:500]
+        truncated_reason = failure.internal_reason[:500]
 
         async with self._session_factory() as session:
             repo = JobRepository(session)
@@ -103,6 +120,8 @@ class JobSweepService:
                     _, did_transition = await ts.transition_to_failed(
                         job.id,
                         error_message=truncated_reason,
+                        public_error_message=failure.public_error_message,
+                        failure_code=failure.public_failure_code,
                         refund=True,
                         product_id=product_id,
                     )
@@ -124,7 +143,7 @@ class JobSweepService:
             swept=swept,
             errored=errored,
             skipped=skipped,
-            reason=reason[:200],
+            public_failure_code=failure.public_failure_code,
         )
         return JobSweepResult(swept_count=swept, error_count=errored, skipped_count=skipped)
 
@@ -133,7 +152,7 @@ class JobSweepService:
         *,
         session_id: UUID,
         product_id: str,
-        reason: str,
+        failure: JobSweepFailure,
         log_event: str,
     ) -> None:
         """Best-effort wrapper around sweep_session.
@@ -148,7 +167,7 @@ class JobSweepService:
         Args:
             session_id: Session whose in-flight jobs to fail.
             product_id: Pass the session's product_id (for refund scoping).
-            reason: Human-readable error_message; truncated internally.
+            failure: Internal diagnostic and curated public failure category.
             log_event: Structlog event name on success
                 (e.g. "gpu_session.stop.job_sweep" or
                 "gpu_session.provision.job_sweep").
@@ -157,7 +176,7 @@ class JobSweepService:
             result = await self.sweep_session(
                 session_id,
                 product_id=product_id,
-                reason=reason,
+                failure=failure,
             )
             logger.info(
                 log_event,

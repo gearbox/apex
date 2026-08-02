@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.core.product_registry import PRODUCT_REGISTRY
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
@@ -42,4 +43,5 @@ class ContentRetentionWorker(PeriodicWorker):
         DB-level failure that should surface.
         """
         await self._service.sweep()
-        await self._service.reconcile_storage_artifacts()
+        for product_config in PRODUCT_REGISTRY.values():
+            await self._service.reconcile_storage_artifacts(product_id=product_config.slug)
