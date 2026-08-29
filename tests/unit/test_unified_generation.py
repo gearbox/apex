@@ -378,13 +378,14 @@ def _make_resolved_source(
     *,
     source: LibraryAssetSource,
     job_id: UUID | None = None,
+    media_kind: MediaKind = MediaKind.IMAGE,
 ) -> ResolvedSourceMedia:
     return ResolvedSourceMedia(
         position=0,
         ref=AssetRef(source=source, asset_id=asset_id),
         asset_ref=format_asset_ref(source, asset_id),
-        media_kind=MediaKind.IMAGE,
-        content_type="image/png",
+        media_kind=media_kind,
+        content_type="video/mp4" if media_kind is MediaKind.VIDEO else "image/png",
         storage_key=f"{source}s/{asset_id}.png",
         size_bytes=1,
         job_id=job_id,
@@ -472,6 +473,54 @@ class TestGenerationServiceValidation:
             request,
             [_make_resolved_source(source_id, source=LibraryAssetSource.UPLOAD)],
         )
+
+    def test_validate_i2i_rejects_video_source_media(self) -> None:
+        service = _make_service()
+        source_id = uuid4()
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_media=[SourceMediaReference(asset_ref=f"upload:{source_id}")],
+        )
+
+        with pytest.raises(SourceMediaValidationError, match="position 0 has media kind 'video'"):
+            service._validate_inputs(
+                request,
+                [
+                    _make_resolved_source(
+                        source_id,
+                        source=LibraryAssetSource.UPLOAD,
+                        media_kind=MediaKind.VIDEO,
+                    )
+                ],
+            )
+
+    @pytest.mark.parametrize("source_count", [0, 5])
+    async def test_invalid_source_count_does_not_resolve_assets(self, source_count: int) -> None:
+        service = _make_service()
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_media=[
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}") for _ in range(source_count)
+            ],
+        )
+        resolve = AsyncMock()
+
+        with (
+            patch.object(SourceMediaResolver, "resolve", new=resolve),
+            pytest.raises(SourceMediaValidationError, match="source_media count must be between"),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        resolve.assert_not_awaited()
 
     def test_validate_legacy_source_aliases_are_mutually_exclusive(self) -> None:
         request = UnifiedGenerationRequest(
@@ -1349,6 +1398,52 @@ class TestGenerationServiceSlidingRetention:
         assert expected_min <= call_kwargs["expires_at"] <= expected_max
         # Called before provider.submit
         mock_provider.submit.assert_awaited_once()
+
+    async def test_submit_failure_rolls_back_expiry_extension(self) -> None:
+        input_image_id = uuid4()
+        mock_provider = _make_mock_provider()
+        mock_provider.submit = AsyncMock(
+            side_effect=GenerationError("The generation backend rejected the request.")
+        )
+        service = _make_service(providers={Provider.GROK: mock_provider})
+        request = UnifiedGenerationRequest(
+            prompt="Edit this",
+            generation_type=GenerationType.I2I,
+            model=ModelType.GROK_IMAGINE_IMAGE,
+            source_media=[SourceMediaReference(asset_ref=f"upload:{input_image_id}")],
+        )
+        image_repo = MagicMock(touch_expiry_many=AsyncMock(return_value=1))
+        session = AsyncMock()
+
+        with (
+            patch(
+                "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                new=AsyncMock(return_value=_make_enabled_model_mock()),
+            ),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=image_repo,
+            ),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(input_image_id, source=LibraryAssetSource.UPLOAD)
+                    ]
+                ),
+            ),
+            pytest.raises(GenerationError, match="backend rejected"),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=session,
+                product_config=VEX_CONFIG,
+            )
+
+        image_repo.touch_expiry_many.assert_awaited_once()
+        session.rollback.assert_awaited_once()
 
     async def test_generate_unowned_input_image_rejected(self) -> None:
         input_image_id = uuid4()

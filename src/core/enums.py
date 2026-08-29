@@ -138,11 +138,16 @@ class GenerationType(StrEnum):
     @property
     def requires_image_input(self) -> bool:
         """Check if this generation type requires an input image."""
-        return self in (GenerationType.I2I, GenerationType.I2V, GenerationType.FLF2V)
+        return MediaKind.IMAGE in self.input_kinds
 
     @property
     def requires_video_input(self) -> bool:
-        """Check if this generation type requires an input video."""
+        """Check if this generation type requires an input video.
+
+        F18: do not derive this from ``input_kinds``. ``v2v`` deliberately
+        has no owned media kind because it still uses a public
+        ``input_video_url``; deriving it would skip that required URL check.
+        """
         return self == GenerationType.V2V
 
     @property

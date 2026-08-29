@@ -429,7 +429,7 @@ class GenerationJobSource(Base):
         nullable=True,
     )
     asset_ref: Mapped[str] = mapped_column(String(64), nullable=False)
-    media_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    media_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     job: Mapped[GenerationJob] = relationship(
         "GenerationJob",
@@ -443,6 +443,8 @@ class GenerationJobSource(Base):
             name="ck_generation_job_sources_single_source",
         ),
         Index("ix_generation_job_sources_product_job", "product_id", "job_id"),
+        Index("ix_generation_job_sources_source_upload_id", "source_upload_id"),
+        Index("ix_generation_job_sources_source_output_id", "source_output_id"),
     )
 
 

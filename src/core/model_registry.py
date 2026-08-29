@@ -268,7 +268,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         # workflow media input slots.
         inputs=ModelInputs(
             source_media=SourceMediaConstraints(
-                min=1, max=1, media_types=frozenset({MediaKind.IMAGE})
+                min=1, max=2, media_types=frozenset({MediaKind.IMAGE})
             )
         ),
         video=VideoMeta(

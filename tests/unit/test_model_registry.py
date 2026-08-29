@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.enums import AspectRatio, ModelType
+from src.core.enums import AspectRatio, GenerationType, ModelType
 from src.core.model_registry import MODEL_METADATA, get_model_meta
 
 
@@ -21,6 +21,19 @@ class TestModelRegistryCompleteness:
         """MODEL_METADATA should not contain keys that aren't ModelType members."""
         for key in MODEL_METADATA:
             assert key in ModelType, f"MODEL_METADATA key {key!r} is not a ModelType member"
+
+    def test_inputs_are_present_and_first_last_frame_models_accept_two_sources(self) -> None:
+        """Registry input limits must accommodate every declared generation type."""
+        for model, meta in MODEL_METADATA.items():
+            assert meta.inputs is not None, f"{model.value} has no input capabilities"
+            supported_types = set()
+            if meta.image is not None:
+                supported_types.update(meta.image.supported_types)
+            if meta.video is not None:
+                supported_types.update(meta.video.supported_types)
+            if GenerationType.FLF2V in supported_types:
+                assert meta.inputs.source_media is not None
+                assert meta.inputs.source_media.max >= 2
 
 
 class TestGetModelMeta:
@@ -105,3 +118,25 @@ class TestRateLimitConfig:
         assert meta.rate_limit is not None
         assert meta.rate_limit.max_requests == 10
         assert meta.rate_limit.window_seconds == 60
+
+
+class TestGenerationTypeInputRequirements:
+    @pytest.mark.parametrize(
+        ("generation_type", "requires_image", "requires_video"),
+        [
+            (GenerationType.T2I, False, False),
+            (GenerationType.I2I, True, False),
+            (GenerationType.T2V, False, False),
+            (GenerationType.I2V, True, False),
+            (GenerationType.V2V, False, True),
+            (GenerationType.FLF2V, True, False),
+        ],
+    )
+    def test_input_requirement_baseline(
+        self,
+        generation_type: GenerationType,
+        requires_image: bool,
+        requires_video: bool,
+    ) -> None:
+        assert generation_type.requires_image_input is requires_image
+        assert generation_type.requires_video_input is requires_video

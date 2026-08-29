@@ -29,7 +29,13 @@ def _backfill_batch(job_ids: list[object]) -> None:
             (job_id, position, product_id, source_upload_id, source_output_id, asset_ref, media_kind)
         SELECT j.id, 0, j.product_id, NULL, j.source_output_id,
                'output:' || j.source_output_id::text,
-               CASE WHEN o.content_type LIKE 'video/%' THEN 'video' ELSE 'image' END
+               -- Keep this in sync with media_kind_from_content_type: unknown
+               -- families must not be silently classified as images.
+               CASE
+                   WHEN o.content_type LIKE 'video/%' THEN 'video'
+                   WHEN o.content_type LIKE 'image/%' THEN 'image'
+                   ELSE NULL
+               END
         FROM generation_jobs j
         JOIN generation_outputs o ON o.id = j.source_output_id
         WHERE j.id IN :job_ids AND j.source_output_id IS NOT NULL
@@ -61,7 +67,13 @@ def _backfill_batch(job_ids: list[object]) -> None:
             (job_id, position, product_id, source_upload_id, source_output_id, asset_ref, media_kind)
         SELECT n.job_id, n.position_offset + n.upload_position, n.product_id, n.upload_id, NULL,
                'upload:' || n.upload_id::text,
-               CASE WHEN u.content_type LIKE 'video/%' THEN 'video' ELSE 'image' END
+               -- Mirrors media_kind_from_content_type; unknown families are
+               -- retained as an explicitly unclassified historical source.
+               CASE
+                   WHEN u.content_type LIKE 'video/%' THEN 'video'
+                   WHEN u.content_type LIKE 'image/%' THEN 'image'
+                   ELSE NULL
+               END
         FROM numbered n
         JOIN user_images u ON u.id = n.upload_id
         ON CONFLICT (job_id, position) DO NOTHING
@@ -101,7 +113,7 @@ def upgrade() -> None:
         sa.Column("source_upload_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("source_output_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("asset_ref", sa.String(length=64), nullable=False),
-        sa.Column("media_kind", sa.String(length=16), nullable=False),
+        sa.Column("media_kind", sa.String(length=16), nullable=True),
         sa.CheckConstraint(
             "NOT (source_upload_id IS NOT NULL AND source_output_id IS NOT NULL)",
             name="ck_generation_job_sources_single_source",
@@ -121,6 +133,16 @@ def upgrade() -> None:
         "generation_job_sources",
         ["product_id", "job_id"],
     )
+    op.create_index(
+        "ix_generation_job_sources_source_upload_id",
+        "generation_job_sources",
+        ["source_upload_id"],
+    )
+    op.create_index(
+        "ix_generation_job_sources_source_output_id",
+        "generation_job_sources",
+        ["source_output_id"],
+    )
     # Offline SQL rendering cannot inspect keyset batches. The generated DDL
     # remains useful for review; production upgrades run online and perform
     # the bounded backfill in the same migration transaction.
@@ -130,5 +152,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop ordered source provenance; legacy columns remain untouched."""
-    op.drop_index("ix_generation_job_sources_product_job", table_name="generation_job_sources")
     op.drop_table("generation_job_sources")

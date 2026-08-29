@@ -9,6 +9,7 @@ so this file preserves the same behavioral coverage against the Library types.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -283,3 +284,64 @@ class TestGetGroupDetail:
         assert result is not None
         assert result.input_media is not None
         assert result.input_media.original.url == f"/v1/content/uploads/{input_image.id}"
+
+    async def test_preserves_unavailable_source_positions(self) -> None:
+        mock_session = AsyncMock()
+        svc = LibraryService(session=mock_session)
+        mock_repo = AsyncMock()
+        job = _make_job(generation_type="i2i", source_output=None, input_image=None)
+        job.outputs = []
+        mock_repo.get_group_job.return_value = job
+
+        upload = _make_output_row(content_type="image/png")
+        upload.product_id = "vex"
+        output = _make_output_row(content_type="image/png")
+        output.product_id = "vex"
+        missing_id = uuid4()
+        source_rows = [
+            SimpleNamespace(
+                position=0,
+                asset_ref=f"upload:{upload.id}",
+                source_upload_id=upload.id,
+                source_output_id=None,
+            ),
+            SimpleNamespace(
+                position=1,
+                asset_ref=f"upload:{missing_id}",
+                source_upload_id=None,
+                source_output_id=None,
+            ),
+            SimpleNamespace(
+                position=2,
+                asset_ref=f"output:{output.id}",
+                source_upload_id=None,
+                source_output_id=output.id,
+            ),
+        ]
+        source_repo = MagicMock(list_for_job=AsyncMock(return_value=source_rows))
+        image_repo = MagicMock(
+            get_many=AsyncMock(return_value={upload.id: upload}),
+            batch_derivatives=AsyncMock(return_value={}),
+        )
+        output_repo = MagicMock(
+            get_many=AsyncMock(return_value={output.id: output}),
+            batch_derivatives=AsyncMock(return_value={}),
+        )
+
+        with (
+            patch("src.api.services.library.LibraryRepository", return_value=mock_repo),
+            patch(
+                "src.api.services.library.GenerationJobSourceRepository",
+                return_value=source_repo,
+            ),
+            patch("src.api.services.library.UserImageRepository", return_value=image_repo),
+            patch("src.api.services.library.OutputRepository", return_value=output_repo),
+        ):
+            result = await svc.get_group_detail(uuid4(), uuid4(), "vex", session=mock_session)
+
+        assert result is not None
+        assert [source.position for source in result.source_media] == [0, 1, 2]
+        assert [source.available for source in result.source_media] == [True, False, True]
+        assert result.source_media[1].asset_ref == f"upload:{missing_id}"
+        assert result.source_media[1].media is None
+        assert result.input_media is result.source_media[0].media

@@ -195,7 +195,11 @@ class GenerationService:
                     f"{[a.value for a in meta.aspect_ratios]}"
                 )
 
-        # 2. Resolve owned-library media once, before any consumer needs it.
+        # 2. Reject impossible source counts before resolving any asset. This
+        # keeps count errors deterministic and avoids needless DB queries.
+        self._validate_source_cardinality(request)
+
+        # 2.1 Resolve owned-library media once, before any consumer needs it.
         resolved_source_media: list[ResolvedSourceMedia] = []
         if request.source_media is not None:
             resolved_source_media = await SourceMediaResolver().resolve(
@@ -205,8 +209,8 @@ class GenerationService:
                 product_id=product_config.slug,
             )
 
-        # 2.1 Cross-cutting input validation against media capabilities.
-        self._validate_inputs(request, resolved_source_media)
+        # 2.2 Per-item validation requires the ownership-checked rows.
+        self._validate_resolved_sources(request, resolved_source_media)
 
         # 3. Output count cap
         max_n = request.model.max_concurrent_outputs
@@ -537,13 +541,10 @@ class GenerationService:
             await self._event_bus.publish_balance(refund_result.event)
 
     @staticmethod
-    def _validate_inputs(
-        request: UnifiedGenerationRequest,
-        resolved_source_media: list[ResolvedSourceMedia] | None = None,
-    ) -> None:
-        """Validate normalized sources against generation and model capabilities."""
-        resolved = resolved_source_media or []
-        has_source_media = request.source_media is not None
+    def _validate_source_cardinality(request: UnifiedGenerationRequest) -> None:
+        """Validate source-media presence and count without resolving assets."""
+        source_media = request.source_media
+        has_source_media = source_media is not None
         expected_kinds = request.generation_type.input_kinds
         constraints = get_model_meta(request.model).inputs.source_media
 
@@ -559,23 +560,43 @@ class GenerationService:
             raise SourceMediaValidationError(
                 f"Model '{request.model.value}' does not accept source_media"
             )
-        if has_source_media and constraints is not None:
-            actual_count = len(resolved)
+        if source_media is not None and constraints is not None:
+            actual_count = len(source_media)
             if not constraints.min <= actual_count <= constraints.max:
                 raise SourceMediaValidationError(
                     f"source_media count must be between {constraints.min} and {constraints.max}; got {actual_count}"
                 )
-            for source in resolved:
-                if source.media_kind not in constraints.media_types:
-                    allowed = ", ".join(sorted(kind.value for kind in constraints.media_types))
-                    raise SourceMediaValidationError(
-                        f"source_media position {source.position} has media kind "
-                        f"'{source.media_kind.value}'; model accepts: {allowed}"
-                    )
         if request.generation_type.requires_video_input and request.input_video_url is None:
             raise ValueError(
                 f"generation_type '{request.generation_type.value}' requires input_video_url"
             )
+
+    @staticmethod
+    def _validate_resolved_sources(
+        request: UnifiedGenerationRequest,
+        resolved_source_media: list[ResolvedSourceMedia],
+    ) -> None:
+        """Validate resolved source media against model media-kind limits."""
+        constraints = get_model_meta(request.model).inputs.source_media
+        if constraints is None:
+            return
+
+        for source in resolved_source_media:
+            if source.media_kind not in constraints.media_types:
+                allowed = ", ".join(sorted(kind.value for kind in constraints.media_types))
+                raise SourceMediaValidationError(
+                    f"source_media position {source.position} has media kind "
+                    f"'{source.media_kind.value}'; model accepts: {allowed}"
+                )
+
+    @staticmethod
+    def _validate_inputs(
+        request: UnifiedGenerationRequest,
+        resolved_source_media: list[ResolvedSourceMedia] | None = None,
+    ) -> None:
+        """Validate normalized source media (compatibility test helper)."""
+        GenerationService._validate_source_cardinality(request)
+        GenerationService._validate_resolved_sources(request, resolved_source_media or [])
 
     @staticmethod
     def _source_media_count(request: UnifiedGenerationRequest) -> int:

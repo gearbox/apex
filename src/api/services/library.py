@@ -30,6 +30,7 @@ from src.api.schemas.library import (
     LibraryLineage,
     LibraryLineageGraph,
     LibraryOutputItem,
+    LibrarySourceMediaItem,
     LibraryTagRef,
     LineageEdge,
     LineageNode,
@@ -1132,36 +1133,68 @@ class LibraryService:
         upload_derivatives = await image_repo.batch_derivatives(upload_ids)
         output_derivatives = await output_repo.batch_derivatives(output_ids)
 
-        source_media: list[MediaObject] = []
+        source_media: list[LibrarySourceMediaItem] = []
         for row in source_rows:
             if row.source_upload_id is not None:
                 upload = uploads.get(row.source_upload_id)
                 if upload is None or upload.product_id != product_id:
+                    source_media.append(
+                        LibrarySourceMediaItem(
+                            position=row.position,
+                            asset_ref=row.asset_ref,
+                            available=False,
+                        )
+                    )
                     continue
                 source_media.append(
-                    _build_media_object(
-                        source=LibraryAssetSource.UPLOAD,
-                        asset_id=upload.id,
-                        width=upload.width,
-                        height=upload.height,
-                        content_type=upload.content_type,
-                        size_bytes=upload.size_bytes,
-                        derivatives=list(upload_derivatives.get(upload.id, [])),
+                    LibrarySourceMediaItem(
+                        position=row.position,
+                        asset_ref=row.asset_ref,
+                        available=True,
+                        media=_build_media_object(
+                            source=LibraryAssetSource.UPLOAD,
+                            asset_id=upload.id,
+                            width=upload.width,
+                            height=upload.height,
+                            content_type=upload.content_type,
+                            size_bytes=upload.size_bytes,
+                            derivatives=list(upload_derivatives.get(upload.id, [])),
+                        ),
                     )
                 )
             elif row.source_output_id is not None:
                 output = source_outputs.get(row.source_output_id)
                 if output is None or output.product_id != product_id:
+                    source_media.append(
+                        LibrarySourceMediaItem(
+                            position=row.position,
+                            asset_ref=row.asset_ref,
+                            available=False,
+                        )
+                    )
                     continue
                 source_media.append(
-                    _build_media_object(
-                        source=LibraryAssetSource.OUTPUT,
-                        asset_id=output.id,
-                        width=output.width,
-                        height=output.height,
-                        content_type=output.content_type,
-                        size_bytes=output.size_bytes,
-                        derivatives=list(output_derivatives.get(output.id, [])),
+                    LibrarySourceMediaItem(
+                        position=row.position,
+                        asset_ref=row.asset_ref,
+                        available=True,
+                        media=_build_media_object(
+                            source=LibraryAssetSource.OUTPUT,
+                            asset_id=output.id,
+                            width=output.width,
+                            height=output.height,
+                            content_type=output.content_type,
+                            size_bytes=output.size_bytes,
+                            derivatives=list(output_derivatives.get(output.id, [])),
+                        ),
+                    )
+                )
+            else:
+                source_media.append(
+                    LibrarySourceMediaItem(
+                        position=row.position,
+                        asset_ref=row.asset_ref,
+                        available=False,
                     )
                 )
 
@@ -1170,33 +1203,43 @@ class LibraryService:
         # the backfill batch has visited it.
         if not source_media and job.source_output is not None:
             source_media = [
-                _build_media_object(
-                    source=LibraryAssetSource.OUTPUT,
-                    asset_id=job.source_output.id,
-                    width=job.source_output.width,
-                    height=job.source_output.height,
-                    content_type=job.source_output.content_type,
-                    size_bytes=job.source_output.size_bytes,
-                    derivatives=list(job.source_output.derivatives),
+                LibrarySourceMediaItem(
+                    position=0,
+                    asset_ref=format_asset_ref(LibraryAssetSource.OUTPUT, job.source_output.id),
+                    available=True,
+                    media=_build_media_object(
+                        source=LibraryAssetSource.OUTPUT,
+                        asset_id=job.source_output.id,
+                        width=job.source_output.width,
+                        height=job.source_output.height,
+                        content_type=job.source_output.content_type,
+                        size_bytes=job.source_output.size_bytes,
+                        derivatives=list(job.source_output.derivatives),
+                    ),
                 )
             ]
         elif not source_media and job.input_image is not None:
             source_media = [
-                _build_media_object(
-                    source=LibraryAssetSource.UPLOAD,
-                    asset_id=job.input_image.id,
-                    width=job.input_image.width,
-                    height=job.input_image.height,
-                    content_type=job.input_image.content_type,
-                    size_bytes=job.input_image.size_bytes,
-                    derivatives=list(job.input_image.derivatives),
+                LibrarySourceMediaItem(
+                    position=0,
+                    asset_ref=format_asset_ref(LibraryAssetSource.UPLOAD, job.input_image.id),
+                    available=True,
+                    media=_build_media_object(
+                        source=LibraryAssetSource.UPLOAD,
+                        asset_id=job.input_image.id,
+                        width=job.input_image.width,
+                        height=job.input_image.height,
+                        content_type=job.input_image.content_type,
+                        size_bytes=job.input_image.size_bytes,
+                        derivatives=list(job.input_image.derivatives),
+                    ),
                 )
             ]
 
         return LibraryGroupDetail(
             job_id=job.id,
             badge=self._resolve_group_badge(gt),
-            input_media=source_media[0] if source_media else None,
+            input_media=next((source.media for source in source_media if source.available), None),
             source_media=source_media,
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,

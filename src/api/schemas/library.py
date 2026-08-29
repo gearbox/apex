@@ -347,6 +347,21 @@ class LibraryGroupLineage(msgspec.Struct, kw_only=True):
     """Specific output used as input."""
 
 
+class LibrarySourceMediaItem(msgspec.Struct, kw_only=True):
+    """One ordered source used by a generation job.
+
+    A source row outlives the referenced asset: retention nulls the foreign
+    key but preserves ``asset_ref`` and its position, allowing clients to
+    show an unavailable placeholder instead of replaying a changed request.
+    """
+
+    position: int
+    asset_ref: str
+    available: bool
+    media: MediaObject | None = None
+    """Resolved media envelope; absent when the source is unavailable."""
+
+
 class LibraryGroupDetail(msgspec.Struct, kw_only=True):
     """Full detail view of a generation group (job)."""
 
@@ -359,8 +374,8 @@ class LibraryGroupDetail(msgspec.Struct, kw_only=True):
     """Media envelope for the source input (upload or remixed output).
     Present when badge == 'image'."""
 
-    source_media: list[MediaObject] = msgspec.field(default_factory=list)
-    """Ordered source assets used for this job. Re-Generate replays this order."""
+    source_media: list[LibrarySourceMediaItem] = msgspec.field(default_factory=list)
+    """Ordered source assets used for this job, including unavailable positions."""
 
     prompt: str
     negative_prompt: str | None = None
