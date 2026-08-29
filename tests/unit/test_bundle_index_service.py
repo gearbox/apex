@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tarfile as tarfile_module
 from typing import TYPE_CHECKING, Any
 
@@ -70,10 +71,49 @@ def _write_bundle_yaml(
     """Create {bundle_path}/current/bundle.yaml with the given hardware section."""
     current_dir = bundle_path / "current"
     current_dir.mkdir(parents=True, exist_ok=True)
-    data: dict[str, object] = {"hardware": hw if hw is not None else _HW_YAML}
+    data: dict[str, object] = {
+        "hardware": hw if hw is not None else _HW_YAML,
+        "workflow_api_file": "workflow.api.json",
+        "workflow": {
+            "contract_version": 2,
+            "media": "image",
+            "nodes": {
+                "latent": {
+                    "id": "1",
+                    "class": "EmptyLatentImage",
+                    "inputs": {"width": "width"},
+                },
+                "positive_prompt": {
+                    "id": "2",
+                    "class": "CLIPTextEncode",
+                    "inputs": {"text": "text"},
+                },
+                "sampler": {
+                    "id": "3",
+                    "class": "KSampler",
+                    "inputs": {"seed": "seed"},
+                },
+                "save": {
+                    "id": "4",
+                    "class": "SaveImage",
+                    "inputs": {"filename_prefix": "filename_prefix"},
+                },
+            },
+        },
+    }
     if readiness_marker is not None:
         data["readiness_marker"] = readiness_marker
     (current_dir / "bundle.yaml").write_text(yaml.dump(data))
+    (current_dir / "workflow.api.json").write_text(
+        json.dumps(
+            {
+                "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024}},
+                "2": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+                "3": {"class_type": "KSampler", "inputs": {"seed": 0}},
+                "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": ""}},
+            }
+        )
+    )
 
 
 def _write_index(cache_dir: Path, entries: list[dict[str, object]]) -> None:
@@ -1474,6 +1514,33 @@ class TestGenerationConfigCacheInvalidation:
                         "max_cfg": 15.0,
                     },
                 },
+                "workflow_api_file": "workflow.api.json",
+                "workflow": {
+                    "contract_version": 2,
+                    "media": "image",
+                    "nodes": {
+                        "latent": {
+                            "id": "1",
+                            "class": "EmptyLatentImage",
+                            "inputs": {"width": "width"},
+                        },
+                        "positive_prompt": {
+                            "id": "2",
+                            "class": "CLIPTextEncode",
+                            "inputs": {"text": "text"},
+                        },
+                        "sampler": {
+                            "id": "3",
+                            "class": "KSampler",
+                            "inputs": {"seed": "seed"},
+                        },
+                        "save": {
+                            "id": "4",
+                            "class": "SaveImage",
+                            "inputs": {"filename_prefix": "filename_prefix"},
+                        },
+                    },
+                },
             }
         )
         return _make_test_tarball(
@@ -1492,6 +1559,14 @@ class TestGenerationConfigCacheInvalidation:
                     }
                 ),
                 "bundles/my_bundle/current/bundle.yaml": bundle_yaml_content,
+                "bundles/my_bundle/current/workflow.api.json": json.dumps(
+                    {
+                        "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024}},
+                        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+                        "3": {"class_type": "KSampler", "inputs": {"seed": 0}},
+                        "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": ""}},
+                    }
+                ),
             },
         )
 
@@ -1640,42 +1715,78 @@ class TestOnResyncCallbacks:
 
 def _write_bundle_yaml_with_models(
     bundle_path: Path,
-    checkpoint_filenames: list[str],
+    model_filenames: list[str],
     *,
     bundle_version: str = "current",
+    model_type: str = "checkpoints",
 ) -> None:
-    """Create {bundle_path}/{bundle_version}/bundle.yaml with hardware + models sections."""
+    """Create a valid bundle contract with model declarations."""
     version_dir = bundle_path / bundle_version
     version_dir.mkdir(parents=True, exist_ok=True)
     data: dict[str, object] = {
         "hardware": _HW_YAML,
+        "workflow_api_file": "workflow.api.json",
+        "workflow": {
+            "contract_version": 2,
+            "media": "image",
+            "nodes": {
+                "latent": {
+                    "id": "1",
+                    "class": "EmptyLatentImage",
+                    "inputs": {"width": "width"},
+                },
+                "positive_prompt": {
+                    "id": "2",
+                    "class": "CLIPTextEncode",
+                    "inputs": {"text": "text"},
+                },
+                "sampler": {
+                    "id": "3",
+                    "class": "KSampler",
+                    "inputs": {"seed": "seed"},
+                },
+                "save": {
+                    "id": "4",
+                    "class": "SaveImage",
+                    "inputs": {"filename_prefix": "filename_prefix"},
+                },
+            },
+        },
         "models": [
             {
-                "model_type": "checkpoints",
-                "files": [{"filename": fn} for fn in checkpoint_filenames],
+                "model_type": model_type,
+                "files": [{"filename": fn} for fn in model_filenames],
             }
         ],
     }
     (version_dir / "bundle.yaml").write_text(yaml.dump(data))
+    (version_dir / "workflow.api.json").write_text(
+        json.dumps(
+            {
+                "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024}},
+                "2": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+                "3": {"class_type": "KSampler", "inputs": {"seed": 0}},
+                "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": ""}},
+            }
+        )
+    )
 
 
-class TestGetCheckpointFilenames:
-    """BundleIndexService.get_checkpoint_filenames() contract tests."""
+class TestGetModelFilenames:
+    """BundleIndexService.get_model_filenames() contract tests."""
 
     def _make_populated_service(
         self,
         tmp_path: Path,
         bundle_name: str,
-        checkpoint_filenames: list[str],
+        model_filenames: list[str],
         *,
         bundle_version: str = "current",
     ) -> BundleIndexService:
         """Build a BundleIndexService with the named bundle in its index."""
         bundle_rel = f"bundles/{bundle_name}"
         bundle_abs = tmp_path / bundle_rel
-        _write_bundle_yaml_with_models(
-            bundle_abs, checkpoint_filenames, bundle_version=bundle_version
-        )
+        _write_bundle_yaml_with_models(bundle_abs, model_filenames, bundle_version=bundle_version)
         # Also create 'current' symlink when a versioned dir is requested.
         if bundle_version != "current":
             current = bundle_abs / "current"
@@ -1696,24 +1807,24 @@ class TestGetCheckpointFilenames:
         svc._parse_index()
         return svc
 
-    def test_returns_declared_single_checkpoint(self, tmp_path: Path) -> None:
+    def test_returns_declared_single_model(self, tmp_path: Path) -> None:
         svc = self._make_populated_service(
             tmp_path, "qwen_rapid_aio", ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
         )
-        result = svc.get_checkpoint_filenames("qwen_rapid_aio")
+        result = svc.get_model_filenames("qwen_rapid_aio", None, "checkpoints")
         assert result == ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
 
-    def test_returns_multiple_checkpoints(self, tmp_path: Path) -> None:
+    def test_returns_multiple_models(self, tmp_path: Path) -> None:
         svc = self._make_populated_service(
             tmp_path, "multi_ckpt", ["model_a.safetensors", "model_b.safetensors"]
         )
-        result = svc.get_checkpoint_filenames("multi_ckpt")
+        result = svc.get_model_filenames("multi_ckpt", None, "checkpoints")
         assert result == ["model_a.safetensors", "model_b.safetensors"]
 
     def test_returns_empty_for_missing_bundle(self, tmp_path: Path) -> None:
         svc = _make_service(tmp_path)
         # No index populated — bundle_index is empty.
-        result = svc.get_checkpoint_filenames("nonexistent_bundle")
+        result = svc.get_model_filenames("nonexistent_bundle", None, "checkpoints")
         assert result is None
 
     def test_returns_empty_for_malformed_yaml(self, tmp_path: Path) -> None:
@@ -1722,19 +1833,18 @@ class TestGetCheckpointFilenames:
         bundle_abs = tmp_path / bundle_rel
         current_dir = bundle_abs / "current"
         current_dir.mkdir(parents=True)
-        # Write valid hardware so _parse_index succeeds (it reads bundle.yaml for hardware).
-        (current_dir / "bundle.yaml").write_text(yaml.dump({"hardware": _HW_YAML}))
+        _write_bundle_yaml_with_models(bundle_abs, [])
         _write_index(
             tmp_path,
             [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
         )
         svc = _make_service(tmp_path)
         svc._parse_index()
-        # Now replace bundle.yaml with malformed YAML to test get_checkpoint_filenames's
+        # Now replace bundle.yaml with malformed YAML to test get_model_filenames's
         # yaml.YAMLError exception path.
         (current_dir / "bundle.yaml").write_text("models: [[[invalid")
         # Must return None without raising.
-        result = svc.get_checkpoint_filenames(bundle_name)
+        result = svc.get_model_filenames(bundle_name, None, "checkpoints")
         assert result is None
 
     def test_returns_empty_when_no_checkpoint_models(self, tmp_path: Path) -> None:
@@ -1742,20 +1852,14 @@ class TestGetCheckpointFilenames:
         bundle_name = "no_ckpt"
         bundle_rel = f"bundles/{bundle_name}"
         bundle_abs = tmp_path / bundle_rel
-        current_dir = bundle_abs / "current"
-        current_dir.mkdir(parents=True)
-        data: dict[str, object] = {
-            "hardware": _HW_YAML,
-            "models": [{"model_type": "loras", "files": [{"filename": "style.safetensors"}]}],
-        }
-        (current_dir / "bundle.yaml").write_text(yaml.dump(data))
+        _write_bundle_yaml_with_models(bundle_abs, ["style.safetensors"], model_type="loras")
         _write_index(
             tmp_path,
             [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
         )
         svc = _make_service(tmp_path)
         svc._parse_index()
-        assert svc.get_checkpoint_filenames(bundle_name) == []
+        assert svc.get_model_filenames(bundle_name, None, "checkpoints") == []
 
     def test_uses_version_subdir_when_specified(self, tmp_path: Path) -> None:
         """bundle_version='260105-01' resolves to that subdir, not 'current'."""
@@ -1765,7 +1869,7 @@ class TestGetCheckpointFilenames:
             ["versioned.safetensors"],
             bundle_version="260105-01",
         )
-        result = svc.get_checkpoint_filenames("versioned_bundle", "260105-01")
+        result = svc.get_model_filenames("versioned_bundle", "260105-01", "checkpoints")
         assert result == ["versioned.safetensors"]
 
     def test_never_raises_on_missing_bundle_yaml(self, tmp_path: Path) -> None:
@@ -1773,20 +1877,17 @@ class TestGetCheckpointFilenames:
         bundle_name = "missing_yaml"
         bundle_rel = f"bundles/{bundle_name}"
         bundle_abs = tmp_path / bundle_rel
-        # Create hardware YAML at current/ for _parse_index, but omit models.
         current_dir = bundle_abs / "current"
-        current_dir.mkdir(parents=True)
-        data: dict[str, object] = {"hardware": _HW_YAML}
-        (current_dir / "bundle.yaml").write_text(yaml.dump(data))
+        _write_bundle_yaml_with_models(bundle_abs, [])
         _write_index(
             tmp_path,
             [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
         )
         svc = _make_service(tmp_path)
         svc._parse_index()
-        # Now remove the bundle.yaml so get_checkpoint_filenames hits OSError.
+        # Now remove the bundle.yaml so get_model_filenames hits OSError.
         (current_dir / "bundle.yaml").unlink()
-        result = svc.get_checkpoint_filenames(bundle_name)
+        result = svc.get_model_filenames(bundle_name, None, "checkpoints")
         assert result is None
 
     def test_cache_hit_parses_yaml_only_once(self, tmp_path: Path) -> None:
@@ -1804,26 +1905,26 @@ class TestGetCheckpointFilenames:
             return original_safe_load(stream)
 
         with patch("yaml.safe_load", side_effect=counting_safe_load):
-            r1 = svc.get_checkpoint_filenames("cache_test_bundle")
-            r2 = svc.get_checkpoint_filenames("cache_test_bundle")
+            r1 = svc.get_model_filenames("cache_test_bundle", None, "checkpoints")
+            r2 = svc.get_model_filenames("cache_test_bundle", None, "checkpoints")
 
         assert r1 == ["cached.safetensors"]
         assert r2 == ["cached.safetensors"]
         assert parse_count == 1, f"expected yaml.safe_load called once, got {parse_count}"
 
     def test_cache_cleared_on_resync(self, tmp_path: Path) -> None:
-        """Clearing _checkpoint_filenames_cache forces re-parse on next call."""
+        """Clearing _model_filenames_cache forces re-parse on next call."""
         from unittest.mock import patch
 
         svc = self._make_populated_service(tmp_path, "resync_bundle", ["before_resync.safetensors"])
 
         # Warm the cache.
-        r1 = svc.get_checkpoint_filenames("resync_bundle")
+        r1 = svc.get_model_filenames("resync_bundle", None, "checkpoints")
         assert r1 == ["before_resync.safetensors"]
-        assert svc._checkpoint_filenames_cache, "cache should be populated"
+        assert svc._model_filenames_cache, "cache should be populated"
 
         # Simulate the swap clearing both caches.
-        svc._checkpoint_filenames_cache.clear()
+        svc._model_filenames_cache.clear()
 
         parse_count = 0
         original_safe_load = yaml.safe_load
@@ -1834,7 +1935,7 @@ class TestGetCheckpointFilenames:
             return original_safe_load(stream)
 
         with patch("yaml.safe_load", side_effect=counting_safe_load):
-            r2 = svc.get_checkpoint_filenames("resync_bundle")
+            r2 = svc.get_model_filenames("resync_bundle", None, "checkpoints")
 
         assert r2 == ["before_resync.safetensors"]
         assert parse_count == 1, "expected re-parse after cache clear"
@@ -1845,7 +1946,7 @@ class TestGetCheckpointFilenames:
         bundle_rel = f"bundles/{bundle_name}"
         bundle_abs = tmp_path / bundle_rel
         current_dir = bundle_abs / "current"
-        current_dir.mkdir(parents=True)
+        _write_bundle_yaml_with_models(bundle_abs, [])
         data: dict[str, object] = {
             "hardware": _HW_YAML,
             "models": [
@@ -1855,7 +1956,6 @@ class TestGetCheckpointFilenames:
                 }
             ],
         }
-        (current_dir / "bundle.yaml").write_text(yaml.dump(data))
         _write_index(
             tmp_path,
             [{"name": bundle_name, "path": bundle_rel, "model_type": "aisha-x"}],
@@ -1867,11 +1967,11 @@ class TestGetCheckpointFilenames:
 
         # First call: file is missing → None (transient error).
         yaml_path.unlink()
-        r1 = svc.get_checkpoint_filenames(bundle_name)
+        r1 = svc.get_model_filenames(bundle_name, None, "checkpoints")
         assert r1 is None
-        assert not svc._checkpoint_filenames_cache, "None must not be cached"
+        assert not svc._model_filenames_cache, "None must not be cached"
 
         # Second call: file restored → should parse successfully.
         yaml_path.write_text(yaml.dump(data))
-        r2 = svc.get_checkpoint_filenames(bundle_name)
+        r2 = svc.get_model_filenames(bundle_name, None, "checkpoints")
         assert r2 == ["recovered.safetensors"]

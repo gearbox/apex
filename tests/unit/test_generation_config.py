@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -76,10 +77,52 @@ def _make_bundle_dir(
             "num_gpus": 1,
             **(extra_hardware or {}),
         }
-        bundle_data: dict[str, Any] = {"hardware": hw}
+        bundle_data: dict[str, Any] = {
+            "hardware": hw,
+            "workflow_api_file": "workflow.api.json",
+            "workflow": {
+                "contract_version": 2,
+                "media": "image",
+                "nodes": {
+                    "latent": {
+                        "id": "1",
+                        "class": "EmptyLatentImage",
+                        "inputs": {"width": "width", "height": "height"},
+                    },
+                    "positive_prompt": {
+                        "id": "2",
+                        "class": "CLIPTextEncode",
+                        "inputs": {"text": "text"},
+                    },
+                    "sampler": {
+                        "id": "3",
+                        "class": "KSampler",
+                        "inputs": {"seed": "seed"},
+                    },
+                    "save": {
+                        "id": "4",
+                        "class": "SaveImage",
+                        "inputs": {"filename_prefix": "filename_prefix"},
+                    },
+                },
+            },
+        }
         if generation_block is not None:
             bundle_data["generation"] = generation_block
         (version_dir / "bundle.yaml").write_text(yaml.dump(bundle_data))
+        (version_dir / "workflow.api.json").write_text(
+            json.dumps(
+                {
+                    "1": {
+                        "class_type": "EmptyLatentImage",
+                        "inputs": {"width": 1024, "height": 1024},
+                    },
+                    "2": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+                    "3": {"class_type": "KSampler", "inputs": {"seed": 0}},
+                    "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": ""}},
+                }
+            )
+        )
 
     # Build a minimal index yaml so _parse_index can find the bundle
     index_yaml = cache_dir / "bundle-index.yaml"

@@ -105,6 +105,9 @@ class ModelInfo(msgspec.Struct, kw_only=True):
     supports_negative_prompt: bool
     """Whether this model uses negative prompts."""
 
+    unsupported_parameters: list[str] = msgspec.field(default_factory=list)
+    """Canonical controls omitted by the resolved bundle workflow."""
+
     aspect_ratios: list[str]
     """Allowed aspect ratios, e.g. ["1:1", "16:9"]."""
 

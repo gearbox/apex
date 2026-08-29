@@ -12,6 +12,11 @@ import structlog
 from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationRequest
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.comfyui_client import ComfyUIClient
+from src.api.services.generation.aisha.handlers import (
+    AishaImageGenerationHandler,
+    AishaMediaHandler,
+    UnsupportedMediaError,
+)
 from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
 from src.api.services.generation.tunnel_validation import (
@@ -26,7 +31,16 @@ from src.api.services.image_normalization import (
     read_image_dimensions,
     sniff_format,
 )
-from src.core.enums import AspectRatio, JobStatus, ModelType, Provider, Sampler, Scheduler
+from src.api.services.workflow.contract import MediaSlot
+from src.core.enums import (
+    AspectRatio,
+    JobStatus,
+    MediaKind,
+    ModelType,
+    Provider,
+    Sampler,
+    Scheduler,
+)
 from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
@@ -76,7 +90,7 @@ def _sanitize_filename(name: str | None) -> str:
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -86,7 +100,8 @@ if TYPE_CHECKING:
     from src.api.services.generation.source_media import ResolvedSourceMedia
     from src.api.services.gpu_session.service import GpuSessionService
     from src.api.services.storage import R2StorageService
-    from src.api.services.workflow_service import WorkflowService
+    from src.api.services.workflow import WorkflowService
+    from src.api.services.workflow.contract import BundleCapabilities
     from src.core.generation_config import BundleGenerationConfig
     from src.db.models.storage import GenerationJob
 
@@ -112,6 +127,7 @@ class AishaGenerationProvider:
         tunnel_domain: str = "",
         tunnel_hostname_allowed_prefix: str | None = None,
         max_input_megapixels: float = 100.0,
+        handlers: Mapping[MediaKind, AishaMediaHandler] | None = None,
     ) -> None:
         self._workflow = workflow_service
         self._gpu_session_service = gpu_session_service
@@ -129,13 +145,34 @@ class AishaGenerationProvider:
         self._tunnel_hostname_allowed_prefix = tunnel_hostname_allowed_prefix
         self._bundle_index = bundle_index
         self._max_input_megapixels = max_input_megapixels
+        self._handlers = (
+            dict(handlers)
+            if handlers is not None
+            else {MediaKind.IMAGE: AishaImageGenerationHandler(self._submit_image)}
+        )
+
+    def _capabilities_for(self, model: ModelType) -> BundleCapabilities | None:
+        """Read the indexed capability used for media-handler validation."""
+        try:
+            mapping = self._bundle_index.resolve_bundle(model.value)
+        except BundleNotFoundError:
+            return None
+        return mapping.capabilities
+
+    def _handler_for(self, media: MediaKind) -> AishaMediaHandler:
+        """Select a registered output-media handler without model branching."""
+        try:
+            return self._handlers[media]
+        except KeyError as exc:
+            raise UnsupportedMediaError(
+                f"Aisha {media.value} media has no registered handler"
+            ) from exc
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
         """Aisha-specific validation beyond what the enum provides."""
-        if request.model == ModelType.AISHA_VIDEO:
-            raise FeatureNotSupportedError(
-                "Aisha video generation is not yet available via the unified endpoint"
-            )
+        self._handler_for(request.generation_type.output_kind).validate(
+            request, self._capabilities_for(request.model)
+        )
 
     async def refresh_job(
         self,
@@ -261,6 +298,37 @@ class AishaGenerationProvider:
         return AspectRatio.RATIO_1_1
 
     async def submit(
+        self,
+        request: UnifiedGenerationRequest,
+        *,
+        user_id: UUID,
+        session: AsyncSession,
+        billing_service: BillingService,
+        account_id: UUID,
+        token_cost: int,
+        product_id: str,
+        source_job_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
+        source_media: Sequence[ResolvedSourceMedia] = (),
+    ) -> ProviderSubmitResult:
+        """Delegate submission to the handler registered for the output medium."""
+        handler = self._handler_for(request.generation_type.output_kind)
+        return await handler.submit(
+            request,
+            user_id=user_id,
+            session=session,
+            billing_service=billing_service,
+            account_id=account_id,
+            token_cost=token_cost,
+            product_id=product_id,
+            source_job_id=source_job_id,
+            primary_output_id=primary_output_id,
+            primary_upload_id=primary_upload_id,
+            source_media=source_media,
+        )
+
+    async def _submit_image(
         self,
         request: UnifiedGenerationRequest,
         *,
@@ -492,21 +560,18 @@ class AishaGenerationProvider:
                     f"Bundle '{gpu_session.bundle_name}' not found in index. "
                     "Wait for the bundle index to sync and try again."
                 ) from exc
-            workflow = self._workflow.load_workflow_from_bundle(
-                bundle_dir, gpu_session.bundle_version
-            )
-            self._workflow.validate_workflow(workflow)
-            self._workflow.inject_checkpoint(
-                workflow,
-                gpu_session.bundle_name,
-                gpu_session.bundle_version,
-                session_id=str(gpu_session.id),
-            )
-            configured = self._workflow.apply_parameters(
-                workflow=workflow,
+            bound = self._workflow.load(bundle_dir, gpu_session.bundle_version)
+            configured = self._workflow.apply(
+                bound,
                 request=legacy_request,
-                input_image_1=uploaded_filename,
+                media_filenames=(
+                    {MediaSlot.REFERENCE: [uploaded_filename]}
+                    if uploaded_filename is not None
+                    else {}
+                ),
                 filename_prefix=f"gen_{str(job_id)[:8]}",
+                bundle_name=gpu_session.bundle_name,
+                bundle_version=gpu_session.bundle_version,
             )
 
             result = await client.queue_prompt(configured)

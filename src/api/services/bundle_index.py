@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import tarfile
@@ -18,7 +19,12 @@ import httpx
 import structlog
 import yaml
 
+from src.api.services.workflow.binder import bind_workflow
+from src.api.services.workflow.capabilities import derive_capabilities
+from src.api.services.workflow.contract import MODEL_TYPE_MEDIA, BoundWorkflow, BundleCapabilities
+from src.api.services.workflow.parser import parse_workflow_map
 from src.core.bundle_config import (
+    BundleDefinitionError,
     BundleMapping,
     HardwareRequirements,
     ReadinessMarker,
@@ -59,10 +65,6 @@ class BundleNotFoundError(Exception):
     """No bundle found for the requested model type or bundle spec."""
 
 
-class BundleDefinitionError(ValueError):
-    """A bundle.yaml file is present but semantically invalid."""
-
-
 @dataclass
 class _BundleIndexEntry:
     bundle_name: str
@@ -70,6 +72,8 @@ class _BundleIndexEntry:
     model_type: str
     is_default: bool
     mapping: BundleMapping
+    bound_workflow: BoundWorkflow
+    capabilities: BundleCapabilities
 
 
 def _parse_github_url(url: str) -> tuple[str, str]:
@@ -164,7 +168,7 @@ class BundleIndexService:
             self._owned_client = httpx.AsyncClient()
         self._settings = settings
         self._generation_config_cache: dict[str, BundleGenerationConfig] = {}
-        self._checkpoint_filenames_cache: dict[str, list[str]] = {}
+        self._model_filenames_cache: dict[tuple[str, str], list[str]] = {}
         self._on_resync: list[Callable[[], None]] = []
 
     def register_on_resync(self, callback: Callable[[], None]) -> None:
@@ -300,18 +304,16 @@ class BundleIndexService:
             bundle_version=version,
             hardware=entry.mapping.hardware,
             readiness_marker=entry.mapping.readiness_marker,
+            capabilities=entry.mapping.capabilities,
         )
 
-    def get_checkpoint_filenames(
-        self, bundle_name: str, bundle_version: str | None = None
+    def get_model_filenames(
+        self, bundle_name: str, bundle_version: str | None, model_type: str
     ) -> list[str] | None:
-        """Return checkpoint filenames declared in the bundle's bundle.yaml.
-
-        Source of truth: models[] entries with model_type == "checkpoints",
-        flattened over files[].filename.
+        """Return model filenames declared by one ``models[].model_type``.
 
         Returns:
-            A list of checkpoint filenames (possibly empty when the bundle
+            A list of model filenames (possibly empty when the bundle
             genuinely declares zero checkpoints). Returns None on any lookup
             or read/parse error so callers can distinguish a transient failure
             from a deliberate zero-checkpoint bundle. Never raises.
@@ -320,15 +322,16 @@ class BundleIndexService:
             bundle_dir = self.get_bundle_path(bundle_name)
         except BundleNotFoundError:
             logger.debug(
-                "bundle_index.checkpoint_filenames.bundle_not_found",
+                "bundle_index.model_filenames.bundle_not_found",
                 bundle_name=bundle_name,
                 bundle_version=bundle_version,
+                model_type=model_type,
             )
             return None
 
         bundle_yaml_path = bundle_dir / (bundle_version or "current") / "bundle.yaml"
-        cache_key = str(bundle_yaml_path)
-        cached = self._checkpoint_filenames_cache.get(cache_key)
+        cache_key = (str(bundle_yaml_path), model_type)
+        cached = self._model_filenames_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -337,9 +340,10 @@ class BundleIndexService:
                 data = yaml.safe_load(fh)
         except (OSError, yaml.YAMLError) as exc:
             logger.info(
-                "bundle_index.checkpoint_filenames.read_error",
+                "bundle_index.model_filenames.read_error",
                 bundle_name=bundle_name,
                 bundle_version=bundle_version,
+                model_type=model_type,
                 error=str(exc),
             )
             return None
@@ -347,16 +351,50 @@ class BundleIndexService:
         if not isinstance(data, dict):
             return None
 
-        ckpt_files: list[str] = []
+        filenames: list[str] = []
         for model in data.get("models", []) or []:
-            if isinstance(model, dict) and model.get("model_type") == "checkpoints":
-                ckpt_files.extend(
+            if isinstance(model, dict) and model.get("model_type") == model_type:
+                filenames.extend(
                     str(file_entry["filename"])
                     for file_entry in model.get("files", []) or []
                     if isinstance(file_entry, dict) and "filename" in file_entry
                 )
-        self._checkpoint_filenames_cache[cache_key] = ckpt_files
-        return ckpt_files
+        self._model_filenames_cache[cache_key] = filenames
+        return filenames
+
+    def get_capabilities(
+        self, bundle_name: str, bundle_version: str | None = None
+    ) -> BundleCapabilities | None:
+        """Return capabilities captured when the bundle index was built."""
+        _ = bundle_version
+        entry = self._bundle_index.get(bundle_name)
+        return entry.capabilities if entry is not None else None
+
+    def get_bound_workflow(
+        self, bundle_name: str, bundle_version: str | None = None
+    ) -> BoundWorkflow | None:
+        """Return the eagerly-bound graph associated with an indexed bundle."""
+        _ = bundle_version
+        entry = self._bundle_index.get(bundle_name)
+        return entry.bound_workflow if entry is not None else None
+
+    def get_bound_workflow_for_path(
+        self, bundle_dir: Path, bundle_version: str | None = None
+    ) -> BoundWorkflow | None:
+        """Resolve a bound graph by the provisioned bundle root path."""
+        _ = bundle_version
+        try:
+            resolved = bundle_dir.resolve()
+        except OSError:
+            resolved = bundle_dir
+        for entry in self._bundle_index.values():
+            try:
+                entry_path = (self._cache_dir / entry.bundle_path).resolve()
+            except OSError:
+                entry_path = self._cache_dir / entry.bundle_path
+            if entry_path == resolved:
+                return entry.bound_workflow
+        return None
 
     def get_generation_config(
         self, bundle_name: str, bundle_version: str | None
@@ -410,6 +448,7 @@ class BundleIndexService:
                 max_cfg=30.0,
                 allowed_samplers=frozenset(),
                 allowed_schedulers=frozenset(),
+                max_batch_size=4,
             ),
         )
 
@@ -563,6 +602,7 @@ class BundleIndexService:
             max_cfg=_parse_float(raw_constraints, "max_cfg", fc.max_cfg),
             allowed_samplers=_parse_samplers_list("allowed_samplers"),
             allowed_schedulers=_parse_schedulers_list("allowed_schedulers"),
+            max_batch_size=_parse_int(raw_constraints, "max_batch_size", fc.max_batch_size),
         )
 
         c = constraints
@@ -585,6 +625,10 @@ class BundleIndexService:
         if c.min_cfg > c.max_cfg:
             raise BundleConfigError(
                 f"{bundle_yaml_path}: min_cfg ({c.min_cfg}) > max_cfg ({c.max_cfg})"
+            )
+        if c.max_batch_size <= 0:
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: max_batch_size must be positive, got {c.max_batch_size}"
             )
 
         return BundleGenerationConfig(defaults=defaults, constraints=constraints)
@@ -742,8 +786,8 @@ class BundleIndexService:
             shutil.rmtree(trash)
 
         self._generation_config_cache.clear()
-        self._checkpoint_filenames_cache.clear()
-        logger.info("bundle_index.generation_config_cache_cleared")
+        self._model_filenames_cache.clear()
+        logger.info("bundle_index.workflow_and_generation_caches_cleared")
         for cb in self._on_resync:
             try:
                 cb()
@@ -954,12 +998,29 @@ class BundleIndexService:
 
         bundle_path = self._cache_dir / path
         hardware, readiness_marker = self._parse_hardware(bundle_path)
+        bound_workflow = self._parse_workflow(bundle_path, model_type)
+        try:
+            generation = self._parse_generation_config(bundle_path / "current" / "bundle.yaml")
+        except BundleConfigError as exc:
+            # Keep a workflow-bearing bundle visible to discovery even when an
+            # optional generation block is malformed. The request path parses
+            # the same block again and fails loudly before billing; swallowing
+            # it here would otherwise prevent callers from receiving the
+            # configuration error through get_generation_config().
+            logger.warning(
+                "bundle_index.generation_config_invalid",
+                bundle_name=name,
+                error=str(exc),
+            )
+            generation = self._fallback_generation_config()
+        capabilities = derive_capabilities(bound_workflow, generation)
 
         mapping = BundleMapping(
             bundle_name=name,
             bundle_version=None,
             hardware=hardware,
             readiness_marker=readiness_marker,
+            capabilities=capabilities,
         )
         return _BundleIndexEntry(
             bundle_name=name,
@@ -967,7 +1028,60 @@ class BundleIndexService:
             model_type=model_type,
             is_default=is_default,
             mapping=mapping,
+            bound_workflow=bound_workflow,
+            capabilities=capabilities,
         )
+
+    def _parse_workflow(self, bundle_path: Path, model_type: str) -> BoundWorkflow:
+        """Parse and bind ``workflow:`` against the declared API graph eagerly."""
+        bundle_yaml = bundle_path / "current" / "bundle.yaml"
+        if not bundle_yaml.exists():
+            raise BundleDefinitionError(f"bundle.yaml not found at {bundle_yaml}")
+        try:
+            with bundle_yaml.open() as fh:
+                data = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            raise BundleDefinitionError(
+                f"{bundle_yaml}: cannot read bundle definition: {exc}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise BundleDefinitionError(
+                f"{bundle_yaml}: expected a YAML mapping at top level, got {type(data).__name__}"
+            )
+        workflow_data = data.get("workflow")
+        if not isinstance(workflow_data, dict):
+            raise BundleDefinitionError(f"{bundle_yaml}: missing required 'workflow' mapping")
+        workflow_file = data.get("workflow_api_file")
+        if (
+            not isinstance(workflow_file, str)
+            or not workflow_file.strip()
+            or "/" in workflow_file
+            or "\\" in workflow_file
+            or workflow_file in {".", ".."}
+        ):
+            raise BundleDefinitionError(
+                f"{bundle_yaml}: workflow_api_file must be a plain relative filename"
+            )
+        api_path = bundle_yaml.parent / workflow_file
+        try:
+            with api_path.open() as fh:
+                api_graph = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BundleDefinitionError(
+                f"{api_path}: cannot read workflow API JSON: {exc}"
+            ) from exc
+        if not isinstance(api_graph, dict):
+            raise BundleDefinitionError(
+                f"{api_path}: expected an API graph mapping, got {type(api_graph).__name__}"
+            )
+        map_ = parse_workflow_map(workflow_data, bundle_yaml)
+        expected_media = MODEL_TYPE_MEDIA.get(model_type)
+        if expected_media is not None and map_.media is not expected_media:
+            raise BundleDefinitionError(
+                f"{bundle_yaml}: workflow.media {map_.media.value!r} does not match "
+                f"model_type {model_type!r}"
+            )
+        return bind_workflow(map_, api_graph)
 
     def _parse_hardware(
         self, bundle_path: Path

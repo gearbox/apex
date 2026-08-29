@@ -28,6 +28,14 @@ from src.api.schemas.providers import (
 )
 from src.api.security import optional_auth_guard
 from src.api.services.generation.service import GenerationService
+from src.api.services.workflow.contract import (
+    DIMENSION_REQUEST_PARAMETERS,
+    DIMENSION_WRITABLE_PARAMETERS,
+    NEGATIVE_PROMPT_PARAMETER,
+    REQUEST_PARAMETER_BINDINGS,
+    BoundWorkflow,
+    BundleCapabilities,
+)
 from src.core.enums import (
     GenerationType,
     GpuSessionStatus,
@@ -61,6 +69,8 @@ def _build_model_info(
     record: object,
     *,
     session_state: ModelSessionState | None,
+    capabilities: BundleCapabilities | None = None,
+    bound_workflow: BoundWorkflow | None = None,
 ) -> ModelInfo:
     """Build ModelInfo from ModelType enum properties + model registry metadata.
 
@@ -70,27 +80,69 @@ def _build_model_info(
         session_state: Per-user readiness; None for always-on providers or unauthenticated.
     """
     meta = get_model_meta(mt)
+    requires_indexed_workflow = mt.provider.provisioning_mode is ProvisioningMode.ON_DEMAND
+    has_indexed_workflow = isinstance(capabilities, BundleCapabilities)
+    if requires_indexed_workflow and isinstance(capabilities, BundleCapabilities):
+        generation_types = [
+            gt.value
+            for gt in GenerationType
+            if mt.supports_generation_type(gt) and gt in capabilities.generation_types
+        ]
+        max_images = min(meta.max_concurrent_outputs, capabilities.max_batch_size)
+        supports_negative = meta.supports_negative_prompt and capabilities.supports_negative_prompt
+        writable = capabilities.writable
+        unsupported_parameters = sorted(
+            binding.parameter
+            for binding in REQUEST_PARAMETER_BINDINGS
+            if binding.writable not in writable
+        )
+        if not supports_negative:
+            unsupported_parameters.append(NEGATIVE_PROMPT_PARAMETER)
+        if not DIMENSION_WRITABLE_PARAMETERS.issubset(writable):
+            unsupported_parameters.extend(DIMENSION_REQUEST_PARAMETERS)
+        unsupported_parameters.sort()
+    else:
+        generation_types = [gt.value for gt in GenerationType if mt.supports_generation_type(gt)]
+        max_images = meta.max_concurrent_outputs
+        supports_negative = meta.supports_negative_prompt
+        unsupported_parameters = []
+
+    source_media_min = (
+        meta.inputs.source_media.min if meta.inputs.source_media is not None else None
+    )
+    source_media_max = (
+        meta.inputs.source_media.max if meta.inputs.source_media is not None else None
+    )
+    source_media_types = (
+        meta.inputs.source_media.media_types if meta.inputs.source_media is not None else None
+    )
+    if requires_indexed_workflow and isinstance(bound_workflow, BoundWorkflow):
+        media_inputs = bound_workflow.map.media_inputs
+        source_media_min = 1 if media_inputs else None
+        source_media_max = len(media_inputs) if media_inputs else None
+        source_media_types = frozenset(item.kind for item in media_inputs) if media_inputs else None
     return ModelInfo(
         model_key=mt.value,
         name=record.name,  # type: ignore[attr-defined]
         description=record.description,  # type: ignore[attr-defined]
-        capabilities=[gt.value for gt in GenerationType if mt.supports_generation_type(gt)],
-        is_enabled=record.is_enabled,  # type: ignore[attr-defined]
-        max_images=meta.max_concurrent_outputs,
+        capabilities=generation_types,
+        is_enabled=record.is_enabled and (not requires_indexed_workflow or has_indexed_workflow),  # type: ignore[attr-defined]
+        max_images=max_images,
         max_prompt_length=meta.max_prompt_length,
-        supports_negative_prompt=meta.supports_negative_prompt,
+        supports_negative_prompt=supports_negative,
+        unsupported_parameters=unsupported_parameters,
         aspect_ratios=[ar.value for ar in meta.aspect_ratios],
         requires_age_verification=meta.requires_age_verification,
         inputs=ModelInputs(
             source_media=(
                 SourceMediaConstraints(
-                    min=meta.inputs.source_media.min,
-                    max=meta.inputs.source_media.max,
-                    media_types=sorted(
-                        meta.inputs.source_media.media_types, key=lambda kind: kind.value
-                    ),
+                    min=source_media_min,
+                    max=source_media_max,
+                    media_types=sorted(source_media_types, key=lambda kind: kind.value),
                 )
-                if meta.inputs.source_media is not None
+                if source_media_min is not None
+                and source_media_max is not None
+                and source_media_types is not None
                 else None
             )
         ),
@@ -193,7 +245,15 @@ class ProvidersController(Controller):
                 if mode is ProvisioningMode.ON_DEMAND and current_user_id is not None
                 else None
             )
-            info = _build_model_info(mt, record, session_state=state)
+            capabilities = generation_service.get_aisha_capabilities(mt)
+            bound_workflow = generation_service.get_aisha_bound_workflow(mt)
+            info = _build_model_info(
+                mt,
+                record,
+                session_state=state,
+                capabilities=capabilities,
+                bound_workflow=bound_workflow,
+            )
             provider_models.setdefault(mt.provider, []).append(info)
 
         # Build provider list — include all known providers even with 0 models

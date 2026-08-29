@@ -374,9 +374,7 @@ class TestAdvanceProvisioning:
         """Unverifiable bundle (zero declared checkpoints) + probe 200 → active via degradation backstop."""
         worker, mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
-        mocks[
-            "bundle_index"
-        ].get_checkpoint_filenames.return_value = []  # zero-checkpoint: unverifiable
+        mocks["bundle_index"].get_model_filenames.return_value = []  # zero-checkpoint: unverifiable
         mocks["http_client"].get.return_value = self._mock_ok_response()
 
         with patch(_REPO_PATH) as MockRepo:
@@ -397,7 +395,7 @@ class TestAdvanceProvisioning:
         worker, mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
         ckpt = "Qwen-Rapid-AIO-NSFW-v19.safetensors"
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = [ckpt]
+        mocks["bundle_index"].get_model_filenames.return_value = [ckpt]
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint([ckpt])
 
         with patch(_REPO_PATH) as MockRepo:
@@ -744,9 +742,7 @@ class TestAdvanceResuming:
             started_at=original_start,
             resumed_at=datetime.now(UTC) - timedelta(minutes=1),
         )
-        mocks[
-            "bundle_index"
-        ].get_checkpoint_filenames.return_value = []  # zero-checkpoint: unverifiable
+        mocks["bundle_index"].get_model_filenames.return_value = []  # zero-checkpoint: unverifiable
         mocks["http_client"].get.return_value = self._mock_ok_response()
 
         with patch(_REPO_PATH) as MockRepo:
@@ -1812,7 +1808,7 @@ class TestProbeComfyui:
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = []
+        mocks["bundle_index"].get_model_filenames.return_value = []
         session = _make_gpu_session(readiness_marker_node_class=None)
         mocks["http_client"].get.return_value = _make_object_info_response(["KSampler"])
 
@@ -1827,11 +1823,11 @@ class TestProbeComfyui:
         assert unverifiable_logs[0].get("log_level") == "warning"
 
     async def test_checkpoint_lookup_failed_returns_false(self) -> None:
-        """get_checkpoint_filenames returning None (lookup/read error) → return False, not unverifiable."""
+        """get_model_filenames returning None (lookup/read error) → return False, not unverifiable."""
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = None
+        mocks["bundle_index"].get_model_filenames.return_value = None
         session = _make_gpu_session(readiness_marker_node_class=None)
         mocks["http_client"].get.return_value = _make_object_info_response(
             ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
@@ -1926,7 +1922,7 @@ class TestProbeComfyui:
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = [
+        mocks["bundle_index"].get_model_filenames.return_value = [
             "Qwen-Rapid-AIO-NSFW-v19.safetensors"
         ]
         session = _make_gpu_session(readiness_marker_node_class=None)
@@ -1949,7 +1945,7 @@ class TestProbeComfyui:
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Model.safetensors"]
+        mocks["bundle_index"].get_model_filenames.return_value = ["Model.safetensors"]
         session = _make_gpu_session(readiness_marker_node_class=None)
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["sub/Model.safetensors"]
@@ -1972,7 +1968,7 @@ class TestProbeComfyui:
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = [
+        mocks["bundle_index"].get_model_filenames.return_value = [
             "Qwen-Rapid-AIO-NSFW-v19.safetensors"
         ]
         session = _make_gpu_session(readiness_marker_node_class=None)
@@ -2000,7 +1996,7 @@ class TestProbeComfyui:
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Qwen.safetensors"]
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
         session = _make_gpu_session(readiness_marker_node_class=None)
         # Response has CheckpointLoaderSimple but with wrong shape (empty dict instead of nested)
         resp = MagicMock(spec=httpx.Response)
@@ -2023,7 +2019,7 @@ class TestProbeComfyui:
     async def test_checkpoint_and_marker_both_present_returns_true(self) -> None:
         """Both checkpoint and marker checks pass → True."""
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Qwen.safetensors"]
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
         session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["Qwen.safetensors"],
@@ -2037,7 +2033,7 @@ class TestProbeComfyui:
     async def test_checkpoint_present_but_marker_missing_returns_false(self) -> None:
         """Checkpoint passes, but marker class absent → False."""
         worker, mocks = _make_worker()
-        mocks["bundle_index"].get_checkpoint_filenames.return_value = ["Qwen.safetensors"]
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
         session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["Qwen.safetensors"]

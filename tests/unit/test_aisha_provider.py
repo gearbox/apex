@@ -24,6 +24,7 @@ from src.api.services.generation.aisha_provider import AishaGenerationProvider
 from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
 from src.api.services.generation.source_media import ResolvedSourceMedia
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
+from src.api.services.workflow.contract import MediaSlot
 from src.core.enums import (
     AspectRatio,
     GenerationType,
@@ -129,10 +130,8 @@ def _make_bundle_index_mock() -> MagicMock:
 
 def _make_provider_with_mocks() -> tuple[AishaGenerationProvider, dict]:
     workflow = MagicMock()
-    workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
-    workflow.validate_workflow = MagicMock()
-    workflow.inject_checkpoint = MagicMock()
-    workflow.apply_parameters.return_value = {"3": {"inputs": {"text": "a cat"}}}
+    workflow.load.return_value = MagicMock()
+    workflow.apply.return_value = {"3": {"inputs": {"text": "a cat"}}}
 
     gpu_session_service = AsyncMock()
     gpu_session_service.get_active_session_for_model = AsyncMock(
@@ -572,10 +571,8 @@ class TestAishaProviderI2IBridge:
     async def test_i2i_with_user_image_uploads_bytes_to_comfyui(self) -> None:
         """End-to-end: input_image_id → R2 download → ComfyUI upload → workflow wiring."""
         workflow = MagicMock()
-        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
-        workflow.validate_workflow = MagicMock()
-        workflow.inject_checkpoint = MagicMock()
-        workflow.apply_parameters.return_value = {"3": {}}
+        workflow.load.return_value = MagicMock()
+        workflow.apply.return_value = {"3": {}}
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
@@ -649,10 +646,10 @@ class TestAishaProviderI2IBridge:
         assert len(job_part) == 8
 
         # Workflow received the ComfyUI-stored name (which may differ from the
-        # requested one) wired into LoadImage via input_image_1.
-        workflow.apply_parameters.assert_called_once()
-        ap_kwargs = workflow.apply_parameters.call_args.kwargs
-        assert ap_kwargs["input_image_1"] == "input_cat.png_deadbeef"
+        # requested one) keyed to the bundle-declared reference slot.
+        workflow.apply.assert_called_once()
+        apply_kwargs = workflow.apply.call_args.kwargs
+        assert apply_kwargs["media_filenames"] == {MediaSlot.REFERENCE: ["input_cat.png_deadbeef"]}
 
         # Job persisted as QUEUED with the ComfyUI prompt_id.
         assert db_job.status == JobStatus.QUEUED
@@ -661,10 +658,8 @@ class TestAishaProviderI2IBridge:
     async def test_i2i_with_source_output_id_takes_precedence(self) -> None:
         """source_output_id branch: filename derived from storage_key tail."""
         workflow = MagicMock()
-        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
-        workflow.validate_workflow = MagicMock()
-        workflow.inject_checkpoint = MagicMock()
-        workflow.apply_parameters.return_value = {"3": {}}
+        workflow.load.return_value = MagicMock()
+        workflow.apply.return_value = {"3": {}}
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
@@ -729,9 +724,11 @@ class TestAishaProviderI2IBridge:
         assert upload_kwargs["filename"].startswith("input_result_001_")
         assert upload_kwargs["filename"].endswith(".jpeg")
 
-        # Workflow wired with the ComfyUI-returned name.
-        ap_kwargs = workflow.apply_parameters.call_args.kwargs
-        assert ap_kwargs["input_image_1"] == "input_result_001.jpg_aaaaaaaa"
+        # Workflow wired with the ComfyUI-returned name via the reference slot.
+        apply_kwargs = workflow.apply.call_args.kwargs
+        assert apply_kwargs["media_filenames"] == {
+            MediaSlot.REFERENCE: ["input_result_001.jpg_aaaaaaaa"]
+        }
 
     async def test_i2i_multiple_sources_raise_before_billing(self) -> None:
         """Provider-level cardinality checks run before billing or job creation."""
@@ -871,26 +868,20 @@ class TestAishaProviderI2IBridge:
 
         # No upload to ComfyUI for T2I.
         mock_client.upload_image.assert_not_called()
-        # Workflow received None for input_image_1.
-        ap_kwargs = mocks["workflow"].apply_parameters.call_args.kwargs
-        assert ap_kwargs["input_image_1"] is None
-        # inject_checkpoint must receive bundle_name as str, not a Path.
-        mocks["workflow"].inject_checkpoint.assert_called_once()
-        ic_args, _ic_kwargs = mocks["workflow"].inject_checkpoint.call_args
-        assert isinstance(ic_args[1], str), (
-            "inject_checkpoint second arg must be bundle_name (str), not Path"
-        )
+        # No media slots are supplied for a text-to-image request.
+        apply_kwargs = mocks["workflow"].apply.call_args.kwargs
+        assert apply_kwargs["media_filenames"] == {}
+        # Bound-workflow application receives the bundle name as a string.
         gpu_session = mocks["gpu_session_service"].get_active_session_for_model.return_value
-        assert ic_args[1] == gpu_session.bundle_name
+        assert isinstance(apply_kwargs["bundle_name"], str)
+        assert apply_kwargs["bundle_name"] == gpu_session.bundle_name
 
     async def test_i2i_webp_source_output_converted_to_png_for_comfyui(self) -> None:
         """D2': a Grok-output WebP remixed via source_output_id must reach
         ComfyUI as PNG bytes with a matching terminal filename extension."""
         workflow = MagicMock()
-        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
-        workflow.validate_workflow = MagicMock()
-        workflow.inject_checkpoint = MagicMock()
-        workflow.apply_parameters.return_value = {"3": {}}
+        workflow.load.return_value = MagicMock()
+        workflow.apply.return_value = {"3": {}}
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
@@ -1154,7 +1145,7 @@ class TestAishaProviderI2IAspectDerivation:
             max_edge=1536,
             tier=Resolution.STANDARD,
         )
-        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        legacy_request = workflow.apply.call_args.kwargs["request"]
         assert legacy_request.width == expected.width
         assert legacy_request.height == expected.height
         # Sanity: landscape in, landscape out — not the 1:1 t2i fallback.
@@ -1174,7 +1165,7 @@ class TestAishaProviderI2IAspectDerivation:
             max_edge=1536,
             tier=Resolution.STANDARD,
         )
-        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        legacy_request = workflow.apply.call_args.kwargs["request"]
         assert legacy_request.width == expected.width
         assert legacy_request.height == expected.height
         assert legacy_request.height > legacy_request.width
@@ -1195,7 +1186,7 @@ class TestAishaProviderI2IAspectDerivation:
             max_edge=1536,
             tier=Resolution.STANDARD,
         )
-        legacy_request = workflow.apply_parameters.call_args.kwargs["request"]
+        legacy_request = workflow.apply.call_args.kwargs["request"]
         assert legacy_request.width == expected.width
         assert legacy_request.height == expected.height
         assert legacy_request.height > legacy_request.width
@@ -1446,14 +1437,8 @@ async def _submit_with_config(
 ) -> None:
     """Helper: submit a request through a provider with the given gen config."""
     workflow = MagicMock()
-    workflow.load_workflow_from_bundle.return_value = {
-        "3": {"inputs": {}},
-        "9": {"inputs": {}},
-        "2": {"inputs": {}},
-    }
-    workflow.validate_workflow = MagicMock()
-    workflow.inject_checkpoint = MagicMock()
-    workflow.apply_parameters.return_value = {"3": {"inputs": {"text": "a cat"}}}
+    workflow.load.return_value = MagicMock()
+    workflow.apply.return_value = {"3": {"inputs": {"text": "a cat"}}}
 
     gpu_session_service = AsyncMock()
     gpu_session_service.get_active_session_for_model = AsyncMock(
@@ -1668,10 +1653,8 @@ class TestAishaProviderClampLogging:
         gen_cfg = _make_constrained_gen_config(max_megapixels=0.5)
 
         workflow = MagicMock()
-        workflow.load_workflow_from_bundle.return_value = {"3": {"inputs": {}}}
-        workflow.validate_workflow = MagicMock()
-        workflow.inject_checkpoint = MagicMock()
-        workflow.apply_parameters.return_value = {"3": {}}
+        workflow.load.return_value = MagicMock()
+        workflow.apply.return_value = {"3": {}}
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(

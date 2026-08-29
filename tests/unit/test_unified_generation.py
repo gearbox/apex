@@ -394,6 +394,8 @@ def _make_resolved_source(
 
 def _make_service(
     providers: dict | None = None,
+    *,
+    bundle_index: MagicMock | None = None,
 ) -> GenerationService:
     billing = AsyncMock()
     billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
@@ -411,6 +413,7 @@ def _make_service(
         billing_service=billing,
         pricing_service=pricing,
         rate_limiter=MagicMock(spec=ModelRateLimiter),
+        bundle_index=bundle_index,
     )
 
 
@@ -438,7 +441,7 @@ class TestGenerationServiceValidation:
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
         with pytest.raises(ValueError, match="requires source_media"):
-            service._validate_inputs(request)
+            service._validate_source_cardinality(request)
 
     def test_validate_v2v_requires_video_url(self) -> None:
         service = _make_service()
@@ -448,7 +451,7 @@ class TestGenerationServiceValidation:
             model=ModelType.GROK_IMAGINE_VIDEO,
         )
         with pytest.raises(ValueError, match="requires input_video_url"):
-            service._validate_inputs(request)
+            service._validate_source_cardinality(request)
 
     def test_validate_t2i_passes(self) -> None:
         service = _make_service()
@@ -457,7 +460,8 @@ class TestGenerationServiceValidation:
             generation_type=GenerationType.T2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
-        service._validate_inputs(request)  # Should not raise
+        service._validate_source_cardinality(request)
+        service._validate_resolved_sources(request, [])
 
     def test_validate_i2i_accepts_resolved_source_media(self) -> None:
         service = _make_service()
@@ -469,10 +473,9 @@ class TestGenerationServiceValidation:
             source_media=[SourceMediaReference(asset_ref=f"upload:{source_id}")],
         )
 
-        service._validate_inputs(
-            request,
-            [_make_resolved_source(source_id, source=LibraryAssetSource.UPLOAD)],
-        )
+        resolved_source_media = [_make_resolved_source(source_id, source=LibraryAssetSource.UPLOAD)]
+        service._validate_source_cardinality(request)
+        service._validate_resolved_sources(request, resolved_source_media)
 
     def test_validate_i2i_rejects_video_source_media(self) -> None:
         service = _make_service()
@@ -485,7 +488,7 @@ class TestGenerationServiceValidation:
         )
 
         with pytest.raises(SourceMediaValidationError, match="position 0 has media kind 'video'"):
-            service._validate_inputs(
+            service._validate_resolved_sources(
                 request,
                 [
                     _make_resolved_source(
@@ -740,7 +743,19 @@ class TestGenerationServiceGenerate:
 
     async def test_rejects_n_exceeding_model_cap(self) -> None:
         """Aisha supports max 4 outputs."""
-        service = _make_service(providers={Provider.AISHA: _make_mock_provider()})  # type: ignore[arg-type]
+        bundle_index = MagicMock()
+        capabilities = MagicMock(
+            generation_types=frozenset({GenerationType.T2I}),
+            supports_negative_prompt=True,
+            writable=frozenset({"latent.batch_size"}),
+            max_batch_size=4,
+        )
+        bundle_index.resolve_bundle.return_value = MagicMock(capabilities=capabilities)
+        bundle_index.get_bound_workflow.return_value = None
+        service = _make_service(
+            providers={Provider.AISHA: _make_mock_provider()},  # type: ignore[arg-type]
+            bundle_index=bundle_index,
+        )
         request = UnifiedGenerationRequest(
             prompt="Cats",
             generation_type=GenerationType.T2I,

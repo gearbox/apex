@@ -29,6 +29,7 @@ from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
 from src.api.security import auth_guard
+from src.api.services.generation.aisha.handlers import UnsupportedMediaError
 from src.api.services.generation.provider_failures import (
     ProviderFailureKind,
     ProviderModerationRejectedError,
@@ -43,6 +44,7 @@ from src.api.services.generation.service import (
     ModelDisabledError,
     ModelNotAllowedError,
     ProviderUnavailableError,
+    UnsupportedGenerationParameterError,
 )
 from src.api.services.generation.source_media import SourceMediaValidationError
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
@@ -283,6 +285,18 @@ class UnifiedGenerationController(Controller):
                 status_code=HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
+        except UnsupportedGenerationParameterError as exc:
+            await _mark_failed(idempotency_service, record_id, session)
+            logger.info("generation.parameter_unsupported", parameters=exc.parameters)
+            return Response(
+                content=ErrorEnvelope(
+                    error="unsupported_generation_parameter",
+                    message=str(exc),
+                    status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                ),
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
         except ValueError as exc:
             await _mark_failed(idempotency_service, record_id, session)
             logger.info("generation.validation_failed", error=str(exc))
@@ -293,6 +307,18 @@ class UnifiedGenerationController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        except UnsupportedMediaError as exc:
+            await _mark_failed(idempotency_service, record_id, session)
+            logger.info("generation.unsupported_media", error=str(exc))
+            return Response(
+                content=ErrorEnvelope(
+                    error="unsupported_media",
+                    message=str(exc),
+                    status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                ),
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
         except FeatureNotSupportedError as exc:

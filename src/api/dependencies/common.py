@@ -67,7 +67,7 @@ from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
-from src.api.services.workflow_service import WorkflowService
+from src.api.services.workflow import WorkflowService
 from src.core.config import Settings, get_settings
 from src.core.enums import WorkerMode
 from src.core.product import ProductConfig  # noqa: TC001
@@ -1082,6 +1082,7 @@ async def init_services(settings: Settings) -> JWTService:
         event_bus=_services.event_bus,
         ops_event_bus=_services.ops_event_bus,
         retention_days=settings.retention_days,
+        bundle_index=_services.bundle_index,
     )
     logger.info(
         "generation_service.initialized",

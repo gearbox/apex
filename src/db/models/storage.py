@@ -516,6 +516,8 @@ class GenerationOutput(Base):
     # Dimensions (nullable; populated for both full and thumbnail rows)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Measured provider duration for video outputs; unknown and image values stay NULL.
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Self-referential FK: thumbnail → full output (ON DELETE CASCADE)
     parent_output_id: Mapped[UUID | None] = mapped_column(

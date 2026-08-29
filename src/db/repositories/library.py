@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import (
-    Integer,
     String,
     and_,
     cast,
@@ -421,7 +420,7 @@ class LibraryRepository:
                 GenerationOutput.size_bytes.label("size_bytes"),
                 GenerationOutput.width.label("width"),
                 GenerationOutput.height.label("height"),
-                cast(null(), Integer).label("duration_ms"),
+                GenerationOutput.duration_ms.label("duration_ms"),
                 cast(null(), String(255)).label("original_filename"),
                 cast(null(), String(255)).label("display_filename"),
                 GenerationOutput.job_id.label("job_id"),
