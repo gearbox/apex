@@ -20,25 +20,31 @@ if TYPE_CHECKING:
     from src.core.generation_config import BundleGenerationConfig
 
 
-def _image_generation_types(slots: set[MediaSlot]) -> set[GenerationType]:
+def _image_generation_types(
+    slots: set[tuple[MediaKind, MediaSlot]],
+) -> set[GenerationType]:
     generation_types = {GenerationType.T2I}
-    if MediaSlot.REFERENCE in slots:
+    if (MediaKind.IMAGE, MediaSlot.REFERENCE) in slots:
         generation_types.add(GenerationType.I2I)
     return generation_types
 
 
-def _video_generation_types(slots: set[MediaSlot]) -> set[GenerationType]:
+def _video_generation_types(
+    slots: set[tuple[MediaKind, MediaSlot]],
+) -> set[GenerationType]:
     generation_types = {GenerationType.T2V}
-    if MediaSlot.FIRST_FRAME in slots:
+    if (MediaKind.IMAGE, MediaSlot.FIRST_FRAME) in slots:
         generation_types.add(GenerationType.I2V)
-        if MediaSlot.LAST_FRAME in slots:
+        if (MediaKind.IMAGE, MediaSlot.LAST_FRAME) in slots:
             generation_types.add(GenerationType.FLF2V)
-    if MediaSlot.SOURCE in slots:
+    if (MediaKind.VIDEO, MediaSlot.SOURCE) in slots:
         generation_types.add(GenerationType.V2V)
     return generation_types
 
 
-_GENERATION_TYPES_BY_MEDIA: Mapping[MediaKind, Callable[[set[MediaSlot]], set[GenerationType]]] = {
+_GENERATION_TYPES_BY_MEDIA: Mapping[
+    MediaKind, Callable[[set[tuple[MediaKind, MediaSlot]]], set[GenerationType]]
+] = {
     MediaKind.IMAGE: _image_generation_types,
     MediaKind.VIDEO: _video_generation_types,
 }
@@ -55,7 +61,7 @@ def derive_capabilities(
     writable = frozenset(declared_writable & PARAMETER_HAS_REQUEST_SOURCE)
     negative = nodes.get(WorkflowRole.NEGATIVE_PROMPT)
     supports_negative_prompt = negative is not None and "text" in negative.inputs
-    slots = {item.slot for item in bound.map.media_inputs}
+    slots = {(item.kind, item.slot) for item in bound.map.media_inputs}
     try:
         generation_types = _GENERATION_TYPES_BY_MEDIA[bound.media](slots)
     except KeyError as exc:
@@ -70,6 +76,7 @@ def derive_capabilities(
         writable=writable,
         max_batch_size=max_batch_size,
         max_reference_images=sum(
-            item.slot is MediaSlot.REFERENCE for item in bound.map.media_inputs
+            item.kind is MediaKind.IMAGE and item.slot is MediaSlot.REFERENCE
+            for item in bound.map.media_inputs
         ),
     )

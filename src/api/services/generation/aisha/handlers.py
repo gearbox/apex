@@ -420,9 +420,8 @@ class AishaImageGenerationHandler:
             session=session,
             product_id=product_id,
         )
-        if db_job is not None:
-            db_job.token_cost = token_cost
-            db_job.debit_transaction_id = reserve_result.txn.id
+        db_job.token_cost = token_cost
+        db_job.debit_transaction_id = reserve_result.txn.id
         await session.flush()
 
         hostname = (gpu_session.tunnel_hostname or "").lower()
@@ -439,10 +438,9 @@ class AishaImageGenerationHandler:
                 gpu_session_id=str(gpu_session.id),
                 tunnel_hostname=hostname,
             )
-            if db_job is not None:
-                db_job.status = JobStatus.FAILED
-                db_job.error_message = "Generation backend session is misconfigured."
-                await session.flush()
+            db_job.status = JobStatus.FAILED
+            db_job.error_message = "Generation backend session is misconfigured."
+            await session.flush()
             raise ProviderResponseError(
                 "Your generation session is misconfigured. "
                 "Please start a new session and try again."
@@ -479,11 +477,10 @@ class AishaImageGenerationHandler:
             await client.close()
 
         if prompt_id := result.get("prompt_id"):
-            if db_job is not None:
-                db_job.status = JobStatus.QUEUED
-                db_job.started_at = datetime.now(UTC)
-                db_job.external_request_id = prompt_id
-        elif db_job is not None:
+            db_job.status = JobStatus.QUEUED
+            db_job.started_at = datetime.now(UTC)
+            db_job.external_request_id = prompt_id
+        else:
             db_job.status = JobStatus.FAILED
             db_job.error_message = "Generation backend returned an unexpected response."
             await session.flush()
@@ -500,8 +497,6 @@ class AishaImageGenerationHandler:
                 "Please try again or report the error if it persists."
             )
 
-        if db_job is None:
-            raise ValueError("Failed to create Aisha job record")
         await session.flush()
         return ProviderSubmitResult(
             job=db_job,

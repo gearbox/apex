@@ -74,6 +74,8 @@ def apply(
         )
     for slot, filenames in media_filenames.items():
         declared = [item for item in bound.map.media_inputs if item.slot is slot]
+        if not declared:
+            continue
         if len(filenames) > len(declared):
             raise WorkflowApplyError(
                 f"slot {slot.value!r} received {len(filenames)} filenames "

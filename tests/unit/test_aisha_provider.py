@@ -20,11 +20,13 @@ import structlog.testing
 from PIL import Image
 
 from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
+from src.api.services.bundle_index import BundleNotFoundError
 from src.api.services.generation.aisha.handlers import AishaImageGenerationHandler
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
 from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
 from src.api.services.generation.source_media import ResolvedSourceMedia
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
+from src.api.services.image_normalization import ImageTooLargeError
 from src.api.services.workflow.contract import MediaSlot
 from src.core.enums import (
     AspectRatio,
@@ -149,7 +151,11 @@ def _make_provider_with_mocks() -> tuple[AishaGenerationProvider, dict]:
         tunnel_domain="gpu.test",
         bundle_index=bundle_index,
     )
-    return provider, {"workflow": workflow, "gpu_session_service": gpu_session_service}
+    return provider, {
+        "workflow": workflow,
+        "gpu_session_service": gpu_session_service,
+        "bundle_index": bundle_index,
+    }
 
 
 class TestAishaProviderMissingPromptId:
@@ -558,6 +564,63 @@ def _jpeg_bytes_with_orientation(orientation: int, size: tuple[int, int] = (16, 
     buf = io.BytesIO()
     im.save(buf, format="JPEG", exif=exif)
     return buf.getvalue()
+
+
+class TestAishaImageHandlerFailurePaths:
+    async def test_oversized_source_image_is_rejected_with_a_clear_public_error(self) -> None:
+        r2 = AsyncMock()
+        r2.download.return_value = _png_bytes()
+        handler = AishaImageGenerationHandler(
+            workflow_service=MagicMock(),
+            gpu_session_service=None,
+            bundle_index=MagicMock(),
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            tunnel_hostname_allowed_prefix=None,
+            max_input_megapixels=1.0,
+        )
+        source = _make_resolved_source_image(
+            uuid4(), source=LibraryAssetSource.UPLOAD, storage_key="users/abc/uploads/large.png"
+        )
+
+        with (
+            patch(
+                "src.api.services.generation.aisha.handlers.ensure_comfyui_input",
+                new=AsyncMock(side_effect=ImageTooLargeError(megapixels=2.0, limit=1.0)),
+            ),
+            pytest.raises(ValueError, match="exceeds maximum pixel count"),
+        ):
+            await handler._resolve_input_image([source])
+
+    async def test_missing_indexed_bundle_becomes_a_session_error_and_closes_client(self) -> None:
+        provider, mocks = _make_provider_with_mocks()
+        mocks["bundle_index"].get_bundle_path.side_effect = BundleNotFoundError("not indexed")
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with (
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as job_repository,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as comfy_client,
+        ):
+            job_repository.return_value.create = AsyncMock(return_value=db_job)
+            client = AsyncMock()
+            comfy_client.return_value = client
+
+            with pytest.raises(NoActiveSessionError, match="not found in index"):
+                await provider.submit(
+                    _make_request(),
+                    user_id=uuid4(),
+                    session=session,
+                    billing_service=billing,
+                    account_id=uuid4(),
+                    token_cost=50,
+                    product_id="vex",
+                )
+
+        client.connect.assert_awaited_once()
+        client.close.assert_awaited_once()
 
 
 class TestAishaProviderI2IBridge:
