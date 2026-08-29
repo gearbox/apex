@@ -205,3 +205,24 @@ PARAMETER_ACCESSORS: Final[Mapping[tuple[WorkflowRole, str], RequestAccessor]] =
     (WorkflowRole.SAVE, "fps"): _request_value("fps"),
     (WorkflowRole.SAVE, "format"): _request_value("format"),
 }
+
+# The workflow vocabulary is intentionally broader than the legacy request
+# shape.  Keep this set as the checklist for request fields added by future
+# generation APIs: until a request accessor can supply a value, a declared
+# workflow input must not be advertised as writable.
+PARAMETER_HAS_REQUEST_SOURCE: Final[frozenset[str]] = frozenset(
+    {
+        "latent.width",
+        "latent.height",
+        "latent.batch_size",
+        "positive_prompt.text",
+        "negative_prompt.text",
+        "sampler.seed",
+        "sampler.steps",
+        "sampler.cfg",
+        "sampler.sampler",
+        "sampler.scheduler",
+        "sampler.denoise",
+        "save.filename_prefix",
+    }
+)

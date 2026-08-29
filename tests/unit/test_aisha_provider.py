@@ -20,6 +20,7 @@ import structlog.testing
 from PIL import Image
 
 from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
+from src.api.services.generation.aisha.handlers import AishaImageGenerationHandler
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
 from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
 from src.api.services.generation.source_media import ResolvedSourceMedia
@@ -174,8 +175,8 @@ class TestAishaProviderMissingPromptId:
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -220,8 +221,8 @@ class TestAishaProviderMissingPromptId:
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -301,7 +302,7 @@ class TestAishaProviderSSRFGuard:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+        with patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo:
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
 
             with pytest.raises(ProviderResponseError) as exc_info:
@@ -359,7 +360,7 @@ class TestAishaProviderSSRFGuard:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+        with patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo:
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
 
             with pytest.raises(ProviderResponseError):
@@ -408,7 +409,7 @@ class TestAishaProviderSSRFGuard:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+        with patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo:
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
 
             with pytest.raises(ProviderResponseError):
@@ -473,7 +474,7 @@ class TestAishaProviderSSRFGuard:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+        with patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo:
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
 
             with pytest.raises(ProviderResponseError):
@@ -600,8 +601,8 @@ class TestAishaProviderI2IBridge:
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -690,8 +691,8 @@ class TestAishaProviderI2IBridge:
         source_id = uuid4()
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -755,7 +756,7 @@ class TestAishaProviderI2IBridge:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+        with patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo:
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
 
             with pytest.raises(FeatureNotSupportedError, match="exactly one"):
@@ -809,7 +810,7 @@ class TestAishaProviderI2IBridge:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
+        with patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo:
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
 
             with pytest.raises(ProviderResponseError) as exc_info:
@@ -848,8 +849,8 @@ class TestAishaProviderI2IBridge:
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -910,8 +911,8 @@ class TestAishaProviderI2IBridge:
         source_id = uuid4()
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -974,8 +975,8 @@ class TestAishaProviderI2IBridge:
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -1029,7 +1030,7 @@ class TestAishaProviderI2IBridge:
         session = AsyncMock()
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
             pytest.raises(ValueError, match="not decodable"),
         ):
             await provider.submit(
@@ -1101,8 +1102,8 @@ class TestAishaProviderI2IAspectDerivation:
         )
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -1204,7 +1205,7 @@ class TestResolveEffectiveAspectRatio:
             n=1,
             input_image_id=uuid4(),
         )
-        result = await AishaGenerationProvider._resolve_effective_aspect_ratio(
+        result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
             request, (_png_bytes(size=(1600, 900)), "source.png")
         )
         assert result == AspectRatio.RATIO_9_16
@@ -1216,7 +1217,7 @@ class TestResolveEffectiveAspectRatio:
             model=ModelType.AISHA_IMAGE,
             n=1,
         )
-        result = await AishaGenerationProvider._resolve_effective_aspect_ratio(request, None)
+        result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(request, None)
         assert result is AspectRatio.RATIO_1_1
 
     async def test_resolve_effective_aspect_ratio_derives_source_fraction(self) -> None:
@@ -1227,7 +1228,7 @@ class TestResolveEffectiveAspectRatio:
             n=1,
             input_image_id=uuid4(),
         )
-        result = await AishaGenerationProvider._resolve_effective_aspect_ratio(
+        result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
             request, (_png_bytes(size=(1600, 900)), "source.png")
         )
         assert result == (16, 9)
@@ -1241,7 +1242,7 @@ class TestResolveEffectiveAspectRatio:
             input_image_id=uuid4(),
         )
         with pytest.raises(ValueError, match="not decodable"):
-            await AishaGenerationProvider._resolve_effective_aspect_ratio(
+            await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
                 request, (b"garbage bytes, not an image", "broken.png")
             )
 
@@ -1282,7 +1283,7 @@ class TestSanitizeFilename:
         ],
     )
     def test_sanitization_results(self, raw: str | None, expected_pattern: str) -> None:
-        from src.api.services.generation.aisha_provider import _sanitize_filename
+        from src.api.services.generation.aisha.handlers import _sanitize_filename
 
         result = _sanitize_filename(raw)
         assert result == expected_pattern, (
@@ -1291,7 +1292,7 @@ class TestSanitizeFilename:
 
     def test_sanitization_keeps_safe_chars_unchanged(self) -> None:
         """The conservative charset preserves alphanumerics, dot, underscore, hyphen."""
-        from src.api.services.generation.aisha_provider import _sanitize_filename
+        from src.api.services.generation.aisha.handlers import _sanitize_filename
 
         safe = "Photo_2024-12-25.final.v3.png"
         assert _sanitize_filename(safe) == safe
@@ -1313,7 +1314,9 @@ class TestAishaProviderI2IDefensive:
         ]
 
         with pytest.raises(FeatureNotSupportedError, match="exactly one"):
-            await provider._resolve_input_image(sources)
+            handler = provider._handlers[MediaKind.IMAGE]
+            assert isinstance(handler, AishaImageGenerationHandler)
+            await handler._resolve_input_image(sources)
 
     async def test_filename_with_path_components_is_sanitized(self) -> None:
         """End-to-end: a user image whose original_filename contains path
@@ -1354,8 +1357,8 @@ class TestAishaProviderI2IDefensive:
         source_key = "users/u_1/uploads/passwd; rm -rf .png"
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -1462,8 +1465,8 @@ async def _submit_with_config(
     db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
     with (
-        patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-        patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+        patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+        patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
     ):
         MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
         mock_client = AsyncMock()
@@ -1683,8 +1686,8 @@ class TestAishaProviderClampLogging:
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
         with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
             structlog.testing.capture_logs() as cap,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)

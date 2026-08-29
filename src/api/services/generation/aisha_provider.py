@@ -1,93 +1,16 @@
-"""Aisha generation provider — adapter for ComfyUI WorkflowService."""
+"""Aisha generation-provider facade and media-handler registry."""
 
 from __future__ import annotations
 
-import math
-import re
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
 
-import structlog
-
-from src.api.schemas.generation import DEFAULT_NEGATIVE_PROMPT, GenerationRequest
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
-from src.api.services.comfyui_client import ComfyUIClient
 from src.api.services.generation.aisha.handlers import (
     AishaImageGenerationHandler,
     AishaMediaHandler,
     UnsupportedMediaError,
 )
-from src.api.services.generation.base import ProviderSubmitResult
-from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
-from src.api.services.generation.tunnel_validation import (
-    InvalidTunnelHostnameError,
-    validate_tunnel_hostname,
-)
-from src.api.services.gpu_session.exceptions import NoActiveSessionError
-from src.api.services.image_normalization import (
-    ImageNormalizationError,
-    ImageTooLargeError,
-    ensure_comfyui_input,
-    read_image_dimensions,
-    sniff_format,
-)
-from src.api.services.workflow.contract import MediaSlot
-from src.core.enums import (
-    AspectRatio,
-    JobStatus,
-    MediaKind,
-    ModelType,
-    Provider,
-    Sampler,
-    Scheduler,
-)
-from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
-from src.core.uid import new_id
-from src.db.repositories.job import JobRepository
-
-# Sanitization for ComfyUI input filenames. ComfyUI writes uploaded files to
-# its `input/` folder by name; any path separators or shell-meta characters in
-# a user-supplied filename could escape that directory. We strip directory
-# components, restrict to a conservative ASCII charset, and cap length.
-_SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
-_MAX_SAFE_FILENAME_LEN = 64
-
-
-def _aspect_log_value(effective_aspect: AspectRatio | tuple[int, int]) -> str:
-    if isinstance(effective_aspect, AspectRatio):
-        return effective_aspect.value
-    w, h = effective_aspect
-    return f"{w}:{h}"
-
-
-def _sanitize_filename(name: str | None) -> str:
-    """Reduce ``name`` to a safe-for-filesystem leaf name.
-
-    - Strips directory components (``../``, ``foo/bar``) by taking the
-      basename only.
-    - Replaces any character outside ``[A-Za-z0-9._-]`` with ``_``.
-    - Caps length at 64 chars to bound disk-name reasonableness.
-    - Falls back to ``"image"`` if the input is None, empty, or fully
-      sanitized to nothing (e.g. ``"///"``).
-
-    The schema currently declares ``UserImage.original_filename`` and
-    ``Output.storage_key`` NOT NULL, so ``None`` shouldn't be reachable
-    in production today — but accepting ``str | None`` costs one
-    falsy-check and defends against future schema relaxations or
-    code paths that might introduce nullable filename sources.
-
-    The job_id suffix added by the caller still guarantees uniqueness
-    across concurrent jobs; this helper just guards against malicious
-    or malformed input names propagating to the GPU node's filesystem.
-    """
-    if not name:
-        return "image"
-    # Take the basename — defeats absolute paths, ``../`` traversal, and
-    # OS-mismatched separators.
-    leaf = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-    sanitized = _SAFE_FILENAME_CHARS.sub("_", leaf)[:_MAX_SAFE_FILENAME_LEN]
-    return sanitized or "image"
-
+from src.core.enums import MediaKind, ModelType
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -97,24 +20,17 @@ if TYPE_CHECKING:
 
     from src.api.schemas.unified_generation import UnifiedGenerationRequest
     from src.api.services.billing import BillingService
+    from src.api.services.generation.base import ProviderSubmitResult
     from src.api.services.generation.source_media import ResolvedSourceMedia
     from src.api.services.gpu_session.service import GpuSessionService
     from src.api.services.storage import R2StorageService
     from src.api.services.workflow import WorkflowService
     from src.api.services.workflow.contract import BundleCapabilities
-    from src.core.generation_config import BundleGenerationConfig
     from src.db.models.storage import GenerationJob
-
-logger = structlog.get_logger(__name__)
 
 
 class AishaGenerationProvider:
-    """Adapts the ComfyUI stack (WorkflowService) to the GenerationProvider protocol.
-
-    Each submit() call resolves the user's active GPU session, builds a
-    per-request ComfyUIClient targeting that session's tunnel hostname,
-    and closes the client when done — no shared client state.
-    """
+    """Route Aisha requests to a handler selected by output media kind."""
 
     supports_image_sizing: ClassVar[bool] = True
 
@@ -129,26 +45,21 @@ class AishaGenerationProvider:
         max_input_megapixels: float = 100.0,
         handlers: Mapping[MediaKind, AishaMediaHandler] | None = None,
     ) -> None:
-        self._workflow = workflow_service
-        self._gpu_session_service = gpu_session_service
-        # R2 is used to fetch source bytes for image-to-image: we download
-        # the user image / prior output, then upload it to ComfyUI's input
-        # folder via the per-session tunnel. Optional only because some
-        # test setups don't wire it; in production it must be configured.
-        self._r2 = r2_storage
-        # Allowlist suffix for the tunnel hostname. Defense in depth: the write
-        # path (CloudflareTunnelClient.create_session_tunnel) only ever produces
-        # hostnames of the form ``{id_short}.{tunnel_domain}``, but we re-check
-        # at outbound-request time so a corrupted DB row, bad migration, or a
-        # future code path that writes the column can't cause SSRF.
-        self._tunnel_domain = tunnel_domain
-        self._tunnel_hostname_allowed_prefix = tunnel_hostname_allowed_prefix
         self._bundle_index = bundle_index
-        self._max_input_megapixels = max_input_megapixels
         self._handlers = (
             dict(handlers)
             if handlers is not None
-            else {MediaKind.IMAGE: AishaImageGenerationHandler(self._submit_image)}
+            else {
+                MediaKind.IMAGE: AishaImageGenerationHandler(
+                    workflow_service=workflow_service,
+                    gpu_session_service=gpu_session_service,
+                    bundle_index=bundle_index,
+                    r2_storage=r2_storage,
+                    tunnel_domain=tunnel_domain,
+                    tunnel_hostname_allowed_prefix=tunnel_hostname_allowed_prefix,
+                    max_input_megapixels=max_input_megapixels,
+                )
+            }
         )
 
     def _capabilities_for(self, model: ModelType) -> BundleCapabilities | None:
@@ -169,7 +80,7 @@ class AishaGenerationProvider:
             ) from exc
 
     def validate(self, request: UnifiedGenerationRequest) -> None:
-        """Aisha-specific validation beyond what the enum provides."""
+        """Run validation owned by the handler for the requested output medium."""
         self._handler_for(request.generation_type.output_kind).validate(
             request, self._capabilities_for(request.model)
         )
@@ -181,121 +92,6 @@ class AishaGenerationProvider:
     ) -> GenerationJob | None:
         """No-op — Aisha job status is updated by the background AishaJobPoller."""
         return None
-
-    @staticmethod
-    def _resolve_int(value: int | None, default: int, min_val: int, max_val: int, name: str) -> int:
-        if value is None:
-            return default
-        if not (min_val <= value <= max_val):
-            raise ValueError(f"{name} {value} out of range [{min_val}, {max_val}] for this model")
-        return value
-
-    @staticmethod
-    def _resolve_float(
-        value: float | None, default: float, min_val: float, max_val: float, name: str
-    ) -> float:
-        if value is None:
-            return default
-        if not (min_val <= value <= max_val):
-            raise ValueError(f"{name} {value} out of range [{min_val}, {max_val}] for this model")
-        return value
-
-    @staticmethod
-    def _resolve_enum(
-        value: Sampler | Scheduler | None,
-        default: Sampler | Scheduler,
-        allowed: frozenset[Sampler] | frozenset[Scheduler],
-        name: str,
-    ) -> Sampler | Scheduler:
-        if value is None:
-            return default
-        if allowed and value not in allowed:
-            raise ValueError(
-                f"{name} {value!r} is not allowed for this model; allowed: {sorted(v.value for v in allowed)}"
-            )
-        return value
-
-    async def _resolve_input_image(
-        self,
-        source_media: Sequence[ResolvedSourceMedia],
-    ) -> tuple[bytes, str] | None:
-        """Download one already-resolved source image for ComfyUI.
-
-        ComfyUI is behind our tunnel, so it receives source bytes rather than
-        an R2 URL.  Service capability validation establishes cardinality;
-        the defensive check protects direct provider callers too.
-        """
-        if not source_media:
-            return None
-        if len(source_media) != 1:
-            raise FeatureNotSupportedError("Aisha accepts exactly one source media asset")
-
-        if self._r2 is None:
-            # Should never happen in production (DI always wires R2), but
-            # if we got here for I2I without R2 it's a config error, not a
-            # user error. Surface as ProviderResponseError with an
-            # infrastructure-agnostic message.
-            raise ProviderResponseError(
-                "Image-to-image is unavailable on this deployment. "
-                "Please contact support if this persists."
-            )
-
-        source = source_media[0]
-        image_bytes = await self._r2.download(source.storage_key)
-        filename = source.storage_key.rsplit("/", 1)[-1]
-
-        # ComfyUI bridge: anything that isn't PNG/JPEG (including static WebP,
-        # which Grok outputs and ComfyUI handles unreliably) is converted to
-        # PNG here. This covers a Grok WEBP output remixed through the
-        # generic source-media path, which upload-time normalization cannot fix.
-        try:
-            normalized = await ensure_comfyui_input(
-                image_bytes, max_megapixels=self._max_input_megapixels
-            )
-        except ImageTooLargeError as e:
-            logger.warning(
-                "aisha.input_too_large",
-                sniffed=sniff_format(image_bytes).value,
-                size_bytes=len(image_bytes),
-                megapixels=e.megapixels,
-                limit=e.limit,
-                source_position=source.position,
-            )
-            raise ValueError("Input image exceeds maximum pixel count") from e
-        except ImageNormalizationError as e:
-            logger.warning(
-                "aisha.input_normalization_failed",
-                sniffed=sniff_format(image_bytes).value,
-                size_bytes=len(image_bytes),
-                source_position=source.position,
-                error=str(e),
-            )
-            raise ValueError("Input image is not decodable") from e
-
-        stem = filename.rsplit(".", 1)[0]
-        filename = f"{stem}.{normalized.format.value}"
-        return normalized.data, filename
-
-    @staticmethod
-    async def _resolve_effective_aspect_ratio(
-        request: UnifiedGenerationRequest,
-        i2i_input: tuple[bytes, str] | None,
-    ) -> AspectRatio | tuple[int, int]:
-        """Explicit request value wins; otherwise for i2i the output canvas
-        follows the source image's exact aspect (Qwen-Image-Edit recomposes
-        onto whatever latent we request); for t2i we fall back to the
-        provider default, at parity with Grok.
-        """
-        if request.aspect_ratio is not None:
-            return request.aspect_ratio
-        if i2i_input is not None:
-            try:
-                src_w, src_h = await read_image_dimensions(i2i_input[0])
-            except ImageNormalizationError as e:
-                raise ValueError("Input image is not decodable") from e
-            gcd = math.gcd(src_w, src_h)
-            return (src_w // gcd, src_h // gcd)
-        return AspectRatio.RATIO_1_1
 
     async def submit(
         self,
@@ -312,7 +108,7 @@ class AishaGenerationProvider:
         primary_upload_id: UUID | None = None,
         source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
-        """Delegate submission to the handler registered for the output medium."""
+        """Submit through the handler registered for the request output medium."""
         handler = self._handler_for(request.generation_type.output_kind)
         return await handler.submit(
             request,
@@ -326,293 +122,4 @@ class AishaGenerationProvider:
             primary_output_id=primary_output_id,
             primary_upload_id=primary_upload_id,
             source_media=source_media,
-        )
-
-    async def _submit_image(
-        self,
-        request: UnifiedGenerationRequest,
-        *,
-        user_id: UUID,
-        session: AsyncSession,
-        billing_service: BillingService,
-        account_id: UUID,
-        token_cost: int,
-        product_id: str,
-        source_job_id: UUID | None = None,
-        primary_output_id: UUID | None = None,
-        primary_upload_id: UUID | None = None,
-        source_media: Sequence[ResolvedSourceMedia] = (),
-    ) -> ProviderSubmitResult:
-        """Resolve GPU session, build per-request ComfyUI client, queue workflow."""
-        job_id = new_id()
-
-        # 1. Resolve active GPU session for this model
-        if self._gpu_session_service is None:
-            raise NoActiveSessionError(
-                "GPU sessions are not configured on this server. "
-                "Vast.ai and Cloudflare Tunnel settings are required."
-            )
-        gpu_session = await self._gpu_session_service.get_active_session_for_model(
-            user_id=user_id,
-            product_id=product_id,
-            model_type=request.model,
-        )
-        if gpu_session is None:
-            raise NoActiveSessionError(
-                f"No active GPU session for model {request.model.value}. "
-                "Start a session first via POST /v1/sessions."
-            )
-
-        # I2I bridge: fetch input image bytes from R2 BEFORE billing.
-        # Resolution failures (missing source or R2 dependency) are user/config errors that should not
-        # leave a debit on the ledger requiring later refund. Validation
-        # via ValueError surfaces as a 4xx; ProviderResponseError surfaces
-        # as a 5xx. Either way: no reservation made, nothing to refund.
-        i2i_input = await self._resolve_input_image(source_media)
-
-        # Aspect-ratio resolution must stay before check_and_reserve — undecodable
-        # input must surface as a no-reservation 4xx.
-        effective_aspect = await self._resolve_effective_aspect_ratio(request, i2i_input)
-
-        # Resolve per-model generation config from bundle.yaml (before billing)
-        gen_cfg: BundleGenerationConfig = self._bundle_index.get_generation_config(
-            gpu_session.bundle_name, gpu_session.bundle_version
-        )
-
-        # Resolve image dimensions
-        tier = request.image_resolution or gen_cfg.defaults.resolution
-        has_explicit_dims = request.width is not None and request.height is not None
-        dims = resolve_dimensions(
-            aspect_ratio=effective_aspect,
-            max_megapixels=gen_cfg.constraints.max_megapixels,
-            latent_multiple=gen_cfg.constraints.latent_multiple,
-            max_edge=gen_cfg.constraints.max_edge,
-            tier=None if has_explicit_dims else tier,
-            explicit_width=request.width,
-            explicit_height=request.height,
-        )
-        if not has_explicit_dims:
-            requested_mp = TIER_MEGAPIXELS[tier]
-            if dims.megapixels < requested_mp * 0.9:
-                logger.info(
-                    "generation.resolution.clamped",
-                    tier=tier.value,
-                    requested_mp=requested_mp,
-                    resolved_mp=round(dims.megapixels, 3),
-                    max_megapixels=gen_cfg.constraints.max_megapixels,
-                    aspect_ratio=_aspect_log_value(effective_aspect),
-                )
-
-        # Resolve + validate sampler params (raises ValueError → 4xx, no reservation made)
-        steps = self._resolve_int(
-            request.steps,
-            gen_cfg.defaults.steps,
-            gen_cfg.constraints.min_steps,
-            gen_cfg.constraints.max_steps,
-            "steps",
-        )
-        cfg = self._resolve_float(
-            request.cfg,
-            gen_cfg.defaults.cfg,
-            gen_cfg.constraints.min_cfg,
-            gen_cfg.constraints.max_cfg,
-            "cfg",
-        )
-        sampler = self._resolve_enum(
-            request.sampler,
-            gen_cfg.defaults.sampler,
-            gen_cfg.constraints.allowed_samplers,
-            "sampler",
-        )
-        scheduler = self._resolve_enum(
-            request.scheduler,
-            gen_cfg.defaults.scheduler,
-            gen_cfg.constraints.allowed_schedulers,
-            "scheduler",
-        )
-        denoise = request.denoise if request.denoise is not None else gen_cfg.defaults.denoise
-
-        # Map unified request -> legacy GenerationRequest for workflow_service
-        legacy_request = GenerationRequest(
-            prompt=request.prompt,
-            name=request.name,
-            negative_prompt=request.negative_prompt or DEFAULT_NEGATIVE_PROMPT,
-            height=dims.height,
-            width=dims.width,
-            aspect_ratio=request.aspect_ratio,
-            model_type=request.model,
-            generation_type=request.generation_type,
-            max_images=request.n,
-            seed=request.seed,
-            steps=steps,
-            cfg=cfg,
-            sampler=sampler.value,
-            scheduler=scheduler.value,
-            denoise=denoise,
-        )
-
-        # Create DB job record
-        db_job = await JobRepository(session).create(
-            id=job_id,
-            user_id=user_id,
-            name=legacy_request.name or "Untitled",
-            prompt=request.prompt,
-            generation_type=request.generation_type,
-            status=JobStatus.PENDING,
-            provider=Provider.AISHA,
-            model=request.model.value,
-            aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else None,
-            product_id=product_id,
-            source_job_id=source_job_id,
-            primary_output_id=primary_output_id,
-            primary_upload_id=primary_upload_id,
-            gpu_session_id=gpu_session.id,
-        )
-
-        # Billing reservation
-        reserve_result = await billing_service.check_and_reserve(
-            account_id,
-            token_cost,
-            job_id,
-            metadata={
-                "type": "generation",
-                "provider": Provider.AISHA.value,
-                "generation_type": request.generation_type.value,
-                "model": request.model.value,
-            },
-            description="Generation charge",
-            session=session,
-            product_id=product_id,
-        )
-        if db_job is not None:
-            db_job.token_cost = token_cost
-            db_job.debit_transaction_id = reserve_result.txn.id
-        await session.flush()
-
-        # 2. Build a session-scoped ComfyUI client.
-        # SSRF guard: validate tunnel hostname against the configured domain.
-        hostname = (gpu_session.tunnel_hostname or "").lower()
-        try:
-            validate_tunnel_hostname(
-                hostname,
-                allowed_suffix=f".{self._tunnel_domain}",
-                allowed_prefix=self._tunnel_hostname_allowed_prefix,
-            )
-        except InvalidTunnelHostnameError as e:
-            logger.exception(
-                "aisha.tunnel_hostname.allowlist_violation",
-                job_id=str(job_id),
-                gpu_session_id=str(gpu_session.id),
-                tunnel_hostname=hostname,
-            )
-            if db_job is not None:
-                db_job.status = JobStatus.FAILED
-                db_job.error_message = "Generation backend session is misconfigured."
-                await session.flush()
-            raise ProviderResponseError(
-                "Your generation session is misconfigured. "
-                "Please start a new session and try again."
-            ) from e
-
-        base_url = f"https://{hostname}"
-        client = ComfyUIClient(base_url)
-        try:
-            await client.connect()
-
-            # If this is an I2I request, push the source bytes to ComfyUI's
-            # input folder before queuing the workflow. ComfyUI returns the
-            # filename it stored, which we wire into the LoadImage node via
-            # apply_parameters(input_image_1=...). Job-scoped prefix prevents
-            # concurrent jobs on the same node from clobbering each other.
-            uploaded_filename: str | None = None
-            if i2i_input is not None:
-                image_bytes, source_filename = i2i_input
-                # Sanitize the source filename: it derives from user-supplied
-                # original_filename or an R2 storage_key tail, neither of
-                # which is guaranteed safe for ComfyUI's input/ folder. We
-                # strip any directory components and restrict to a
-                # conservative ASCII charset before composing the upload
-                # name. The job_id suffix preserves uniqueness across
-                # concurrent jobs on the same node.
-                safe_source = _sanitize_filename(source_filename)
-                stem, _, ext = safe_source.rpartition(".")
-                comfyui_filename = f"input_{stem or safe_source}_{str(job_id)[:8]}.{ext or 'png'}"
-                upload_result = await client.upload_image(
-                    image_data=image_bytes,
-                    filename=comfyui_filename,
-                )
-                # ComfyUI returns the actual stored name; trust it over our request.
-                uploaded_filename = upload_result.get("name", comfyui_filename)
-                logger.info(
-                    "aisha.i2i.image_uploaded",
-                    job_id=str(job_id),
-                    gpu_session_id=str(gpu_session.id),
-                    requested_name=comfyui_filename,
-                    stored_name=uploaded_filename,
-                    bytes=len(image_bytes),
-                )
-
-            # Build and queue workflow from the provisioned bundle's cache
-            try:
-                bundle_dir = self._bundle_index.get_bundle_path(gpu_session.bundle_name)
-            except BundleNotFoundError as exc:
-                raise NoActiveSessionError(
-                    f"Bundle '{gpu_session.bundle_name}' not found in index. "
-                    "Wait for the bundle index to sync and try again."
-                ) from exc
-            bound = self._workflow.load(bundle_dir, gpu_session.bundle_version)
-            configured = self._workflow.apply(
-                bound,
-                request=legacy_request,
-                media_filenames=(
-                    {MediaSlot.REFERENCE: [uploaded_filename]}
-                    if uploaded_filename is not None
-                    else {}
-                ),
-                filename_prefix=f"gen_{str(job_id)[:8]}",
-                bundle_name=gpu_session.bundle_name,
-                bundle_version=gpu_session.bundle_version,
-            )
-
-            result = await client.queue_prompt(configured)
-        finally:
-            await client.close()
-
-        if prompt_id := result.get("prompt_id"):
-            if db_job is not None:
-                db_job.status = JobStatus.QUEUED
-                db_job.started_at = datetime.now(UTC)
-                db_job.external_request_id = prompt_id
-        elif db_job is not None:
-            # The backend accepted the request but returned no job handle we can
-            # poll. Mark the job FAILED so the user can see the failure via
-            # GET /v1/jobs/{id}, flush so the error_message persists alongside
-            # the debit, then raise. The orchestrator's except-path refunds the
-            # debit and wraps this into a user-visible GenerationError. We
-            # deliberately keep the user-facing message infrastructure-agnostic;
-            # the structlog entry below captures the backend detail for ops.
-            db_job.status = JobStatus.FAILED
-            db_job.error_message = "Generation backend returned an unexpected response."
-            await session.flush()
-            logger.error(
-                "aisha.queue_prompt.no_prompt_id",
-                job_id=str(job_id),
-                gpu_session_id=str(gpu_session.id),
-                tunnel_hostname=gpu_session.tunnel_hostname,
-                response_keys=list(result.keys()) if isinstance(result, dict) else None,
-            )
-            raise ProviderResponseError(
-                "The generation backend returned an unexpected response. "
-                "Your tokens have been refunded. "
-                "Please try again or report the error if it persists."
-            )
-
-        if db_job is None:
-            raise ValueError("Failed to create Aisha job record")
-
-        await session.flush()
-        return ProviderSubmitResult(
-            job=db_job,
-            balance_after=reserve_result.txn.balance_after,
-            balance_event=reserve_result.event,
         )

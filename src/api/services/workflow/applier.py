@@ -17,6 +17,10 @@ class ModelInputResolutionError(ValueError):
     """A declared model loader cannot be supplied with a bundle filename."""
 
 
+class WorkflowApplyError(ValueError):
+    """A request cannot be applied to the bundle's declared workflow."""
+
+
 def _select_model_filename(
     *,
     model_type: str | None,
@@ -70,7 +74,13 @@ def apply(
         )
     for slot, filenames in media_filenames.items():
         declared = [item for item in bound.map.media_inputs if item.slot is slot]
-        for media_input, filename in zip(declared, filenames, strict=False):
+        if len(filenames) > len(declared):
+            raise WorkflowApplyError(
+                f"slot {slot.value!r} received {len(filenames)} filenames "
+                f"but the bundle declares {len(declared)}"
+            )
+        for index, filename in enumerate(filenames):
+            media_input = declared[index]
             graph[media_input.id]["inputs"][media_input.input] = filename
             graph[bound.map.nodes[media_input.target_role].id]["inputs"][
                 media_input.target_input

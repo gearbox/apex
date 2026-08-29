@@ -1,6 +1,6 @@
 """Bundle-declared workflow loading, binding, capability, and application."""
 
-from src.api.services.workflow.applier import ModelInputResolutionError
+from src.api.services.workflow.applier import ModelInputResolutionError, WorkflowApplyError
 from src.api.services.workflow.contract import (
     BoundWorkflow,
     BundleCapabilities,
@@ -15,6 +15,7 @@ __all__ = [
     "BundleCapabilities",
     "MediaSlot",
     "ModelInputResolutionError",
+    "WorkflowApplyError",
     "WorkflowContractError",
     "WorkflowMap",
     "WorkflowNotFoundError",

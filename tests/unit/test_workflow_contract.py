@@ -7,12 +7,15 @@ from pathlib import Path
 import pytest
 
 from src.api.schemas.generation import GenerationRequest
-from src.api.services.workflow.applier import ModelInputResolutionError, apply
+from src.api.services.workflow.applier import ModelInputResolutionError, WorkflowApplyError, apply
 from src.api.services.workflow.binder import bind_workflow
-from src.api.services.workflow.capabilities import derive_capabilities
+from src.api.services.workflow.capabilities import (
+    _GENERATION_TYPES_BY_MEDIA,
+    derive_capabilities,
+)
 from src.api.services.workflow.contract import MediaSlot
 from src.api.services.workflow.parser import WorkflowContractError, parse_workflow_map
-from src.core.enums import GenerationType, Resolution, Sampler, Scheduler
+from src.core.enums import GenerationType, MediaKind, Resolution, Sampler, Scheduler
 from src.core.generation_config import (
     BundleGenerationConfig,
     GenerationConstraints,
@@ -179,6 +182,46 @@ def test_apply_disconnects_media_and_fails_loudly_for_missing_model() -> None:
     assert "reference_image" not in configured["2"]["inputs"]
 
 
+def test_apply_rejects_oversupplied_media_filenames() -> None:
+    with pytest.raises(WorkflowApplyError, match=r"received 2 filenames.*declares 1"):
+        apply(
+            _bound(),  # type: ignore[arg-type]
+            GenerationRequest(prompt="i2i", height=768, width=1024),
+            media_filenames={MediaSlot.REFERENCE: ["one.png", "two.png"]},
+            filename_prefix="gen_123",
+            model_filenames=lambda _model_type: ["model.safetensors"],
+        )
+
+
+def test_apply_tolerates_undersupplied_media_filenames() -> None:
+    raw = _map()
+    raw["media_inputs"].append(  # type: ignore[union-attr]
+        {
+            "id": "7",
+            "class": "LoadImage",
+            "kind": "image",
+            "slot": "reference",
+            "target_role": "positive_prompt",
+            "target_input": "reference_image_2",
+        }
+    )
+    graph = _graph()
+    graph["2"]["inputs"]["reference_image_2"] = ["7", 0]  # type: ignore[index]
+    graph["7"] = {"class_type": "LoadImage", "inputs": {"image": ""}}
+    bound = bind_workflow(parse_workflow_map(raw, Path("bundle.yaml")), graph)
+
+    configured = apply(
+        bound,
+        GenerationRequest(prompt="i2i", height=768, width=1024),
+        media_filenames={MediaSlot.REFERENCE: ["one.png"]},
+        filename_prefix="gen_123",
+        model_filenames=lambda _model_type: ["model.safetensors"],
+    )
+
+    assert configured["5"]["inputs"]["image"] == "one.png"  # type: ignore[index]
+    assert "reference_image_2" not in configured["2"]["inputs"]  # type: ignore[index]
+
+
 def test_capabilities_are_mechanical_from_the_bound_map() -> None:
     capabilities = derive_capabilities(_bound(), _generation())  # type: ignore[arg-type]
 
@@ -186,3 +229,34 @@ def test_capabilities_are_mechanical_from_the_bound_map() -> None:
     assert capabilities.max_batch_size == 1
     assert capabilities.max_reference_images == 1
     assert capabilities.supports_negative_prompt is False
+
+
+@pytest.mark.parametrize("media_kind", MediaKind)
+def test_every_media_kind_has_capability_derivation(media_kind: MediaKind) -> None:
+    assert media_kind in _GENERATION_TYPES_BY_MEDIA
+
+
+def test_missing_capability_derivation_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(_GENERATION_TYPES_BY_MEDIA, MediaKind.IMAGE)
+
+    with pytest.raises(WorkflowContractError, match="image"):
+        derive_capabilities(_bound(), _generation())  # type: ignore[arg-type]
+
+
+def test_capabilities_do_not_advertise_inputs_without_request_sources() -> None:
+    raw = _map()
+    raw["nodes"]["model_sampling"] = {  # type: ignore[index]
+        "id": "7",
+        "class": "ModelSamplingAuraFlow",
+        "inputs": {"shift": "shift"},
+    }
+    graph = _graph()
+    graph["7"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"shift": 0.0}}
+
+    capabilities = derive_capabilities(
+        bind_workflow(parse_workflow_map(raw, Path("bundle.yaml")), graph),
+        _generation(),
+    )
+    assert "model_sampling.shift" not in capabilities.writable

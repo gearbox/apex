@@ -168,6 +168,7 @@ class BundleIndexService:
             self._owned_client = httpx.AsyncClient()
         self._settings = settings
         self._generation_config_cache: dict[str, BundleGenerationConfig] = {}
+        self._invalid_generation_config_paths: dict[str, Path] = {}
         self._model_filenames_cache: dict[tuple[str, str], list[str]] = {}
         self._on_resync: list[Callable[[], None]] = []
 
@@ -409,6 +410,11 @@ class BundleIndexService:
         """
         entry = self._bundle_index.get(bundle_name)
         if entry is None:
+            invalid_path = self._invalid_generation_config_paths.get(bundle_name)
+            if invalid_path is not None:
+                return self._parse_generation_config(
+                    invalid_path / (bundle_version or "current") / "bundle.yaml"
+                )
             return self._fallback_generation_config()
 
         bundle_path = self._cache_dir / entry.bundle_path
@@ -452,11 +458,15 @@ class BundleIndexService:
             ),
         )
 
-    def _parse_generation_config(self, bundle_yaml_path: Path) -> BundleGenerationConfig:
+    def _parse_generation_config(
+        self, bundle_yaml_path: Path, *, strict: bool = False
+    ) -> BundleGenerationConfig:
         """Parse the ``generation:`` block from a bundle.yaml file.
 
         Missing keys fall back to Settings or permissive defaults.
         Unknown enum values or non-numeric YAML values raise BundleConfigError.
+        With ``strict=True``, malformed config structure also raises so index
+        capabilities are never derived from fallback values.
         """
         fallback = self._fallback_generation_config()
 
@@ -467,6 +477,10 @@ class BundleIndexService:
             with bundle_yaml_path.open() as fh:
                 data = yaml.safe_load(fh)
         except (OSError, yaml.YAMLError) as exc:
+            if strict:
+                raise BundleConfigError(
+                    f"{bundle_yaml_path}: unable to read generation config: {exc}"
+                ) from exc
             logger.warning(
                 "bundle_index.generation_config_unreadable",
                 path=str(bundle_yaml_path),
@@ -475,6 +489,11 @@ class BundleIndexService:
             return fallback
 
         if not isinstance(data, dict):
+            if strict:
+                raise BundleConfigError(
+                    f"{bundle_yaml_path}: generation config root must be a mapping, "
+                    f"got {type(data).__name__}"
+                )
             logger.warning(
                 "bundle_index.generation_config_invalid_root",
                 path=str(bundle_yaml_path),
@@ -490,15 +509,47 @@ class BundleIndexService:
             return fallback
 
         if not isinstance(gen, dict):
-            logger.warning(
-                "bundle_index.generation_config_section_malformed",
-                path=str(bundle_yaml_path),
-                got_type=type(gen).__name__,
+            if not strict:
+                logger.warning(
+                    "bundle_index.generation_config_section_malformed",
+                    path=str(bundle_yaml_path),
+                    got_type=type(gen).__name__,
+                )
+                return fallback
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: generation must be a mapping, got {type(gen).__name__}"
             )
-            return fallback
 
-        raw_defaults = gen.get("defaults", {}) or {}
-        raw_constraints = gen.get("constraints", {}) or {}
+        raw_defaults = gen.get("defaults", {})
+        raw_constraints = gen.get("constraints", {})
+        if raw_defaults is None:
+            raw_defaults = {}
+        if raw_constraints is None:
+            raw_constraints = {}
+        if not isinstance(raw_defaults, dict):
+            if not strict:
+                logger.warning(
+                    "bundle_index.generation_config_invalid_defaults",
+                    path=str(bundle_yaml_path),
+                    got_type=type(raw_defaults).__name__,
+                )
+                return fallback
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: generation.defaults must be a mapping, "
+                f"got {type(raw_defaults).__name__}"
+            )
+        if not isinstance(raw_constraints, dict):
+            if not strict:
+                logger.warning(
+                    "bundle_index.generation_config_invalid_constraints",
+                    path=str(bundle_yaml_path),
+                    got_type=type(raw_constraints).__name__,
+                )
+                return fallback
+            raise BundleConfigError(
+                f"{bundle_yaml_path}: generation.constraints must be a mapping, "
+                f"got {type(raw_constraints).__name__}"
+            )
 
         fd = fallback.defaults
         fc = fallback.constraints
@@ -948,6 +999,7 @@ class BundleIndexService:
 
         model_index: dict[str, _BundleIndexEntry] = {}
         bundle_index: dict[str, _BundleIndexEntry] = {}
+        invalid_generation_config_paths: dict[str, Path] = {}
         skipped = 0
 
         for item in bundles_raw:
@@ -960,12 +1012,17 @@ class BundleIndexService:
                 continue
             try:
                 entry = self._build_entry(item)
-            except (KeyError, ValueError) as exc:
+            except (BundleConfigError, KeyError, ValueError) as exc:
                 logger.warning(
                     "bundle_index.entry_invalid",
                     bundle_name=item.get("name") if isinstance(item, dict) else None,
                     error=str(exc),
                 )
+                if isinstance(exc, BundleConfigError):
+                    name = item.get("name")
+                    path = item.get("path")
+                    if isinstance(name, str) and isinstance(path, str):
+                        invalid_generation_config_paths[name] = self._cache_dir / path
                 skipped += 1
                 continue
 
@@ -979,6 +1036,7 @@ class BundleIndexService:
         # Atomic replacement
         self._model_index = model_index
         self._bundle_index = bundle_index
+        self._invalid_generation_config_paths = invalid_generation_config_paths
 
     def _build_entry(self, item: dict[str, object]) -> _BundleIndexEntry:
         """Build a single index entry from a raw YAML mapping.
@@ -999,21 +1057,26 @@ class BundleIndexService:
         bundle_path = self._cache_dir / path
         hardware, readiness_marker = self._parse_hardware(bundle_path)
         bound_workflow = self._parse_workflow(bundle_path, model_type)
-        try:
-            generation = self._parse_generation_config(bundle_path / "current" / "bundle.yaml")
-        except BundleConfigError as exc:
-            # Keep a workflow-bearing bundle visible to discovery even when an
-            # optional generation block is malformed. The request path parses
-            # the same block again and fails loudly before billing; swallowing
-            # it here would otherwise prevent callers from receiving the
-            # configuration error through get_generation_config().
-            logger.warning(
-                "bundle_index.generation_config_invalid",
-                bundle_name=name,
-                error=str(exc),
-            )
-            generation = self._fallback_generation_config()
+        # Keep malformed generation config out of the published index. A
+        # fallback is useful for direct legacy reads, but its capability
+        # limits are not the bundle's and must not be advertised as such.
+        generation = self._parse_generation_config(
+            bundle_path / "current" / "bundle.yaml", strict=True
+        )
         capabilities = derive_capabilities(bound_workflow, generation)
+
+        declared_writable = {
+            f"{role.value}.{parameter}"
+            for role, node in bound_workflow.map.nodes.items()
+            for parameter in node.inputs
+        }
+        no_request_source = sorted(declared_writable - capabilities.writable)
+        if no_request_source:
+            logger.warning(
+                "workflow.capability.no_request_source",
+                bundle_name=name,
+                parameters=no_request_source,
+            )
 
         mapping = BundleMapping(
             bundle_name=name,
