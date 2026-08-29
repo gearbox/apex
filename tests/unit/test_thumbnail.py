@@ -19,6 +19,20 @@ _FAKE_JPEG = b"\xff\xd8\xff\xe0jpeg"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _read_dockerfile(dockerfile_name: str) -> str:
+    """Read a build manifest when tests run from a source checkout.
+
+    Application-image test runs package the Python sources under ``/app`` but
+    intentionally omit Docker build manifests. The path invariant cannot be
+    checked there, so skip it rather than treating the absent build context as
+    a product failure.
+    """
+    path = _REPO_ROOT / dockerfile_name
+    if not path.is_file():
+        pytest.skip(f"{dockerfile_name} is not present in this test environment")
+    return path.read_text()
+
+
 class TestExtractVideoThumbnail:
     async def test_returns_jpeg_bytes_on_success(self) -> None:
         with patch("src.api.services.thumbnail.asyncio.to_thread") as mock_thread:
@@ -97,7 +111,7 @@ class TestFfmpegPathAssumption:
 
     @pytest.mark.parametrize("dockerfile_name", ["Dockerfile", "Dockerfile.dev"])
     def test_image_is_debian_based(self, dockerfile_name: str) -> None:
-        contents = (_REPO_ROOT / dockerfile_name).read_text()
+        contents = _read_dockerfile(dockerfile_name)
         from_lines = [line for line in contents.splitlines() if line.strip().startswith("FROM")]
         assert from_lines, f"{dockerfile_name} has no FROM line"
         for line in from_lines:
@@ -110,7 +124,7 @@ class TestFfmpegPathAssumption:
 
     @pytest.mark.parametrize("dockerfile_name", ["Dockerfile", "Dockerfile.dev"])
     def test_ffmpeg_installed_via_apt(self, dockerfile_name: str) -> None:
-        contents = (_REPO_ROOT / dockerfile_name).read_text()
+        contents = _read_dockerfile(dockerfile_name)
         assert "apk add" not in contents, (
             f"{dockerfile_name} installs packages via apk (Alpine) — ffmpeg would not "
             f"be at FFMPEG_PATH={FFMPEG_PATH!r}. Update FFMPEG_PATH to match."

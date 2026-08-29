@@ -30,6 +30,7 @@ from src.api.schemas.library import (
     LibraryLineage,
     LibraryLineageGraph,
     LibraryOutputItem,
+    LibrarySourceMediaItem,
     LibraryTagRef,
     LineageEdge,
     LineageNode,
@@ -46,12 +47,14 @@ from src.core.enums import (
     LibraryBadge,
     LibraryGroupSourceType,
     LibrarySort,
-    OutputMediaType,
+    MediaKind,
+    media_kind_from_content_type,
 )
 from src.core.library_limits import MAX_TAGS_PER_ASSET as _MAX_TAGS_PER_ASSET
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.core.thumbnails import label_for_max_edge
 from src.db.models.storage import GenerationOutput, UserImage
+from src.db.repositories.generation_job_source import GenerationJobSourceRepository
 from src.db.repositories.job import JobRepository
 from src.db.repositories.library import UNSET_UPDATE, LibraryRepository, _UnsetUpdate
 from src.db.repositories.library_project import LibraryProjectRepository
@@ -156,7 +159,7 @@ class LibraryService:
         limit: int = 30,
         cursor: str | None = None,
         source: LibraryAssetSource | None = None,
-        media_type: OutputMediaType | None = None,
+        media_type: MediaKind | None = None,
         model: str | None = None,
         favorite: bool | None = None,
         project_id: UUID | None = None,
@@ -1114,36 +1117,134 @@ class LibraryService:
             for o in sorted(full_outputs, key=lambda o: o.output_index)
         ]
 
-        input_media: MediaObject | None = None
-        if job.source_output is not None:
-            input_media = _build_media_object(
-                source=LibraryAssetSource.OUTPUT,
-                asset_id=job.source_output.id,
-                width=job.source_output.width,
-                height=job.source_output.height,
-                content_type=job.source_output.content_type,
-                size_bytes=job.source_output.size_bytes,
-                derivatives=list(job.source_output.derivatives),
-            )
-        elif job.input_image is not None:
-            input_media = _build_media_object(
-                source=LibraryAssetSource.UPLOAD,
-                asset_id=job.input_image.id,
-                width=job.input_image.width,
-                height=job.input_image.height,
-                content_type=job.input_image.content_type,
-                size_bytes=job.input_image.size_bytes,
-                derivatives=list(job.input_image.derivatives),
-            )
+        source_rows = await GenerationJobSourceRepository(session).list_for_job(
+            job.id, product_id=product_id
+        )
+        upload_ids = [
+            row.source_upload_id for row in source_rows if row.source_upload_id is not None
+        ]
+        output_ids = [
+            row.source_output_id for row in source_rows if row.source_output_id is not None
+        ]
+        image_repo = UserImageRepository(session)
+        output_repo = OutputRepository(session)
+        uploads = await image_repo.get_many(upload_ids, user_id=user_id)
+        source_outputs = await output_repo.get_many(output_ids, user_id=user_id)
+        upload_derivatives = await image_repo.batch_derivatives(upload_ids)
+        output_derivatives = await output_repo.batch_derivatives(output_ids)
+
+        source_media: list[LibrarySourceMediaItem] = []
+        for row in source_rows:
+            if row.source_upload_id is not None:
+                upload = uploads.get(row.source_upload_id)
+                if upload is None or upload.product_id != product_id:
+                    source_media.append(
+                        LibrarySourceMediaItem(
+                            position=row.position,
+                            asset_ref=row.asset_ref,
+                            available=False,
+                        )
+                    )
+                    continue
+                source_media.append(
+                    LibrarySourceMediaItem(
+                        position=row.position,
+                        asset_ref=row.asset_ref,
+                        available=True,
+                        media=_build_media_object(
+                            source=LibraryAssetSource.UPLOAD,
+                            asset_id=upload.id,
+                            width=upload.width,
+                            height=upload.height,
+                            content_type=upload.content_type,
+                            size_bytes=upload.size_bytes,
+                            derivatives=list(upload_derivatives.get(upload.id, [])),
+                        ),
+                    )
+                )
+            elif row.source_output_id is not None:
+                output = source_outputs.get(row.source_output_id)
+                if output is None or output.product_id != product_id:
+                    source_media.append(
+                        LibrarySourceMediaItem(
+                            position=row.position,
+                            asset_ref=row.asset_ref,
+                            available=False,
+                        )
+                    )
+                    continue
+                source_media.append(
+                    LibrarySourceMediaItem(
+                        position=row.position,
+                        asset_ref=row.asset_ref,
+                        available=True,
+                        media=_build_media_object(
+                            source=LibraryAssetSource.OUTPUT,
+                            asset_id=output.id,
+                            width=output.width,
+                            height=output.height,
+                            content_type=output.content_type,
+                            size_bytes=output.size_bytes,
+                            derivatives=list(output_derivatives.get(output.id, [])),
+                        ),
+                    )
+                )
+            else:
+                source_media.append(
+                    LibrarySourceMediaItem(
+                        position=row.position,
+                        asset_ref=row.asset_ref,
+                        available=False,
+                    )
+                )
+
+        # A migration backfills historical rows. This fallback protects reads
+        # during a rolling deploy where application code reaches a job before
+        # the backfill batch has visited it.
+        if not source_media and job.source_output is not None:
+            source_media = [
+                LibrarySourceMediaItem(
+                    position=0,
+                    asset_ref=format_asset_ref(LibraryAssetSource.OUTPUT, job.source_output.id),
+                    available=True,
+                    media=_build_media_object(
+                        source=LibraryAssetSource.OUTPUT,
+                        asset_id=job.source_output.id,
+                        width=job.source_output.width,
+                        height=job.source_output.height,
+                        content_type=job.source_output.content_type,
+                        size_bytes=job.source_output.size_bytes,
+                        derivatives=list(job.source_output.derivatives),
+                    ),
+                )
+            ]
+        elif not source_media and job.input_image is not None:
+            source_media = [
+                LibrarySourceMediaItem(
+                    position=0,
+                    asset_ref=format_asset_ref(LibraryAssetSource.UPLOAD, job.input_image.id),
+                    available=True,
+                    media=_build_media_object(
+                        source=LibraryAssetSource.UPLOAD,
+                        asset_id=job.input_image.id,
+                        width=job.input_image.width,
+                        height=job.input_image.height,
+                        content_type=job.input_image.content_type,
+                        size_bytes=job.input_image.size_bytes,
+                        derivatives=list(job.input_image.derivatives),
+                    ),
+                )
+            ]
 
         return LibraryGroupDetail(
             job_id=job.id,
             badge=self._resolve_group_badge(gt),
-            input_media=input_media,
+            input_media=next((source.media for source in source_media if source.available), None),
+            source_media=source_media,
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
             outputs=output_items,
-            media_type=OutputMediaType.VIDEO if gt.is_video else OutputMediaType.IMAGE,
+            media_type=MediaKind.VIDEO if gt.is_video else MediaKind.IMAGE,
             model=job.model,
             provider=job.provider,
             generation_type=gt,
@@ -1542,9 +1643,7 @@ def _build_media_object(
     shape; the URL prefix constants are still reused from services/media.py.
     """
     prefix = OUTPUT_PREFIX if source == LibraryAssetSource.OUTPUT else UPLOAD_PREFIX
-    media_type = (
-        OutputMediaType.VIDEO if content_type.startswith("video/") else OutputMediaType.IMAGE
-    )
+    media_type = media_kind_from_content_type(content_type)
 
     original = MediaOriginal(
         url=f"{prefix}/{asset_id}",
@@ -1564,4 +1663,9 @@ def _build_media_object(
         )
     variants.sort(key=lambda v: v.width)
 
-    return MediaObject(media_type=media_type, original=original, variants=variants)
+    return MediaObject(
+        media_type=media_type,
+        original=original,
+        variants=variants,
+        asset_ref=format_asset_ref(source, asset_id),
+    )

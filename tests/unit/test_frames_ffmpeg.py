@@ -43,6 +43,20 @@ _PNG_BYTES = b"\x89PNG\r\n\x1a\nfakepngdata"
 _WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBPfakewebpdata"
 
 
+def _read_dockerfile(dockerfile_name: str) -> str:
+    """Read a build manifest when tests run from a source checkout.
+
+    Application-image test runs package the Python sources under ``/app`` but
+    intentionally omit Docker build manifests. The path invariant cannot be
+    checked there, so skip it rather than treating the absent build context as
+    a product failure.
+    """
+    path = _REPO_ROOT / dockerfile_name
+    if not path.is_file():
+        pytest.skip(f"{dockerfile_name} is not present in this test environment")
+    return path.read_text()
+
+
 def _run_result(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> MagicMock:
     r = MagicMock(spec=subprocess.CompletedProcess)
     r.returncode = returncode
@@ -185,7 +199,7 @@ class TestFfmpegPathAssumption:
 
     @pytest.mark.parametrize("dockerfile_name", ["Dockerfile", "Dockerfile.dev"])
     def test_image_is_debian_based(self, dockerfile_name: str) -> None:
-        contents = (_REPO_ROOT / dockerfile_name).read_text()
+        contents = _read_dockerfile(dockerfile_name)
         from_lines = [line for line in contents.splitlines() if line.strip().startswith("FROM")]
         assert from_lines, f"{dockerfile_name} has no FROM line"
         for line in from_lines:
@@ -197,7 +211,7 @@ class TestFfmpegPathAssumption:
 
     @pytest.mark.parametrize("dockerfile_name", ["Dockerfile", "Dockerfile.dev"])
     def test_ffmpeg_installed_via_apt(self, dockerfile_name: str) -> None:
-        contents = (_REPO_ROOT / dockerfile_name).read_text()
+        contents = _read_dockerfile(dockerfile_name)
         joined_lines = re.sub(r"\\\n\s*", " ", contents).splitlines()
         apt_install_lines = [line for line in joined_lines if "apt-get install" in line]
         assert any("ffmpeg" in line for line in apt_install_lines), (

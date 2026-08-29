@@ -10,7 +10,7 @@ and a committed one must produce exactly one.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -33,6 +33,11 @@ from src.db.models.user import User
 from src.db.repositories.job import JobRepository
 
 pytestmark = pytest.mark.asyncio
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from src.api.services.generation.source_media import ResolvedSourceMedia
 
 
 class _SpyEventBus:
@@ -84,7 +89,9 @@ class _WriteThenFailProvider:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,  # noqa: ARG002
-        source_output_id: UUID | None = None,  # noqa: ARG002
+        primary_output_id: UUID | None = None,  # noqa: ARG002
+        primary_upload_id: UUID | None = None,  # noqa: ARG002
+        source_media: Sequence[ResolvedSourceMedia] = (),  # noqa: ARG002
     ) -> ProviderSubmitResult:
         job_id = new_id()
         self.written_job_id = job_id
@@ -147,7 +154,9 @@ class _WriteAndSucceedProvider:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,  # noqa: ARG002
-        source_output_id: UUID | None = None,  # noqa: ARG002
+        primary_output_id: UUID | None = None,  # noqa: ARG002
+        primary_upload_id: UUID | None = None,  # noqa: ARG002
+        source_media: Sequence[ResolvedSourceMedia] = (),  # noqa: ARG002
     ) -> ProviderSubmitResult:
         job_id = new_id()
         db_job = await JobRepository(session).create(

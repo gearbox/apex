@@ -138,12 +138,29 @@ class GenerationType(StrEnum):
     @property
     def requires_image_input(self) -> bool:
         """Check if this generation type requires an input image."""
-        return self in (GenerationType.I2I, GenerationType.I2V, GenerationType.FLF2V)
+        return MediaKind.IMAGE in self.input_kinds
 
     @property
     def requires_video_input(self) -> bool:
-        """Check if this generation type requires an input video."""
+        """Check if this generation type requires an input video.
+
+        F18: do not derive this from ``input_kinds``. ``v2v`` deliberately
+        has no owned media kind because it still uses a public
+        ``input_video_url``; deriving it would skip that required URL check.
+        """
         return self == GenerationType.V2V
+
+    @property
+    def input_kinds(self) -> frozenset[MediaKind]:
+        """Owned library-media kinds this generation type accepts as input.
+
+        ``v2v`` deliberately remains empty: its legacy ``input_video_url`` is
+        a public URL rather than an owned library asset, and is validated on
+        its existing path until video-to-video moves to ``source_media``.
+        """
+        if self in (GenerationType.I2I, GenerationType.I2V, GenerationType.FLF2V):
+            return frozenset({MediaKind.IMAGE})
+        return frozenset()
 
 
 class VideoPollStatus(StrEnum):
@@ -336,11 +353,40 @@ class FrameExtractionStatus(StrEnum):
     FAILED = "failed"
 
 
-class OutputMediaType(StrEnum):
-    """Media type classification for gallery filtering."""
+class MediaKind(StrEnum):
+    """Supported owned-library media kinds."""
 
     IMAGE = "image"
     VIDEO = "video"
+
+
+# Kept as a compatibility alias while library consumers migrate to the
+# generic media vocabulary.  This is intentionally an alias, not a second
+# enum: serialized values and identity comparisons stay identical.
+OutputMediaType = MediaKind
+
+
+class UnknownMediaTypeError(ValueError):
+    """Raised when a MIME type cannot be represented by ``MediaKind``."""
+
+
+_MEDIA_KIND_PREFIXES: Final[tuple[tuple[str, MediaKind], ...]] = (
+    ("image/", MediaKind.IMAGE),
+    ("video/", MediaKind.VIDEO),
+)
+
+
+def media_kind_from_content_type(content_type: str) -> MediaKind:
+    """Return the library media kind represented by ``content_type``.
+
+    Only image and video MIME families are library media today.  Treating an
+    unknown family as an image would incorrectly make e.g. audio selectable
+    by image-only generation models, so it is an explicit error instead.
+    """
+    for prefix, kind in _MEDIA_KIND_PREFIXES:
+        if content_type.startswith(prefix):
+            return kind
+    raise UnknownMediaTypeError(f"Unsupported media content type: {content_type}")
 
 
 class LibrarySort(StrEnum):

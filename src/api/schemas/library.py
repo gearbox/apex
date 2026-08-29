@@ -12,7 +12,7 @@ import msgspec
 
 from src.api.schemas.media import MediaObject
 from src.api.services.library_capabilities import LibraryAction
-from src.core.enums import GenerationType, LibraryBadge, LibraryGroupSourceType, OutputMediaType
+from src.core.enums import GenerationType, LibraryBadge, LibraryGroupSourceType, MediaKind
 from src.core.library_limits import MAX_TAGS_PER_ASSET
 from src.core.library_ref import LibraryAssetSource
 
@@ -347,6 +347,21 @@ class LibraryGroupLineage(msgspec.Struct, kw_only=True):
     """Specific output used as input."""
 
 
+class LibrarySourceMediaItem(msgspec.Struct, kw_only=True):
+    """One ordered source used by a generation job.
+
+    A source row outlives the referenced asset: retention nulls the foreign
+    key but preserves ``asset_ref`` and its position, allowing clients to
+    show an unavailable placeholder instead of replaying a changed request.
+    """
+
+    position: int
+    asset_ref: str
+    available: bool
+    media: MediaObject | None = None
+    """Resolved media envelope; absent when the source is unavailable."""
+
+
 class LibraryGroupDetail(msgspec.Struct, kw_only=True):
     """Full detail view of a generation group (job)."""
 
@@ -359,13 +374,16 @@ class LibraryGroupDetail(msgspec.Struct, kw_only=True):
     """Media envelope for the source input (upload or remixed output).
     Present when badge == 'image'."""
 
+    source_media: list[LibrarySourceMediaItem] = msgspec.field(default_factory=list)
+    """Ordered source assets used for this job, including unavailable positions."""
+
     prompt: str
     negative_prompt: str | None = None
 
     outputs: list[LibraryOutputItem]
     """All non-thumbnail outputs, ordered by output_index."""
 
-    media_type: OutputMediaType
+    media_type: MediaKind
     model: str | None = None
     provider: str
     generation_type: GenerationType

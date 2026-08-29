@@ -35,7 +35,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
 from sqlalchemy.sql import union_all as sa_union_all
 
-from src.core.enums import JobStatus, LibrarySort, OutputMediaType
+from src.core.enums import JobStatus, LibrarySort, MediaKind
 from src.core.library_ref import AssetRef, LibraryAssetSource
 from src.core.uid import new_id
 from src.db.models.library import LibraryAssetMetadata, LibraryAssetTag
@@ -122,7 +122,7 @@ class LibraryRepository:
         limit: int,
         cursor: tuple[datetime, str, UUID] | None = None,
         source: LibraryAssetSource | None = None,
-        media_type: OutputMediaType | None = None,
+        media_type: MediaKind | None = None,
         model: str | None = None,
         favorite: bool | None = None,
         project_id: UUID | None = None,
@@ -268,7 +268,7 @@ class LibraryRepository:
         user_id: UUID,
         product_id: str,
         *,
-        media_type: OutputMediaType | None,
+        media_type: MediaKind | None,
         favorite: bool | None,
         project_id: UUID | None,
         tag_id: UUID | None,
@@ -319,9 +319,9 @@ class LibraryRepository:
             )
         )
 
-        if media_type == OutputMediaType.VIDEO:
+        if media_type == MediaKind.VIDEO:
             query = query.where(UserImage.content_type.like("video/%"))
-        elif media_type == OutputMediaType.IMAGE:
+        elif media_type == MediaKind.IMAGE:
             query = query.where(~UserImage.content_type.like("video/%"))
 
         if favorite is True:
@@ -388,7 +388,7 @@ class LibraryRepository:
         user_id: UUID,
         product_id: str,
         *,
-        media_type: OutputMediaType | None,
+        media_type: MediaKind | None,
         model: str | None,
         favorite: bool | None,
         project_id: UUID | None,
@@ -443,9 +443,9 @@ class LibraryRepository:
             )
         )
 
-        if media_type == OutputMediaType.VIDEO:
+        if media_type == MediaKind.VIDEO:
             query = query.where(GenerationOutput.content_type.like("video/%"))
-        elif media_type == OutputMediaType.IMAGE:
+        elif media_type == MediaKind.IMAGE:
             query = query.where(~GenerationOutput.content_type.like("video/%"))
 
         if model is not None:

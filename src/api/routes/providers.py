@@ -19,8 +19,10 @@ from src.api.dependencies.auth import get_optional_user_id
 from src.api.schemas.providers import (
     ImageConstraints,
     ModelInfo,
+    ModelInputs,
     ProviderInfo,
     ProvidersResponse,
+    SourceMediaConstraints,
     UserContext,
     VideoConstraints,
 )
@@ -79,6 +81,19 @@ def _build_model_info(
         supports_negative_prompt=meta.supports_negative_prompt,
         aspect_ratios=[ar.value for ar in meta.aspect_ratios],
         requires_age_verification=meta.requires_age_verification,
+        inputs=ModelInputs(
+            source_media=(
+                SourceMediaConstraints(
+                    min=meta.inputs.source_media.min,
+                    max=meta.inputs.source_media.max,
+                    media_types=sorted(
+                        meta.inputs.source_media.media_types, key=lambda kind: kind.value
+                    ),
+                )
+                if meta.inputs.source_media is not None
+                else None
+            )
+        ),
         image=(
             ImageConstraints(
                 min_height=meta.image.min_height,

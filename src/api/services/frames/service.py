@@ -24,7 +24,12 @@ from src.api.schemas.frames import (
     PreviewFrame,
 )
 from src.api.services.media import build_upload_media
-from src.core.enums import FrameExtractionKind, FrameExtractionStatus
+from src.core.enums import (
+    FrameExtractionKind,
+    FrameExtractionStatus,
+    MediaKind,
+    media_kind_from_content_type,
+)
 from src.core.uid import new_id
 from src.db.repositories.frame_extraction import FrameExtractionJobRepository
 from src.db.repositories.output import OutputRepository
@@ -189,8 +194,8 @@ class FrameExtractionService:
         extraction source is "active use", same as i2i input (see
         GenerationService.submit).
         """
-        touched = await self._image_repo.touch_expiry(
-            source_upload_id,
+        touched = await self._image_repo.touch_expiry_many(
+            [source_upload_id],
             user_id=user_id,
             expires_at=datetime.now(UTC) + timedelta(days=self._retention_days),
         )
@@ -226,7 +231,7 @@ class FrameExtractionService:
             output = await self._output_repo.get(source_output_id, user_id=user_id)
             if output is None or output.product_id != self._product_id:
                 raise FrameSourceNotFoundError(f"Output not found: {source_output_id}")
-            if not output.content_type.startswith("video/"):
+            if media_kind_from_content_type(output.content_type) is not MediaKind.VIDEO:
                 raise FrameSourceNotVideoError(f"Output {source_output_id} is not a video")
             return "output", source_output_id
 
@@ -236,7 +241,7 @@ class FrameExtractionService:
         upload = await self._image_repo.get(source_upload_id, user_id=user_id)
         if upload is None or upload.product_id != self._product_id:
             raise FrameSourceNotFoundError(f"Upload not found: {source_upload_id}")
-        if not upload.content_type.startswith("video/"):
+        if media_kind_from_content_type(upload.content_type) is not MediaKind.VIDEO:
             raise FrameSourceNotVideoError(f"Upload {source_upload_id} is not a video")
         return "upload", source_upload_id
 

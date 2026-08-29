@@ -22,11 +22,13 @@ from PIL import Image
 from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
 from src.api.services.generation.service import FeatureNotSupportedError, ProviderResponseError
+from src.api.services.generation.source_media import ResolvedSourceMedia
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.core.enums import (
     AspectRatio,
     GenerationType,
     JobStatus,
+    MediaKind,
     ModelType,
     Resolution,
     Sampler,
@@ -37,6 +39,7 @@ from src.core.generation_config import (
     GenerationConstraints,
     GenerationDefaults,
 )
+from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.resolution import resolve_dimensions
 
 
@@ -100,7 +103,7 @@ class TestAishaProviderValidation:
         with pytest.raises(FeatureNotSupportedError, match="Aisha video"):
             provider.validate(request)
 
-    def test_source_images_inputs_are_not_implemented(self) -> None:
+    def test_source_images_validation_is_deferred_to_the_service(self) -> None:
         provider = AishaGenerationProvider(
             workflow_service=MagicMock(),
             gpu_session_service=MagicMock(),
@@ -113,8 +116,7 @@ class TestAishaProviderValidation:
             source_images=[SourceImageReference(input_image_id=uuid4())],
         )
 
-        with pytest.raises(FeatureNotSupportedError, match="source_images"):
-            provider.validate(request)
+        provider.validate(request)
 
 
 def _make_bundle_index_mock() -> MagicMock:
@@ -509,6 +511,24 @@ def _make_i2i_request_with_source_output(source_output_id: UUID) -> UnifiedGener
     )
 
 
+def _make_resolved_source_image(
+    asset_id: UUID,
+    *,
+    source: LibraryAssetSource,
+    storage_key: str,
+) -> ResolvedSourceMedia:
+    return ResolvedSourceMedia(
+        position=0,
+        ref=AssetRef(source=source, asset_id=asset_id),
+        asset_ref=format_asset_ref(source, asset_id),
+        media_kind=MediaKind.IMAGE,
+        content_type="image/png",
+        storage_key=storage_key,
+        size_bytes=1,
+        job_id=uuid4() if source is LibraryAssetSource.OUTPUT else None,
+    )
+
+
 def _webp_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
     im = Image.new("RGB", size, (10, 20, 30))
     buf = io.BytesIO()
@@ -582,17 +602,9 @@ class TestAishaProviderI2IBridge:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        # User-image repo returns a row with a stable filename for the assertion.
-        user_image_row = MagicMock()
-        user_image_row.storage_key = "users/abc/uploads/cat.png"
-        user_image_row.original_filename = "cat.png"
-
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch(
-                "src.api.services.generation.aisha_provider.UserImageRepository"
-            ) as MockUserImageRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -603,8 +615,6 @@ class TestAishaProviderI2IBridge:
             )
             mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-123"})
             MockComfyClient.return_value = mock_client
-            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
-
             await provider.submit(
                 _make_i2i_request_with_user_image(user_image_id),
                 user_id=uuid4(),
@@ -613,9 +623,16 @@ class TestAishaProviderI2IBridge:
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
+                source_media=[
+                    _make_resolved_source_image(
+                        user_image_id,
+                        source=LibraryAssetSource.UPLOAD,
+                        storage_key="users/abc/uploads/cat.png",
+                    )
+                ],
             )
 
-        # R2 was hit with the storage key from the user image row.
+        # R2 receives the storage key resolved by the orchestrator.
         r2.download.assert_awaited_once_with("users/abc/uploads/cat.png")
 
         # ComfyUI received the bytes with the agreed filename template:
@@ -673,14 +690,13 @@ class TestAishaProviderI2IBridge:
         output_row = MagicMock()
         output_row.storage_key = "outputs/job_xyz/result_001.jpg"
 
-        # Single ID flows through both the request body and the kwarg used
-        # for the source_jobs.source_output_id FK column on the GenerationJob row.
+        # The primary output ID is recorded on the GenerationJob row, while
+        # the resolved source supplies the storage key used by the bridge.
         source_id = uuid4()
 
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch("src.api.services.generation.aisha_provider.OutputRepository") as MockOutputRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
@@ -689,8 +705,6 @@ class TestAishaProviderI2IBridge:
             )
             mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-456"})
             MockComfyClient.return_value = mock_client
-            MockOutputRepo.return_value.get = AsyncMock(return_value=output_row)
-
             await provider.submit(
                 _make_i2i_request_with_source_output(source_id),
                 user_id=uuid4(),
@@ -699,12 +713,15 @@ class TestAishaProviderI2IBridge:
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
-                source_output_id=source_id,
+                primary_output_id=source_id,
+                source_media=[
+                    _make_resolved_source_image(
+                        source_id,
+                        source=LibraryAssetSource.OUTPUT,
+                        storage_key=output_row.storage_key,
+                    )
+                ],
             )
-
-        # Repo lookup used the request's source_output_id (the request body is
-        # authoritative; the submit kwarg is for the GenerationJob FK column).
-        MockOutputRepo.return_value.get.assert_awaited_once_with(source_id)
 
         # Filename derived from storage_key tail (not original_filename).
         # Extension is normalized to "jpeg" (MediaFormat.JPEG) and kept terminal.
@@ -716,13 +733,8 @@ class TestAishaProviderI2IBridge:
         ap_kwargs = workflow.apply_parameters.call_args.kwargs
         assert ap_kwargs["input_image_1"] == "input_result_001.jpg_aaaaaaaa"
 
-    async def test_i2i_user_image_not_found_raises(self) -> None:
-        """A missing input_image_id row raises BEFORE billing — no debit, no refund needed.
-
-        Resolution happens before reservation so user-error inputs (missing
-        rows, mutually-exclusive IDs) don't leave a debit on the ledger
-        that requires later refund. This is a fail-fast contract.
-        """
+    async def test_i2i_multiple_sources_raise_before_billing(self) -> None:
+        """Provider-level cardinality checks run before billing or job creation."""
         workflow = MagicMock()
         workflow.load_workflow.return_value = {"3": {"inputs": {}}}
         workflow.validate_workflow = MagicMock()
@@ -746,16 +758,10 @@ class TestAishaProviderI2IBridge:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        with (
-            patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch(
-                "src.api.services.generation.aisha_provider.UserImageRepository"
-            ) as MockUserImageRepo,
-        ):
+        with patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo:
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
-            MockUserImageRepo.return_value.get = AsyncMock(return_value=None)
 
-            with pytest.raises(ValueError, match="not found"):
+            with pytest.raises(FeatureNotSupportedError, match="exactly one"):
                 await provider.submit(
                     _make_i2i_request_with_user_image(uuid4()),
                     user_id=uuid4(),
@@ -764,16 +770,23 @@ class TestAishaProviderI2IBridge:
                     account_id=uuid4(),
                     token_cost=50,
                     product_id="vex",
+                    source_media=[
+                        _make_resolved_source_image(
+                            uuid4(),
+                            source=LibraryAssetSource.UPLOAD,
+                            storage_key="uploads/one.png",
+                        ),
+                        _make_resolved_source_image(
+                            uuid4(),
+                            source=LibraryAssetSource.UPLOAD,
+                            storage_key="uploads/two.png",
+                        ),
+                    ],
                 )
 
-        # R2 download was never reached because the row lookup returned None.
+        # The cardinality check runs before any R2 access.
         r2.download.assert_not_called()
-        # Billing reservation must NOT have run — that's the whole point of
-        # resolving inputs before the ledger write. No debit means no refund
-        # responsibility on the orchestrator.
         billing.check_and_reserve.assert_not_called()
-        # The DB job row also was never created (resolve runs even before
-        # JobRepository.create).
         MockJobRepo.return_value.create.assert_not_called()
 
     async def test_i2i_without_r2_dependency_raises_provider_response_error(self) -> None:
@@ -811,6 +824,13 @@ class TestAishaProviderI2IBridge:
                     account_id=uuid4(),
                     token_cost=50,
                     product_id="vex",
+                    source_media=[
+                        _make_resolved_source_image(
+                            uuid4(),
+                            source=LibraryAssetSource.UPLOAD,
+                            storage_key="uploads/input.png",
+                        )
+                    ],
                 )
 
         # User-facing message stays infrastructure-agnostic.
@@ -901,15 +921,12 @@ class TestAishaProviderI2IBridge:
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch("src.api.services.generation.aisha_provider.OutputRepository") as MockOutputRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
             mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
             mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-webp"})
             MockComfyClient.return_value = mock_client
-            MockOutputRepo.return_value.get = AsyncMock(return_value=output_row)
-
             await provider.submit(
                 _make_i2i_request_with_source_output(source_id),
                 user_id=uuid4(),
@@ -918,7 +935,14 @@ class TestAishaProviderI2IBridge:
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
-                source_output_id=source_id,
+                primary_output_id=source_id,
+                source_media=[
+                    _make_resolved_source_image(
+                        source_id,
+                        source=LibraryAssetSource.OUTPUT,
+                        storage_key=output_row.storage_key,
+                    )
+                ],
             )
 
         upload_kwargs = mock_client.upload_image.await_args.kwargs
@@ -958,24 +982,15 @@ class TestAishaProviderI2IBridge:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        user_image_row = MagicMock()
-        user_image_row.storage_key = "users/abc/uploads/photo.png"
-        user_image_row.original_filename = "photo.png"
-
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch(
-                "src.api.services.generation.aisha_provider.UserImageRepository"
-            ) as MockUserImageRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
             mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
             mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-ext"})
             MockComfyClient.return_value = mock_client
-            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
-
             await provider.submit(
                 _make_i2i_request_with_user_image(uuid4()),
                 user_id=uuid4(),
@@ -984,6 +999,13 @@ class TestAishaProviderI2IBridge:
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
+                source_media=[
+                    _make_resolved_source_image(
+                        uuid4(),
+                        source=LibraryAssetSource.UPLOAD,
+                        storage_key="users/abc/uploads/photo.png",
+                    )
+                ],
             )
 
         upload_kwargs = mock_client.upload_image.await_args.kwargs
@@ -1015,28 +1037,26 @@ class TestAishaProviderI2IBridge:
         billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
         session = AsyncMock()
 
-        user_image_row = MagicMock()
-        user_image_row.storage_key = "users/abc/uploads/broken.png"
-        user_image_row.original_filename = "broken.png"
-
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
-            patch(
-                "src.api.services.generation.aisha_provider.UserImageRepository"
-            ) as MockUserImageRepo,
+            pytest.raises(ValueError, match="not decodable"),
         ):
-            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
-
-            with pytest.raises(ValueError, match="not decodable"):
-                await provider.submit(
-                    _make_i2i_request_with_user_image(uuid4()),
-                    user_id=uuid4(),
-                    session=session,
-                    billing_service=billing,
-                    account_id=uuid4(),
-                    token_cost=50,
-                    product_id="vex",
-                )
+            await provider.submit(
+                _make_i2i_request_with_user_image(uuid4()),
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+                source_media=[
+                    _make_resolved_source_image(
+                        uuid4(),
+                        source=LibraryAssetSource.UPLOAD,
+                        storage_key="users/abc/uploads/broken.png",
+                    )
+                ],
+            )
 
         billing.check_and_reserve.assert_not_called()
         MockJobRepo.return_value.create.assert_not_called()
@@ -1081,33 +1101,23 @@ class TestAishaProviderI2IAspectDerivation:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        user_image_row = MagicMock()
-        user_image_row.storage_key = "users/abc/uploads/source.png"
-        user_image_row.original_filename = "source.png"
-
         request = UnifiedGenerationRequest(
             prompt="a cat in a hat",
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE,
             aspect_ratio=aspect_ratio,
             n=1,
-            input_image_id=uuid4(),
         )
 
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch(
-                "src.api.services.generation.aisha_provider.UserImageRepository"
-            ) as MockUserImageRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
             mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
             mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-1"})
             MockComfyClient.return_value = mock_client
-            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
-
             await provider.submit(
                 request,
                 user_id=uuid4(),
@@ -1116,6 +1126,13 @@ class TestAishaProviderI2IAspectDerivation:
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
+                source_media=[
+                    _make_resolved_source_image(
+                        uuid4(),
+                        source=LibraryAssetSource.UPLOAD,
+                        storage_key="users/abc/uploads/source.png",
+                    )
+                ],
             )
 
         return workflow
@@ -1292,28 +1309,20 @@ class TestSanitizeFilename:
 class TestAishaProviderI2IDefensive:
     """Provider-level defenses against misuse and hostile input."""
 
-    async def test_both_inputs_set_raises_value_error(self) -> None:
-        """Defensive guard: orchestrator already enforces mutual exclusion,
-        but a future direct caller of the provider deserves a clear local
-        error rather than a silently-ignored input_image_id."""
-        from src.api.schemas.unified_generation import UnifiedGenerationRequest
-
-        # Construct a request with BOTH set. Bypass the unified schema's own
-        # validator if it has one by using model_construct (msgspec equivalent).
-        req = UnifiedGenerationRequest(
-            prompt="a cat",
-            generation_type=GenerationType.I2I,
-            model=ModelType.AISHA_IMAGE,
-            aspect_ratio=AspectRatio.RATIO_1_1,
-            n=1,
-            input_image_id=uuid4(),
-            source_output_id=uuid4(),
-        )
-
+    async def test_multiple_sources_raise_feature_not_supported(self) -> None:
+        """The provider defensively limits direct callers to one source asset."""
         provider, _ = _make_provider_with_mocks()
+        sources = [
+            _make_resolved_source_image(
+                uuid4(), source=LibraryAssetSource.UPLOAD, storage_key="uploads/one.png"
+            ),
+            _make_resolved_source_image(
+                uuid4(), source=LibraryAssetSource.UPLOAD, storage_key="uploads/two.png"
+            ),
+        ]
 
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            await provider._resolve_input_image(req, AsyncMock())
+        with pytest.raises(FeatureNotSupportedError, match="exactly one"):
+            await provider._resolve_input_image(sources)
 
     async def test_filename_with_path_components_is_sanitized(self) -> None:
         """End-to-end: a user image whose original_filename contains path
@@ -1350,25 +1359,18 @@ class TestAishaProviderI2IDefensive:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        # Hostile filename: tries path traversal AND has shell metacharacters.
-        user_image_row = MagicMock()
-        user_image_row.storage_key = "users/u_1/uploads/legit.png"
-        user_image_row.original_filename = "../../../etc/passwd; rm -rf /.png"
+        # Storage keys are trusted server values, but sanitize defensively.
+        source_key = "users/u_1/uploads/passwd; rm -rf .png"
 
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch(
-                "src.api.services.generation.aisha_provider.UserImageRepository"
-            ) as MockUserImageRepo,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
             mock_client = AsyncMock()
             mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
             mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-x"})
             MockComfyClient.return_value = mock_client
-            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
-
             await provider.submit(
                 _make_i2i_request_with_user_image(uuid4()),
                 user_id=uuid4(),
@@ -1377,6 +1379,13 @@ class TestAishaProviderI2IDefensive:
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
+                source_media=[
+                    _make_resolved_source_image(
+                        uuid4(),
+                        source=LibraryAssetSource.UPLOAD,
+                        storage_key=source_key,
+                    )
+                ],
             )
 
         upload_kwargs = mock_client.upload_image.await_args.kwargs
@@ -1653,7 +1662,6 @@ class TestAishaProviderClampLogging:
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE,
             n=1,
-            input_image_id=uuid4(),
         )
         # tier STANDARD targets 1.0 MP; a 0.5 MP model cap forces
         # dims.megapixels well below requested_mp * 0.9, so the clamp log fires.
@@ -1691,16 +1699,9 @@ class TestAishaProviderClampLogging:
         session = AsyncMock()
         db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
 
-        user_image_row = MagicMock()
-        user_image_row.storage_key = "users/abc/uploads/source.jpg"
-        user_image_row.original_filename = "source.jpg"
-
         with (
             patch("src.api.services.generation.aisha_provider.JobRepository") as MockJobRepo,
             patch("src.api.services.generation.aisha_provider.ComfyUIClient") as MockComfyClient,
-            patch(
-                "src.api.services.generation.aisha_provider.UserImageRepository"
-            ) as MockUserImageRepo,
             structlog.testing.capture_logs() as cap,
         ):
             MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
@@ -1708,8 +1709,6 @@ class TestAishaProviderClampLogging:
             mock_client.upload_image = AsyncMock(return_value={"name": "stored.png"})
             mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-1"})
             MockComfyClient.return_value = mock_client
-            MockUserImageRepo.return_value.get = AsyncMock(return_value=user_image_row)
-
             await provider.submit(
                 request,
                 user_id=uuid4(),
@@ -1718,6 +1717,13 @@ class TestAishaProviderClampLogging:
                 account_id=uuid4(),
                 token_cost=50,
                 product_id="vex",
+                source_media=[
+                    _make_resolved_source_image(
+                        uuid4(),
+                        source=LibraryAssetSource.UPLOAD,
+                        storage_key="users/abc/uploads/source.jpg",
+                    )
+                ],
             )
 
         clamp_events = [e for e in cap if e["event"] == "generation.resolution.clamped"]

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from sqlalchemy import CursorResult, and_, func, literal, or_, select, tuple_, update
+from sqlalchemy import and_, func, literal, or_, select, tuple_, update
 
 from src.db.models.storage import UserImage
 from src.db.repositories.base import BaseRepository
@@ -304,47 +304,43 @@ class UserImageRepository(BaseRepository[UserImage]):
         )
         return result.scalars().all()
 
-    async def touch_expiry(
+    async def touch_expiry_many(
         self,
-        image_id: UUID,
+        image_ids: Sequence[UUID],
         *,
         user_id: UUID,
         expires_at: datetime,
-    ) -> bool:
-        """Reset the retention window on a full upload and its thumbnails.
+    ) -> int:
+        """Reset retention for full uploads and their derivatives in one UPDATE.
 
-        Ownership-scoped: only rows belonging to ``user_id`` are touched.
-        Matching a thumbnail row directly by ``image_id`` is rejected —
-        the sliding window applies to full uploads only; derivatives are
-        bumped via their ``parent_image_id`` link.
-
-        Args:
-            image_id: Full (non-thumbnail) upload ID.
-            user_id: Owner — rows of other users are never touched.
-            expires_at: New expiry timestamp (caller computes
-                ``now + retention_days``).
+        Directly naming a thumbnail remains deliberately ineffective; only a
+        full parent upload can slide a retention window.  Its thumbnail rows
+        are then included through ``parent_image_id`` in the same statement.
 
         Returns:
-            True if the full upload row was updated; False if the image
-            does not exist, is not owned by ``user_id``, or is a
-            thumbnail row.
+            Number of requested full uploads that existed and were owned by
+            ``user_id``. Derivative rows are updated but deliberately do not
+            contribute to that count.
         """
-        result = cast(
-            "CursorResult[tuple[()]]",
-            await self._session.execute(
-                update(UserImage)
-                .where(
-                    UserImage.user_id == user_id,
-                    or_(
-                        and_(UserImage.id == image_id, UserImage.is_thumbnail.is_(False)),
-                        UserImage.parent_image_id == image_id,
+        if not image_ids:
+            return 0
+        result = await self._session.execute(
+            update(UserImage)
+            .where(
+                UserImage.user_id == user_id,
+                or_(
+                    and_(
+                        UserImage.id.in_(image_ids),
+                        UserImage.is_thumbnail.is_(False),
                     ),
-                )
-                .values(expires_at=expires_at)
-                .execution_options(synchronize_session=False)
-            ),
+                    UserImage.parent_image_id.in_(image_ids),
+                ),
+            )
+            .values(expires_at=expires_at)
+            .returning(UserImage.id, UserImage.is_thumbnail)
+            .execution_options(synchronize_session=False)
         )
-        return (result.rowcount or 0) > 0
+        return sum(not is_thumbnail for _, is_thumbnail in result)
 
     async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
         """Count full uploads and sum their size for a user.

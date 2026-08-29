@@ -29,6 +29,7 @@ from src.api.services.storage import (
 )
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.config import Settings
+from src.core.enums import MediaKind, media_kind_from_content_type
 from src.core.thumbnails import THUMBNAIL_SPECS, label_for_max_edge
 from src.db.models.storage import GenerationOutput, UserImage
 from src.db.repositories.output import OutputRepository
@@ -126,7 +127,7 @@ async def _backfill_output_row(
         return _RowResult(_RowStatus.SKIPPED_COMPLETE)
 
     source_bytes: bytes
-    if _is_video := full.content_type.startswith("video/"):
+    if _is_video := media_kind_from_content_type(full.content_type) is MediaKind.VIDEO:
         poster = next(
             (d for d in derivatives if d.content_type.startswith("image/")),
             None,

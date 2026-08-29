@@ -50,7 +50,9 @@ class JobRepository(BaseRepository[GenerationJob]):
         aspect_ratio: str | None = None,
         source_job_id: UUID | None = None,
         source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
         input_image_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
         gpu_session_id: UUID | None = None,
     ) -> GenerationJob:
         """Create a new generation job.
@@ -68,12 +70,23 @@ class JobRepository(BaseRepository[GenerationJob]):
             aspect_ratio: Aspect ratio string, e.g. ``16:9``.
             source_job_id: ID of the source job for lineage tracking.
             source_output_id: ID of the source output used as input.
+            primary_output_id: Generic source-media spelling for the primary
+                output lineage. Mutually exclusive with ``source_output_id``.
             input_image_id: ID of the uploaded image used as input.
             gpu_session_id: GPU session this job will run on (Aisha only).
 
         Returns:
             Created GenerationJob instance.
         """
+        if primary_output_id is not None:
+            if source_output_id is not None and source_output_id != primary_output_id:
+                raise ValueError("Conflicting primary output lineage values")
+            source_output_id = primary_output_id
+        if primary_upload_id is not None:
+            if input_image_id is not None and input_image_id != primary_upload_id:
+                raise ValueError("Conflicting primary upload lineage values")
+            input_image_id = primary_upload_id
+
         job = GenerationJob(
             id=id,
             user_id=user_id,

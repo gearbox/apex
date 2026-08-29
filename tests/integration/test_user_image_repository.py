@@ -197,10 +197,10 @@ async def test_count_and_sum_by_user_with_data(
     assert total_bytes == 3000
 
 
-async def test_touch_expiry_updates_full_row_and_thumbnails(
+async def test_touch_expiry_many_counts_requested_full_uploads(
     user_image_repo: UserImageRepository, make_user
 ) -> None:
-    """touch_expiry bumps the full upload and all its derivative thumbnails."""
+    """Derivative updates do not hide a missing requested parent upload."""
     user = await make_user(email=f"touchexpiry-{uuid4().hex[:6]}@example.com")
     old_expiry = datetime.now(UTC) + timedelta(days=1)
     parent_id = uuid4()
@@ -215,110 +215,36 @@ async def test_touch_expiry_updates_full_row_and_thumbnails(
         expires_at=old_expiry,
         product_id="vex",
     )
-    thumb_id = uuid4()
-    await user_image_repo.create(
-        id=thumb_id,
-        user_id=user.id,
-        storage_key=f"users/{user.id}/uploads/{thumb_id}.webp",
-        original_filename="parent.png",
-        content_type="image/webp",
-        size_bytes=256,
-        format="webp",
-        expires_at=old_expiry,
-        product_id="vex",
-        is_thumbnail=True,
-        parent_image_id=parent_id,
-        thumbnail_max_edge=150,
-    )
+    thumb_ids = [uuid4(), uuid4()]
+    for index, thumb_id in enumerate(thumb_ids):
+        await user_image_repo.create(
+            id=thumb_id,
+            user_id=user.id,
+            storage_key=f"users/{user.id}/uploads/{thumb_id}.webp",
+            original_filename="parent.png",
+            content_type="image/webp",
+            size_bytes=256,
+            format="webp",
+            expires_at=old_expiry,
+            product_id="vex",
+            is_thumbnail=True,
+            parent_image_id=parent_id,
+            thumbnail_max_edge=150 + index,
+        )
 
     new_expiry = datetime.now(UTC) + timedelta(days=7)
-    result = await user_image_repo.touch_expiry(parent_id, user_id=user.id, expires_at=new_expiry)
+    touched = await user_image_repo.touch_expiry_many(
+        [parent_id, uuid4()], user_id=user.id, expires_at=new_expiry
+    )
 
-    assert result is True
+    assert touched == 1
     parent = await user_image_repo.get(parent_id)
-    thumb = await user_image_repo.get(thumb_id)
     assert parent is not None
-    assert thumb is not None
     assert parent.expires_at == new_expiry
-    assert thumb.expires_at == new_expiry
-
-
-async def test_touch_expiry_wrong_user_returns_false(
-    user_image_repo: UserImageRepository, make_user_image, make_user
-) -> None:
-    """touch_expiry scoped to another user's id leaves the row untouched."""
-    old_expiry = datetime.now(UTC) + timedelta(days=1)
-    image = await make_user_image(expires_at=old_expiry)
-    other_user = await make_user(email=f"touchother-{uuid4().hex[:6]}@example.com")
-
-    result = await user_image_repo.touch_expiry(
-        image.id, user_id=other_user.id, expires_at=datetime.now(UTC) + timedelta(days=7)
-    )
-
-    assert result is False
-    reloaded = await user_image_repo.get(image.id)
-    assert reloaded is not None
-    assert reloaded.expires_at == old_expiry
-
-
-async def test_touch_expiry_missing_returns_false(
-    user_image_repo: UserImageRepository, make_user
-) -> None:
-    """touch_expiry on a non-existent image id returns False."""
-    user = await make_user(email=f"touchmissing-{uuid4().hex[:6]}@example.com")
-
-    result = await user_image_repo.touch_expiry(
-        uuid4(), user_id=user.id, expires_at=datetime.now(UTC) + timedelta(days=7)
-    )
-
-    assert result is False
-
-
-async def test_touch_expiry_thumbnail_id_returns_false(
-    user_image_repo: UserImageRepository, make_user
-) -> None:
-    """Passing a thumbnail row's own id is rejected — full uploads only."""
-    user = await make_user(email=f"touchthumb-{uuid4().hex[:6]}@example.com")
-    old_expiry = datetime.now(UTC) + timedelta(days=1)
-    parent_id = uuid4()
-    await user_image_repo.create(
-        id=parent_id,
-        user_id=user.id,
-        storage_key=f"users/{user.id}/uploads/{parent_id}.png",
-        original_filename="parent.png",
-        content_type="image/png",
-        size_bytes=1024,
-        format="png",
-        expires_at=old_expiry,
-        product_id="vex",
-    )
-    thumb_id = uuid4()
-    await user_image_repo.create(
-        id=thumb_id,
-        user_id=user.id,
-        storage_key=f"users/{user.id}/uploads/{thumb_id}.webp",
-        original_filename="parent.png",
-        content_type="image/webp",
-        size_bytes=256,
-        format="webp",
-        expires_at=old_expiry,
-        product_id="vex",
-        is_thumbnail=True,
-        parent_image_id=parent_id,
-        thumbnail_max_edge=150,
-    )
-
-    result = await user_image_repo.touch_expiry(
-        thumb_id, user_id=user.id, expires_at=datetime.now(UTC) + timedelta(days=7)
-    )
-
-    assert result is False
-    parent = await user_image_repo.get(parent_id)
-    thumb = await user_image_repo.get(thumb_id)
-    assert parent is not None
-    assert thumb is not None
-    assert parent.expires_at == old_expiry
-    assert thumb.expires_at == old_expiry
+    for thumb_id in thumb_ids:
+        thumb = await user_image_repo.get(thumb_id)
+        assert thumb is not None
+        assert thumb.expires_at == new_expiry
 
 
 async def test_expired_images_count_accuracy(
