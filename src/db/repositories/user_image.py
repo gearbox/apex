@@ -346,6 +346,41 @@ class UserImageRepository(BaseRepository[UserImage]):
         )
         return (result.rowcount or 0) > 0
 
+    async def touch_expiry_many(
+        self,
+        image_ids: Sequence[UUID],
+        *,
+        user_id: UUID,
+        expires_at: datetime,
+    ) -> int:
+        """Reset retention for full uploads and their derivatives in one UPDATE.
+
+        Directly naming a thumbnail remains deliberately ineffective; only a
+        full parent upload can slide a retention window.  Its thumbnail rows
+        are then included through ``parent_image_id`` in the same statement.
+        """
+        if not image_ids:
+            return 0
+        result = cast(
+            "CursorResult[tuple[()]]",
+            await self._session.execute(
+                update(UserImage)
+                .where(
+                    UserImage.user_id == user_id,
+                    or_(
+                        and_(
+                            UserImage.id.in_(image_ids),
+                            UserImage.is_thumbnail.is_(False),
+                        ),
+                        UserImage.parent_image_id.in_(image_ids),
+                    ),
+                )
+                .values(expires_at=expires_at)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return result.rowcount or 0
+
     async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
         """Count full uploads and sum their size for a user.
 

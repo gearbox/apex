@@ -72,7 +72,7 @@ def _make_service(
     service._job_repo = AsyncMock()
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
-    service._image_repo.touch_expiry = AsyncMock(return_value=True)
+    service._image_repo.touch_expiry_many = AsyncMock(return_value=1)
     return service, storage
 
 
@@ -118,8 +118,8 @@ class TestTouchesSourceExpiry:
         service, _storage = _make_service(retention_days=7)
         upload = _make_upload()
         service._image_repo.get = AsyncMock(return_value=upload)
-        touch_expiry = AsyncMock(return_value=True)
-        service._image_repo.touch_expiry = touch_expiry
+        touch_expiry_many = AsyncMock(return_value=1)
+        service._image_repo.touch_expiry_many = touch_expiry_many
         service._job_repo.create = AsyncMock(return_value=_make_job(source_upload_id=upload.id))
 
         await service.create_preview_job(
@@ -129,16 +129,17 @@ class TestTouchesSourceExpiry:
             frame_count=12,
         )
 
-        touch_expiry.assert_awaited_once()
-        kwargs = touch_expiry.call_args.kwargs
+        touch_expiry_many.assert_awaited_once()
+        assert touch_expiry_many.call_args.args[0] == [upload.id]
+        kwargs = touch_expiry_many.call_args.kwargs
         assert kwargs["expires_at"] > datetime.now(UTC) + timedelta(days=6)
 
     async def test_upload_source_expiry_extended_on_extract(self) -> None:
         service, _storage = _make_service()
         upload = _make_upload()
         service._image_repo.get = AsyncMock(return_value=upload)
-        touch_expiry = AsyncMock(return_value=True)
-        service._image_repo.touch_expiry = touch_expiry
+        touch_expiry_many = AsyncMock(return_value=1)
+        service._image_repo.touch_expiry_many = touch_expiry_many
         service._job_repo.create = AsyncMock(return_value=_make_job(source_upload_id=upload.id))
 
         await service.create_extract_job(
@@ -148,14 +149,15 @@ class TestTouchesSourceExpiry:
             timestamps_ms=[0, 1000],
         )
 
-        touch_expiry.assert_awaited_once()
+        touch_expiry_many.assert_awaited_once()
+        assert touch_expiry_many.call_args.args[0] == [upload.id]
 
     async def test_output_source_does_not_touch_upload_expiry(self) -> None:
         service, _storage = _make_service()
         output = _make_output()
         service._output_repo.get = AsyncMock(return_value=output)
-        touch_expiry = AsyncMock(return_value=True)
-        service._image_repo.touch_expiry = touch_expiry
+        touch_expiry_many = AsyncMock(return_value=1)
+        service._image_repo.touch_expiry_many = touch_expiry_many
         service._job_repo.create = AsyncMock(return_value=_make_job(source_output_id=output.id))
 
         await service.create_preview_job(
@@ -165,7 +167,7 @@ class TestTouchesSourceExpiry:
             frame_count=12,
         )
 
-        touch_expiry.assert_not_awaited()
+        touch_expiry_many.assert_not_awaited()
 
 
 class TestCreateJobRequiresExactlyOneSource:

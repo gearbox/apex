@@ -44,6 +44,7 @@ from src.api.services.generation.service import (
     ModelNotAllowedError,
     ProviderUnavailableError,
 )
+from src.api.services.generation.source_media import SourceMediaValidationError
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.idempotency import IdempotencyReplayResult, IdempotencyService
 from src.core.product import ProductConfig
@@ -268,6 +269,18 @@ class UnifiedGenerationController(Controller):
                     status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        except SourceMediaValidationError as exc:
+            await _mark_failed(idempotency_service, record_id, session)
+            logger.info("generation.source_media.validation_failed", error=str(exc))
+            return Response(
+                content=ErrorEnvelope(
+                    error="validation_error",
+                    message=str(exc),
+                    status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                ),
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
         except ValueError as exc:

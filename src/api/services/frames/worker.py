@@ -24,7 +24,7 @@ import structlog
 from src.api.services.frames import ffmpeg as frame_ffmpeg
 from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions
 from src.api.services.storage import MediaFormat, StorageType
-from src.core.enums import FrameExtractionKind
+from src.core.enums import FrameExtractionKind, MediaKind, media_kind_from_content_type
 from src.db.repositories.frame_extraction import FrameExtractionJobRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
@@ -146,7 +146,7 @@ class FrameExtractionWorker(PeriodicWorker):
         self, job: FrameExtractionJob, storage_key: str, content_type: str
     ) -> dict[str, object]:
         """Download the source, probe it, extract frames. Raises on any failure."""
-        if not content_type.startswith("video/"):
+        if media_kind_from_content_type(content_type) is not MediaKind.VIDEO:
             # Defense-in-depth: FrameExtractionService already rejects
             # non-video sources at job creation time.
             raise ValueError(f"Source content type {content_type!r} is not a video")

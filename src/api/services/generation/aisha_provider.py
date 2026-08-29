@@ -30,8 +30,6 @@ from src.core.enums import AspectRatio, JobStatus, ModelType, Provider, Sampler,
 from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository
-from src.db.repositories.output import OutputRepository
-from src.db.repositories.user_image import UserImageRepository
 
 # Sanitization for ComfyUI input filenames. ComfyUI writes uploaded files to
 # its `input/` folder by name; any path separators or shell-meta characters in
@@ -78,12 +76,14 @@ def _sanitize_filename(name: str | None) -> str:
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.schemas.unified_generation import UnifiedGenerationRequest
     from src.api.services.billing import BillingService
+    from src.api.services.generation.source_media import ResolvedSourceMedia
     from src.api.services.gpu_session.service import GpuSessionService
     from src.api.services.storage import R2StorageService
     from src.api.services.workflow_service import WorkflowService
@@ -136,8 +136,6 @@ class AishaGenerationProvider:
             raise FeatureNotSupportedError(
                 "Aisha video generation is not yet available via the unified endpoint"
             )
-        if request.source_images is not None:
-            raise FeatureNotSupportedError("Aisha does not support source_images inputs yet")
 
     async def refresh_job(
         self,
@@ -182,34 +180,18 @@ class AishaGenerationProvider:
 
     async def _resolve_input_image(
         self,
-        request: UnifiedGenerationRequest,
-        session: AsyncSession,
+        source_media: Sequence[ResolvedSourceMedia],
     ) -> tuple[bytes, str] | None:
-        """Resolve the I2I input image to (bytes, original_filename).
+        """Download one already-resolved source image for ComfyUI.
 
-        Mirrors ``GrokGenerationProvider._resolve_input_url`` but downloads
-        the actual bytes (ComfyUI is behind our tunnel and cannot fetch a
-        presigned URL from R2 — we have to push the bytes through). Returns
-        None when the request has no input image (T2I path).
-
-        Source priority matches Grok:
-        1. ``source_output_id`` — a prior generation's output
-        2. ``input_image_id`` — a user-uploaded image
-
-        Mutual exclusion is also enforced at the orchestrator layer; the
-        defensive check here turns provider misuse (a future direct caller
-        bypassing the orchestrator) into a clear local error rather than a
-        silently-ignored field.
+        ComfyUI is behind our tunnel, so it receives source bytes rather than
+        an R2 URL.  Service capability validation establishes cardinality;
+        the defensive check protects direct provider callers too.
         """
-        # Defensive: orchestrator already rejects this combination, but a
-        # future direct caller of the provider deserves a clear local error
-        # rather than a silently-ignored input_image_id.
-        if request.source_output_id is not None and request.input_image_id is not None:
-            raise ValueError("source_output_id and input_image_id are mutually exclusive")
-
-        # Fast path for T2I: no input image, no R2 dependency exercised.
-        if request.source_output_id is None and request.input_image_id is None:
+        if not source_media:
             return None
+        if len(source_media) != 1:
+            raise FeatureNotSupportedError("Aisha accepts exactly one source media asset")
 
         if self._r2 is None:
             # Should never happen in production (DI always wires R2), but
@@ -221,29 +203,14 @@ class AishaGenerationProvider:
                 "Please contact support if this persists."
             )
 
-        if request.source_output_id is not None:
-            output = await OutputRepository(session).get(request.source_output_id)
-            if output is None:
-                raise ValueError(f"Source output {request.source_output_id} not found")
-            image_bytes = await self._r2.download(output.storage_key)
-            filename = output.storage_key.rsplit("/", 1)[-1]
-        else:
-            # input_image_id is not None at this point (mutual exclusion enforced
-            # above and the early-return handled the both-None case).
-            if request.input_image_id is None:
-                raise RuntimeError(
-                    "input_image_id is None after mutual-exclusion checks — invariant violated"
-                )
-            user_image = await UserImageRepository(session).get(request.input_image_id)
-            if user_image is None:
-                raise ValueError(f"Input image {request.input_image_id} not found")
-            image_bytes = await self._r2.download(user_image.storage_key)
-            filename = user_image.original_filename
+        source = source_media[0]
+        image_bytes = await self._r2.download(source.storage_key)
+        filename = source.storage_key.rsplit("/", 1)[-1]
 
         # ComfyUI bridge: anything that isn't PNG/JPEG (including static WebP,
         # which Grok outputs and ComfyUI handles unreliably) is converted to
-        # PNG here. This covers the source_output_id -> Grok-WEBP-output remix
-        # path that upload-time normalization cannot fix.
+        # PNG here. This covers a Grok WEBP output remixed through the
+        # generic source-media path, which upload-time normalization cannot fix.
         try:
             normalized = await ensure_comfyui_input(
                 image_bytes, max_megapixels=self._max_input_megapixels
@@ -255,10 +222,7 @@ class AishaGenerationProvider:
                 size_bytes=len(image_bytes),
                 megapixels=e.megapixels,
                 limit=e.limit,
-                source_output_id=str(request.source_output_id)
-                if request.source_output_id
-                else None,
-                input_image_id=str(request.input_image_id) if request.input_image_id else None,
+                source_position=source.position,
             )
             raise ValueError("Input image exceeds maximum pixel count") from e
         except ImageNormalizationError as e:
@@ -266,10 +230,7 @@ class AishaGenerationProvider:
                 "aisha.input_normalization_failed",
                 sniffed=sniff_format(image_bytes).value,
                 size_bytes=len(image_bytes),
-                source_output_id=str(request.source_output_id)
-                if request.source_output_id
-                else None,
-                input_image_id=str(request.input_image_id) if request.input_image_id else None,
+                source_position=source.position,
                 error=str(e),
             )
             raise ValueError("Input image is not decodable") from e
@@ -310,7 +271,9 @@ class AishaGenerationProvider:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,
-        source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
+        source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
         """Resolve GPU session, build per-request ComfyUI client, queue workflow."""
         job_id = new_id()
@@ -333,12 +296,11 @@ class AishaGenerationProvider:
             )
 
         # I2I bridge: fetch input image bytes from R2 BEFORE billing.
-        # Resolution failures (missing row, mutually-exclusive inputs,
-        # missing R2 dependency) are user/config errors that should not
+        # Resolution failures (missing source or R2 dependency) are user/config errors that should not
         # leave a debit on the ledger requiring later refund. Validation
         # via ValueError surfaces as a 4xx; ProviderResponseError surfaces
         # as a 5xx. Either way: no reservation made, nothing to refund.
-        i2i_input = await self._resolve_input_image(request, session)
+        i2i_input = await self._resolve_input_image(source_media)
 
         # Aspect-ratio resolution must stay before check_and_reserve — undecodable
         # input must surface as a no-reservation 4xx.
@@ -434,8 +396,8 @@ class AishaGenerationProvider:
             aspect_ratio=request.aspect_ratio.value if request.aspect_ratio else None,
             product_id=product_id,
             source_job_id=source_job_id,
-            source_output_id=source_output_id,
-            input_image_id=request.input_image_id,
+            primary_output_id=primary_output_id,
+            primary_upload_id=primary_upload_id,
             gpu_session_id=gpu_session.id,
         )
 

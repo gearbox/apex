@@ -51,7 +51,7 @@ from src.api.services.library import (
     LibraryTagNotFoundError,
     LibraryValidationError,
 )
-from src.core.enums import LibrarySort, OutputMediaType
+from src.core.enums import LibrarySort, MediaKind
 from src.core.library_ref import LibraryAssetSource
 from src.core.product import ProductConfig
 
@@ -85,7 +85,7 @@ class LibraryController(Controller):
         limit: Annotated[int, Parameter(ge=1, le=50)] = 30,
         cursor: str | None = None,
         source: LibraryAssetSource | None = None,
-        media_type: OutputMediaType | None = None,
+        media_type: MediaKind | None = None,
         model: str | None = None,
         favorite: bool | None = None,
         project_id: UUID | None = None,

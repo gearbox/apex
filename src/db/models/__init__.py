@@ -23,6 +23,7 @@ from .library import LibraryAssetMetadata
 from .push_subscription import PushSubscription
 from .storage import (
     GenerationJob,
+    GenerationJobSource,
     GenerationMaterializationAttempt,
     GenerationOutput,
     StorageCleanupRecord,
@@ -39,6 +40,7 @@ __all__ = [
     "EmailVerificationToken",
     "FrameExtractionJob",
     "GenerationJob",
+    "GenerationJobSource",
     "GenerationMaterializationAttempt",
     "GenerationModel",
     "GenerationOutput",

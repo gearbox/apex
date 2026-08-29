@@ -354,6 +354,13 @@ class GenerationJob(Base):
         uselist=False,
         overlaps="generation_outputs",
     )
+    sources: Mapped[list[GenerationJobSource]] = relationship(
+        "GenerationJobSource",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="GenerationJobSource.position",
+        foreign_keys="GenerationJobSource.job_id",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -385,6 +392,58 @@ class GenerationJob(Base):
 
     def __repr__(self) -> str:
         return f"<GenerationJob {self.id} user={self.user_id} status={self.status}>"
+
+
+class GenerationJobSource(Base):
+    """An ordered owned-library asset used as input to a generation job.
+
+    The denormalized reference is retained when a source asset is deleted;
+    nullable foreign keys then make the missing source explicit without
+    rewriting the historical generation request.
+    """
+
+    __tablename__ = "generation_job_sources"
+
+    job_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("generation_jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Product scope is deliberately duplicated from the job to make every
+    # table independently scoped, as required by the multi-product model.
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_upload_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("user_images.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_output_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "generation_outputs.id",
+            name="fk_generation_job_sources_source_output_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    asset_ref: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    job: Mapped[GenerationJob] = relationship(
+        "GenerationJob",
+        back_populates="sources",
+        foreign_keys=[job_id],
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "NOT (source_upload_id IS NOT NULL AND source_output_id IS NOT NULL)",
+            name="ck_generation_job_sources_single_source",
+        ),
+        Index("ix_generation_job_sources_product_job", "product_id", "job_id"),
+    )
 
 
 class GenerationOutput(Base):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from src.core.enums import OutputMediaType
+from src.core.enums import MediaKind
 
 if TYPE_CHECKING:
     from src.core.library_ref import LibraryAssetSource
@@ -63,7 +63,7 @@ _GENERATION_METADATA_ACTIONS: tuple[LibraryAction, ...] = (
 
 def resolve_library_actions(
     *,
-    media_type: OutputMediaType,
+    media_type: MediaKind,
     source: LibraryAssetSource,
     has_generation_metadata: bool,
     product_config: ProductConfig,
@@ -91,7 +91,7 @@ def resolve_library_actions(
     del source, product_config  # see docstring — accepted for future/API-symmetry use only
 
     actions: list[LibraryAction] = list(_ALWAYS_ACTIONS)
-    actions.extend(_VIDEO_ACTIONS if media_type == OutputMediaType.VIDEO else _IMAGE_ACTIONS)
+    actions.extend(_VIDEO_ACTIONS if media_type == MediaKind.VIDEO else _IMAGE_ACTIONS)
     if has_generation_metadata:
         actions.extend(_GENERATION_METADATA_ACTIONS)
 

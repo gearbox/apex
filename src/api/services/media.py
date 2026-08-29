@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
-from src.core.enums import OutputMediaType
+from src.core.enums import media_kind_from_content_type
+from src.core.library_ref import LibraryAssetSource, format_asset_ref
 from src.core.thumbnails import label_for_max_edge
 from src.db.models.storage import GenerationOutput, UserImage
 
@@ -33,9 +34,7 @@ def _build_media(
     derivatives: Sequence[_MediaRow],
     url_prefix: str,
 ) -> MediaObject:
-    media_type = (
-        OutputMediaType.VIDEO if full.content_type.startswith("video/") else OutputMediaType.IMAGE
-    )
+    media_type = media_kind_from_content_type(full.content_type)
 
     original = MediaOriginal(
         url=f"{url_prefix}/{full.id}",
@@ -67,6 +66,12 @@ def _build_media(
         media_type=media_type,
         original=original,
         variants=variants,
+        asset_ref=format_asset_ref(
+            LibraryAssetSource.OUTPUT
+            if isinstance(full, GenerationOutput)
+            else LibraryAssetSource.UPLOAD,
+            full.id,
+        ),
     )
 
 

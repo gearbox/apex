@@ -7,6 +7,35 @@ from __future__ import annotations
 
 import msgspec
 
+from src.core.enums import MediaKind
+
+
+class SourceMediaConstraints(msgspec.Struct, kw_only=True):
+    """Limits for a model's ordered owned-library input assets.
+
+    ``source_media is None`` means the model accepts no owned media input.
+    ``min`` and ``max`` bound the total count across every listed media kind;
+    they do not express requiredness.  Requiredness comes from the selected
+    generation type.  Input order is significant and preserved end to end.
+    """
+
+    min: int
+    max: int
+    media_types: list[MediaKind]
+
+
+class ModelInputs(msgspec.Struct, kw_only=True):
+    """Model input capabilities independent from output constraints.
+
+    ``inputs.source_media == null`` means the model accepts no media input.
+    ``min`` / ``max`` bound the total number of source assets across all
+    media types, and ``media_types`` lists the allowed asset media kinds.
+    Order is significant and preserved end to end. Requiredness comes from
+    the selected generation type, not from ``min``.
+    """
+
+    source_media: SourceMediaConstraints | None = None
+
 
 class ImageConstraints(msgspec.Struct, kw_only=True):
     """Image-specific constraints for a model."""
@@ -81,6 +110,9 @@ class ModelInfo(msgspec.Struct, kw_only=True):
 
     requires_age_verification: bool = False
     """Whether users must be age-verified before generating with this model."""
+
+    inputs: ModelInputs = msgspec.field(default_factory=ModelInputs)
+    """Owned-library media input capabilities."""
 
     image: ImageConstraints | None = None
     """Image constraints. None for video-only models."""

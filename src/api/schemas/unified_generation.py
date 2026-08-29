@@ -52,6 +52,18 @@ SourceImageReferences = Annotated[
 ]
 
 
+class SourceMediaReference(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Reference to one owned library asset used as generation input."""
+
+    asset_ref: str
+    """Wire-format library reference: ``"upload:<uuid>"`` or ``"output:<uuid>"``."""
+
+
+SourceMediaReferences = Annotated[
+    list[SourceMediaReference], msgspec.Meta(min_length=1, max_length=8)
+]
+
+
 class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Provider-agnostic generation request.
 
@@ -70,18 +82,21 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
 
     # --- Optional fields (applicability depends on generation_type) ---
 
+    source_media: SourceMediaReferences | None = None
+    """Ordered owned-library media input references.
+
+    Order is significant.  The model capability's ``inputs.source_media``
+    declaration determines allowed kinds and cardinality.
+    """
+
     input_image_id: UUID | None = None
-    """Required for i2i, i2v, flf2v unless another supported source field is set.
-    ID of a previously uploaded image (via POST /v1/storage/upload)."""
+    """Deprecated alias for ``source_media=[{asset_ref: "upload:<id>"}]``."""
 
     source_output_id: UUID | None = None
-    """ID of a GenerationOutput to use as input (remix).
-    Mutually exclusive with input_image_id and source_images."""
+    """Deprecated alias for ``source_media=[{asset_ref: "output:<id>"}]``."""
 
     source_images: SourceImageReferences | None = None
-    """Additional image input references for multi-reference I2I (1-4 items).
-    Mutually exclusive with input_image_id and source_output_id. Lineage is recorded
-    from the first item with source_output_id when no top-level source_output_id is set."""
+    """Deprecated ordered image aliases, normalized at the service boundary."""
 
     input_video_url: str | None = None
     """Required for v2v. Publicly-accessible URL of the source video."""

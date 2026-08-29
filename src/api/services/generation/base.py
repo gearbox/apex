@@ -6,12 +6,14 @@ import dataclasses
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.schemas.unified_generation import UnifiedGenerationRequest
     from src.api.services.billing import BalanceEvent, BillingService
+    from src.api.services.generation.source_media import ResolvedSourceMedia
     from src.db.models.storage import GenerationJob
 
 
@@ -72,7 +74,9 @@ class GenerationProvider(Protocol):
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,
-        source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
+        source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
         """Submit the generation request to the provider.
 
@@ -88,6 +92,9 @@ class GenerationProvider(Protocol):
             account_id: Pre-resolved token account.
             token_cost: Pre-calculated cost.
             product_id: Product this generation belongs to.
+            source_media: Ordered, ownership-checked source assets. Providers
+                use their storage data directly and never re-resolve request
+                aliases.
 
         Returns:
             ``ProviderSubmitResult`` wrapping the created GenerationJob (status

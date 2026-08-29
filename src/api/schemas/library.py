@@ -12,7 +12,7 @@ import msgspec
 
 from src.api.schemas.media import MediaObject
 from src.api.services.library_capabilities import LibraryAction
-from src.core.enums import GenerationType, LibraryBadge, LibraryGroupSourceType, OutputMediaType
+from src.core.enums import GenerationType, LibraryBadge, LibraryGroupSourceType, MediaKind
 from src.core.library_limits import MAX_TAGS_PER_ASSET
 from src.core.library_ref import LibraryAssetSource
 
@@ -359,13 +359,16 @@ class LibraryGroupDetail(msgspec.Struct, kw_only=True):
     """Media envelope for the source input (upload or remixed output).
     Present when badge == 'image'."""
 
+    source_media: list[MediaObject] = msgspec.field(default_factory=list)
+    """Ordered source assets used for this job. Re-Generate replays this order."""
+
     prompt: str
     negative_prompt: str | None = None
 
     outputs: list[LibraryOutputItem]
     """All non-thumbnail outputs, ordered by output_index."""
 
-    media_type: OutputMediaType
+    media_type: MediaKind
     model: str | None = None
     provider: str
     generation_type: GenerationType

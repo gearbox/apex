@@ -210,7 +210,8 @@ class GrokJobService:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,
-        source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
     ) -> ProviderSubmitResult:
         """Create and execute an image generation job.
 
@@ -249,6 +250,11 @@ class GrokJobService:
         Raises:
             GrokJobError: If job creation or processing fails.
         """
+        if primary_upload_id is not None:
+            if input_image_id is not None and input_image_id != primary_upload_id:
+                raise ValueError("Conflicting primary upload lineage values")
+            input_image_id = primary_upload_id
+
         job_repo = JobRepository(session)
         output_repo = OutputRepository(session)
 
@@ -285,7 +291,7 @@ class GrokJobService:
             aspect_ratio=resolved_aspect_ratio.value if resolved_aspect_ratio is not None else None,
             product_id=product_id,
             source_job_id=source_job_id,
-            source_output_id=source_output_id,
+            primary_output_id=primary_output_id,
             input_image_id=input_image_id,
         )
 
@@ -679,7 +685,8 @@ class GrokJobService:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,
-        source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
     ) -> ProviderSubmitResult:
         """Start an async video generation job.
 
@@ -735,7 +742,8 @@ class GrokJobService:
             aspect_ratio=resolved_aspect_ratio.value,
             product_id=product_id,
             source_job_id=source_job_id,
-            source_output_id=source_output_id,
+            primary_output_id=primary_output_id,
+            primary_upload_id=primary_upload_id,
         )
 
         reserve_event = None

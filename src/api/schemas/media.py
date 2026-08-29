@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import msgspec
 
-from src.core.enums import OutputMediaType
+from src.core.enums import MediaKind
 
 
 class ImageVariant(msgspec.Struct, kw_only=True):
@@ -45,10 +45,13 @@ class MediaObject(msgspec.Struct, kw_only=True):
     For images: original.url is the full-res image, variants are preview thumbnails.
     """
 
-    media_type: OutputMediaType
+    media_type: MediaKind
     """'image' or 'video'. Derived from original.content_type."""
 
     original: MediaOriginal
 
     variants: list[ImageVariant]
     """Preview rasters, ascending by width. Always present; may be empty."""
+
+    asset_ref: str | None = None
+    """Owned-library asset reference, when this object represents a stored asset."""

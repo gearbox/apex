@@ -52,7 +52,10 @@ from src.db.models.user import User
 from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.api.services.generation.base import ProviderSubmitResult
+    from src.api.services.generation.source_media import ResolvedSourceMedia
 
 pytestmark = pytest.mark.asyncio
 
@@ -88,7 +91,9 @@ class _WriteThenFailProvider:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,  # noqa: ARG002
-        source_output_id: UUID | None = None,  # noqa: ARG002
+        primary_output_id: UUID | None = None,  # noqa: ARG002
+        primary_upload_id: UUID | None = None,  # noqa: ARG002
+        source_media: Sequence[ResolvedSourceMedia] = (),  # noqa: ARG002
     ) -> ProviderSubmitResult:
         job_id = new_id()
         self.written_job_id = job_id

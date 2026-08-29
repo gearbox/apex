@@ -13,11 +13,28 @@ from dataclasses import dataclass
 from src.core.enums import (
     AspectRatio,
     GenerationType,
+    MediaKind,
     ModelType,
     Provider,
     Resolution,
     VideoResolution,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceMediaConstraints:
+    """Static owned-library input limits for one model."""
+
+    min: int
+    max: int
+    media_types: frozenset[MediaKind]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInputs:
+    """Model inputs distinct from image/video output constraints."""
+
+    source_media: SourceMediaConstraints | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +122,9 @@ class ModelMeta:
     max_concurrent_outputs: int
     """Maximum number of outputs this model can produce per request."""
 
+    inputs: ModelInputs
+    """Owned-library input capabilities. Present for every registry entry."""
+
     image: ImageMeta | None = None
     """Image constraints. None for video-only models."""
 
@@ -135,6 +155,11 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=False,
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=10,
+        inputs=ModelInputs(
+            source_media=SourceMediaConstraints(
+                min=1, max=4, media_types=frozenset({MediaKind.IMAGE})
+            )
+        ),
         image=ImageMeta(
             supported_types=frozenset(
                 {
@@ -159,6 +184,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=False,
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=10,
+        inputs=ModelInputs(),
         image=ImageMeta(
             supported_types=frozenset(
                 {
@@ -177,6 +203,11 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=False,
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=1,
+        inputs=ModelInputs(
+            source_media=SourceMediaConstraints(
+                min=1, max=1, media_types=frozenset({MediaKind.IMAGE})
+            )
+        ),
         video=VideoMeta(
             max_duration=15,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
@@ -197,6 +228,13 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=True,
         aspect_ratios=ALL_ASPECT_RATIOS,
         max_concurrent_outputs=4,
+        # TODO(b1-workflow-map): derive these constraints from bound workflow
+        # media input slots when bundle workflow capabilities land.
+        inputs=ModelInputs(
+            source_media=SourceMediaConstraints(
+                min=1, max=1, media_types=frozenset({MediaKind.IMAGE})
+            )
+        ),
         image=ImageMeta(
             supported_types=frozenset(
                 {
@@ -226,6 +264,13 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             AspectRatio.RATIO_9_16,
         ),
         max_concurrent_outputs=1,
+        # TODO(b1-workflow-map): replace static input metadata with bound
+        # workflow media input slots.
+        inputs=ModelInputs(
+            source_media=SourceMediaConstraints(
+                min=1, max=1, media_types=frozenset({MediaKind.IMAGE})
+            )
+        ),
         video=VideoMeta(
             max_duration=10,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),

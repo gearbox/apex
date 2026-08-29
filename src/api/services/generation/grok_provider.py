@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, ClassVar
 
 import structlog
 
-from src.api.schemas.unified_generation import SourceImageReference
 from src.core.enums import GenerationType, JobStatus
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.api.schemas.unified_generation import UnifiedGenerationRequest
     from src.api.services.billing import BillingService
     from src.api.services.generation.base import ProviderSubmitResult
+    from src.api.services.generation.source_media import ResolvedSourceMedia
     from src.api.services.grok.job_service import GrokJobService
     from src.api.services.storage import R2StorageService
     from src.db.models.storage import GenerationJob
@@ -80,7 +81,9 @@ class GrokGenerationProvider:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,
-        source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
+        source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.create_image_job or start_video_job."""
         if request.generation_type.is_video:
@@ -93,7 +96,9 @@ class GrokGenerationProvider:
                 token_cost=token_cost,
                 product_id=product_id,
                 source_job_id=source_job_id,
-                source_output_id=source_output_id,
+                primary_output_id=primary_output_id,
+                primary_upload_id=primary_upload_id,
+                source_media=source_media,
             )
         return await self._submit_image(
             request,
@@ -104,78 +109,24 @@ class GrokGenerationProvider:
             token_cost=token_cost,
             product_id=product_id,
             source_job_id=source_job_id,
-            source_output_id=source_output_id,
+            primary_output_id=primary_output_id,
+            primary_upload_id=primary_upload_id,
+            source_media=source_media,
         )
 
-    async def _resolve_input_url(
+    async def _resolve_source_urls(
         self,
-        request: UnifiedGenerationRequest,
-        *,
-        user_id: UUID,
-        session: AsyncSession,
-    ) -> str | None:
-        """Resolve input URL from either source_output_id or input_image_id."""
-        if request.source_output_id is None and request.input_image_id is None:
-            return None
-        return await self._resolve_reference_url(
-            SourceImageReference(
-                input_image_id=request.input_image_id,
-                source_output_id=request.source_output_id,
-            ),
-            user_id=user_id,
-            session=session,
-        )
-
-    async def _resolve_reference_url(
-        self,
-        image_ref: SourceImageReference,
-        *,
-        user_id: UUID,
-        session: AsyncSession,
-    ) -> str:
-        """Resolve one API image reference to a provider-readable URL."""
-        if image_ref.source_output_id is not None:
-            from src.db.repositories.output import OutputRepository
-
-            source_output_id = image_ref.source_output_id
-            output = await OutputRepository(session).get(source_output_id, user_id=user_id)
-            if output is None:
-                raise ValueError(f"Source output {source_output_id} not found")
+        source_media: Sequence[ResolvedSourceMedia],
+    ) -> list[str]:
+        """Presign the already-resolved source assets for the Grok API."""
+        urls: list[str] = []
+        for source in source_media:
             url_result = await self._r2.get_presigned_url(
-                output.storage_key,
+                source.storage_key,
                 expires_in=_PRESIGN_EXPIRES_SECONDS,
             )
-            return url_result.presigned_url
-
-        if image_ref.input_image_id is None:
-            raise RuntimeError("image reference has no input_image_id or source_output_id")
-
-        from src.db.repositories.user_image import UserImageRepository
-
-        input_image_id = image_ref.input_image_id
-        input_image = await UserImageRepository(session).get(input_image_id, user_id=user_id)
-        if input_image is None:
-            raise ValueError(f"Input image {input_image_id} not found")
-        url_result = await self._r2.get_presigned_url(
-            input_image.storage_key,
-            expires_in=_PRESIGN_EXPIRES_SECONDS,
-        )
-        return url_result.presigned_url
-
-    async def _resolve_input_urls(
-        self,
-        request: UnifiedGenerationRequest,
-        *,
-        user_id: UUID,
-        session: AsyncSession,
-    ) -> list[str] | None:
-        """Resolve multi-reference image inputs to provider-readable URLs."""
-        if request.source_images is None:
-            return None
-        return [
-            await self._resolve_reference_url(image_ref, user_id=user_id, session=session)
-            for image_ref in request.source_images
-        ]
+            urls.append(url_result.presigned_url)
+        return urls
 
     async def _submit_image(
         self,
@@ -188,15 +139,14 @@ class GrokGenerationProvider:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,
-        source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
+        source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.create_image_job."""
-        input_image_url = await self._resolve_input_url(request, user_id=user_id, session=session)
-        input_image_urls = await self._resolve_input_urls(
-            request,
-            user_id=user_id,
-            session=session,
-        )
+        urls = await self._resolve_source_urls(source_media)
+        input_image_url = urls[0] if len(urls) == 1 else None
+        input_image_urls = urls if len(urls) > 1 else None
 
         return await self._grok.create_image_job(
             session=session,
@@ -210,13 +160,13 @@ class GrokGenerationProvider:
             negative_prompt=request.negative_prompt,
             input_image_url=input_image_url,
             input_image_urls=input_image_urls,
-            input_image_id=request.input_image_id,
             billing_service=billing_service,
             account_id=account_id,
             token_cost=token_cost,
             product_id=product_id,
             source_job_id=source_job_id,
-            source_output_id=source_output_id,
+            primary_output_id=primary_output_id,
+            primary_upload_id=primary_upload_id,
         )
 
     async def _submit_video(
@@ -230,10 +180,13 @@ class GrokGenerationProvider:
         token_cost: int,
         product_id: str,
         source_job_id: UUID | None = None,
-        source_output_id: UUID | None = None,
+        primary_output_id: UUID | None = None,
+        primary_upload_id: UUID | None = None,
+        source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.start_video_job."""
-        input_image_url = await self._resolve_input_url(request, user_id=user_id, session=session)
+        urls = await self._resolve_source_urls(source_media)
+        input_image_url = urls[0] if urls else None
 
         return await self._grok.start_video_job(
             session=session,
@@ -252,5 +205,6 @@ class GrokGenerationProvider:
             token_cost=token_cost,
             product_id=product_id,
             source_job_id=source_job_id,
-            source_output_id=source_output_id,
+            primary_output_id=primary_output_id,
+            primary_upload_id=primary_upload_id,
         )

@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import msgspec
 import pytest
 
-from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
+from src.api.schemas.unified_generation import (
+    SourceImageReference,
+    SourceMediaReference,
+    UnifiedGenerationRequest,
+)
 from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.provider_failures import (
     ProviderFailure,
@@ -24,10 +28,17 @@ from src.api.services.generation.service import (
     ModelDisabledError,
     ProviderUnavailableError,
 )
+from src.api.services.generation.source_media import (
+    ResolvedSourceMedia,
+    SourceMediaResolver,
+    SourceMediaValidationError,
+    normalize_source_media,
+)
 from src.core.enums import (
     AspectRatio,
     GenerationType,
     JobStatus,
+    MediaKind,
     ModelType,
     Provider,
     Resolution,
@@ -35,6 +46,7 @@ from src.core.enums import (
     Scheduler,
     VideoResolution,
 )
+from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.product_registry import VEX_CONFIG
 
 # ---------------------------------------------------------------------------
@@ -361,6 +373,24 @@ def _make_mock_provider() -> MagicMock:
     return provider
 
 
+def _make_resolved_source(
+    asset_id: UUID,
+    *,
+    source: LibraryAssetSource,
+    job_id: UUID | None = None,
+) -> ResolvedSourceMedia:
+    return ResolvedSourceMedia(
+        position=0,
+        ref=AssetRef(source=source, asset_id=asset_id),
+        asset_ref=format_asset_ref(source, asset_id),
+        media_kind=MediaKind.IMAGE,
+        content_type="image/png",
+        storage_key=f"{source}s/{asset_id}.png",
+        size_bytes=1,
+        job_id=job_id,
+    )
+
+
 def _make_service(
     providers: dict | None = None,
 ) -> GenerationService:
@@ -406,7 +436,7 @@ class TestGenerationServiceValidation:
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
-        with pytest.raises(ValueError, match="requires input_image_id"):
+        with pytest.raises(ValueError, match="requires source_media"):
             service._validate_inputs(request)
 
     def test_validate_v2v_requires_video_url(self) -> None:
@@ -428,19 +458,22 @@ class TestGenerationServiceValidation:
         )
         service._validate_inputs(request)  # Should not raise
 
-    def test_validate_i2i_accepts_source_images_references(self) -> None:
+    def test_validate_i2i_accepts_resolved_source_media(self) -> None:
         service = _make_service()
+        source_id = uuid4()
         request = UnifiedGenerationRequest(
             prompt="Edit",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            source_images=[SourceImageReference(input_image_id=uuid4())],
+            source_media=[SourceMediaReference(asset_ref=f"upload:{source_id}")],
         )
 
-        service._validate_inputs(request)
+        service._validate_inputs(
+            request,
+            [_make_resolved_source(source_id, source=LibraryAssetSource.UPLOAD)],
+        )
 
-    def test_validate_source_images_mutually_exclusive_with_scalar_inputs(self) -> None:
-        service = _make_service()
+    def test_validate_legacy_source_aliases_are_mutually_exclusive(self) -> None:
         request = UnifiedGenerationRequest(
             prompt="Edit",
             generation_type=GenerationType.I2I,
@@ -449,51 +482,51 @@ class TestGenerationServiceValidation:
             source_images=[SourceImageReference(source_output_id=uuid4())],
         )
 
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            service._validate_inputs(request)
+        with pytest.raises(SourceMediaValidationError, match="mutually exclusive"):
+            normalize_source_media(request)
 
-    def test_input_image_count_t2i(self) -> None:
+    def test_source_media_count_t2i(self) -> None:
         request = UnifiedGenerationRequest(
             prompt="A cat",
             generation_type=GenerationType.T2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
 
-        assert GenerationService._input_image_count(request) == 0
+        assert GenerationService._source_media_count(request) == 0
 
-    def test_input_image_count_input_image_id(self) -> None:
+    def test_source_media_count_upload(self) -> None:
         request = UnifiedGenerationRequest(
             prompt="Edit",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            input_image_id=uuid4(),
+            source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
         )
 
-        assert GenerationService._input_image_count(request) == 1
+        assert GenerationService._source_media_count(request) == 1
 
-    def test_input_image_count_source_output_id(self) -> None:
+    def test_source_media_count_output(self) -> None:
         request = UnifiedGenerationRequest(
             prompt="Edit",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            source_output_id=uuid4(),
+            source_media=[SourceMediaReference(asset_ref=f"output:{uuid4()}")],
         )
 
-        assert GenerationService._input_image_count(request) == 1
+        assert GenerationService._source_media_count(request) == 1
 
-    def test_input_image_count_source_images(self) -> None:
+    def test_source_media_count_multiple_sources(self) -> None:
         request = UnifiedGenerationRequest(
             prompt="Edit",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            source_images=[
-                SourceImageReference(input_image_id=uuid4()),
-                SourceImageReference(input_image_id=uuid4()),
-                SourceImageReference(input_image_id=uuid4()),
+            source_media=[
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
+                SourceMediaReference(asset_ref=f"output:{uuid4()}"),
             ],
         )
 
-        assert GenerationService._input_image_count(request) == 3
+        assert GenerationService._source_media_count(request) == 3
 
 
 class TestGenerationServiceAspectRatioCapability:
@@ -519,17 +552,27 @@ class TestGenerationServiceAspectRatioCapability:
         """aisha-image can reshape on edit — a supported ratio must clear the
         capability gate and proceed to later validation stages."""
         service = _make_service(providers={Provider.AISHA: _make_mock_provider()})
+        source_id = uuid4()
         request = UnifiedGenerationRequest(
             prompt="Edit",
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE,
-            input_image_id=uuid4(),
+            source_media=[SourceMediaReference(asset_ref=f"upload:{source_id}")],
             aspect_ratio=AspectRatio.RATIO_16_9,
         )
         with (
             patch(
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(source_id, source=LibraryAssetSource.UPLOAD)
+                    ]
+                ),
             ),
             pytest.raises(ModelDisabledError),
         ):
@@ -543,17 +586,27 @@ class TestGenerationServiceAspectRatioCapability:
     async def test_i2i_accepts_unset_aspect_ratio_for_any_model(self) -> None:
         """None always clears the gate, even for a model with no reshape capability."""
         service = _make_service()
+        source_id = uuid4()
         request = UnifiedGenerationRequest(
             prompt="Edit",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            input_image_id=uuid4(),
+            source_media=[SourceMediaReference(asset_ref=f"upload:{source_id}")],
             aspect_ratio=None,
         )
         with (
             patch(
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(source_id, source=LibraryAssetSource.UPLOAD)
+                    ]
+                ),
             ),
             pytest.raises(ModelDisabledError),
         ):
@@ -1036,10 +1089,10 @@ class TestGenerationServiceGenerate:
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
             n=2,
-            source_images=[
-                SourceImageReference(input_image_id=uuid4()),
-                SourceImageReference(input_image_id=uuid4()),
-                SourceImageReference(input_image_id=uuid4()),
+            source_media=[
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
             ],
         )
         with (
@@ -1047,7 +1100,24 @@ class TestGenerationServiceGenerate:
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=_make_enabled_model_mock()),
             ),
-            patch("src.db.repositories.output.OutputRepository") as output_repo_cls,
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(uuid4(), source=LibraryAssetSource.UPLOAD)
+                        for _ in range(3)
+                    ]
+                ),
+            ),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=MagicMock(touch_expiry_many=AsyncMock(return_value=3)),
+            ),
+            patch(
+                "src.api.services.generation.service.GenerationJobSourceRepository",
+                return_value=MagicMock(create_many=AsyncMock()),
+            ),
         ):
             response = await service.generate(
                 request,
@@ -1056,7 +1126,6 @@ class TestGenerationServiceGenerate:
                 product_config=VEX_CONFIG,
             )
 
-        output_repo_cls.assert_not_called()
         assert pricing.quote.await_args.kwargs["n"] == 2
         assert pricing.quote.await_args.kwargs["input_image_count"] == 3
         billing.assert_sufficient_balance.assert_awaited_once_with(account.id, 123, session=session)
@@ -1069,10 +1138,6 @@ class TestGenerationServiceGenerate:
         second_output_id = uuid4()
         source_job_id = uuid4()
         user_id = uuid4()
-        source_output = MagicMock()
-        source_output.job_id = source_job_id
-        output_repo = MagicMock()
-        output_repo.get = AsyncMock(return_value=source_output)
         mock_provider = _make_mock_provider()
         service = _make_service(providers={Provider.GROK: mock_provider})
         session = AsyncMock()
@@ -1080,10 +1145,10 @@ class TestGenerationServiceGenerate:
             prompt="use several references",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            source_images=[
-                SourceImageReference(input_image_id=first_input_id),
-                SourceImageReference(source_output_id=first_output_id),
-                SourceImageReference(source_output_id=second_output_id),
+            source_media=[
+                SourceMediaReference(asset_ref=f"upload:{first_input_id}"),
+                SourceMediaReference(asset_ref=f"output:{first_output_id}"),
+                SourceMediaReference(asset_ref=f"output:{second_output_id}"),
             ],
         )
 
@@ -1092,7 +1157,33 @@ class TestGenerationServiceGenerate:
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=_make_enabled_model_mock()),
             ),
-            patch("src.db.repositories.output.OutputRepository", return_value=output_repo),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(first_input_id, source=LibraryAssetSource.UPLOAD),
+                        _make_resolved_source(
+                            first_output_id,
+                            source=LibraryAssetSource.OUTPUT,
+                            job_id=source_job_id,
+                        ),
+                        _make_resolved_source(
+                            second_output_id,
+                            source=LibraryAssetSource.OUTPUT,
+                            job_id=uuid4(),
+                        ),
+                    ]
+                ),
+            ),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=MagicMock(touch_expiry_many=AsyncMock(return_value=1)),
+            ),
+            patch(
+                "src.api.services.generation.service.GenerationJobSourceRepository",
+                return_value=MagicMock(create_many=AsyncMock()),
+            ),
         ):
             await service.generate(
                 request,
@@ -1101,10 +1192,9 @@ class TestGenerationServiceGenerate:
                 product_config=VEX_CONFIG,
             )
 
-        output_repo.get.assert_awaited_once_with(first_output_id, user_id=user_id)
         submit_kwargs = mock_provider.submit.await_args.kwargs
         assert submit_kwargs["source_job_id"] == source_job_id
-        assert submit_kwargs["source_output_id"] == first_output_id
+        assert submit_kwargs["primary_output_id"] == first_output_id
 
     async def test_source_images_all_input_references_have_no_lineage(self) -> None:
         mock_provider = _make_mock_provider()
@@ -1113,9 +1203,9 @@ class TestGenerationServiceGenerate:
             prompt="use uploads",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            source_images=[
-                SourceImageReference(input_image_id=uuid4()),
-                SourceImageReference(input_image_id=uuid4()),
+            source_media=[
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
+                SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
             ],
         )
 
@@ -1124,7 +1214,24 @@ class TestGenerationServiceGenerate:
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=_make_enabled_model_mock()),
             ),
-            patch("src.db.repositories.output.OutputRepository") as output_repo_cls,
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(uuid4(), source=LibraryAssetSource.UPLOAD),
+                        _make_resolved_source(uuid4(), source=LibraryAssetSource.UPLOAD),
+                    ]
+                ),
+            ),
+            patch(
+                "src.api.services.generation.service.UserImageRepository",
+                return_value=MagicMock(touch_expiry_many=AsyncMock(return_value=2)),
+            ),
+            patch(
+                "src.api.services.generation.service.GenerationJobSourceRepository",
+                return_value=MagicMock(create_many=AsyncMock()),
+            ),
         ):
             await service.generate(
                 request,
@@ -1133,23 +1240,20 @@ class TestGenerationServiceGenerate:
                 product_config=VEX_CONFIG,
             )
 
-        output_repo_cls.assert_not_called()
         submit_kwargs = mock_provider.submit.await_args.kwargs
         assert submit_kwargs["source_job_id"] is None
-        assert submit_kwargs["source_output_id"] is None
+        assert submit_kwargs["primary_output_id"] is None
 
     async def test_source_images_output_reference_not_owned_raises_value_error(self) -> None:
         source_output_id = uuid4()
         user_id = uuid4()
-        output_repo = MagicMock()
-        output_repo.get = AsyncMock(return_value=None)
         mock_provider = _make_mock_provider()
         service = _make_service(providers={Provider.GROK: mock_provider})
         request = UnifiedGenerationRequest(
             prompt="use output",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            source_images=[SourceImageReference(source_output_id=source_output_id)],
+            source_media=[SourceMediaReference(asset_ref=f"output:{source_output_id}")],
         )
 
         with (
@@ -1157,8 +1261,16 @@ class TestGenerationServiceGenerate:
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=_make_enabled_model_mock()),
             ),
-            patch("src.db.repositories.output.OutputRepository", return_value=output_repo),
-            pytest.raises(ValueError, match="Source output not found"),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    side_effect=SourceMediaValidationError(
+                        "source_media position 0 does not name an available asset"
+                    )
+                ),
+            ),
+            pytest.raises(SourceMediaValidationError, match="available asset"),
         ):
             await service.generate(
                 request,
@@ -1167,7 +1279,6 @@ class TestGenerationServiceGenerate:
                 product_config=VEX_CONFIG,
             )
 
-        output_repo.get.assert_awaited_once_with(source_output_id, user_id=user_id)
         mock_provider.submit.assert_not_awaited()
 
 
@@ -1192,11 +1303,11 @@ class TestGenerationServiceSlidingRetention:
             prompt="Edit this",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            input_image_id=input_image_id,
+            source_media=[SourceMediaReference(asset_ref=f"upload:{input_image_id}")],
         )
 
         image_repo = MagicMock()
-        image_repo.touch_expiry = AsyncMock(return_value=True)
+        image_repo.touch_expiry_many = AsyncMock(return_value=1)
         before = datetime.now(UTC)
         with (
             patch(
@@ -1207,6 +1318,19 @@ class TestGenerationServiceSlidingRetention:
                 "src.api.services.generation.service.UserImageRepository",
                 return_value=image_repo,
             ),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(input_image_id, source=LibraryAssetSource.UPLOAD)
+                    ]
+                ),
+            ),
+            patch(
+                "src.api.services.generation.service.GenerationJobSourceRepository",
+                return_value=MagicMock(create_many=AsyncMock()),
+            ),
         ):
             await service.generate(
                 request,
@@ -1216,9 +1340,9 @@ class TestGenerationServiceSlidingRetention:
             )
         after = datetime.now(UTC)
 
-        image_repo.touch_expiry.assert_awaited_once()
-        call_kwargs = image_repo.touch_expiry.await_args.kwargs
-        assert image_repo.touch_expiry.await_args.args[0] == input_image_id
+        image_repo.touch_expiry_many.assert_awaited_once()
+        call_kwargs = image_repo.touch_expiry_many.await_args.kwargs
+        assert image_repo.touch_expiry_many.await_args.args[0] == [input_image_id]
         assert call_kwargs["user_id"] == user_id
         expected_min = before + timedelta(days=7) - timedelta(seconds=5)
         expected_max = after + timedelta(days=7) + timedelta(seconds=5)
@@ -1242,11 +1366,11 @@ class TestGenerationServiceSlidingRetention:
             prompt="Edit this",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            input_image_id=input_image_id,
+            source_media=[SourceMediaReference(asset_ref=f"upload:{input_image_id}")],
         )
 
         image_repo = MagicMock()
-        image_repo.touch_expiry = AsyncMock(return_value=False)
+        image_repo.touch_expiry_many = AsyncMock(return_value=0)
         session = AsyncMock()
         with (
             patch(
@@ -1257,7 +1381,16 @@ class TestGenerationServiceSlidingRetention:
                 "src.api.services.generation.service.UserImageRepository",
                 return_value=image_repo,
             ),
-            pytest.raises(ValueError, match="Input image not found"),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(input_image_id, source=LibraryAssetSource.UPLOAD)
+                    ]
+                ),
+            ),
+            pytest.raises(SourceMediaValidationError, match="no longer available"),
         ):
             await service.generate(
                 request,
@@ -1272,30 +1405,42 @@ class TestGenerationServiceSlidingRetention:
     async def test_generate_source_output_does_not_touch_uploads(self) -> None:
         source_output_id = uuid4()
         user_id = uuid4()
-        source_output = MagicMock()
-        source_output.job_id = uuid4()
-        output_repo = MagicMock()
-        output_repo.get = AsyncMock(return_value=source_output)
         mock_provider = _make_mock_provider()
         service = _make_service(providers={Provider.GROK: mock_provider})
         request = UnifiedGenerationRequest(
             prompt="Remix",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
-            source_output_id=source_output_id,
+            source_media=[SourceMediaReference(asset_ref=f"output:{source_output_id}")],
         )
 
         image_repo = MagicMock()
-        image_repo.touch_expiry = AsyncMock(return_value=True)
+        image_repo.touch_expiry_many = AsyncMock(return_value=1)
         with (
             patch(
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
                 new=AsyncMock(return_value=_make_enabled_model_mock()),
             ),
-            patch("src.db.repositories.output.OutputRepository", return_value=output_repo),
             patch(
                 "src.api.services.generation.service.UserImageRepository",
                 return_value=image_repo,
+            ),
+            patch.object(
+                SourceMediaResolver,
+                "resolve",
+                new=AsyncMock(
+                    return_value=[
+                        _make_resolved_source(
+                            source_output_id,
+                            source=LibraryAssetSource.OUTPUT,
+                            job_id=uuid4(),
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.api.services.generation.service.GenerationJobSourceRepository",
+                return_value=MagicMock(create_many=AsyncMock()),
             ),
         ):
             await service.generate(
@@ -1305,7 +1450,7 @@ class TestGenerationServiceSlidingRetention:
                 product_config=VEX_CONFIG,
             )
 
-        image_repo.touch_expiry.assert_not_awaited()
+        image_repo.touch_expiry_many.assert_not_awaited()
 
     async def test_generate_t2i_does_not_touch_uploads(self) -> None:
         mock_provider = _make_mock_provider()
@@ -1317,7 +1462,7 @@ class TestGenerationServiceSlidingRetention:
         )
 
         image_repo = MagicMock()
-        image_repo.touch_expiry = AsyncMock(return_value=True)
+        image_repo.touch_expiry_many = AsyncMock(return_value=1)
         with (
             patch(
                 "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
@@ -1335,7 +1480,7 @@ class TestGenerationServiceSlidingRetention:
                 product_config=VEX_CONFIG,
             )
 
-        image_repo.touch_expiry.assert_not_awaited()
+        image_repo.touch_expiry_many.assert_not_awaited()
 
 
 class TestGenerationServiceRateLimit:

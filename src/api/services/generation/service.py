@@ -11,10 +11,18 @@ from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
 from src.api.services.billing_errors import BillingError
 from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
+from src.api.services.generation.source_media import (
+    ResolvedSourceMedia,
+    SourceMediaResolver,
+    SourceMediaValidationError,
+    normalize_source_media,
+)
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import GenerationType, JobStatus, Provider
+from src.core.library_ref import LibraryAssetSource
 from src.core.model_registry import get_model_meta
+from src.db.repositories.generation_job_source import GenerationJobSourceRepository
 from src.db.repositories.generation_model import GenerationModelRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
@@ -79,7 +87,7 @@ class GenerationService:
 
     Responsibilities:
     1. Validate model-generation_type compatibility (via ModelType enum)
-    2. Validate required inputs (image_id, video_url)
+    2. Normalize, resolve, and validate owned media inputs
     3. Validate n <= model.max_concurrent_outputs
     4. Check model is enabled in generation_models table
     4.5. Global per-model rate limit check
@@ -145,6 +153,10 @@ class GenerationService:
         post_commit_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
     ) -> JobCreatedResponse:
         """Execute the full generation pipeline."""
+        # The request crosses its only legacy compatibility boundary here.
+        # Every downstream consumer receives the normalized shape only.
+        request = normalize_source_media(request)
+
         # 1. Model-generation_type compatibility (declarative, enum-driven)
         if not request.model.supports_generation_type(request.generation_type):
             raise ValueError(
@@ -183,8 +195,18 @@ class GenerationService:
                     f"{[a.value for a in meta.aspect_ratios]}"
                 )
 
-        # 2. Cross-cutting input validation
-        self._validate_inputs(request)
+        # 2. Resolve owned-library media once, before any consumer needs it.
+        resolved_source_media: list[ResolvedSourceMedia] = []
+        if request.source_media is not None:
+            resolved_source_media = await SourceMediaResolver().resolve(
+                request.source_media,
+                user_id=user_id,
+                session=session,
+                product_id=product_config.slug,
+            )
+
+        # 2.1 Cross-cutting input validation against media capabilities.
+        self._validate_inputs(request, resolved_source_media)
 
         # 3. Output count cap
         max_n = request.model.max_concurrent_outputs
@@ -233,7 +255,7 @@ class GenerationService:
             request.generation_type.value,
             request.model.value,
             n=request.n,
-            input_image_count=self._input_image_count(request),
+            input_image_count=self._source_media_count(request),
             session=session,
         )
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)
@@ -241,44 +263,63 @@ class GenerationService:
         # 8. Submit to provider (with billing saga)
         product_id = product_config.slug
 
-        # Resolve lineage: if source_output_id is provided, look up the source job
-        source_job_id: UUID | None = None
-        resolved_source_output_id: UUID | None = request.source_output_id
-        lineage_output_id: UUID | None = request.source_output_id
-        if lineage_output_id is None and request.source_images is not None:
-            lineage_output_id = next(
-                (
-                    image_ref.source_output_id
-                    for image_ref in request.source_images
-                    if image_ref.source_output_id is not None
-                ),
-                None,
-            )
-        if lineage_output_id is not None:
-            from src.db.repositories.output import OutputRepository
-
-            source_output = await OutputRepository(session).get(lineage_output_id, user_id=user_id)
-            if source_output is None:
-                raise ValueError("Source output not found")
-            source_job_id = source_output.job_id
-            resolved_source_output_id = lineage_output_id
+        # Existing primary-lineage columns retain their historic meaning:
+        # they point at the first output source, while ordered provenance is
+        # written separately below.
+        first_output_source = next(
+            (
+                source
+                for source in resolved_source_media
+                if source.ref.source is LibraryAssetSource.OUTPUT
+            ),
+            None,
+        )
+        source_job_id: UUID | None = (
+            first_output_source.job_id if first_output_source is not None else None
+        )
+        primary_output_id: UUID | None = (
+            first_output_source.ref.asset_id if first_output_source is not None else None
+        )
+        first_upload_source = next(
+            (
+                source
+                for source in resolved_source_media
+                if source.ref.source is LibraryAssetSource.UPLOAD
+            ),
+            None,
+        )
+        primary_upload_id: UUID | None = (
+            first_upload_source.ref.asset_id if first_upload_source is not None else None
+        )
 
         # Sliding retention: using an upload as generation input resets its
         # expiry window, so actively-used images are never swept mid-use.
         # Rides in the submit transaction — rolled back if submit fails.
-        if request.input_image_id is not None:
-            touched = await UserImageRepository(session).touch_expiry(
-                request.input_image_id,
+        upload_ids = [
+            source.ref.asset_id
+            for source in resolved_source_media
+            if source.ref.source is LibraryAssetSource.UPLOAD
+        ]
+        if upload_ids:
+            touched = await UserImageRepository(session).touch_expiry_many(
+                upload_ids,
                 user_id=user_id,
                 expires_at=datetime.now(UTC) + timedelta(days=self._retention_days),
             )
-            if not touched:
-                raise ValueError("Input image not found")
+            if touched < len(upload_ids):
+                raise SourceMediaValidationError(
+                    "One or more source assets are no longer available"
+                )
             logger.info(
-                "generation.input_image_expiry_extended",
-                image_id=str(request.input_image_id),
+                "generation.source_media.expiry_extended",
                 user_id=str(user_id),
                 retention_days=self._retention_days,
+                count=len(upload_ids),
+                positions=[
+                    source.position
+                    for source in resolved_source_media
+                    if source.ref.source is LibraryAssetSource.UPLOAD
+                ],
             )
 
         job: GenerationJob | None = None
@@ -293,10 +334,18 @@ class GenerationService:
                 token_cost=token_cost,
                 product_id=product_id,
                 source_job_id=source_job_id,
-                source_output_id=resolved_source_output_id,
+                primary_output_id=primary_output_id,
+                primary_upload_id=primary_upload_id,
+                source_media=resolved_source_media,
             )
             job = submit_result.job
             reserve_event = submit_result.balance_event
+            if resolved_source_media:
+                await GenerationJobSourceRepository(session).create_many(
+                    job_id=job.id,
+                    product_id=product_id,
+                    sources=resolved_source_media,
+                )
             if not defer_commit:
                 await session.commit()
 
@@ -488,32 +537,47 @@ class GenerationService:
             await self._event_bus.publish_balance(refund_result.event)
 
     @staticmethod
-    def _validate_inputs(request: UnifiedGenerationRequest) -> None:
-        """Cross-cutting validation: generation_type vs required inputs."""
-        image_input_sources = [
-            request.input_image_id is not None,
-            request.source_output_id is not None,
-            request.source_images is not None,
-        ]
-        if sum(image_input_sources) > 1:
-            raise ValueError(
-                "input_image_id, source_output_id, and source_images are mutually exclusive"
+    def _validate_inputs(
+        request: UnifiedGenerationRequest,
+        resolved_source_media: list[ResolvedSourceMedia] | None = None,
+    ) -> None:
+        """Validate normalized sources against generation and model capabilities."""
+        resolved = resolved_source_media or []
+        has_source_media = request.source_media is not None
+        expected_kinds = request.generation_type.input_kinds
+        constraints = get_model_meta(request.model).inputs.source_media
+
+        if not expected_kinds and has_source_media:
+            raise SourceMediaValidationError(
+                f"generation_type '{request.generation_type.value}' does not accept source_media"
             )
-        if request.source_images is not None and request.generation_type != GenerationType.I2I:
-            raise ValueError("source_images is only supported for i2i generation")
-        if request.generation_type.requires_image_input and not any(image_input_sources):
-            raise ValueError(
-                f"generation_type '{request.generation_type.value}' requires input_image_id, source_output_id, or source_images"
+        if expected_kinds and not has_source_media:
+            raise SourceMediaValidationError(
+                f"generation_type '{request.generation_type.value}' requires source_media"
             )
+        if has_source_media and constraints is None:
+            raise SourceMediaValidationError(
+                f"Model '{request.model.value}' does not accept source_media"
+            )
+        if has_source_media and constraints is not None:
+            actual_count = len(resolved)
+            if not constraints.min <= actual_count <= constraints.max:
+                raise SourceMediaValidationError(
+                    f"source_media count must be between {constraints.min} and {constraints.max}; got {actual_count}"
+                )
+            for source in resolved:
+                if source.media_kind not in constraints.media_types:
+                    allowed = ", ".join(sorted(kind.value for kind in constraints.media_types))
+                    raise SourceMediaValidationError(
+                        f"source_media position {source.position} has media kind "
+                        f"'{source.media_kind.value}'; model accepts: {allowed}"
+                    )
         if request.generation_type.requires_video_input and request.input_video_url is None:
             raise ValueError(
                 f"generation_type '{request.generation_type.value}' requires input_video_url"
             )
 
     @staticmethod
-    def _input_image_count(request: UnifiedGenerationRequest) -> int:
-        if request.source_images is not None:
-            return len(request.source_images)
-        if request.input_image_id is not None or request.source_output_id is not None:
-            return 1
-        return 0
+    def _source_media_count(request: UnifiedGenerationRequest) -> int:
+        """Return normalized source cardinality for input-aware pricing."""
+        return len(request.source_media or [])

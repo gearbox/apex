@@ -205,8 +205,16 @@ class TestGetGroupDetail:
         job = _make_job(generation_type="t2i", source_output=None, input_image=None)
         job.outputs = []
         mock_repo.get_group_job.return_value = job
+        source_repo = MagicMock()
+        source_repo.list_for_job = AsyncMock(return_value=[])
 
-        with patch("src.api.services.library.LibraryRepository", return_value=mock_repo):
+        with (
+            patch("src.api.services.library.LibraryRepository", return_value=mock_repo),
+            patch(
+                "src.api.services.library.GenerationJobSourceRepository",
+                return_value=source_repo,
+            ),
+        ):
             result = await svc.get_group_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
@@ -228,8 +236,16 @@ class TestGetGroupDetail:
         )
         job.outputs = []
         mock_repo.get_group_job.return_value = job
+        source_repo = MagicMock()
+        source_repo.list_for_job = AsyncMock(return_value=[])
 
-        with patch("src.api.services.library.LibraryRepository", return_value=mock_repo):
+        with (
+            patch("src.api.services.library.LibraryRepository", return_value=mock_repo),
+            patch(
+                "src.api.services.library.GenerationJobSourceRepository",
+                return_value=source_repo,
+            ),
+        ):
             result = await svc.get_group_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
@@ -252,8 +268,16 @@ class TestGetGroupDetail:
         )
         job.outputs = []
         mock_repo.get_group_job.return_value = job
+        source_repo = MagicMock()
+        source_repo.list_for_job = AsyncMock(return_value=[])
 
-        with patch("src.api.services.library.LibraryRepository", return_value=mock_repo):
+        with (
+            patch("src.api.services.library.LibraryRepository", return_value=mock_repo),
+            patch(
+                "src.api.services.library.GenerationJobSourceRepository",
+                return_value=source_repo,
+            ),
+        ):
             result = await svc.get_group_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
