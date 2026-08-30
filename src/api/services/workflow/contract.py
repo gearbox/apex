@@ -61,6 +61,7 @@ MEDIA_SLOT_KINDS: Final[Mapping[MediaSlot, MediaKind]] = {
 }
 MODEL_TYPE_MEDIA: Final[Mapping[str, MediaKind]] = {
     "aisha-image": MediaKind.IMAGE,
+    "aisha-image-lite": MediaKind.IMAGE,
     "aisha-video": MediaKind.VIDEO,
 }
 

@@ -84,7 +84,7 @@ class AishaMediaHandler(Protocol):
         capabilities: BundleCapabilities | None,
     ) -> None:
         """Validate media-specific request semantics."""
-        ...
+        ...  # pragma: no cover - Protocol method body, never executed
 
     async def prepare_inputs(
         self,
@@ -96,7 +96,7 @@ class AishaMediaHandler(Protocol):
         resolved_input: tuple[bytes, str] | None = None,
     ) -> dict[MediaSlot, list[str]]:
         """Upload resolved source media and return filenames keyed by slot."""
-        ...
+        ...  # pragma: no cover - Protocol method body, never executed
 
     async def submit(
         self,
@@ -114,7 +114,7 @@ class AishaMediaHandler(Protocol):
         source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
         """Submit a request for this output medium."""
-        ...
+        ...  # pragma: no cover - Protocol method body, never executed
 
 
 class AishaImageGenerationHandler:
@@ -258,7 +258,9 @@ class AishaImageGenerationHandler:
         i2i_input = resolved_input
         if i2i_input is None:
             i2i_input = await self._resolve_input_image(source_media)
-        if i2i_input is None:
+        # Unreachable: source_media is non-empty here, and _resolve_input_image
+        # only returns None for empty input. Kept as a type-narrowing guard for mypy.
+        if i2i_input is None:  # pragma: no cover
             return {}
 
         image_bytes, source_filename = i2i_input

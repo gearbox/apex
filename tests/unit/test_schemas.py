@@ -85,35 +85,20 @@ class TestGenerationRequest:
         request = GenerationRequest(prompt="test", seed=42)
         assert request.seed == 42
 
-    def test_calculated_width(self) -> None:
-        """Test width calculation method."""
-        request = GenerationRequest(
-            prompt="test",
-            height=1080,
-            aspect_ratio=AspectRatio.RATIO_16_9,
-        )
-        assert request.get_calculated_width() == 1920
-
     def test_legacy_generation_request_aspect_ratio_defaults_none(self) -> None:
         """aspect_ratio must default to None, never a fabricated value."""
         request = GenerationRequest(prompt="test")
         assert request.aspect_ratio is None
 
-    def test_get_calculated_width_uses_aspect_fallback_when_set(self) -> None:
-        """Width falls back to aspect_ratio.calculate_width when width is unset."""
-        request = GenerationRequest(
-            prompt="test",
-            height=1080,
-            aspect_ratio=AspectRatio.RATIO_16_9,
-        )
-        assert request.width is None
-        assert request.get_calculated_width() == 1920
+    def test_width_defaults_symmetrically_with_height(self) -> None:
+        """width has the same non-optional default shape as height.
 
-    def test_get_calculated_width_raises_without_width_and_aspect(self) -> None:
-        """Neither width nor aspect_ratio set must fail loud, not fabricate a value."""
+        resolve_dimensions() is the single authority for aspect-derived
+        sizing; this field default is a no-op it always overrides.
+        """
         request = GenerationRequest(prompt="test")
-        with pytest.raises(ValueError, match="neither width nor aspect_ratio"):
-            request.get_calculated_width()
+        assert request.width == 1024
+        assert request.height == 1024
 
     def test_validation_prompt_required(self) -> None:
         """Test prompt is required."""
@@ -158,6 +143,26 @@ class TestGenerationRequest:
             type=GenerationRequest,
         )
         assert result.height == 2048
+
+    def test_validation_width_range(self) -> None:
+        """width shares height's validation range, per B2 symmetry."""
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "width": 100}',
+                type=GenerationRequest,
+            )
+
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt": "test", "width": 3000}',
+                type=GenerationRequest,
+            )
+
+        result = msgspec.json.decode(
+            b'{"prompt": "test", "width": 256}',
+            type=GenerationRequest,
+        )
+        assert result.width == 256
 
     def test_validation_max_images(self) -> None:
         """Test max_images validation via msgspec decode."""

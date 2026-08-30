@@ -24,6 +24,7 @@ from src.core.enums import AspectRatio, GenerationType, JobStatus, ModelType
 PromptStr = Annotated[str, msgspec.Meta(min_length=1, max_length=4096)]
 NegativePromptStr = Annotated[str, msgspec.Meta(max_length=2048)]
 Height = Annotated[int, msgspec.Meta(ge=256, le=2048)]
+Width = Annotated[int, msgspec.Meta(ge=256, le=2048)]
 MaxImages = Annotated[int, msgspec.Meta(ge=1, le=4)]
 Steps = Annotated[int, msgspec.Meta(ge=1, le=20)]
 Progress = Annotated[float, msgspec.Meta(ge=0.0, le=100.0)]
@@ -52,7 +53,7 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     max_images: MaxImages = 1
     seed: int | None = None
     steps: Steps = 12
-    width: int | None = None  # resolved width; None => get_calculated_width()
+    width: Width = 1024
     cfg: float = 1.1
     sampler: str = "euler"
     scheduler: str = "beta"
@@ -70,16 +71,6 @@ class GenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
         # Generate random seed if not provided
         if self.seed is None:
             self.seed = random.randint(0, 2**31 - 1)  # noqa: S311
-
-    def get_calculated_width(self) -> int:
-        """Return resolved width, or derive from height + aspect ratio as fallback."""
-        if self.width is not None:
-            return self.width
-        if self.aspect_ratio is None:
-            raise ValueError(
-                "GenerationRequest has neither width nor aspect_ratio; cannot derive a canvas width"
-            )
-        return self.aspect_ratio.calculate_width(self.height)
 
 
 class ImageUploadResponse(msgspec.Struct, kw_only=True):

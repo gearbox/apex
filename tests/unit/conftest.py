@@ -191,3 +191,86 @@ def wan_workflow_bundle(tmp_path: Path) -> Path:
     (bundle_dir / "bundle.yaml").write_text(json.dumps({"workflow": workflow}))
     (bundle_dir / "workflow.api.json").write_text(json.dumps(graph))
     return bundle_dir
+
+
+@pytest.fixture
+def zit_workflow_bundle(tmp_path: Path) -> Path:
+    """A minimal zit.cyberrealistic-shaped t2i-only image bundle.
+
+    Mirrors the real bundle's declared-but-unadvertised ``model_sampling.shift``
+    at node id ``73`` — it has no request source, so its baked value (3) must
+    survive ``apply()`` untouched — and its lack of a ``negative_prompt`` role.
+    """
+    bundle_dir = tmp_path / "zit-synthetic" / "260101-01"
+    bundle_dir.mkdir(parents=True)
+    workflow = {
+        "contract_version": 2,
+        "media": "image",
+        "nodes": {
+            "latent": {
+                "id": "1",
+                "class": "EmptyLatentImage",
+                "inputs": {"width": "width", "height": "height", "batch_size": "batch_size"},
+            },
+            "positive_prompt": {
+                "id": "2",
+                "class": "CLIPTextEncode",
+                "inputs": {"text": "text"},
+            },
+            "sampler": {
+                "id": "3",
+                "class": "KSampler",
+                "inputs": {
+                    "seed": "seed",
+                    "steps": "steps",
+                    "cfg": "cfg",
+                    "sampler": "sampler_name",
+                    "scheduler": "scheduler",
+                    "denoise": "denoise",
+                },
+            },
+            "model_sampling": {
+                "id": "73",
+                "class": "ModelSamplingAuraFlow",
+                "inputs": {"shift": "shift"},
+            },
+            "save": {
+                "id": "4",
+                "class": "SaveImage",
+                "inputs": {"filename_prefix": "filename_prefix"},
+            },
+        },
+        "model_inputs": [
+            {
+                "id": "6",
+                "class": "CheckpointLoaderSimple",
+                "input": "ckpt_name",
+                "model_type": "checkpoints",
+                "filename": "cyberrealistic.safetensors",
+            }
+        ],
+    }
+    graph = {
+        "1": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": 0, "height": 0, "batch_size": 1},
+        },
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 0,
+                "steps": 0,
+                "cfg": 0.0,
+                "sampler_name": "",
+                "scheduler": "",
+                "denoise": 0.0,
+            },
+        },
+        "73": {"class_type": "ModelSamplingAuraFlow", "inputs": {"shift": 3}},
+        "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": ""}},
+        "6": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ""}},
+    }
+    (bundle_dir / "bundle.yaml").write_text(json.dumps({"workflow": workflow}))
+    (bundle_dir / "workflow.api.json").write_text(json.dumps(graph))
+    return bundle_dir

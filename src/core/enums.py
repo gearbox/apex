@@ -61,6 +61,7 @@ class ModelType(StrEnum):
     """Available model types."""
 
     AISHA_IMAGE = "aisha-image"
+    AISHA_IMAGE_LITE = "aisha-image-lite"
     AISHA_VIDEO = "aisha-video"
 
     # Grok models

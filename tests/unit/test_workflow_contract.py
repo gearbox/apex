@@ -23,12 +23,21 @@ from src.api.services.workflow.capabilities import (
 )
 from src.api.services.workflow.contract import (
     MEDIA_SLOT_KINDS,
+    MODEL_TYPE_MEDIA,
     BoundWorkflow,
     MediaSlot,
     WorkflowRole,
 )
 from src.api.services.workflow.parser import WorkflowContractError, parse_workflow_map
-from src.core.enums import GenerationType, MediaKind, Resolution, Sampler, Scheduler
+from src.core.enums import (
+    GenerationType,
+    MediaKind,
+    ModelType,
+    ProvisioningMode,
+    Resolution,
+    Sampler,
+    Scheduler,
+)
 from src.core.generation_config import (
     BundleGenerationConfig,
     GenerationConstraints,
@@ -428,6 +437,36 @@ def test_capabilities_use_the_bundle_batch_constraint_only_when_batch_is_mapped(
             "workflow.model_inputs[0] must be a mapping",
             id="model-input-not-a-mapping",
         ),
+        pytest.param(
+            lambda raw: raw["nodes"]["latent"].__setitem__("inputs", "not-a-map"),  # type: ignore[index]
+            "workflow.nodes.latent.inputs must be a mapping",
+            id="node-inputs-not-a-mapping",
+        ),
+        pytest.param(
+            lambda raw: raw["nodes"].__setitem__(  # type: ignore[index]
+                "negative_prompt", {"id": "8", "class": "CLIPTextEncode", "inputs": {}}
+            ),
+            "workflow.nodes.negative_prompt.inputs must include 'text'",
+            id="prompt-role-missing-text",
+        ),
+        pytest.param(
+            lambda raw: raw["model_inputs"][0].__setitem__("filename", ""),  # type: ignore[index]
+            "workflow.model_inputs[0].filename must be a non-empty string",
+            id="model-input-filename-blank",
+        ),
+        pytest.param(
+            lambda raw: raw["model_inputs"][0].__setitem__("label", ""),  # type: ignore[index]
+            "workflow.model_inputs[0].label must be a non-empty string",
+            id="model-input-label-blank",
+        ),
+        pytest.param(
+            lambda raw: (
+                raw["model_inputs"][0].pop("model_type"),  # type: ignore[index]
+                raw["model_inputs"][0].pop("filename"),  # type: ignore[index]
+            ),
+            "workflow.model_inputs[0] requires model_type or filename",
+            id="model-input-missing-both",
+        ),
     ],
 )
 def test_parser_rejections_name_the_invalid_workflow_field(mutate: object, message: str) -> None:
@@ -781,3 +820,93 @@ def test_apply_rejects_media_filenames_for_slots_not_declared_by_the_bundle() ->
         "slot 'source' received 1 filename(s) but the bundle declares no 'source' media input"
         in str(error.value)
     )
+
+
+def test_apply_leaves_baked_value_when_request_has_no_source_for_it(
+    wan_workflow_bundle: Path,
+) -> None:
+    """B-C2 (and A1): a declared parameter with no request source — the video
+    case, e.g. ``latent.length`` — leaves the graph's baked value untouched
+    rather than overwriting it with None."""
+    bound = _wan_bound(wan_workflow_bundle)
+
+    configured = apply(
+        bound,
+        GenerationRequest(prompt="video test", height=768, width=1024),
+        media_filenames={
+            MediaSlot.FIRST_FRAME: ["first.png"],
+            MediaSlot.LAST_FRAME: ["last.png"],
+        },
+        filename_prefix="gen_123",
+        model_filenames=lambda _model_type: ["wan.safetensors"],
+    )
+
+    assert configured["1"]["inputs"]["length"] == 0
+    assert configured["1"]["inputs"]["width"] == 1024
+    assert configured["1"]["inputs"]["height"] == 768
+
+
+def test_apply_raises_when_a_request_sourced_parameter_is_missing(
+    wan_workflow_bundle: Path,
+) -> None:
+    """B-C1: a declared parameter with a request source whose value is None
+    raises, naming the role.parameter key, instead of silently dropping it."""
+    bound = _wan_bound(wan_workflow_bundle)
+    request = GenerationRequest(prompt="video test", height=768, width=1024)
+    request.seed = None
+
+    with pytest.raises(WorkflowApplyError, match=r"sampler\.seed"):
+        apply(
+            bound,
+            request,
+            media_filenames={
+                MediaSlot.FIRST_FRAME: ["first.png"],
+                MediaSlot.LAST_FRAME: ["last.png"],
+            },
+            filename_prefix="gen_123",
+            model_filenames=lambda _model_type: ["wan.safetensors"],
+        )
+
+
+def _zit_bound(zit_workflow_bundle: Path) -> BoundWorkflow:
+    bundle_data = json.loads((zit_workflow_bundle / "bundle.yaml").read_text())
+    graph = json.loads((zit_workflow_bundle / "workflow.api.json").read_text())
+    return bind_workflow(
+        parse_workflow_map(bundle_data["workflow"], zit_workflow_bundle / "bundle.yaml"), graph
+    )
+
+
+def test_zit_shaped_fixture_derives_expected_capabilities(zit_workflow_bundle: Path) -> None:
+    capabilities = derive_capabilities(_zit_bound(zit_workflow_bundle), _generation())
+
+    assert capabilities.generation_types == frozenset({GenerationType.T2I})
+    assert capabilities.supports_negative_prompt is False
+    assert capabilities.max_reference_images == 0
+    assert "model_sampling.shift" not in capabilities.writable
+    assert len(capabilities.writable) == 11
+
+
+def test_zit_shaped_apply_leaves_shift_baked_at_three(zit_workflow_bundle: Path) -> None:
+    """B-C3: a zit.cyberrealistic-shaped apply leaves node 73 shift at 3."""
+    bound = _zit_bound(zit_workflow_bundle)
+
+    configured = apply(
+        bound,
+        GenerationRequest(prompt="zit test", height=768, width=1024),
+        media_filenames={},
+        filename_prefix="gen_123",
+        model_filenames=lambda _model_type: ["cyberrealistic.safetensors"],
+    )
+
+    assert configured["73"]["inputs"]["shift"] == 3
+
+
+@pytest.mark.parametrize("mt", list(ModelType))
+def test_every_on_demand_model_type_has_a_media_row(mt: ModelType) -> None:
+    """Z-C2: a missing MODEL_TYPE_MEDIA row is silent — the bundle just never
+    appears in the index (bundle_index.entry_invalid is skipped, not raised
+    at model-registration time) — so this must fail CI, not at runtime."""
+    if mt.provider.provisioning_mode is ProvisioningMode.ON_DEMAND:
+        assert mt.value in MODEL_TYPE_MEDIA, (
+            f"ModelType.{mt.name} ({mt.value}) is ON_DEMAND but missing from MODEL_TYPE_MEDIA"
+        )

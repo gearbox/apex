@@ -592,6 +592,58 @@ class TestAishaImageHandlerFailurePaths:
         ):
             await handler._resolve_input_image([source])
 
+    async def test_submit_raises_when_gpu_sessions_are_not_configured(self) -> None:
+        handler = AishaImageGenerationHandler(
+            workflow_service=MagicMock(),
+            gpu_session_service=None,
+            bundle_index=MagicMock(),
+            r2_storage=None,
+            tunnel_domain="gpu.test",
+            tunnel_hostname_allowed_prefix=None,
+            max_input_megapixels=100.0,
+        )
+
+        with pytest.raises(NoActiveSessionError, match="not configured on this server"):
+            await handler.submit(
+                _make_request(),
+                user_id=uuid4(),
+                session=AsyncMock(),
+                billing_service=AsyncMock(),
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+    async def test_prepare_inputs_resolves_the_source_itself_when_not_preresolved(self) -> None:
+        """submit() always pre-resolves and passes ``resolved_input``; a direct
+        caller that omits it still gets a correctly resolved upload."""
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=_png_bytes())
+        handler = AishaImageGenerationHandler(
+            workflow_service=MagicMock(),
+            gpu_session_service=None,
+            bundle_index=MagicMock(),
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            tunnel_hostname_allowed_prefix=None,
+            max_input_megapixels=100.0,
+        )
+        source = _make_resolved_source_image(
+            uuid4(), source=LibraryAssetSource.UPLOAD, storage_key="users/abc/uploads/cat.png"
+        )
+        client = AsyncMock()
+        client.upload_image = AsyncMock(return_value={"name": "stored.png"})
+
+        result = await handler.prepare_inputs(
+            [source],
+            client=client,
+            job_id=uuid4(),
+            gpu_session_id=uuid4(),
+        )
+
+        r2.download.assert_awaited_once_with("users/abc/uploads/cat.png")
+        assert result == {MediaSlot.REFERENCE: ["stored.png"]}
+
     async def test_missing_indexed_bundle_becomes_a_session_error_and_closes_client(self) -> None:
         provider, mocks = _make_provider_with_mocks()
         mocks["bundle_index"].get_bundle_path.side_effect = BundleNotFoundError("not indexed")
@@ -1686,6 +1738,27 @@ class TestAishaProviderResolutionAndSamplerValidation:
             )
         billing.check_and_reserve.assert_not_awaited()
 
+    async def test_explicit_valid_overrides_are_applied_verbatim(self) -> None:
+        """steps/cfg/sampler/scheduler explicitly set within range are used as-is,
+        not just defaulted or rejected."""
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+            aspect_ratio=AspectRatio.RATIO_1_1,
+            steps=15,
+            cfg=7.5,
+            sampler=Sampler.EULER,
+            scheduler=Scheduler.BETA,
+        )
+        gen_cfg = _make_constrained_gen_config(
+            allowed_samplers=frozenset({Sampler.EULER}),
+            allowed_schedulers=frozenset({Scheduler.BETA}),
+        )
+
+        # Should complete without error, using the explicit values verbatim.
+        await _submit_with_config(request, gen_cfg)
+
     async def test_explicit_dims_over_mp_cap_clamped_no_error(self) -> None:
         """Explicit width+height exceeding mp cap is clamped, not rejected."""
         request = UnifiedGenerationRequest(
@@ -1778,3 +1851,57 @@ class TestAishaProviderClampLogging:
         clamp_events = [e for e in cap if e["event"] == "generation.resolution.clamped"]
         assert clamp_events, "expected a generation.resolution.clamped log event"
         assert clamp_events[0]["aspect_ratio"] == "3:4"
+
+    async def test_clamp_log_reports_aspect_ratio_value_for_explicit_aspect(self) -> None:
+        """T2I with an explicit AspectRatio (not a derived source tuple) still
+        logs its ``.value``, exercising the other branch of _aspect_log_value."""
+        request = _make_request()  # aspect_ratio=AspectRatio.RATIO_1_1, t2i
+        gen_cfg = _make_constrained_gen_config(max_megapixels=0.1)
+
+        workflow = MagicMock()
+        workflow.load.return_value = MagicMock()
+        workflow.apply.return_value = {"3": {}}
+
+        gpu_session_service = AsyncMock()
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_make_active_gpu_session()
+        )
+
+        bundle_index = MagicMock()
+        bundle_index.get_bundle_path = MagicMock(return_value=MagicMock())
+        bundle_index.get_generation_config = MagicMock(return_value=gen_cfg)
+
+        provider = AishaGenerationProvider(
+            workflow_service=workflow,
+            gpu_session_service=gpu_session_service,
+            tunnel_domain="gpu.test",
+            bundle_index=bundle_index,
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with (
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
+            structlog.testing.capture_logs() as cap,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-2"})
+            MockComfyClient.return_value = mock_client
+            await provider.submit(
+                request,
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        clamp_events = [e for e in cap if e["event"] == "generation.resolution.clamped"]
+        assert clamp_events, "expected a generation.resolution.clamped log event"
+        assert clamp_events[0]["aspect_ratio"] == AspectRatio.RATIO_1_1.value

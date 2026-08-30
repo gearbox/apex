@@ -617,6 +617,35 @@ class TestResolveBundle:
         with pytest.raises(BundleNotFoundError):
             svc.resolve_bundle("aisha-i2v")
 
+    def test_aisha_image_and_aisha_image_lite_resolve_independently(self, tmp_path: Path) -> None:
+        """Z-C6: aisha-image and aisha-image-lite are two distinct default
+        bundles — a mis-set model_type in bundle-index.yaml could otherwise
+        swap them silently."""
+        _write_bundle_yaml(tmp_path / "bundles" / "qwen_rapid_aio")
+        _write_bundle_yaml(tmp_path / "bundles" / "zit_cyberrealistic")
+        _write_index(
+            tmp_path,
+            [
+                {
+                    "name": "qwen_rapid_aio",
+                    "path": "bundles/qwen_rapid_aio",
+                    "model_type": "aisha-image",
+                    "default_bundle": True,
+                },
+                {
+                    "name": "zit_cyberrealistic",
+                    "path": "bundles/zit_cyberrealistic",
+                    "model_type": "aisha-image-lite",
+                    "default_bundle": True,
+                },
+            ],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+
+        assert svc.resolve_bundle("aisha-image").bundle_name == "qwen_rapid_aio"
+        assert svc.resolve_bundle("aisha-image-lite").bundle_name == "zit_cyberrealistic"
+
 
 # ---------------------------------------------------------------------------
 # resolve_bundle_override

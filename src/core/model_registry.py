@@ -264,6 +264,29 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         rate_limit=None,
         requires_age_verification=True,
     ),
+    ModelType.AISHA_IMAGE_LITE: ModelMeta(
+        provider=Provider.AISHA,
+        max_prompt_length=4096,
+        # zit.cyberrealistic has no negative_prompt role (ConditioningZeroOut
+        # supplies the sampler's negative) — matches the bundle, not narrowed.
+        supports_negative_prompt=False,
+        aspect_ratios=ALL_ASPECT_RATIOS,
+        max_concurrent_outputs=4,
+        # Bundle declares no media_inputs — no owned-library source media.
+        inputs=ModelInputs(),
+        image=ImageMeta(
+            # t2i-only by graph shape: the bundle declares no reference slot.
+            supported_types=frozenset({GenerationType.T2I}),
+            edit_aspect_ratios=(),
+            min_height=256,
+            max_height=2048,
+            default_height=1024,
+            supported_tiers=tuple(Resolution),
+            default_tier=Resolution.STANDARD,
+        ),
+        rate_limit=None,
+        requires_age_verification=True,
+    ),
     ModelType.AISHA_VIDEO: ModelMeta(
         provider=Provider.AISHA,
         max_prompt_length=4096,

@@ -252,6 +252,55 @@ class TestModelInfoSchema:
         assert info.inputs.source_media is not None
         assert info.inputs.source_media.required_for == [GenerationType.I2I.value]
 
+    def test_aisha_image_lite_reports_t2i_only_no_negative_no_source_media(self) -> None:
+        """Z-C1: aisha-image-lite (zit.cyberrealistic) is t2i-only, has no
+        negative_prompt role, and declares no media_inputs at all."""
+        bound_workflow = BoundWorkflow(
+            map=WorkflowMap(
+                contract_version=2,
+                media=MediaKind.IMAGE,
+                nodes={},
+                media_inputs=(),
+                model_inputs=(),
+            ),
+            api_graph={},
+        )
+        capabilities = BundleCapabilities(
+            media=MediaKind.IMAGE,
+            generation_types=frozenset({GenerationType.T2I}),
+            supports_negative_prompt=False,
+            writable=frozenset(
+                {
+                    "latent.width",
+                    "latent.height",
+                    "latent.batch_size",
+                    "positive_prompt.text",
+                    "sampler.seed",
+                    "sampler.steps",
+                    "sampler.cfg",
+                    "sampler.sampler",
+                    "sampler.scheduler",
+                    "sampler.denoise",
+                    "save.filename_prefix",
+                }
+            ),
+            max_batch_size=4,
+            max_reference_images=0,
+        )
+
+        info = _build_model_info(
+            ModelType.AISHA_IMAGE_LITE,
+            SimpleNamespace(name="Aisha Image Lite", description="", is_enabled=True),
+            session_state=None,
+            capabilities=capabilities,
+            bound_workflow=bound_workflow,
+        )
+
+        assert info.capabilities == [GenerationType.T2I.value]
+        assert info.supports_negative_prompt is False
+        assert info.inputs.source_media is None
+        assert "negative_prompt" in info.unsupported_parameters
+
 
 class TestProviderInfoSchema:
     def test_provider_with_models(self) -> None:
@@ -375,6 +424,11 @@ class TestCapabilitiesDerivation:
         mt = ModelType.AISHA_VIDEO
         caps = [gt.value for gt in GenerationType if mt.supports_generation_type(gt)]
         assert caps == ["t2v", "i2v", "flf2v"]
+
+    def test_aisha_image_lite_capabilities(self) -> None:
+        mt = ModelType.AISHA_IMAGE_LITE
+        caps = [gt.value for gt in GenerationType if mt.supports_generation_type(gt)]
+        assert caps == ["t2i"]
 
     def test_aspect_ratios_are_valid_enum_members(self) -> None:
         """Every model's aspect_ratios must be valid AspectRatio enum values."""
