@@ -27,7 +27,7 @@ class RawNumber(str):
     __slots__ = ()
 
 
-type JSONValue = None | bool | RawNumber | str | list[JSONValue] | dict[str, JSONValue]
+type JSONValue = bool | RawNumber | str | list[JSONValue] | dict[str, JSONValue] | None
 
 
 def parse_ipn_body(raw: bytes) -> JSONValue:

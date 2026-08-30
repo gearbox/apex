@@ -121,10 +121,10 @@ class LibraryAssetDetail(LibraryAssetItem, kw_only=True):
 class LibraryAssetPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to update mutable library asset fields."""
 
-    display_title: str | None | msgspec.UnsetType = msgspec.UNSET
+    display_title: str | msgspec.UnsetType | None = msgspec.UNSET
     """Absent = leave unchanged. ``null`` = clear. String = set (max 255 chars)."""
 
-    project_id: UUID | None | msgspec.UnsetType = msgspec.UNSET
+    project_id: UUID | msgspec.UnsetType | None = msgspec.UNSET
     """Absent = leave unchanged. ``null`` = unassign. UUID = assign (must be owned by caller)."""
 
     # The redundant annotated_types.MaxLen marker gets the bound onto the
@@ -190,7 +190,7 @@ class LibraryProjectPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=Tr
     """Request to rename/redescribe a project. Both fields are tri-state."""
 
     name: _ProjectName | msgspec.UnsetType = msgspec.UNSET
-    description: str | None | msgspec.UnsetType = msgspec.UNSET
+    description: str | msgspec.UnsetType | None = msgspec.UNSET
 
 
 # ---------------------------------------------------------------------------

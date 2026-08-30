@@ -290,8 +290,7 @@ class GenerationJob(Base):
     )
 
     # GPU session link (Aisha jobs only; NULL for Grok jobs)
-    # CHECK constraint `ck_generation_jobs_aisha_has_session` in migration 006
-    # enforces (provider != 'aisha') OR (gpu_session_id IS NOT NULL).
+    # See ck_generation_jobs_aisha_has_session in __table_args__ below.
     gpu_session_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("gpu_sessions.id", ondelete="SET NULL"),
@@ -366,6 +365,10 @@ class GenerationJob(Base):
         CheckConstraint(
             "(finalization_claim_token IS NULL) = (finalization_lease_expires_at IS NULL)",
             name="ck_generation_jobs_finalization_claim_pair",
+        ),
+        CheckConstraint(
+            "(provider != 'aisha') OR (gpu_session_id IS NOT NULL)",
+            name="ck_generation_jobs_aisha_has_session",
         ),
         Index(
             "ix_generation_jobs_gpu_session_id_status",

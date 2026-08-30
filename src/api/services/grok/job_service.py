@@ -481,7 +481,7 @@ class GrokJobService:
             user_id=user_id,
             product_id=product_id,
         )
-        logger.exception("grok.unexpected_submission_error", job_id=str(job_id))
+        logger.error("grok.unexpected_submission_error", job_id=str(job_id), exc_info=exc)
         previous_status = str(job.status) if job is not None else JobStatus.PENDING.value
         raise ProviderSubmissionFailedError(
             failure=failure,

@@ -91,7 +91,7 @@ class StripeGateway:
         # (StripeError.__str__ never surfaces http_body/sig_header), so str(exc)
         # is safe to log — it never leaks the payload or secret (D2).
         try:
-            event = stripe.Webhook.construct_event(  # type: ignore[no-untyped-call]
+            event = stripe.Webhook.construct_event(
                 envelope.raw_body,
                 sig_header,
                 self._settings.stripe_webhook_secret_for(envelope.product_id),

@@ -331,6 +331,7 @@ PROVIDER_DISPLAY_NAMES: dict[Provider, str] = {
     Provider.GROK: "xAI Grok",
 }
 
+
 def _is_provider_available(provider: Provider, *, grok_configured: bool) -> bool:
     """Determine if a provider's backend is currently reachable."""
     if provider == Provider.GROK:
@@ -345,6 +346,7 @@ def _is_provider_available(provider: Provider, *, grok_configured: bool) -> bool
 
 ```python
 # src/api/routes/providers.py (v2)
+
 
 class ProvidersController(Controller):
     path = "/v1/providers"
@@ -373,11 +375,7 @@ class ProvidersController(Controller):
                 model_key=mt.value,
                 name=record.name,
                 description=record.description,
-                capabilities=[
-                    gt.value
-                    for gt in GenerationType
-                    if mt.supports_generation_type(gt)
-                ],
+                capabilities=[gt.value for gt in GenerationType if mt.supports_generation_type(gt)],
                 is_enabled=record.is_enabled,
                 max_images=mt.max_concurrent_outputs,
                 max_prompt_length=meta.max_prompt_length,
@@ -431,6 +429,7 @@ Rate limits are enforced server-side in `GenerationService`, **not** exposed to 
 ```python
 # src/core/model_registry.py — extend ModelMeta
 
+
 @dataclass(frozen=True, slots=True)
 class RateLimitMeta:
     """Global rate limit for a model (shared across all users)."""
@@ -469,6 +468,7 @@ Use a lightweight `model_rate_limit_log` table or an in-memory counter (Redis if
 
 ```python
 # src/api/services/generation/rate_limiter.py
+
 
 class ModelRateLimiter:
     """Sliding-window rate limiter for global per-model request throttling.
@@ -519,6 +519,7 @@ Litestar doesn't natively support "inject user_id if token present, else None" w
 
 ```python
 # src/api/dependencies/auth.py
+
 
 async def get_optional_user_id(request: Request) -> UUID | None:
     """Extract user_id from JWT if Authorization header is present.

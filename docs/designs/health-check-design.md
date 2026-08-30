@@ -89,15 +89,17 @@ from typing import Protocol, runtime_checkable
 
 class ComponentStatus(str, enum.Enum):
     """Health status of a single component."""
+
     healthy = "healthy"
     degraded = "degraded"
     unhealthy = "unhealthy"
-    unknown = "unknown"          # check timed out or raised unexpectedly
-    inactive = "inactive"        # expected to be off (e.g. no active GPU sessions)
+    unknown = "unknown"  # check timed out or raised unexpectedly
+    inactive = "inactive"  # expected to be off (e.g. no active GPU sessions)
 
 
 class ComponentCategory(str, enum.Enum):
     """Taxonomy bucket for a health component."""
+
     infrastructure = "infrastructure"
     cloud_provider = "cloud_provider"
     platform_api = "platform_api"
@@ -107,11 +109,12 @@ class ComponentCategory(str, enum.Enum):
 @dataclass(frozen=True, kw_only=True)
 class ComponentHealth:
     """Result of a single health check."""
+
     name: str
     category: ComponentCategory
     status: ComponentStatus
-    latency_ms: float              # wall-clock time of the check
-    message: str = ""              # human-readable detail
+    latency_ms: float  # wall-clock time of the check
+    message: str = ""  # human-readable detail
     product_id: str | None = None  # None = global (infrastructure)
     metadata: dict[str, object] = field(default_factory=dict)
     # metadata examples:
@@ -320,10 +323,7 @@ class GpuSessionReconciler:
         healthy, stale = 0, 0
         stale_session_ids: list[UUID] = []
 
-        probe_tasks = [
-            self._probe_node(s.node_host, s.node_port)
-            for s in active_sessions
-        ]
+        probe_tasks = [self._probe_node(s.node_host, s.node_port) for s in active_sessions]
         results = await asyncio.gather(*probe_tasks, return_exceptions=True)
 
         for session, result in zip(active_sessions, results):
@@ -339,8 +339,10 @@ class GpuSessionReconciler:
 
         total = len(active_sessions)
         status = (
-            ComponentStatus.healthy if stale == 0
-            else ComponentStatus.degraded if healthy > 0
+            ComponentStatus.healthy
+            if stale == 0
+            else ComponentStatus.degraded
+            if healthy > 0
             else ComponentStatus.unhealthy
         )
 
@@ -393,10 +395,12 @@ for product_id, product_config in product_configs.items():
         )
 
 # GPU session reconciler (global — operates across products)
-health_registry.register(GpuSessionReconciler(
-    session_factory=db_manager.session_factory,
-    http_client=http_client,
-))
+health_registry.register(
+    GpuSessionReconciler(
+        session_factory=db_manager.session_factory,
+        http_client=http_client,
+    )
+)
 
 # Health service
 health_service = HealthService(
@@ -520,7 +524,7 @@ import msgspec
 
 class ComponentHealthResponse(msgspec.Struct, kw_only=True):
     name: str
-    status: str              # ComponentStatus.value
+    status: str  # ComponentStatus.value
     latency_ms: float
     message: str = ""
     metadata: dict[str, object] = {}
@@ -541,7 +545,7 @@ class GpuSessionHealthResponse(msgspec.Struct, kw_only=True):
 
 class DetailedHealthResponse(msgspec.Struct, kw_only=True):
     status: str
-    checked_at: str          # ISO 8601
+    checked_at: str  # ISO 8601
     infrastructure: CategoryHealthResponse
     platform_apis: CategoryHealthResponse
     cloud_providers: dict[str, CategoryHealthResponse]  # keyed by product_id
@@ -549,12 +553,12 @@ class DetailedHealthResponse(msgspec.Struct, kw_only=True):
 
 
 class LivenessResponse(msgspec.Struct, kw_only=True):
-    status: str              # "alive"
+    status: str  # "alive"
 
 
 class ReadinessResponse(msgspec.Struct, kw_only=True):
-    status: str              # "ready" | "not_ready"
-    checks: dict[str, str]   # component_name → status value
+    status: str  # "ready" | "not_ready"
+    checks: dict[str, str]  # component_name → status value
 ```
 
 ---
@@ -622,8 +626,8 @@ class HealthSnapshotWorker:
     def __init__(
         self,
         health_service: HealthService,
-        interval_seconds: float,            # from HEALTH_SNAPSHOT_INTERVAL_SECONDS env
-        retention_days: int,                 # from HEALTH_SNAPSHOT_RETENTION_DAYS env
+        interval_seconds: float,  # from HEALTH_SNAPSHOT_INTERVAL_SECONDS env
+        retention_days: int,  # from HEALTH_SNAPSHOT_RETENTION_DAYS env
     ) -> None: ...
 
     async def run(self) -> None:
@@ -707,6 +711,7 @@ A separate worker (not part of this feature) will watch for sessions where `stal
 ```python
 # src/api/routes/health.py
 
+
 class HealthController(Controller):
     """Three-tier health check endpoints."""
 
@@ -719,7 +724,8 @@ class HealthController(Controller):
 
     @get("/ready", status_code=200)
     async def readiness(
-        self, health_service: HealthService,
+        self,
+        health_service: HealthService,
     ) -> Response[ReadinessResponse]:
         ready, checks = await health_service.readiness()
         body = ReadinessResponse(
@@ -741,13 +747,15 @@ class AdminHealthController(Controller):
 
     @get("/", status_code=200)
     async def detailed(
-        self, health_service: HealthService,
+        self,
+        health_service: HealthService,
     ) -> DetailedHealthResponse:
         return await health_service.detailed()
 
     @get("/stream")
     async def stream(
-        self, health_service: HealthService,
+        self,
+        health_service: HealthService,
     ) -> Stream:
         """SSE stream of health snapshots."""
         ...

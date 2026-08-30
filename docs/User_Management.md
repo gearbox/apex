@@ -81,9 +81,10 @@ To protect existing routes, add the guard:
 ```python
 from src.api.security import auth_guard
 
+
 class MyController(Controller):
     guards = [auth_guard]
-    
+
     @get("/protected")
     async def protected_route(self, request: Request) -> ...:
         user_id = request.state["user_id"]  # UUID from token

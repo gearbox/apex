@@ -172,5 +172,5 @@ class PatchPricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_onl
     token_cost: int | None = None
     input_token_cost: int | None = None
     is_active: bool | None = None
-    effective_until: datetime | None | msgspec.UnsetType = msgspec.UNSET
-    notes: str | None | msgspec.UnsetType = msgspec.UNSET
+    effective_until: datetime | msgspec.UnsetType | None = msgspec.UNSET
+    notes: str | msgspec.UnsetType | None = msgspec.UNSET
