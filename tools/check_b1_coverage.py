@@ -28,7 +28,7 @@ FLOORS: tuple[CoverageFloor, ...] = (
     CoverageFloor("workflow applier", ("api/services/workflow/applier.py",), 95.0),
     CoverageFloor(
         "Aisha workflow handler",
-        ("api/services/generation/aisha/handlers.py", "handlers.py"),
+        ("api/services/generation/aisha/handlers.py",),
         92.0,
     ),
 )

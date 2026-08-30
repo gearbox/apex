@@ -121,6 +121,12 @@ def _build_model_info(
         source_media_min = 1 if media_inputs else None
         source_media_max = len(media_inputs) if media_inputs else None
         source_media_types = frozenset(item.kind for item in media_inputs) if media_inputs else None
+    # `v2v` deliberately consumes `input_video_url`, not owned `source_media`.
+    required_for = [
+        generation_type
+        for generation_type in generation_types
+        if GenerationType(generation_type).input_kinds
+    ]
     return ModelInfo(
         model_key=mt.value,
         name=record.name,  # type: ignore[attr-defined]
@@ -139,6 +145,7 @@ def _build_model_info(
                     min=source_media_min,
                     max=source_media_max,
                     media_types=sorted(source_media_types, key=lambda kind: kind.value),
+                    required_for=required_for,
                 )
                 if source_media_min is not None
                 and source_media_max is not None

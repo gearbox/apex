@@ -267,7 +267,7 @@ def parse_workflow_map(data: Mapping[str, object], source: Path) -> WorkflowMap:
             errors.append(f"workflow node id {node_id!r} is reused by {', '.join(owners)}")
     if errors:
         raise WorkflowContractError(f"{source}: {'; '.join(errors)}")
-    if media is None:
+    if media is None:  # pragma: no cover - type guard; errors already raised
         raise WorkflowContractError(f"{source}: workflow.media is required")
     return WorkflowMap(
         contract_version=contract_version,

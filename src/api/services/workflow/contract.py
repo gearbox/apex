@@ -176,11 +176,7 @@ def _request_value(name: str) -> RequestAccessor:
 
 
 def _width(request: object, _filename_prefix: str) -> object:
-    width = getattr(request, "width", None)
-    if width is not None:
-        return width
-    calculate = getattr(request, "get_calculated_width", None)
-    return calculate() if callable(calculate) else None
+    return getattr(request, "width", None)
 
 
 def _filename_prefix(_request: object, filename_prefix: str) -> str:

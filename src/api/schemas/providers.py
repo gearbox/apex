@@ -15,13 +15,14 @@ class SourceMediaConstraints(msgspec.Struct, kw_only=True):
 
     ``source_media is None`` means the model accepts no owned media input.
     ``min`` and ``max`` bound the total count across every listed media kind;
-    they do not express requiredness.  Requiredness comes from the selected
-    generation type.  Input order is significant and preserved end to end.
+    ``required_for`` identifies the generation types that require at least one
+    source asset. Input order is significant and preserved end to end.
     """
 
     min: int
     max: int
     media_types: list[MediaKind]
+    required_for: list[str]
 
 
 class ModelInputs(msgspec.Struct, kw_only=True):
@@ -30,8 +31,8 @@ class ModelInputs(msgspec.Struct, kw_only=True):
     ``inputs.source_media == null`` means the model accepts no media input.
     ``min`` / ``max`` bound the total number of source assets across all
     media types, and ``media_types`` lists the allowed asset media kinds.
-    Order is significant and preserved end to end. Requiredness comes from
-    the selected generation type, not from ``min``.
+    ``required_for`` identifies generation types that require source media.
+    Order is significant and preserved end to end.
     """
 
     source_media: SourceMediaConstraints | None = None

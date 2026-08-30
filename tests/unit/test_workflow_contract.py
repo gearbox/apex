@@ -21,7 +21,12 @@ from src.api.services.workflow.capabilities import (
     _GENERATION_TYPES_BY_MEDIA,
     derive_capabilities,
 )
-from src.api.services.workflow.contract import BoundWorkflow, MediaSlot, WorkflowRole
+from src.api.services.workflow.contract import (
+    MEDIA_SLOT_KINDS,
+    BoundWorkflow,
+    MediaSlot,
+    WorkflowRole,
+)
 from src.api.services.workflow.parser import WorkflowContractError, parse_workflow_map
 from src.core.enums import GenerationType, MediaKind, Resolution, Sampler, Scheduler
 from src.core.generation_config import (
@@ -456,6 +461,46 @@ def test_parser_rejects_video_slots_on_image_workflows(slot: MediaSlot, message:
     assert message in str(error.value)
 
 
+@pytest.mark.parametrize(
+    ("kind", "slot", "message"),
+    [
+        pytest.param(
+            MediaKind.VIDEO,
+            MediaSlot.REFERENCE,
+            "slot 'reference' requires kind 'image'",
+            id="video-reference",
+        ),
+        pytest.param(
+            MediaKind.VIDEO,
+            MediaSlot.FIRST_FRAME,
+            "slot 'first_frame' requires kind 'image'",
+            id="video-first-frame",
+        ),
+        pytest.param(
+            MediaKind.IMAGE,
+            MediaSlot.SOURCE,
+            "slot 'source' requires kind 'video'",
+            id="image-source",
+        ),
+    ],
+)
+def test_parser_requires_the_declared_kind_for_each_media_slot(
+    kind: MediaKind, slot: MediaSlot, message: str
+) -> None:
+    raw = _map()
+    raw["media_inputs"][0]["kind"] = kind.value  # type: ignore[index]
+    raw["media_inputs"][0]["slot"] = slot.value  # type: ignore[index]
+
+    with pytest.raises(WorkflowContractError) as error:
+        parse_workflow_map(raw, Path("bundle.yaml"))
+
+    assert message in str(error.value)
+
+
+def test_every_media_slot_has_a_declared_kind() -> None:
+    assert set(MEDIA_SLOT_KINDS) == set(MediaSlot)
+
+
 def test_parser_rejects_duplicate_media_slots_missing_first_frame_and_reused_ids() -> None:
     raw = _map()
     raw["media"] = "video"
@@ -722,13 +767,17 @@ def test_model_filename_resolution_uses_static_or_unambiguous_bundle_filenames()
     )
 
 
-def test_apply_ignores_media_filenames_for_slots_not_declared_by_the_bundle() -> None:
-    configured = apply(
-        _bound(),
-        GenerationRequest(prompt="t2i", height=768, width=1024),
-        media_filenames={MediaSlot.SOURCE: ["ignored.mp4"]},
-        filename_prefix="gen_123",
-        model_filenames=lambda _model_type: ["model.safetensors"],
-    )
+def test_apply_rejects_media_filenames_for_slots_not_declared_by_the_bundle() -> None:
+    with pytest.raises(WorkflowApplyError) as error:
+        apply(
+            _bound(),
+            GenerationRequest(prompt="t2i", height=768, width=1024),
+            media_filenames={MediaSlot.SOURCE: ["ignored.mp4"]},
+            filename_prefix="gen_123",
+            model_filenames=lambda _model_type: ["model.safetensors"],
+        )
 
-    assert configured["5"]["inputs"]["image"] == ""
+    assert (
+        "slot 'source' received 1 filename(s) but the bundle declares no 'source' media input"
+        in str(error.value)
+    )

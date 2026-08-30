@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import msgspec
 import pytest
 
-from src.api.routes.providers import PROVIDER_DISPLAY_NAMES
+from src.api.routes.providers import PROVIDER_DISPLAY_NAMES, _build_model_info
 from src.api.schemas.providers import (
     ImageConstraints,
     ModelInfo,
@@ -17,11 +18,20 @@ from src.api.schemas.providers import (
     VideoConstraints,
 )
 from src.api.services.generation.service import GenerationService
+from src.api.services.workflow.contract import (
+    BoundWorkflow,
+    BundleCapabilities,
+    MediaSlot,
+    WorkflowMap,
+    WorkflowMediaInput,
+    WorkflowRole,
+)
 from src.core.enums import (
     STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
     TERMINAL_GPU_SESSION_STATUSES,
     GenerationType,
     GpuSessionStatus,
+    MediaKind,
     ModelSessionState,
     ModelType,
     Provider,
@@ -176,6 +186,71 @@ class TestModelInfoSchema:
         )
         decoded = msgspec.json.decode(msgspec.json.encode(info), type=ModelInfo)
         assert decoded.session_state == "provisioning"
+
+    @pytest.mark.parametrize("model_type", ModelType)
+    def test_source_media_required_for_is_derived_from_capabilities(
+        self, model_type: ModelType
+    ) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            session_state=None,
+        )
+        source_media = info.inputs.source_media
+
+        if source_media is None:
+            assert get_model_meta(model_type).inputs.source_media is None
+            return
+
+        expected = [
+            generation_type
+            for generation_type in info.capabilities
+            if GenerationType(generation_type).input_kinds
+        ]
+        assert source_media.required_for == expected
+        assert set(source_media.required_for).issubset(info.capabilities)
+        assert GenerationType.V2V.value not in source_media.required_for
+
+    def test_source_media_required_for_tracks_narrowed_indexed_capabilities(self) -> None:
+        media_input = WorkflowMediaInput(
+            id="loader",
+            class_name="LoadImage",
+            input="image",
+            kind=MediaKind.IMAGE,
+            slot=MediaSlot.REFERENCE,
+            target_role=WorkflowRole.POSITIVE_PROMPT,
+            target_input="reference_image",
+        )
+        bound_workflow = BoundWorkflow(
+            map=WorkflowMap(
+                contract_version=2,
+                media=MediaKind.IMAGE,
+                nodes={},
+                media_inputs=(media_input,),
+                model_inputs=(),
+            ),
+            api_graph={},
+        )
+        capabilities = BundleCapabilities(
+            media=MediaKind.IMAGE,
+            generation_types=frozenset({GenerationType.I2I}),
+            supports_negative_prompt=False,
+            writable=frozenset(),
+            max_batch_size=1,
+            max_reference_images=1,
+        )
+
+        info = _build_model_info(
+            ModelType.AISHA_IMAGE,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            session_state=None,
+            capabilities=capabilities,
+            bound_workflow=bound_workflow,
+        )
+
+        assert info.capabilities == [GenerationType.I2I.value]
+        assert info.inputs.source_media is not None
+        assert info.inputs.source_media.required_for == [GenerationType.I2I.value]
 
 
 class TestProviderInfoSchema:

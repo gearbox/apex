@@ -75,7 +75,10 @@ def apply(
     for slot, filenames in media_filenames.items():
         declared = [item for item in bound.map.media_inputs if item.slot is slot]
         if not declared:
-            continue
+            raise WorkflowApplyError(
+                f"slot {slot.value!r} received {len(filenames)} filename(s) "
+                f"but the bundle declares no {slot.value!r} media input"
+            )
         if len(filenames) > len(declared):
             raise WorkflowApplyError(
                 f"slot {slot.value!r} received {len(filenames)} filenames "
