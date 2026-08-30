@@ -10,6 +10,7 @@ import structlog
 from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
 from src.api.services.billing_errors import BillingError
+from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
 from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
@@ -19,7 +20,20 @@ from src.api.services.generation.source_media import (
 )
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
-from src.core.enums import GenerationType, JobStatus, Provider
+from src.api.services.workflow.contract import (
+    DIMENSION_REQUEST_PARAMETERS,
+    DIMENSION_WRITABLE_PARAMETERS,
+    NEGATIVE_PROMPT_PARAMETER,
+    REQUEST_PARAMETER_BINDINGS,
+)
+from src.core.enums import (
+    GenerationType,
+    JobStatus,
+    MediaKind,
+    ModelType,
+    Provider,
+    ProvisioningMode,
+)
 from src.core.library_ref import LibraryAssetSource
 from src.core.model_registry import get_model_meta
 from src.db.repositories.generation_job_source import GenerationJobSourceRepository
@@ -39,6 +53,9 @@ if TYPE_CHECKING:
     from src.api.services.generation.base import GenerationProvider
     from src.api.services.generation.rate_limiter import ModelRateLimiter
     from src.api.services.pricing import PricingService
+    from src.api.services.workflow.contract import BoundWorkflow, BundleCapabilities
+    from src.core.bundle_config import BundleMapping
+    from src.core.generation_config import BundleGenerationConfig
     from src.core.product import ProductConfig
     from src.db.models.storage import GenerationJob
 
@@ -82,6 +99,14 @@ class ProviderResponseError(GenerationError):
     """
 
 
+class UnsupportedGenerationParameterError(GenerationError):
+    """The resolved bundle cannot apply one or more request controls."""
+
+    def __init__(self, parameters: list[str]) -> None:
+        self.parameters = tuple(sorted(set(parameters)))
+        super().__init__("Unsupported generation parameter(s): " + ", ".join(self.parameters))
+
+
 class GenerationService:
     """Orchestrates generation requests across providers.
 
@@ -105,6 +130,7 @@ class GenerationService:
         rate_limiter: ModelRateLimiter,
         event_bus: EventBus | None = None,
         ops_event_bus: OpsEventBus | None = None,
+        bundle_index: BundleIndexService | None = None,
         *,
         retention_days: int = 7,
         transition_service_factory: Callable[[AsyncSession], JobStateTransitionService]
@@ -118,6 +144,7 @@ class GenerationService:
         self._ops_event_bus = (
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
         )
+        self._bundle_index = bundle_index
         self._retention_days = retention_days
         self._transition_service_factory = (
             transition_service_factory or self._default_transition_service_factory
@@ -142,6 +169,66 @@ class GenerationService:
             ops_event_bus=self._ops_event_bus,
         )
 
+    def _aisha_mapping(self, model: ModelType) -> BundleMapping | None:
+        if (
+            self._bundle_index is None
+            or model.provider.provisioning_mode is not ProvisioningMode.ON_DEMAND
+        ):
+            return None
+        try:
+            return self._bundle_index.resolve_bundle(model.value)
+        except BundleNotFoundError:
+            return None
+
+    def get_aisha_capabilities(self, model: ModelType) -> BundleCapabilities | None:
+        """Return the active bundle capability for an Aisha model, if indexed."""
+        mapping = self._aisha_mapping(model)
+        return mapping.capabilities if mapping is not None else None
+
+    def get_aisha_bound_workflow(self, model: ModelType) -> BoundWorkflow | None:
+        """Return the active bound workflow for provider catalogue derivation."""
+        mapping = self._aisha_mapping(model)
+        if mapping is None or self._bundle_index is None:
+            return None
+        return self._bundle_index.get_bound_workflow(mapping.bundle_name, mapping.bundle_version)
+
+    @staticmethod
+    def _validate_bundle_capabilities(
+        request: UnifiedGenerationRequest,
+        capabilities: BundleCapabilities,
+        generation: BundleGenerationConfig,
+    ) -> None:
+        """Reject overrides a bound workflow cannot write before billing begins."""
+        if request.generation_type not in capabilities.generation_types:
+            raise UnsupportedGenerationParameterError(["generation_type"])
+        unsupported: list[str] = []
+        if request.negative_prompt is not None and not capabilities.supports_negative_prompt:
+            unsupported.append(NEGATIVE_PROMPT_PARAMETER)
+        writable = capabilities.writable
+        # ``None`` means the client left a value to the bundle.  Sampler values
+        # are compared by their scalar wire values, so StrEnums and strings both
+        # work without a provider-specific branch.
+        generation_defaults = generation.defaults
+        for binding in REQUEST_PARAMETER_BINDINGS:
+            value = getattr(request, binding.request_attribute)
+            default = (
+                getattr(generation_defaults, binding.generation_default_attribute)
+                if binding.generation_default_attribute is not None
+                else binding.request_default
+            )
+            if value is None or value == default:
+                continue
+            if binding.writable not in writable:
+                unsupported.append(binding.parameter)
+        if not DIMENSION_WRITABLE_PARAMETERS.issubset(writable):
+            unsupported.extend(
+                parameter
+                for parameter in DIMENSION_REQUEST_PARAMETERS
+                if getattr(request, parameter) is not None
+            )
+        if unsupported:
+            raise UnsupportedGenerationParameterError(unsupported)
+
     async def generate(
         self,
         request: UnifiedGenerationRequest,
@@ -163,6 +250,9 @@ class GenerationService:
                 f"Model '{request.model.value}' does not support generation type '{request.generation_type.value}'"
             )
 
+        bundle_mapping = self._aisha_mapping(request.model)
+        bundle_capabilities = bundle_mapping.capabilities if bundle_mapping is not None else None
+
         # 1.5. Product model access check
         if not product_config.is_model_allowed(request.model):
             raise ModelNotAllowedError(
@@ -177,8 +267,31 @@ class GenerationService:
                     f"Model '{request.model.value}' requires age verification"
                 )
 
+        # A production service always receives the index. Keeping the dependency
+        # optional lets lightweight callers exercise the shared orchestration
+        # path without fabricating a bundle graph, while an indexed on-demand
+        # model must still have a valid, capability-bearing bundle.
+        if (
+            self._bundle_index is not None
+            and request.model.provider.provisioning_mode is ProvisioningMode.ON_DEMAND
+        ):
+            if bundle_capabilities is None or bundle_mapping is None:
+                raise ModelDisabledError(
+                    f"Model '{request.model.value}' has no indexed workflow bundle"
+                )
+            self._validate_bundle_capabilities(
+                request,
+                bundle_capabilities,
+                self._bundle_index.get_generation_config(
+                    bundle_mapping.bundle_name, bundle_mapping.bundle_version
+                ),
+            )
+
         # 1.7 Aspect-ratio capability validation (registry-driven)
-        if request.aspect_ratio is not None and not request.generation_type.is_video:
+        if (
+            request.aspect_ratio is not None
+            and request.generation_type.output_kind is not MediaKind.VIDEO
+        ):
             meta = get_model_meta(request.model)
             if request.generation_type == GenerationType.I2I:
                 allowed = meta.image.edit_aspect_ratios if meta.image else ()
@@ -197,7 +310,8 @@ class GenerationService:
 
         # 2. Reject impossible source counts before resolving any asset. This
         # keeps count errors deterministic and avoids needless DB queries.
-        self._validate_source_cardinality(request)
+        bound_workflow = self.get_aisha_bound_workflow(request.model)
+        self._validate_source_cardinality(request, bound_workflow=bound_workflow)
 
         # 2.1 Resolve owned-library media once, before any consumer needs it.
         resolved_source_media: list[ResolvedSourceMedia] = []
@@ -210,10 +324,14 @@ class GenerationService:
             )
 
         # 2.2 Per-item validation requires the ownership-checked rows.
-        self._validate_resolved_sources(request, resolved_source_media)
+        self._validate_resolved_sources(
+            request, resolved_source_media, bound_workflow=bound_workflow
+        )
 
         # 3. Output count cap
         max_n = request.model.max_concurrent_outputs
+        if bundle_capabilities is not None:
+            max_n = min(max_n, bundle_capabilities.max_batch_size)
         if request.n > max_n:
             raise ValueError(
                 f"Model '{request.model.value}' supports max {max_n} outputs per request, requested {request.n}"
@@ -541,12 +659,28 @@ class GenerationService:
             await self._event_bus.publish_balance(refund_result.event)
 
     @staticmethod
-    def _validate_source_cardinality(request: UnifiedGenerationRequest) -> None:
+    def _validate_source_cardinality(
+        request: UnifiedGenerationRequest,
+        *,
+        bound_workflow: BoundWorkflow | None = None,
+    ) -> None:
         """Validate source-media presence and count without resolving assets."""
         source_media = request.source_media
         has_source_media = source_media is not None
         expected_kinds = request.generation_type.input_kinds
         constraints = get_model_meta(request.model).inputs.source_media
+        if bound_workflow is not None:
+            media_inputs = bound_workflow.map.media_inputs
+            if not media_inputs:
+                constraints = None
+            else:
+                from src.core.model_registry import SourceMediaConstraints
+
+                constraints = SourceMediaConstraints(
+                    min=1,
+                    max=len(media_inputs),
+                    media_types=frozenset(item.kind for item in media_inputs),
+                )
 
         if not expected_kinds and has_source_media:
             raise SourceMediaValidationError(
@@ -575,9 +709,24 @@ class GenerationService:
     def _validate_resolved_sources(
         request: UnifiedGenerationRequest,
         resolved_source_media: list[ResolvedSourceMedia],
+        *,
+        bound_workflow: BoundWorkflow | None = None,
     ) -> None:
         """Validate resolved source media against model media-kind limits."""
         constraints = get_model_meta(request.model).inputs.source_media
+        if bound_workflow is not None:
+            from src.core.model_registry import SourceMediaConstraints
+
+            media_inputs = bound_workflow.map.media_inputs
+            constraints = (
+                SourceMediaConstraints(
+                    min=1,
+                    max=len(media_inputs),
+                    media_types=frozenset(item.kind for item in media_inputs),
+                )
+                if media_inputs
+                else None
+            )
         if constraints is None:
             return
 
@@ -588,15 +737,6 @@ class GenerationService:
                     f"source_media position {source.position} has media kind "
                     f"'{source.media_kind.value}'; model accepts: {allowed}"
                 )
-
-    @staticmethod
-    def _validate_inputs(
-        request: UnifiedGenerationRequest,
-        resolved_source_media: list[ResolvedSourceMedia] | None = None,
-    ) -> None:
-        """Validate normalized source media (compatibility test helper)."""
-        GenerationService._validate_source_cardinality(request)
-        GenerationService._validate_resolved_sources(request, resolved_source_media or [])
 
     @staticmethod
     def _source_media_count(request: UnifiedGenerationRequest) -> int:

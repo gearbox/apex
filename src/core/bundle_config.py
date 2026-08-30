@@ -7,6 +7,14 @@ parsed from the ai-bundles repository's bundle.yaml files.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.api.services.workflow.contract import BundleCapabilities
+
+
+class BundleDefinitionError(ValueError):
+    """A bundle.yaml file is present but semantically invalid."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,3 +83,6 @@ class BundleMapping:
 
     readiness_marker: ReadinessMarker | None = None
     """Optional bundle-declared readiness marker. None means fall back to 200-OK probe."""
+
+    capabilities: BundleCapabilities | None = None
+    """Bound-workflow capabilities for this resolved bundle, when indexed."""

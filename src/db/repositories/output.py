@@ -45,6 +45,7 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         thumbnail_max_edge: int | None = None,
         width: int | None = None,
         height: int | None = None,
+        duration_ms: int | None = None,
     ) -> GenerationOutput:
         """Create a new generation output record.
 
@@ -65,6 +66,7 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             thumbnail_max_edge: Size bucket (150=sm, 512=md). None on full rows.
             width: Pixel width (stored for full and thumbnail rows).
             height: Pixel height (stored for full and thumbnail rows).
+            duration_ms: Measured video duration, when reported by the provider.
 
         Returns:
             Created GenerationOutput instance.
@@ -85,6 +87,7 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             thumbnail_max_edge=thumbnail_max_edge,
             width=width,
             height=height,
+            duration_ms=duration_ms,
             product_id=product_id,
         )
         self._session.add(output)

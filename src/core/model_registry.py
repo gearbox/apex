@@ -93,6 +93,15 @@ class VideoMeta:
 
 
 @dataclass(frozen=True, slots=True)
+class AudioMeta:
+    """Future audio constraints; no current ``GenerationType`` emits audio."""
+
+    supported_types: frozenset[GenerationType]
+    max_duration_seconds: int
+    sample_rates: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RateLimitMeta:
     """Global rate limit for a model (shared across all users, keyed by API key)."""
 
@@ -130,6 +139,9 @@ class ModelMeta:
 
     video: VideoMeta | None = None
     """Video constraints. None for image-only models."""
+
+    audio: AudioMeta | None = None
+    """Audio constraints. Reserved until an audio generation type exists."""
 
     rate_limit: RateLimitMeta | None = None
     """Global rate limit. None means unlimited."""
@@ -228,8 +240,6 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=True,
         aspect_ratios=ALL_ASPECT_RATIOS,
         max_concurrent_outputs=4,
-        # TODO(b1-workflow-map): derive these constraints from bound workflow
-        # media input slots when bundle workflow capabilities land.
         inputs=ModelInputs(
             source_media=SourceMediaConstraints(
                 min=1, max=1, media_types=frozenset({MediaKind.IMAGE})
@@ -264,8 +274,6 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             AspectRatio.RATIO_9_16,
         ),
         max_concurrent_outputs=1,
-        # TODO(b1-workflow-map): replace static input metadata with bound
-        # workflow media input slots.
         inputs=ModelInputs(
             source_media=SourceMediaConstraints(
                 min=1, max=2, media_types=frozenset({MediaKind.IMAGE})

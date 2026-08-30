@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import structlog
 
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, MediaKind
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -64,7 +64,7 @@ class GrokGenerationProvider:
         No-op for image jobs (synchronous — always terminal by the time the
         row exists) and for jobs already in a terminal status.
         """
-        if not GenerationType(job.generation_type).is_video:
+        if GenerationType(job.generation_type).output_kind is not MediaKind.VIDEO:
             return None
         if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
             return None
@@ -86,7 +86,7 @@ class GrokGenerationProvider:
         source_media: Sequence[ResolvedSourceMedia] = (),
     ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.create_image_job or start_video_job."""
-        if request.generation_type.is_video:
+        if request.generation_type.output_kind is MediaKind.VIDEO:
             return await self._submit_video(
                 request,
                 user_id=user_id,

@@ -111,6 +111,9 @@ jobs:
           # Minimal env needed to satisfy Settings validation
           JWT_SECRET_KEY: "ci-unit-test-secret-key-32-bytes-long"
 
+      - name: Enforce B1 workflow coverage floors
+        run: uv run python tools/check_b1_coverage.py coverage-unit.xml
+
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
         if: always()                   # Upload even if tests fail

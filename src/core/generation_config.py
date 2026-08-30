@@ -34,6 +34,8 @@ class GenerationConstraints:
     max_cfg: float
     allowed_samplers: frozenset[Sampler]  # empty = any
     allowed_schedulers: frozenset[Scheduler]  # empty = any
+    max_batch_size: int = 4
+    """Maximum batch size when the workflow declares ``latent.batch_size``."""
 
 
 @dataclass(frozen=True, slots=True)

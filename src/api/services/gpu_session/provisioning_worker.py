@@ -64,6 +64,7 @@ _REASON_PENDING_TIMEOUT_AFTER_ERRORS = "pending_timeout_after_errors"
 # Both are eligible for recreation (unlike provisioning_timeout which stays terminal).
 _REASON_PROVISIONING_STALLED = "provisioning_stalled"
 _REASON_NODE_REPORTED_FAILURE = "node_reported_failure"
+_READINESS_MODEL_TYPE = "checkpoints"
 
 # Vast.ai actual_status values that mean the container is dead and will never reach 'running'.
 # Sourced from Vast.ai docs: https://docs.vast.ai/sdk/python/quickstart — "if actual_status
@@ -84,7 +85,8 @@ def _match_checkpoint(expected: str, available: list[str]) -> tuple[bool, bool]:
     appears as 'subdir/name.safetensors' while bundle.yaml declares the basename.
     Match exactly first; fall back to basename comparison (which also absorbs any
     stray './' or category prefix). exact=False on a basename-only match signals
-    a subfolder placement that inject_checkpoint does NOT yet handle.
+    a subfolder placement that the workflow model-input application cannot
+    address until the bundle declares that relative filename.
     """
     if expected in available:
         return True, True
@@ -464,8 +466,8 @@ class GpuProvisioningWorker(PeriodicWorker):
             return False
 
         # Determine which checks are applicable before parsing JSON.
-        expected = self._bundles.get_checkpoint_filenames(
-            session.bundle_name, session.bundle_version
+        expected = self._bundles.get_model_filenames(
+            session.bundle_name, session.bundle_version, _READINESS_MODEL_TYPE
         )
         if expected is None:
             logger.warning(
@@ -565,8 +567,8 @@ class GpuProvisioningWorker(PeriodicWorker):
                 )
                 return False
             if not exact:
-                # Readiness passes on basename, but inject_checkpoint sends the basename while
-                # ComfyUI exposes a subpath — generation will fail until injection is aligned.
+                # Readiness passes on basename, but the bundle must declare the
+                # exposed subpath for its model-input application to use it.
                 logger.warning(
                     "gpu_session.provision.probe_checkpoint_path_mismatch",
                     session_id=str(session.id),

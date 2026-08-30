@@ -4,7 +4,25 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.enums import GenerationType, ModelType
+from src.core.enums import (
+    _GENERATION_TYPE_MEDIA,
+    _META_BY_MEDIA,
+    GenerationType,
+    MediaKind,
+    ModelType,
+)
+
+
+@pytest.mark.parametrize("generation_type", GenerationType)
+def test_every_generation_type_has_media_table_row(generation_type: GenerationType) -> None:
+    """Adding a generation type requires declaring its media behavior."""
+    assert generation_type in _GENERATION_TYPE_MEDIA
+
+
+@pytest.mark.parametrize("media_kind", MediaKind)
+def test_every_media_kind_has_model_metadata_row(media_kind: MediaKind) -> None:
+    """Every media kind must map to a model-registry section."""
+    assert media_kind in _META_BY_MEDIA
 
 
 class TestModelTypeSupportsGenerationType:

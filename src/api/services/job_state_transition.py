@@ -69,6 +69,7 @@ class GenerationOutputData:
     thumbnail_max_edge: int | None = None
     width: int | None = None
     height: int | None = None
+    duration_ms: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -274,6 +275,7 @@ class JobStateTransitionService:
                 thumbnail_max_edge=out.thumbnail_max_edge,
                 width=out.width,
                 height=out.height,
+                duration_ms=out.duration_ms,
             )
 
         if materialization_attempt_id is not None:

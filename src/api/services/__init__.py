@@ -6,20 +6,13 @@ from .comfyui_client import (
     ComfyUIClientError,
     ComfyUIConnectionError,
 )
-from .workflow_service import (
-    WorkflowError,
-    WorkflowNotFoundError,
-    WorkflowService,
-    WorkflowValidationError,
-)
+from .workflow import WorkflowNotFoundError, WorkflowService
 
 __all__ = [
     "ComfyUIAPIError",
     "ComfyUIClient",
     "ComfyUIClientError",
     "ComfyUIConnectionError",
-    "WorkflowError",
     "WorkflowNotFoundError",
     "WorkflowService",
-    "WorkflowValidationError",
 ]

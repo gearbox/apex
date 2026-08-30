@@ -9,6 +9,7 @@ from src.api.schemas.jobs import JobCreatedResponse
 from src.core.enums import (
     GenerationType,
     JobStatus,
+    MediaKind,
     ModelType,
     Provider,
 )
@@ -34,25 +35,25 @@ class TestModelType:
         assert ModelType.GROK_IMAGINE_VIDEO.supports_image_input is True
         assert ModelType.AISHA_IMAGE.supports_image_input is True
 
-    def test_is_video_model(self) -> None:
-        """Test is_video_model property."""
-        assert ModelType.GROK_IMAGINE_VIDEO.is_video_model is True
-        assert ModelType.GROK_IMAGINE_IMAGE.is_video_model is False
-        assert ModelType.GROK_2_IMAGE.is_video_model is False
-        assert ModelType.AISHA_IMAGE.is_video_model is False
+    def test_output_media(self) -> None:
+        """Test the media kinds each model can emit."""
+        assert ModelType.GROK_IMAGINE_VIDEO.output_media == frozenset({MediaKind.VIDEO})
+        assert ModelType.GROK_IMAGINE_IMAGE.output_media == frozenset({MediaKind.IMAGE})
+        assert ModelType.GROK_2_IMAGE.output_media == frozenset({MediaKind.IMAGE})
+        assert ModelType.AISHA_IMAGE.output_media == frozenset({MediaKind.IMAGE})
 
 
 class TestGenerationType:
     """Tests for GenerationType enum."""
 
-    def test_is_video(self) -> None:
-        """Test is_video property."""
-        assert GenerationType.T2V.is_video is True
-        assert GenerationType.I2V.is_video is True
-        assert GenerationType.V2V.is_video is True
-        assert GenerationType.FLF2V.is_video is True
-        assert GenerationType.T2I.is_video is False
-        assert GenerationType.I2I.is_video is False
+    def test_output_kind(self) -> None:
+        """Test the media kind emitted by each generation type."""
+        assert GenerationType.T2V.output_kind is MediaKind.VIDEO
+        assert GenerationType.I2V.output_kind is MediaKind.VIDEO
+        assert GenerationType.V2V.output_kind is MediaKind.VIDEO
+        assert GenerationType.FLF2V.output_kind is MediaKind.VIDEO
+        assert GenerationType.T2I.output_kind is MediaKind.IMAGE
+        assert GenerationType.I2I.output_kind is MediaKind.IMAGE
 
     def test_requires_image_input(self) -> None:
         """Test requires_image_input property."""

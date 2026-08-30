@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class Product(StrEnum):
@@ -80,11 +83,16 @@ class ModelType(StrEnum):
         )
 
     @property
-    def is_video_model(self) -> bool:
-        """Check if this model generates video."""
+    def output_media(self) -> frozenset[MediaKind]:
+        """Media kinds this model can emit, derived from registry sections."""
         from src.core.model_registry import get_model_meta
 
-        return get_model_meta(self).video is not None
+        meta = get_model_meta(self)
+        return frozenset(
+            kind
+            for kind, section_name in _META_BY_MEDIA.items()
+            if getattr(meta, section_name) is not None
+        )
 
     def supports_generation_type(self, gen_type: GenerationType) -> bool:
         """Check if this model supports the given generation type.
@@ -96,9 +104,8 @@ class ModelType(StrEnum):
 
         meta = get_model_meta(self)
 
-        if not gen_type.is_video:
-            return meta.image is not None and gen_type in meta.image.supported_types
-        return meta.video is not None and gen_type in meta.video.supported_types
+        section = getattr(meta, _META_BY_MEDIA[gen_type.output_kind])
+        return section is not None and gen_type in section.supported_types
 
     @property
     def max_concurrent_outputs(self) -> int:
@@ -126,16 +133,6 @@ class GenerationType(StrEnum):
     FLF2V = "flf2v"  # First-last-frame to video
 
     @property
-    def is_video(self) -> bool:
-        """Check if this is a video generation type."""
-        return self in (
-            GenerationType.T2V,
-            GenerationType.I2V,
-            GenerationType.V2V,
-            GenerationType.FLF2V,
-        )
-
-    @property
     def requires_image_input(self) -> bool:
         """Check if this generation type requires an input image."""
         return MediaKind.IMAGE in self.input_kinds
@@ -158,9 +155,12 @@ class GenerationType(StrEnum):
         a public URL rather than an owned library asset, and is validated on
         its existing path until video-to-video moves to ``source_media``.
         """
-        if self in (GenerationType.I2I, GenerationType.I2V, GenerationType.FLF2V):
-            return frozenset({MediaKind.IMAGE})
-        return frozenset()
+        return _GENERATION_TYPE_MEDIA[self][0]
+
+    @property
+    def output_kind(self) -> MediaKind:
+        """Media kind emitted by this generation type."""
+        return _GENERATION_TYPE_MEDIA[self][1]
 
 
 class VideoPollStatus(StrEnum):
@@ -358,6 +358,22 @@ class MediaKind(StrEnum):
 
     IMAGE = "image"
     VIDEO = "video"
+
+
+_GENERATION_TYPE_MEDIA: Final[Mapping[GenerationType, tuple[frozenset[MediaKind], MediaKind]]] = {
+    GenerationType.T2I: (frozenset(), MediaKind.IMAGE),
+    GenerationType.I2I: (frozenset({MediaKind.IMAGE}), MediaKind.IMAGE),
+    GenerationType.T2V: (frozenset(), MediaKind.VIDEO),
+    GenerationType.I2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
+    GenerationType.FLF2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
+    # v2v still takes a public input_video_url, not an owned library asset.
+    GenerationType.V2V: (frozenset(), MediaKind.VIDEO),
+}
+
+_META_BY_MEDIA: Final[Mapping[MediaKind, str]] = {
+    MediaKind.IMAGE: "image",
+    MediaKind.VIDEO: "video",
+}
 
 
 # Kept as a compatibility alias while library consumers migrate to the
