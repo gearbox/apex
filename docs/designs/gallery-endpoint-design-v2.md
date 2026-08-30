@@ -79,7 +79,7 @@ Gallery schemas return **path-based references** instead of presigned URLs:
 
 ```python
 class GalleryGridItem(msgspec.Struct, kw_only=True):
-    cover_url: str       # "/v1/content/outputs/{output_id}"
+    cover_url: str  # "/v1/content/outputs/{output_id}"
     video_url: str | None  # "/v1/content/outputs/{output_id}" (for video)
     # ...
 ```
@@ -136,19 +136,20 @@ content_url_ttl: int = Field(
 ```python
 # src/api/services/content_proxy.py
 
+
 class ContentProxyService:
     """Auth-gated streaming proxy for R2 content.
-    
+
     Designed as a thin layer that:
     1. Looks up the DB record (ownership + product check).
     2. Presigns the R2 URL (server-side only, never exposed).
     3. Streams the response using httpx async streaming.
-    
+
     This abstraction is transport-agnostic — when migrating to
     CF Workers, this service is replaced by a redirect to the
     Worker URL, and the Worker handles the R2 presigning.
     """
-    
+
     def __init__(
         self,
         storage: R2StorageService,
@@ -156,7 +157,7 @@ class ContentProxyService:
     ) -> None:
         self._storage = storage
         self._ttl = settings.content_url_ttl
-    
+
     async def stream_output(
         self,
         output_id: UUID,
@@ -166,16 +167,16 @@ class ContentProxyService:
         session: AsyncSession,
     ) -> StreamResponse:
         """Stream an output file to the client.
-        
+
         Returns:
             StreamResponse with async byte iterator, content_type, size, headers.
-            
+
         Raises:
             ContentNotFoundError: Output not found or not owned.
             ContentFetchError: R2 streaming failed.
         """
         ...
-    
+
     async def stream_upload(
         self,
         image_id: UUID,
@@ -230,21 +231,25 @@ async def _stream_from_r2(self, storage_key: str) -> AsyncIterator[bytes]:
 ```python
 # src/core/enums.py
 
+
 class OutputMediaType(str, Enum):
     """Media type classification for gallery filtering."""
+
     IMAGE = "image"
     VIDEO = "video"
 
 
 class GalleryBadge(str, Enum):
     """Badge type for gallery grid items — describes the input source."""
-    IMAGE = "image"    # Generation used an image/video as input (i2i, i2v, flf2v, v2v)
+
+    IMAGE = "image"  # Generation used an image/video as input (i2i, i2v, flf2v, v2v)
     PROMPT = "prompt"  # Generation was text-only (t2i, t2v)
 
 
 class GallerySourceType(str, Enum):
     """Type of input source for lineage display."""
-    UPLOAD = "upload"          # User uploaded an image directly
+
+    UPLOAD = "upload"  # User uploaded an image directly
     GENERATION = "generation"  # Used a previous generation's output
 ```
 
@@ -255,6 +260,7 @@ class GallerySourceType(str, Enum):
 @staticmethod
 def media_type_from_generation_type(gt: GenerationType) -> OutputMediaType:
     return OutputMediaType.VIDEO if gt.is_video else OutputMediaType.IMAGE
+
 
 # Output-level: from content_type (more precise — a video job's thumbnail is still IMAGE)
 @staticmethod
@@ -331,7 +337,10 @@ input_image: Mapped[UserImage | None] = relationship(
 # Gallery grid query optimization
 Index(
     "ix_generation_jobs_gallery",
-    "user_id", "product_id", "status", "created_at",
+    "user_id",
+    "product_id",
+    "status",
+    "created_at",
 )
 ```
 
@@ -340,44 +349,72 @@ Index(
 ```python
 # alembic/versions/NNN_add_gallery_lineage_columns.py
 
+
 def upgrade() -> None:
     # New columns
-    op.add_column("generation_jobs", sa.Column(
-        "source_job_id", postgresql.UUID(as_uuid=True), nullable=True,
-    ))
-    op.add_column("generation_jobs", sa.Column(
-        "source_output_id", postgresql.UUID(as_uuid=True), nullable=True,
-    ))
-    op.add_column("generation_jobs", sa.Column(
-        "input_image_id", postgresql.UUID(as_uuid=True), nullable=True,
-    ))
-    
+    op.add_column(
+        "generation_jobs",
+        sa.Column(
+            "source_job_id",
+            postgresql.UUID(as_uuid=True),
+            nullable=True,
+        ),
+    )
+    op.add_column(
+        "generation_jobs",
+        sa.Column(
+            "source_output_id",
+            postgresql.UUID(as_uuid=True),
+            nullable=True,
+        ),
+    )
+    op.add_column(
+        "generation_jobs",
+        sa.Column(
+            "input_image_id",
+            postgresql.UUID(as_uuid=True),
+            nullable=True,
+        ),
+    )
+
     # Foreign keys
     op.create_foreign_key(
         "fk_generation_jobs_source_job",
-        "generation_jobs", "generation_jobs",
-        ["source_job_id"], ["id"], ondelete="SET NULL",
+        "generation_jobs",
+        "generation_jobs",
+        ["source_job_id"],
+        ["id"],
+        ondelete="SET NULL",
     )
     op.create_foreign_key(
         "fk_generation_jobs_source_output",
-        "generation_jobs", "generation_outputs",
-        ["source_output_id"], ["id"], ondelete="SET NULL",
+        "generation_jobs",
+        "generation_outputs",
+        ["source_output_id"],
+        ["id"],
+        ondelete="SET NULL",
     )
     op.create_foreign_key(
         "fk_generation_jobs_input_image",
-        "generation_jobs", "user_images",
-        ["input_image_id"], ["id"], ondelete="SET NULL",
+        "generation_jobs",
+        "user_images",
+        ["input_image_id"],
+        ["id"],
+        ondelete="SET NULL",
     )
-    
+
     # Indexes
     op.create_index(
-        "ix_generation_jobs_source_job", "generation_jobs", ["source_job_id"],
+        "ix_generation_jobs_source_job",
+        "generation_jobs",
+        ["source_job_id"],
     )
     op.create_index(
         "ix_generation_jobs_gallery",
         "generation_jobs",
         ["user_id", "product_id", "status", "created_at"],
     )
+
 
 def downgrade() -> None:
     op.drop_index("ix_generation_jobs_gallery")
@@ -418,10 +455,11 @@ Response: GalleryPage (custom — no total count)
 ```python
 class GalleryPage(msgspec.Struct, kw_only=True):
     """Cursor-paginated gallery response.
-    
+
     Unlike PaginatedResponse, this does NOT include a total count.
     Infinite scroll only needs has_more + next_cursor.
     """
+
     items: list[GalleryGridItem]
     limit: int
     has_more: bool
@@ -592,23 +630,20 @@ Text-only video (t2v):
 **Query 1: Paginated jobs**
 
 ```python
-query = (
-    select(
-        GenerationJob.id,
-        GenerationJob.generation_type,
-        GenerationJob.model,
-        GenerationJob.prompt,
-        GenerationJob.created_at,
-        GenerationJob.source_job_id,
-        GenerationJob.source_output_id,
-        GenerationJob.input_image_id,
-    )
-    .where(
-        GenerationJob.user_id == user_id,
-        GenerationJob.product_id == product_id,
-        GenerationJob.status == JobStatus.COMPLETED.value,
-        GenerationJob.error_message.is_distinct_from("__hidden__"),
-    )
+query = select(
+    GenerationJob.id,
+    GenerationJob.generation_type,
+    GenerationJob.model,
+    GenerationJob.prompt,
+    GenerationJob.created_at,
+    GenerationJob.source_job_id,
+    GenerationJob.source_output_id,
+    GenerationJob.input_image_id,
+).where(
+    GenerationJob.user_id == user_id,
+    GenerationJob.product_id == product_id,
+    GenerationJob.status == JobStatus.COMPLETED.value,
+    GenerationJob.error_message.is_distinct_from("__hidden__"),
 )
 
 # Apply media_type filter
@@ -628,14 +663,11 @@ if model is not None:
 # Keyset cursor
 if cursor_ts is not None and cursor_id is not None:
     query = query.where(
-        sa.tuple_(GenerationJob.created_at, GenerationJob.id)
-        < sa.tuple_(cursor_ts, cursor_id)
+        sa.tuple_(GenerationJob.created_at, GenerationJob.id) < sa.tuple_(cursor_ts, cursor_id)
     )
 
 # Fetch limit + 1 to determine has_more
-query = query.order_by(
-    GenerationJob.created_at.desc(), GenerationJob.id.desc()
-).limit(limit + 1)
+query = query.order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc()).limit(limit + 1)
 ```
 
 **Query 2: Batch cover outputs for returned job IDs**
@@ -736,9 +768,7 @@ IMAGE_TYPES = [gt.value for gt in GenerationType if not gt.is_video]
 
 ```python
 media_type = (
-    OutputMediaType.VIDEO 
-    if output.content_type.startswith("video/") 
-    else OutputMediaType.IMAGE
+    OutputMediaType.VIDEO if output.content_type.startswith("video/") else OutputMediaType.IMAGE
 )
 ```
 

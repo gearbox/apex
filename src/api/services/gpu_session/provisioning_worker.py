@@ -215,7 +215,7 @@ class GpuProvisioningWorker(PeriodicWorker):
 
         for s, result in zip(sessions, results, strict=True):
             if result is not None and isinstance(result, BaseException):
-                logger.exception(
+                logger.error(
                     "gpu_provisioning_worker.advance_error",
                     session_id=str(s.id),
                     exc_info=result,

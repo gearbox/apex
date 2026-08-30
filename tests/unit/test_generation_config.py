@@ -52,7 +52,7 @@ def _make_bundle_dir(
     bundle_name: str = "test_bundle",
     version: str = "260101-01",
     *,
-    generation_block: dict[str, Any] | None | str = None,
+    generation_block: dict[str, Any] | str | None = None,
     extra_hardware: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, BundleIndexService]:
     """Create a temp bundle tree and a BundleIndexService pointing at it.

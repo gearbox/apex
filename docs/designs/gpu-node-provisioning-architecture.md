@@ -173,9 +173,11 @@ src/api/services/
 ```python
 # src/core/bundle_config.py
 
+
 @dataclass(frozen=True, slots=True)
 class HardwareRequirements:
     """GPU hardware requirements parsed from bundle.yaml."""
+
     gpu_whitelist: tuple[str, ...]
     min_disk_gb: int
     min_network_upload_mbps: int
@@ -184,9 +186,11 @@ class HardwareRequirements:
     num_gpus: int
     comfyui_port: int = 8188
 
+
 @dataclass(frozen=True, slots=True)
 class BundleMapping:
     """Resolved bundle for a ModelType."""
+
     bundle_name: str
     bundle_version: str | None  # None = use "current" symlink
     hardware: HardwareRequirements
@@ -227,7 +231,7 @@ When Apex provisions a node, it translates `HardwareRequirements` into Vast.ai s
 ```python
 # Vast.ai search payload derived from HardwareRequirements
 {
-    "gpu_name": {"in": hardware.gpu_whitelist},   # e.g. ["RTX_4090", "A100_SXM4"]
+    "gpu_name": {"in": hardware.gpu_whitelist},  # e.g. ["RTX_4090", "A100_SXM4"]
     "num_gpus": {"gte": hardware.num_gpus},
     "disk_space": {"gte": hardware.min_disk_gb},
     "inet_up": {"gte": hardware.min_network_upload_mbps},
@@ -238,8 +242,8 @@ When Apex provisions a node, it translates `HardwareRequirements` into Vast.ai s
     "rented": {"eq": False},
     "type": "on-demand",
     "limit": 10,
-    "order": "dph_total",           # cheapest first
-    "order_dir": "asc"
+    "order": "dph_total",  # cheapest first
+    "order_dir": "asc",
 }
 ```
 
@@ -250,7 +254,7 @@ When Apex provisions a node, it translates `HardwareRequirements` into Vast.ai s
 ```python
 # PUT /api/v0/asks/{offer_id}/
 {
-    "image": "vastai/comfy:latest",   # default Docker image; custom image in later phases
+    "image": "vastai/comfy:latest",  # default Docker image; custom image in later phases
     "disk": hardware.min_disk_gb,
     "runtype": "ssh_direct",
     "env": {
@@ -261,19 +265,16 @@ When Apex provisions a node, it translates `HardwareRequirements` into Vast.ai s
         "ACS_BUNDLES_REPO": settings.ai_bundles_repo_url,
         "ACS_HF_TOKEN": settings.hf_token,
         "ACS_CIVITAI_API_TOKEN": settings.civitai_api_token,
-
         # Cloudflare Tunnel
         "ACS_CF_TUNNEL_TOKEN": tunnel_token,
-
         # Apex callback (Phase 2 — env vars set now, unused until Phase 2)
         "ACS_APEX_SESSION_ID": str(session_id),
         "ACS_APEX_CALLBACK_URL": settings.apex_callback_url,
         "ACS_APEX_CALLBACK_TOKEN": callback_token,
-
         # Port mapping for ComfyUI (internal, tunneled via CF)
-        "-p 8188:8188": "1"
+        "-p 8188:8188": "1",
     },
-    "onstart": "curl -sL https://raw.githubusercontent.com/gearbox/aisha/main/scripts/onstart.sh | bash"
+    "onstart": "curl -sL https://raw.githubusercontent.com/gearbox/aisha/main/scripts/onstart.sh | bash",
 }
 ```
 
@@ -328,11 +329,11 @@ When creating a tunnel via API with `config_src: "cloudflare"`, the ingress rule
         "ingress": [
             {
                 "hostname": f"gpu-{short_session_id}.gpu-domain.com",
-                "service": f"http://localhost:{comfyui_port}"
+                "service": f"http://localhost:{comfyui_port}",
             },
             {
                 "service": "http_status:404"  # catch-all required by CF
-            }
+            },
         ]
     }
 }
@@ -471,65 +472,79 @@ The existing `gpu_sessions` table needs new columns for provisioning, tunnel tra
 
 # Bundle identity
 bundle_name: Mapped[str] = mapped_column(
-    String(100), nullable=False,
+    String(100),
+    nullable=False,
     comment="ai-bundles bundle name (e.g. wan_2.2_i2v)",
 )
 bundle_version: Mapped[str | None] = mapped_column(
-    String(20), nullable=True,
+    String(20),
+    nullable=True,
     comment="Bundle version (e.g. 260105-01). NULL = current",
 )
 model_type: Mapped[str] = mapped_column(
-    String(50), nullable=False,
+    String(50),
+    nullable=False,
     comment="ModelType enum value this session serves",
 )
 
 # Cloudflare tunnel
 cf_tunnel_id: Mapped[str | None] = mapped_column(
-    String(64), nullable=True,
+    String(64),
+    nullable=True,
     comment="Cloudflare tunnel UUID",
 )
 cf_dns_record_id: Mapped[str | None] = mapped_column(
-    String(64), nullable=True,
+    String(64),
+    nullable=True,
     comment="Cloudflare DNS record ID for cleanup",
 )
 tunnel_hostname: Mapped[str | None] = mapped_column(
-    String(255), nullable=True,
+    String(255),
+    nullable=True,
     comment="Full tunnel hostname (e.g. gpu-01jf8x3k.gpu-domain.com)",
 )
 
 # Vast.ai instance details
 vastai_offer_id: Mapped[int | None] = mapped_column(
-    Integer, nullable=True,
+    Integer,
+    nullable=True,
     comment="Vast.ai offer ID used to create the instance",
 )
 vastai_cost_per_hour_micros: Mapped[int | None] = mapped_column(
-    Integer, nullable=True,
+    Integer,
+    nullable=True,
     comment="Vast.ai $/hr in microdollars (1_000_000 = $1.00) at instance creation time",
 )
 vastai_gpu_name: Mapped[str | None] = mapped_column(
-    String(50), nullable=True,
+    String(50),
+    nullable=True,
     comment="GPU model name from Vast.ai (e.g. RTX_4090)",
 )
 
 # Provisioning tracking
 provision_attempt: Mapped[int] = mapped_column(
-    Integer, nullable=False, server_default=text("1"),
+    Integer,
+    nullable=False,
+    server_default=text("1"),
     comment="Current provisioning attempt number (1-based)",
 )
 
 # Pause/resume tracking
 paused_at: Mapped[datetime | None] = mapped_column(
-    DateTime(timezone=True), nullable=True,
+    DateTime(timezone=True),
+    nullable=True,
     comment="When the session was paused (Vast.ai instance stopped)",
 )
 resumed_at: Mapped[datetime | None] = mapped_column(
-    DateTime(timezone=True), nullable=True,
+    DateTime(timezone=True),
+    nullable=True,
     comment="When the last resume was requested",
 )
 
 # Phase 2 callback token (set at creation, unused until Phase 2)
 callback_token: Mapped[str | None] = mapped_column(
-    String(128), nullable=True,
+    String(128),
+    nullable=True,
     comment="HMAC token for Phase 2 node → Apex callback auth",
 )
 ```
@@ -541,7 +556,9 @@ callback_token: Mapped[str | None] = mapped_column(
 # "Active" = any non-terminal state (everything except stopped and failed)
 Index(
     "ix_gpu_sessions_active_user_model",
-    "user_id", "product_id", "model_type",
+    "user_id",
+    "product_id",
+    "model_type",
     unique=True,
     postgresql_where=text("status NOT IN ('stopped', 'failed')"),
 )
@@ -559,15 +576,15 @@ This partial unique index enforces the "one active session per ModelType per use
 class GpuSessionStatus(StrEnum):
     """GPU session lifecycle states."""
 
-    pending = "pending"            # session requested, Vast.ai instance creating
+    pending = "pending"  # session requested, Vast.ai instance creating
     provisioning = "provisioning"  # Vast.ai instance running, waiting for ComfyUI
-    active = "active"              # ComfyUI reachable, ready for generation jobs
-    stale = "stale"                # was active, now unreachable (health reconciler)
-    paused = "paused"              # user paused — Vast.ai instance stopped, disk retained
-    resuming = "resuming"          # user resumed — Vast.ai instance restarting
-    stopping = "stopping"          # user requested stop, teardown in progress
-    stopped = "stopped"            # session ended normally, resources cleaned up
-    failed = "failed"              # unrecoverable error
+    active = "active"  # ComfyUI reachable, ready for generation jobs
+    stale = "stale"  # was active, now unreachable (health reconciler)
+    paused = "paused"  # user paused — Vast.ai instance stopped, disk retained
+    resuming = "resuming"  # user resumed — Vast.ai instance restarting
+    stopping = "stopping"  # user requested stop, teardown in progress
+    stopped = "stopped"  # session ended normally, resources cleaned up
+    failed = "failed"  # unrecoverable error
 ```
 
 ### 8.2 State Transitions
@@ -698,7 +715,7 @@ class GpuSessionService:
         product_id: str,
         model_type: ModelType,
         bundle_override: str | None = None,  # admin only
-        account_id: UUID,                     # for billing reservation
+        account_id: UUID,  # for billing reservation
     ) -> GpuSession:
         """Create a new GPU session.
 
@@ -927,11 +944,11 @@ class SessionResponse(msgspec.Struct, kw_only=True):
     status: GpuSessionStatus
     model_type: str
     bundle_name: str
-    gpu_name: str | None           # Set after Vast.ai offer selected
-    tunnel_hostname: str | None    # Set after CF tunnel created
+    gpu_name: str | None  # Set after Vast.ai offer selected
+    tunnel_hostname: str | None  # Set after CF tunnel created
     created_at: datetime
-    started_at: datetime | None    # Set when ComfyUI becomes reachable
-    paused_at: datetime | None     # Set when user pauses
+    started_at: datetime | None  # Set when ComfyUI becomes reachable
+    paused_at: datetime | None  # Set when user pauses
     stopped_at: datetime | None
     error_message: str | None
     provision_attempt: int
@@ -941,8 +958,8 @@ class SessionResponse(msgspec.Struct, kw_only=True):
 class StopConfirmation(msgspec.Struct, kw_only=True):
     session_id: UUID
     active_duration_minutes: float
-    message: str                   # Human-readable cost summary
-    confirmed: bool = False        # Client must re-send with confirmed=true
+    message: str  # Human-readable cost summary
+    confirmed: bool = False  # Client must re-send with confirmed=true
 
 
 # GET /v1/sessions — Response
@@ -970,8 +987,8 @@ Session status changes are published via the existing `EventBus` (Redis Pub/Sub)
         "session_id": "...",
         "status": "active",
         "model_type": "aisha-video",
-        "tunnel_hostname": "gpu-01jf8x3k.gpu-domain.com"
-    }
+        "tunnel_hostname": "gpu-01jf8x3k.gpu-domain.com",
+    },
 }
 ```
 
@@ -986,22 +1003,33 @@ Frontend subscribes via existing SSE infrastructure to show real-time provisioni
 
 # --- GPU Session Provisioning ---
 vastai_api_key: str = Field(default="", description="Vast.ai API key")
-ai_bundles_github_token: str = Field(default="", description="GitHub PAT for ai-bundles private repo")
+ai_bundles_github_token: str = Field(
+    default="", description="GitHub PAT for ai-bundles private repo"
+)
 ai_bundles_repo_url: str = Field(
     default="https://github.com/gearbox/ai-bundles.git",
     description="Git URL for the ai-bundles repository",
 )
 ai_bundles_sync_interval_minutes: int = Field(
-    default=15, ge=1, le=60,
+    default=15,
+    ge=1,
+    le=60,
     description="How often to git-pull ai-bundles for updates",
 )
 hf_token: str = Field(default="", description="HuggingFace token for private model downloads")
 civitai_api_token: str = Field(default="", description="Civitai API token for model downloads")
 
 # --- Cloudflare API (per-session GPU node tunnels — NOT the apex API's own cloudflared sidecar) ---
-aisha_cf_api_token: str = Field(default="", description="Cloudflare API token (Tunnel:Edit permission) for per-session GPU node tunnels")
-aisha_cf_account_id: str = Field(default="", description="Cloudflare account ID for per-session GPU node tunnels")
-aisha_cf_zone_id: str = Field(default="", description="Cloudflare zone ID for the GPU tunnel domain")
+aisha_cf_api_token: str = Field(
+    default="",
+    description="Cloudflare API token (Tunnel:Edit permission) for per-session GPU node tunnels",
+)
+aisha_cf_account_id: str = Field(
+    default="", description="Cloudflare account ID for per-session GPU node tunnels"
+)
+aisha_cf_zone_id: str = Field(
+    default="", description="Cloudflare zone ID for the GPU tunnel domain"
+)
 aisha_cf_tunnel_domain: str = Field(
     default="gpu-domain.com",
     description="CF zone for tunnel DNS records. Tunnel hostnames are constructed as gpu-{session_id_short}.{this}.",
@@ -1009,19 +1037,27 @@ aisha_cf_tunnel_domain: str = Field(
 
 # --- Provisioning Worker ---
 gpu_provision_poll_interval_seconds: int = Field(
-    default=15, ge=5, le=60,
+    default=15,
+    ge=5,
+    le=60,
     description="How often to poll pending/provisioning/resuming sessions",
 )
 gpu_provision_timeout_minutes: int = Field(
-    default=20, ge=5, le=60,
+    default=20,
+    ge=5,
+    le=60,
     description="Max time to wait for a single provisioning attempt",
 )
 gpu_resume_timeout_minutes: int = Field(
-    default=5, ge=1, le=15,
+    default=5,
+    ge=1,
+    le=15,
     description="Max time to wait for a paused session to resume",
 )
 max_node_provisioning_retries: int = Field(
-    default=3, ge=1, le=10,
+    default=3,
+    ge=1,
+    le=10,
     description="Max provisioning attempts before marking session as failed",
 )
 

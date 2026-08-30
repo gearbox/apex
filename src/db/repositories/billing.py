@@ -32,7 +32,7 @@ class _UnsetOptionalUpdate:
 
 
 UNSET_OPTIONAL_UPDATE = _UnsetOptionalUpdate()
-type OptionalUpdate[T] = T | None | _UnsetOptionalUpdate
+type OptionalUpdate[T] = T | _UnsetOptionalUpdate | None
 
 
 class BillingRepository:

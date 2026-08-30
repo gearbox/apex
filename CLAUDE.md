@@ -197,7 +197,7 @@ dependencies = {
     "settings": Provide(provide_settings, sync_to_thread=False),
     # Storage services
     "r2_storage": Provide(get_r2_storage, sync_to_thread=False),
-    "session": Provide(get_db_session),                        # request-scoped
+    "session": Provide(get_db_session),  # request-scoped
     "user_content": Provide(get_user_content, sync_to_thread=False),  # request-scoped
     # Grok services
     "grok_job_service": Provide(get_grok_job_service, sync_to_thread=False),
@@ -216,7 +216,7 @@ dependencies = {
     "sse_ticket_service": Provide(get_sse_ticket_service, sync_to_thread=False),
     # Product context (set by ProductMiddleware, extracted here as DI)
     "product_config": Provide(get_product_config, sync_to_thread=False),  # ProductConfig
-    "product_id": Provide(get_product_id, sync_to_thread=False),          # str slug
+    "product_id": Provide(get_product_id, sync_to_thread=False),  # str slug
     # JWT service (needed by auth routes to mint content tokens)
     "jwt_service": Provide(get_jwt_service, sync_to_thread=False),
     # Content proxy + library (request-scoped)

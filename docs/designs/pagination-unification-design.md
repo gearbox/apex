@@ -75,22 +75,23 @@ These are the repository signatures that need to change:
 
 T = TypeVar("T")
 
+
 class CursorPage(msgspec.Struct, Generic[T], kw_only=True):
     """Cursor-paginated response — used by all list endpoints.
-    
+
     No total count. Uses limit+1 fetch to determine has_more.
     No offset parameter — cursor-only pagination.
     """
-    
+
     items: list[T]
     """Page of results."""
-    
+
     limit: int
     """Requested page size, echoed back."""
-    
+
     has_more: bool
     """True when there are additional pages after this one."""
-    
+
     next_cursor: str | None = None
     """Opaque cursor token for the next page. None when has_more is False."""
 ```
@@ -125,9 +126,9 @@ If the frontend needs a grace period:
 # Deprecated — use CursorPage instead
 class PaginatedResponse(msgspec.Struct, Generic[T], kw_only=True):
     items: list[T]
-    total: int = 0           # always 0, deprecated
+    total: int = 0  # always 0, deprecated
     limit: int
-    offset: int = 0          # always 0, deprecated
+    offset: int = 0  # always 0, deprecated
     has_more: bool
     next_cursor: str | None = None
 ```
@@ -156,26 +157,22 @@ async def list_gallery_jobs(
     # ... filters
 ) -> list[GenerationJob]:
     """Fetch limit+1 rows. Caller checks len > limit for has_more."""
-    
-    query = (
-        select(GenerationJob)
-        .where(
-            GenerationJob.user_id == user_id,
-            GenerationJob.product_id == product_id,
-        )
+
+    query = select(GenerationJob).where(
+        GenerationJob.user_id == user_id,
+        GenerationJob.product_id == product_id,
     )
-    
+
     if cursor_ts is not None and cursor_id is not None:
         query = query.where(
-            sa.tuple_(GenerationJob.created_at, GenerationJob.id)
-            < sa.tuple_(cursor_ts, cursor_id)
+            sa.tuple_(GenerationJob.created_at, GenerationJob.id) < sa.tuple_(cursor_ts, cursor_id)
         )
-    
+
     query = query.order_by(
         GenerationJob.created_at.desc(),
         GenerationJob.id.desc(),
     ).limit(limit + 1)  # ← fetch one extra
-    
+
     result = await self._session.execute(query)
     return list(result.scalars().all())
 ```
@@ -363,9 +360,7 @@ This is correct but verbose. The `tuple_()` form is cleaner and generates the sa
 ```python
 from sqlalchemy import tuple_
 
-where(
-    tuple_(Model.created_at, Model.id) < tuple_(cursor_ts, cursor_id)
-)
+where(tuple_(Model.created_at, Model.id) < tuple_(cursor_ts, cursor_id))
 ```
 
 PostgreSQL optimizes `(a, b) < (x, y)` into the same plan as the `OR`/`AND` form.
