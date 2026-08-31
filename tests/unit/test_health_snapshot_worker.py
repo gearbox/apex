@@ -14,6 +14,7 @@ def _make_worker(**kwargs: object) -> HealthSnapshotWorker:
         "db_manager": MagicMock(),
         "interval_seconds": 60,
         "redis_url": None,
+        "redis_client_factory": MagicMock(),
     } | kwargs
     return HealthSnapshotWorker(**defaults)  # type: ignore[arg-type]
 
@@ -22,6 +23,7 @@ def _make_cleanup_worker(**kwargs: object) -> HealthSnapshotCleanupWorker:
     defaults: dict[str, object] = {
         "db_manager": MagicMock(),
         "retention_days": 30,
+        "redis_client_factory": MagicMock(),
     } | kwargs
     return HealthSnapshotCleanupWorker(**defaults)  # type: ignore[arg-type]
 

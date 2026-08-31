@@ -40,6 +40,9 @@ from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.billing import BillingService
@@ -90,11 +93,13 @@ class AishaJobPoller(PeriodicWorker):
         config: AishaPollerConfig,
         ops_event_bus: OpsEventBus | None = None,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         super().__init__(
             name="aisha_job_poller",
             interval_seconds=config.tick_interval_seconds,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._session_factory = session_factory
         self._event_bus = event_bus

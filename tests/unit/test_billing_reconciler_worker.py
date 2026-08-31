@@ -86,11 +86,13 @@ def _make_worker(**overrides: Any) -> tuple[BillingReconcilerWorker, dict[str, A
         "mock_db": mock_db,
         "gpu_session_service": AsyncMock(),
         "settings": _make_settings(),
+        "redis_client_factory": MagicMock(),
     } | overrides
     worker = BillingReconcilerWorker(
         session_factory=mocks["session_factory"],
         gpu_session_service=mocks["gpu_session_service"],
         settings=mocks["settings"],
+        redis_client_factory=mocks["redis_client_factory"],
     )
     return worker, mocks
 

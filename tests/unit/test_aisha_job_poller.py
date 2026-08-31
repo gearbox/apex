@@ -44,6 +44,7 @@ def _make_poller(**kwargs: object) -> AishaJobPoller:
         billing_service=AsyncMock(),
         r2_storage=None,
         config=_make_config(**kwargs),
+        redis_client_factory=MagicMock(),
     )
 
 
@@ -87,6 +88,7 @@ class TestConstructor:
                 billing_service=AsyncMock(),
                 r2_storage=None,
                 config=_make_config(tunnel_allowed_suffix=""),
+                redis_client_factory=MagicMock(),
             )
 
     def test_raises_on_whitespace_only_suffix(self) -> None:
@@ -98,6 +100,7 @@ class TestConstructor:
                 billing_service=AsyncMock(),
                 r2_storage=None,
                 config=_make_config(tunnel_allowed_suffix="   "),
+                redis_client_factory=MagicMock(),
             )
 
     def test_normalizes_suffix_without_leading_dot(self) -> None:

@@ -640,11 +640,18 @@ async def init_services(settings: Settings) -> JWTService:
     )
     logger.info("provisioning_callback_service.initialized")
 
-    # Initialize Redis (required for pub/sub and rate limiting). Two pools —
+    # Initialize Redis (required for pub/sub and rate limiting). Three pools —
     # see src/core/redis.py module docstring: the shared pool serves
-    # short-lived operations (token revocation, leases, SSE tickets), the
-    # SSE pool serves EventBus.subscribe's per-client long-lived connections.
-    from src.core.redis import get_redis_client, init_redis_pool, init_sse_redis_pool
+    # short-lived auth-path operations (token revocation, SSE tickets), the
+    # operational pool serves health checks and leases, and the SSE pool
+    # serves EventBus.subscribe's per-client long-lived connections.
+    from src.core.redis import (
+        get_operational_redis_client,
+        get_redis_client,
+        init_operational_redis_pool,
+        init_redis_pool,
+        init_sse_redis_pool,
+    )
 
     if settings.redis_url:
         init_redis_pool(
@@ -660,6 +667,13 @@ async def init_services(settings: Settings) -> JWTService:
             socket_timeout=settings.redis_socket_timeout_seconds,
             health_check_interval=settings.redis_health_check_interval_seconds,
             max_connections=settings.redis_sse_max_connections,
+        )
+        init_operational_redis_pool(
+            settings.redis_url,
+            socket_connect_timeout=settings.redis_operational_socket_connect_timeout_seconds,
+            socket_timeout=settings.redis_operational_socket_timeout_seconds,
+            health_check_interval=settings.redis_health_check_interval_seconds,
+            max_connections=settings.redis_operational_max_connections,
         )
         _services.sse_ticket_service = SSETicketService(ttl_seconds=settings.sse_ticket_ttl_seconds)
         logger.info("sse_ticket_service.initialized")
@@ -773,6 +787,7 @@ async def init_services(settings: Settings) -> JWTService:
                 sync_service=_services.payment_currency_sync_service,
                 interval=settings.payment_currency_sync_interval_seconds,
                 redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
             )
             await _services.payment_currency_sync_worker.start()
             logger.info("payment_currency_sync_worker.started")
@@ -791,6 +806,7 @@ async def init_services(settings: Settings) -> JWTService:
         _services.content_retention_worker = ContentRetentionWorker(
             service=retention_service,
             interval=settings.content_cleanup_interval_seconds,
+            redis_client_factory=get_operational_redis_client,
         )
         await _services.content_retention_worker.start()
         logger.info(
@@ -808,6 +824,7 @@ async def init_services(settings: Settings) -> JWTService:
             r2_storage=_services.r2_storage,
             settings=settings,
             redis_enabled=redis_enabled,
+            redis_client_factory=get_operational_redis_client,
         )
         await _services.frame_extraction_worker.start()
         logger.info("frame_extraction_worker.started")
@@ -847,6 +864,7 @@ async def init_services(settings: Settings) -> JWTService:
                 event_bus=_services.event_bus,
                 ops_event_bus=_services.ops_event_bus,
                 redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
             )
             await _services.grok_video_worker.start()
             logger.info("grok.video_worker_in_process_started")
@@ -920,6 +938,7 @@ async def init_services(settings: Settings) -> JWTService:
             config=poller_config,
             ops_event_bus=_services.ops_event_bus,
             redis_enabled=redis_enabled,
+            redis_client_factory=get_operational_redis_client,
         )
         await _services.aisha_job_poller.start()
         logger.info("aisha_job_poller.started")
@@ -1004,6 +1023,7 @@ async def init_services(settings: Settings) -> JWTService:
                 job_sweep_service=job_sweep_service,
                 ops_event_bus=_services.ops_event_bus,
                 redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
             )
             await _services.gpu_provisioning_worker.start()
 
@@ -1013,6 +1033,7 @@ async def init_services(settings: Settings) -> JWTService:
                 vastai_client=vastai_client,
                 settings=settings,
                 redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
             )
             await _services.orphaned_tunnel_cleanup_worker.start()
 
@@ -1025,6 +1046,7 @@ async def init_services(settings: Settings) -> JWTService:
                 gpu_session_service=_services.gpu_session_service,
                 settings=settings,
                 redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
             )
             await _services.billing_reconciler_worker.start()
 
@@ -1095,6 +1117,7 @@ async def init_services(settings: Settings) -> JWTService:
             db_manager=_services.db_manager,
             interval=settings.token_cleanup_interval_seconds,
             redis_enabled=redis_enabled,
+            redis_client_factory=get_operational_redis_client,
         )
         await _services.token_cleanup_worker.start()
         logger.info("token_cleanup_worker.started")
@@ -1153,6 +1176,7 @@ async def init_services(settings: Settings) -> JWTService:
                 session_factory=_services.db_manager.session_factory,
                 poll_timeout_seconds=settings.telegram_poll_timeout_seconds,
                 redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
             )
             await _services.telegram_link_poller.start()
             logger.info("telegram.link_poller.started")
@@ -1190,9 +1214,7 @@ async def init_services(settings: Settings) -> JWTService:
     health_registry = HealthCheckRegistry()
     health_registry.register(PostgresChecker(session_factory=_services.db_manager.session_factory))
     if settings.redis_url:
-        from src.core.redis import get_redis_client
-
-        health_registry.register(RedisChecker(redis=get_redis_client()))
+        health_registry.register(RedisChecker(redis=get_operational_redis_client()))
     if _services.r2_storage is not None:
         health_registry.register(R2Checker(r2_storage=_services.r2_storage))
     if _services.token_revocation_service is None:
@@ -1261,6 +1283,7 @@ async def init_services(settings: Settings) -> JWTService:
             redis_url=settings.redis_url,
             session_credit_guard=session_credit_guard,
             ops_event_bus=_services.ops_event_bus,
+            redis_client_factory=get_operational_redis_client,
         )
         await _services.health_snapshot_worker.start()
 
@@ -1268,6 +1291,7 @@ async def init_services(settings: Settings) -> JWTService:
             db_manager=_services.db_manager,
             retention_days=settings.health_snapshot_retention_days,
             redis_enabled=redis_enabled,
+            redis_client_factory=get_operational_redis_client,
         )
         await _services.health_snapshot_cleanup_worker.start()
 

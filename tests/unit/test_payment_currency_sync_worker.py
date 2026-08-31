@@ -33,6 +33,7 @@ def _make_worker(sync_service: AsyncMock, **kwargs: object) -> PaymentCurrencySy
         "db_manager": _db_manager(),
         "sync_service": sync_service,
         "interval": 10800,
+        "redis_client_factory": MagicMock(),
     } | kwargs
     return PaymentCurrencySyncWorker(**defaults)  # type: ignore[arg-type]
 

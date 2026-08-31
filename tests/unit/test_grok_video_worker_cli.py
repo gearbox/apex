@@ -34,6 +34,9 @@ def settings() -> MagicMock:
     s.redis_socket_timeout_seconds = 0.05
     s.redis_health_check_interval_seconds = 30.0
     s.redis_max_connections = 77
+    s.redis_operational_socket_connect_timeout_seconds = 0.5
+    s.redis_operational_socket_timeout_seconds = 0.75
+    s.redis_operational_max_connections = 20
     return s
 
 
@@ -198,6 +201,7 @@ class TestGrokVideoWorkerCLIRun:
             event_bus=ANY,
             ops_event_bus=ANY,
             redis_enabled=False,
+            redis_client_factory=ANY,
         )
 
     async def test_redis_pool_initialized_with_max_connections_from_settings(
@@ -205,8 +209,8 @@ class TestGrokVideoWorkerCLIRun:
     ) -> None:
         """The standalone worker must pass max_connections through, or it
         silently falls back to init_redis_pool's default of 50 and ignores
-        REDIS_MAX_CONNECTIONS entirely. No SSE pool is initialized here —
-        this process has no long-lived subscribers."""
+        REDIS_MAX_CONNECTIONS entirely. It also initializes the operational
+        pool for the worker lease; no SSE pool is needed in this process."""
         settings.redis_url = "redis://localhost:6379"
         mock_db_manager = AsyncMock()
         mock_r2_storage = AsyncMock()
@@ -222,6 +226,7 @@ class TestGrokVideoWorkerCLIRun:
             patch("src.workers.grok_video.GrokVideoWorker", return_value=mock_worker),
             patch("src.workers.grok_video.BillingService"),
             patch("src.core.redis.init_redis_pool") as mock_init_redis_pool,
+            patch("src.core.redis.init_operational_redis_pool") as mock_init_operational_pool,
             patch("src.core.redis.init_sse_redis_pool") as mock_init_sse_redis_pool,
             patch("src.core.redis.close_redis_pool", new_callable=AsyncMock),
         ):
@@ -241,3 +246,10 @@ class TestGrokVideoWorkerCLIRun:
             max_connections=settings.redis_max_connections,
         )
         mock_init_sse_redis_pool.assert_not_called()
+        mock_init_operational_pool.assert_called_once_with(
+            settings.redis_url,
+            socket_connect_timeout=settings.redis_operational_socket_connect_timeout_seconds,
+            socket_timeout=settings.redis_operational_socket_timeout_seconds,
+            health_check_interval=settings.redis_health_check_interval_seconds,
+            max_connections=settings.redis_operational_max_connections,
+        )

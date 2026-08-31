@@ -81,6 +81,7 @@ def _make_poller(r2: MagicMock | None = None) -> AishaJobPoller:
         billing_service=AsyncMock(),
         r2_storage=r2,
         config=_make_config(),
+        redis_client_factory=MagicMock(),
     )
 
 

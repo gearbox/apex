@@ -28,6 +28,7 @@ from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
+from src.core.redis import get_operational_redis_client
 from src.db import init_db
 
 logger = structlog.get_logger(__name__)
@@ -68,10 +69,10 @@ class GrokVideoWorkerCLI:
         )
         logger.info("grok_worker.db_initialized")
 
-        # Redis for the leader lease — lets this standalone process and any
-        # in-process worker share ownership safely (see GrokVideoWorker init).
+        # The shared pool remains necessary for EventBus/OpsEventBus publish;
+        # the operational pool is dedicated to this worker's leader lease.
         if self._settings.redis_url:
-            from src.core.redis import init_redis_pool
+            from src.core.redis import init_operational_redis_pool, init_redis_pool
 
             init_redis_pool(
                 self._settings.redis_url,
@@ -79,6 +80,13 @@ class GrokVideoWorkerCLI:
                 socket_timeout=self._settings.redis_socket_timeout_seconds,
                 health_check_interval=self._settings.redis_health_check_interval_seconds,
                 max_connections=self._settings.redis_max_connections,
+            )
+            init_operational_redis_pool(
+                self._settings.redis_url,
+                socket_connect_timeout=self._settings.redis_operational_socket_connect_timeout_seconds,
+                socket_timeout=self._settings.redis_operational_socket_timeout_seconds,
+                health_check_interval=self._settings.redis_health_check_interval_seconds,
+                max_connections=self._settings.redis_operational_max_connections,
             )
             logger.info("grok_worker.redis_initialized")
 
@@ -135,6 +143,7 @@ class GrokVideoWorkerCLI:
             event_bus=event_bus,
             ops_event_bus=ops_event_bus,
             redis_enabled=self._settings.redis_url is not None,
+            redis_client_factory=get_operational_redis_client,
         )
         await self._worker.start()
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -30,6 +30,7 @@ def _make_poller(sender: object) -> TelegramLinkPoller:
         session_factory=AsyncMock(),  # type: ignore[arg-type]
         poll_timeout_seconds=25,
         redis_enabled=False,
+        redis_client_factory=MagicMock(),
     )
 
 

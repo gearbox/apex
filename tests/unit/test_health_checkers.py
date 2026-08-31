@@ -1,6 +1,6 @@
 """Tests for infrastructure health checkers."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.api.services.health.checkers.infrastructure import (
     PostgresChecker,
@@ -20,8 +20,13 @@ class TestPostgresChecker:
         mock_factory = MagicMock(return_value=mock_session)
 
         checker = PostgresChecker(session_factory=mock_factory)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001, 1.002],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.healthy
+        assert result.latency_ms > 0
 
     async def test_unhealthy_on_exception(self) -> None:
         mock_session = AsyncMock()
@@ -32,8 +37,13 @@ class TestPostgresChecker:
         mock_factory = MagicMock(return_value=mock_session)
 
         checker = PostgresChecker(session_factory=mock_factory)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001, 1.002],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.unhealthy
+        assert result.latency_ms > 0
         assert "refused" in result.message
 
 
@@ -42,22 +52,37 @@ class TestRedisChecker:
         mock_redis = AsyncMock()
         mock_redis.ping = AsyncMock(return_value=True)
         checker = RedisChecker(redis=mock_redis)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.healthy
+        assert result.latency_ms > 0
 
     async def test_healthy_pong(self) -> None:
         mock_redis = AsyncMock()
         mock_redis.ping = AsyncMock(return_value=b"PONG")
         checker = RedisChecker(redis=mock_redis)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.healthy
+        assert result.latency_ms > 0
 
     async def test_unhealthy_on_exception(self) -> None:
         mock_redis = AsyncMock()
         mock_redis.ping = AsyncMock(side_effect=ConnectionError("no redis"))
         checker = RedisChecker(redis=mock_redis)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.unhealthy
+        assert result.latency_ms > 0
 
 
 class TestR2Checker:
@@ -65,22 +90,37 @@ class TestR2Checker:
         mock_r2 = AsyncMock()
         mock_r2.health_check = AsyncMock(return_value=True)
         checker = R2Checker(r2_storage=mock_r2)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.healthy
+        assert result.latency_ms > 0
 
     async def test_unhealthy_when_health_check_false(self) -> None:
         mock_r2 = AsyncMock()
         mock_r2.health_check = AsyncMock(return_value=False)
         checker = R2Checker(r2_storage=mock_r2)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.unhealthy
+        assert result.latency_ms > 0
 
     async def test_unhealthy_on_exception(self) -> None:
         mock_r2 = AsyncMock()
         mock_r2.health_check = AsyncMock(side_effect=Exception("access denied"))
         checker = R2Checker(r2_storage=mock_r2)
-        result = await checker.check()
+        with patch(
+            "src.api.services.health.checkers.infrastructure.time.perf_counter",
+            side_effect=[1.0, 1.001],
+        ):
+            result = await checker.check()
         assert result.status == ComponentStatus.unhealthy
+        assert result.latency_ms > 0
 
     def test_does_not_gate_readiness(self) -> None:
         """issue #142 G2 — a slow HeadBucket must never fail GET /health/ready."""

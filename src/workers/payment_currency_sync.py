@@ -15,6 +15,10 @@ from src.core.product_registry import PRODUCT_REGISTRY
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
+
     from src.api.services.payment_currency_sync import PaymentCurrencySyncService
     from src.db.session import DatabaseManager
 
@@ -31,12 +35,14 @@ class PaymentCurrencySyncWorker(PeriodicWorker):
         sync_service: PaymentCurrencySyncService,
         interval: int,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         super().__init__(
             name="payment_currency_sync",
             interval_seconds=interval,
             jitter_seconds=5.0,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._db_manager = db_manager
         self._sync_service = sync_service

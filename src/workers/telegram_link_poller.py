@@ -33,6 +33,7 @@ from src.workers.base import PeriodicWorker
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.telegram.sender import TelegramSender, TelegramUpdate
@@ -70,6 +71,7 @@ class TelegramLinkPoller(PeriodicWorker):
         session_factory: Callable[[], AsyncSession],
         poll_timeout_seconds: int,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         # interval_seconds is nominal — get_updates() itself long-polls for
         # up to poll_timeout_seconds, so each tick already blocks that long.
@@ -77,6 +79,7 @@ class TelegramLinkPoller(PeriodicWorker):
             name=_LEASE_KEY_NAME,
             interval_seconds=1.0,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._sender = sender
         self._session_factory = session_factory
