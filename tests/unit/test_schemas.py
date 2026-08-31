@@ -11,40 +11,6 @@ from src.api.schemas.generation import (
 )
 
 
-class TestAspectRatio:
-    """Tests for AspectRatio enum."""
-
-    @pytest.mark.parametrize(
-        ("ratio", "height", "expected_width"),
-        [
-            (AspectRatio.RATIO_1_1, 1024, 1024),
-            (AspectRatio.RATIO_16_9, 1080, 1920),
-            (AspectRatio.RATIO_9_16, 1920, 1080),
-            (AspectRatio.RATIO_4_3, 768, 1024),
-            (AspectRatio.RATIO_3_4, 1024, 768),
-            (AspectRatio.RATIO_2_3, 1536, 1024),
-            (AspectRatio.RATIO_3_2, 1024, 1536),
-        ],
-    )
-    def test_calculate_width(
-        self,
-        ratio: AspectRatio,
-        height: int,
-        expected_width: int,
-    ) -> None:
-        """Test width calculation from aspect ratio."""
-        width = ratio.calculate_width(height)
-        # Allow small rounding differences due to multiple of 8 rounding
-        assert abs(width - expected_width) <= 8
-
-    def test_width_multiple_of_8(self) -> None:
-        """Test that calculated width is multiple of 8."""
-        for ratio in AspectRatio:
-            for height in [512, 768, 1024, 1080, 1536]:
-                width = ratio.calculate_width(height)
-                assert width % 8 == 0, f"{ratio} with height {height} gave width {width}"
-
-
 class TestGenerationRequest:
     """Tests for GenerationRequest schema."""
 

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
@@ -51,19 +50,9 @@ _PRICING_RULES = [
         "provider": "aisha",
         "generation_type": "t2i",
         "model": "aisha-image-lite",
-        "token_cost": 6,
+        "token_cost": 1,
     },
 ]
-
-_generation_models_t = sa.table(
-    "generation_models",
-    sa.column("id", postgresql.UUID(as_uuid=True)),
-    sa.column("model_key", sa.String),
-    sa.column("provider", sa.String),
-    sa.column("name", sa.String),
-    sa.column("description", sa.Text),
-    sa.column("is_enabled", sa.Boolean),
-)
 
 
 def upgrade() -> None:
@@ -87,7 +76,24 @@ def upgrade() -> None:
             )
         )
 
-    op.bulk_insert(_generation_models_t, _GENERATION_MODELS)
+    for model in _GENERATION_MODELS:
+        op.execute(
+            sa.text("""
+                INSERT INTO generation_models
+                    (id, model_key, provider, name, description, is_enabled)
+                VALUES (
+                    :id, :model_key, :provider, :name, :description, :is_enabled
+                )
+                ON CONFLICT DO NOTHING
+            """).bindparams(
+                id=UUID(str(model["id"])),
+                model_key=model["model_key"],
+                provider=model["provider"],
+                name=model["name"],
+                description=model["description"],
+                is_enabled=model["is_enabled"],
+            )
+        )
 
 
 def downgrade() -> None:

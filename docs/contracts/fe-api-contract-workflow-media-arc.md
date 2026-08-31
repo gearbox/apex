@@ -1,8 +1,8 @@
 # Frontend API contract — workflow-map & media-assets arc
 
-**Backend source:** `gearbox/apex@9bd09cc` (`feat/b1-workflow-node-map`, on top of merged
-`feat/source-media-assets`)
-**Status:** contract is stable; regenerate `gen:api` once B1 merges.
+**Backend source:** `gearbox/apex@7b79e4b` (B1 workflow-node-map, merged as #160, on top of
+merged `feat/source-media-assets`)
+**Status:** B1 merged; contract is stable. Regenerate `gen:api` before the next frontend release.
 
 Two changes drive everything here:
 
@@ -245,10 +245,24 @@ This is what makes Re-Generate correct:
 Still present, equal to the first available item's `media`. Use `source_media` instead; a single
 envelope cannot represent an ordered multi-reference job.
 
-### 4.3 `duration_ms` on `MediaObject`
+### 4.3 `duration_ms` — on the asset schemas, **not** on `MediaObject`
 
-Now populated for outputs where the provider reports it. `null` means unknown — including every
-image — and must not be rendered as zero.
+The only components exposing `duration_ms` are `LibraryAssetItem`
+(`GET /v1/library/assets`), `LibraryAssetDetail`, and `FramePreviewResult`.
+
+`MediaObject` does **not** carry it, so it is absent everywhere `MediaObject` is embedded:
+`LibraryGroupDetail.source_media[].media`, `input_media`, job outputs and frames media.
+
+Population:
+
+| Asset | `duration_ms` |
+|---|---|
+| Uploaded video | populated — ffprobe measurement taken at upload |
+| Uploaded image | null |
+| Generated output (any) | always null — the column exists and is read, but nothing writes it |
+
+Treat `null` as unknown. Never render it as zero, and do not use its presence to infer
+media type — `media_type` on `MediaObject` is the discriminator.
 
 ### 4.4 `media_type`
 
@@ -321,7 +335,8 @@ breaking change.
 
 ## 6. Migration checklist
 
-1. Regenerate `gen:api` after B1 merges; confirm the emitted types match §5 field for field.
+1. Regenerate `gen:api` before the next frontend release; confirm the emitted types match §5
+   field for field.
 2. Replace every `input_image_id` / `source_output_id` / `source_images` write with `source_media`.
    Never send both shapes.
 3. Drive the media picker from `inputs.source_media` — visibility from `!== null`, cardinality
@@ -334,14 +349,14 @@ breaking change.
 6. Stop inferring capability from `model_key`. Any `if (model === 'aisha-image')` guarding i2i,
    negative prompts or a batch selector is now wrong.
 7. Rework Re-Generate onto `source_media`, handling `available: false` explicitly.
-8. Treat `duration_ms: null` as unknown.
+8. Treat `duration_ms: null` as unknown wherever the asset or preview schema exposes it.
 
 ## 7. What has not changed
 
 - Authentication, idempotency headers, SSE job events, and job/output polling.
 - Grok request and response shapes, beyond gaining `inputs` on discovery.
 - `input_video_url` and the v2v flow.
-- Upload endpoints and `MediaObject`, apart from `duration_ms` now being populated.
+- Upload endpoints and the `MediaObject` shape.
 - Pricing responses. Input count still drives price where applicable; it is now
   `source_media.length`.
 
