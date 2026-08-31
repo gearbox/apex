@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import TYPE_CHECKING, Any
 
-from src.api.services.workflow.contract import PARAMETER_ACCESSORS
+from src.api.services.workflow.contract import PARAMETER_ACCESSORS, PARAMETER_HAS_REQUEST_SOURCE
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -64,9 +64,16 @@ def apply(
     for role, node in bound.map.nodes.items():
         inputs = graph[node.id]["inputs"]
         for parameter, input_name in node.inputs.items():
+            key = f"{role.value}.{parameter}"
             value = PARAMETER_ACCESSORS[(role, parameter)](request, filename_prefix)
-            if value is not None:
-                inputs[input_name] = value
+            if value is None:
+                if key in PARAMETER_HAS_REQUEST_SOURCE:
+                    raise WorkflowApplyError(
+                        f"{key} is declared by the bundle and has a request source, "
+                        f"but the request supplied no value"
+                    )
+                continue
+            inputs[input_name] = value
 
     for media_input in bound.map.media_inputs:
         graph[bound.map.nodes[media_input.target_role].id]["inputs"].pop(

@@ -61,6 +61,7 @@ class ModelType(StrEnum):
     """Available model types."""
 
     AISHA_IMAGE = "aisha-image"
+    AISHA_IMAGE_LITE = "aisha-image-lite"
     AISHA_VIDEO = "aisha-video"
 
     # Grok models
@@ -199,15 +200,6 @@ class AspectRatio(StrEnum):
     RATIO_16_9 = "16:9"
     RATIO_3_4 = "3:4"
     RATIO_4_3 = "4:3"
-
-    def calculate_width(self, height: int) -> int:
-        """Calculate width from height based on aspect ratio.
-
-        Returns width rounded to nearest multiple of 8 for latent space compatibility.
-        """
-        rw, rh = self.as_fraction()
-        width = int(height * rw / rh)
-        return (width + 4) // 8 * 8
 
     def as_fraction(self) -> tuple[int, int]:
         """Return (w, h) integer ratio components, e.g. RATIO_3_4 -> (3, 4)."""

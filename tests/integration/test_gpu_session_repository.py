@@ -258,6 +258,36 @@ async def test_unique_index_blocks_two_non_terminal_same_model(
         await db_session.flush()
 
 
+async def test_unique_index_allows_two_non_terminal_different_models(
+    make_gpu_session: GpuSessionFactory,
+    make_user: UserFactory,
+    db_session: AsyncSession,
+) -> None:
+    """Z-C7: one user can hold concurrent non-terminal sessions for two
+    different model_types (e.g. aisha-image + aisha-image-lite) — the
+    partial unique index is scoped per model_type, not per user."""
+    user = await make_user(email=f"multi-model-{uuid4().hex[:8]}@example.com")
+    await make_gpu_session(
+        user=user,
+        product_id="vex",
+        model_type="aisha-image",
+        status=GpuSessionStatus.active,
+    )
+
+    repo2 = GpuSessionRepository(db_session)
+    second = await repo2.create(
+        id=uuid4(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.active,
+        bundle_name="zit_cyberrealistic",
+        model_type="aisha-image-lite",
+    )
+    await db_session.flush()
+
+    assert second.model_type == "aisha-image-lite"
+
+
 async def test_unique_index_allows_terminal_then_new(
     make_gpu_session: GpuSessionFactory,
     make_user: UserFactory,

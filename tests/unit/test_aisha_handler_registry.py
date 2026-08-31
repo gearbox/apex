@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from src.api.schemas.unified_generation import UnifiedGenerationRequest
+from src.api.services.bundle_index import BundleNotFoundError
 from src.api.services.generation.aisha.handlers import UnsupportedMediaError
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
 from src.api.services.generation.base import ProviderSubmitResult
@@ -71,3 +72,18 @@ def test_unregistered_output_media_names_the_media_not_a_model() -> None:
 
     with pytest.raises(UnsupportedMediaError, match="video media"):
         provider.validate(_request(GenerationType.T2V))
+
+
+def test_missing_indexed_bundle_has_no_capabilities() -> None:
+    """An unindexed model stays disabled instead of making validation fail."""
+    bundle_index = MagicMock()
+    bundle_index.resolve_bundle.side_effect = BundleNotFoundError("not indexed")
+    provider = AishaGenerationProvider(
+        workflow_service=MagicMock(),
+        gpu_session_service=None,
+        bundle_index=bundle_index,
+        handlers={},
+    )
+
+    assert provider._capabilities_for(ModelType.AISHA_IMAGE_LITE) is None
+    bundle_index.resolve_bundle.assert_called_once_with(ModelType.AISHA_IMAGE_LITE.value)
