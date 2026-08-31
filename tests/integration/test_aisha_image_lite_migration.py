@@ -84,7 +84,7 @@ async def test_aisha_image_lite_seed_is_idempotent_and_reverses_cleanly(
                     migration._PRICE_ID_AISHA_IMG_LITE_T2I,
                     "aisha",
                     "t2i",
-                    6,
+                    1,
                 )
             ]
 
