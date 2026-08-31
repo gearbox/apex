@@ -1,0 +1,38 @@
+{
+    "workbench.colorCustomizations": {
+        "activityBar.activeBackground": "#28693c",
+        "activityBar.background": "#28693c",
+        "activityBar.foreground": "#e7e7e7",
+        "activityBar.inactiveForeground": "#e7e7e799",
+        "activityBarBadge.background": "#35235c",
+        "activityBarBadge.foreground": "#e7e7e7",
+        "commandCenter.border": "#e7e7e799",
+        "commandCenter.foreground": "#e7e7e7",
+        "sash.hoverBorder": "#28693c",
+        "statusBar.background": "#1a4427",
+        "statusBar.foreground": "#e7e7e7",
+        "statusBarItem.hoverBackground": "#28693c",
+        "statusBarItem.remoteBackground": "#7c5ec1",
+        "statusBarItem.remoteForeground": "#e7e7e7",
+        "titleBar.activeBackground": "#1a4427",
+        "titleBar.activeForeground": "#e7e7e7",
+        "titleBar.inactiveBackground": "#1a442799",
+        "titleBar.inactiveForeground": "#e7e7e799",
+        "activityBarTop.activeBackground": "#28693c",
+        "activityBarTop.background": "#28693c",
+        "activityBarTop.foreground": "#e7e7e7",
+        "activityBarTop.inactiveForeground": "#e7e7e799",
+        "statusBar.debuggingBackground": "#1a4427",
+        "statusBar.debuggingForeground": "#e7e7e7"
+    },
+    "peacock.color": "#1a4427",
+    "sonarlint.connectedMode.project": {
+        "connectionId": "gearbox",
+        "projectKey": "gearbox_apex"
+    },
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
+}
