@@ -25,6 +25,9 @@ from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.billing import BillingService
@@ -55,6 +58,7 @@ class GrokVideoWorker(PeriodicWorker):
         ops_event_bus: OpsEventBus | None = None,
         *,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         """Initialize the video worker.
 
@@ -72,6 +76,7 @@ class GrokVideoWorker(PeriodicWorker):
             name="grok_video_poller",
             interval_seconds=settings.grok_video_poll_interval,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._db_manager = db_manager
         self._job_service = job_service

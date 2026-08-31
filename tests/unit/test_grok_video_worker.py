@@ -31,6 +31,7 @@ def _make_worker(**overrides: object) -> GrokVideoWorker:
         "billing_service": AsyncMock(),
         "settings": _make_settings(),
         "event_bus": None,
+        "redis_client_factory": MagicMock(),
     } | overrides
     return GrokVideoWorker(**defaults)  # type: ignore[arg-type]
 

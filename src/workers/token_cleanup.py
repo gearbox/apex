@@ -15,6 +15,10 @@ from src.db.repositories.user import UserRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
+
     from src.db.session import DatabaseManager
 
 logger = structlog.get_logger(__name__)
@@ -24,7 +28,12 @@ class TokenCleanupWorker(PeriodicWorker):
     """Worker that periodically cleans up expired tokens."""
 
     def __init__(
-        self, db_manager: DatabaseManager, interval: int, *, redis_enabled: bool = False
+        self,
+        db_manager: DatabaseManager,
+        interval: int,
+        *,
+        redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         """Initialize the worker.
 
@@ -38,6 +47,7 @@ class TokenCleanupWorker(PeriodicWorker):
             interval_seconds=interval,
             jitter_seconds=5.0,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._db_manager = db_manager
 

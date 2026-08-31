@@ -21,6 +21,9 @@ from src.db.repositories.gpu_session import GpuSessionRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.gpu_session.service import GpuSessionService
@@ -44,6 +47,7 @@ class BillingReconcilerWorker(PeriodicWorker):
         gpu_session_service: GpuSessionService,
         settings: Settings,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         super().__init__(
             name="billing_reconciler",
@@ -51,6 +55,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             initial_delay_seconds=30.0,
             jitter_seconds=10.0,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._session_factory = session_factory
         self._service = gpu_session_service

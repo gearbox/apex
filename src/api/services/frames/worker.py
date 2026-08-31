@@ -31,8 +31,10 @@ from src.db.repositories.user_image import UserImageRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from uuid import UUID
 
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.storage.r2 import R2StorageService
@@ -69,11 +71,13 @@ class FrameExtractionWorker(PeriodicWorker):
         settings: Settings,
         *,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         super().__init__(
             name="frame_extraction",
             interval_seconds=settings.frame_extract_poll_interval_seconds,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._db_manager = db_manager
         self._storage = r2_storage

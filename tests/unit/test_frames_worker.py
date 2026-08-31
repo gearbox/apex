@@ -84,6 +84,7 @@ def _make_worker(
         db_manager=db_manager,
         r2_storage=r2_storage,
         settings=settings or _make_settings(),
+        redis_client_factory=MagicMock(),
     )
     return worker, db_manager, r2_storage
 

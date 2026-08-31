@@ -90,7 +90,9 @@ async def test_worker_runs_cleanup_on_interval() -> None:
 
     db_manager_mock.session.return_value = AsyncContextManagerMock()
 
-    worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
+    worker = TokenCleanupWorker(
+        db_manager=db_manager_mock, interval=3600, redis_client_factory=MagicMock()
+    )
 
     with (
         patch("src.workers.token_cleanup.UserRepository") as user_repo_cls,
@@ -138,7 +140,9 @@ async def test_worker_run_once_propagates_db_exception() -> None:
 
     db_manager_mock.session.return_value = AsyncContextManagerMock()
 
-    worker = TokenCleanupWorker(db_manager=db_manager_mock, interval=3600)
+    worker = TokenCleanupWorker(
+        db_manager=db_manager_mock, interval=3600, redis_client_factory=MagicMock()
+    )
 
     with patch("src.workers.token_cleanup.UserRepository") as user_repo_cls:
         user_repo_mock = AsyncMock()

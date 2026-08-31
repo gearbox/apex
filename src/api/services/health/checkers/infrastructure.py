@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import structlog
@@ -31,21 +32,26 @@ class PostgresChecker:
         self._session_factory = session_factory
 
     async def check(self) -> ComponentHealth:
+        # This fallback covers a failure while entering the session context.
+        # On the normal path, reset the timer immediately before the query so
+        # the persisted latency represents only the database round trip.
+        start = time.perf_counter()
         try:
             async with self._session_factory() as session:
+                start = time.perf_counter()
                 await session.execute(text("SELECT 1"))
             return ComponentHealth(
                 name=self.name,
                 category=self.category,
                 status=ComponentStatus.healthy,
-                latency_ms=0.0,
+                latency_ms=(time.perf_counter() - start) * 1000,
             )
         except Exception as exc:
             return ComponentHealth(
                 name=self.name,
                 category=self.category,
                 status=ComponentStatus.unhealthy,
-                latency_ms=0.0,
+                latency_ms=(time.perf_counter() - start) * 1000,
                 message=str(exc),
             )
 
@@ -62,6 +68,7 @@ class RedisChecker:
         self._redis = redis
 
     async def check(self) -> ComponentHealth:
+        start = time.perf_counter()
         try:
             result = await self._redis.ping()
             if result:
@@ -69,13 +76,13 @@ class RedisChecker:
                     name=self.name,
                     category=self.category,
                     status=ComponentStatus.healthy,
-                    latency_ms=0.0,
+                    latency_ms=(time.perf_counter() - start) * 1000,
                 )
             return ComponentHealth(
                 name=self.name,
                 category=self.category,
                 status=ComponentStatus.unhealthy,
-                latency_ms=0.0,
+                latency_ms=(time.perf_counter() - start) * 1000,
                 message=f"unexpected PING response: {result!r}",
             )
         except Exception as exc:
@@ -83,7 +90,7 @@ class RedisChecker:
                 name=self.name,
                 category=self.category,
                 status=ComponentStatus.unhealthy,
-                latency_ms=0.0,
+                latency_ms=(time.perf_counter() - start) * 1000,
                 message=str(exc),
             )
 
@@ -106,6 +113,7 @@ class R2Checker:
         self._r2_storage = r2_storage
 
     async def check(self) -> ComponentHealth:
+        start = time.perf_counter()
         try:
             ok = await self._r2_storage.health_check()
             if ok:
@@ -113,13 +121,13 @@ class R2Checker:
                     name=self.name,
                     category=self.category,
                     status=ComponentStatus.healthy,
-                    latency_ms=0.0,
+                    latency_ms=(time.perf_counter() - start) * 1000,
                 )
             return ComponentHealth(
                 name=self.name,
                 category=self.category,
                 status=ComponentStatus.unhealthy,
-                latency_ms=0.0,
+                latency_ms=(time.perf_counter() - start) * 1000,
                 message="HeadBucket check failed",
             )
         except Exception as exc:
@@ -127,6 +135,6 @@ class R2Checker:
                 name=self.name,
                 category=self.category,
                 status=ComponentStatus.unhealthy,
-                latency_ms=0.0,
+                latency_ms=(time.perf_counter() - start) * 1000,
                 message=str(exc),
             )

@@ -20,13 +20,17 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 from redis.exceptions import RedisError
 
 from src.core.config import get_settings
-from src.core.redis import get_redis_client
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
 
 logger = structlog.get_logger(__name__)
 
@@ -80,10 +84,18 @@ class LeaderLease:
     - is deliberately unnamespaced for the same reason.
     """
 
-    def __init__(self, *, key: str, ttl_seconds: int, redis_enabled: bool) -> None:
+    def __init__(
+        self,
+        *,
+        key: str,
+        ttl_seconds: int,
+        redis_enabled: bool,
+        client_factory: Callable[[], Redis],
+    ) -> None:
         self._key = key
         self._ttl_seconds = ttl_seconds
         self._enabled = redis_enabled
+        self._client_factory = client_factory
         self._token = secrets.token_hex(16)
         self._held = False
         self._last_renew_at: float | None = None
@@ -101,7 +113,8 @@ class LeaderLease:
             return True
 
         try:
-            client = get_redis_client()
+            client = self._client_factory()
+            started = time.perf_counter()
             acquired = await client.set(
                 self._key,
                 self._token,
@@ -112,8 +125,14 @@ class LeaderLease:
                 self._held = True
                 self._last_renew_at = time.monotonic()
                 self._consecutive_grace_misses = 0
+                logger.debug(
+                    "worker.lease.renewed",
+                    key=self._key,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
                 return True
 
+            started = time.perf_counter()
             renewed = await client.eval(
                 _RENEW_LEASE_SCRIPT,
                 1,
@@ -125,6 +144,11 @@ class LeaderLease:
             if self._held:
                 self._last_renew_at = time.monotonic()
                 self._consecutive_grace_misses = 0
+                logger.debug(
+                    "worker.lease.renewed",
+                    key=self._key,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
         # Narrow: only genuine Redis/transport failures forfeit leadership.
         # A TypeError or a Lua bug is a programming error and must surface as
         # a tick failure, not be silently downgraded to "not leader".
@@ -170,7 +194,7 @@ class LeaderLease:
             return
 
         try:
-            client = get_redis_client()
+            client = self._client_factory()
             await client.eval(_RELEASE_LEASE_SCRIPT, 1, self._key, self._token)
         except (RedisError, OSError) as exc:
             logger.warning(
@@ -201,6 +225,7 @@ class PeriodicWorker(ABC):
         drain_timeout_seconds: float = 30.0,
         use_leader_lease: bool = True,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         self._name = name
         self._interval = interval_seconds
@@ -225,6 +250,7 @@ class PeriodicWorker(ABC):
             key=lease_key(name),
             ttl_seconds=lease_ttl_seconds,
             redis_enabled=redis_enabled and use_leader_lease,
+            client_factory=redis_client_factory,
         )
 
     @property

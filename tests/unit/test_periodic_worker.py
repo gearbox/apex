@@ -41,6 +41,7 @@ def _worker_kwargs(**overrides: object) -> dict[str, object]:
         "name": "test_worker",
         "interval_seconds": 0.01,
         "use_leader_lease": False,
+        "redis_client_factory": MagicMock(),
     } | overrides
 
 

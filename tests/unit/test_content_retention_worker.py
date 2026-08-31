@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -14,6 +14,7 @@ def _make_worker(**kwargs: object) -> ContentRetentionWorker:
     defaults: dict[str, object] = {
         "service": AsyncMock(),
         "interval": 900,
+        "redis_client_factory": MagicMock(),
     } | kwargs
     return ContentRetentionWorker(**defaults)  # type: ignore[arg-type]
 

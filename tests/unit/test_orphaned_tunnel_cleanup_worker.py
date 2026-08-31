@@ -111,12 +111,14 @@ def _make_worker(**overrides: Any) -> tuple[OrphanedTunnelCleanupWorker, dict[st
         "cf_client": AsyncMock(spec=CloudflareTunnelClient),
         "vastai_client": AsyncMock(spec=VastAIClient),
         "settings": _make_settings(),
+        "redis_client_factory": MagicMock(),
     } | overrides
     worker = OrphanedTunnelCleanupWorker(
         session_factory=mocks["session_factory"],
         cf_client=mocks["cf_client"],
         vastai_client=mocks["vastai_client"],
         settings=mocks["settings"],
+        redis_client_factory=mocks["redis_client_factory"],
     )
     return worker, mocks
 

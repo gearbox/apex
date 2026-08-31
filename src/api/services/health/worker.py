@@ -22,6 +22,10 @@ from src.db.repositories.health import HealthSnapshotRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
+
     from src.api.services.gpu_session.credit_guard import SessionCreditGuard
     from src.api.services.health.service import HealthService
     from src.api.services.ops_event_bus import OpsEventBus
@@ -40,6 +44,7 @@ class HealthSnapshotWorker(PeriodicWorker):
         health_service: HealthService,
         db_manager: DatabaseManager,
         interval_seconds: int,
+        redis_client_factory: Callable[[], Redis],
         redis_url: str | None = None,
         session_credit_guard: SessionCreditGuard | None = None,
         ops_event_bus: OpsEventBus | None = None,
@@ -49,6 +54,7 @@ class HealthSnapshotWorker(PeriodicWorker):
             interval_seconds=interval_seconds,
             initial_delay_seconds=5.0,
             redis_enabled=redis_url is not None,
+            redis_client_factory=redis_client_factory,
         )
         self._health_service = health_service
         self._db_manager = db_manager
@@ -191,6 +197,7 @@ class HealthSnapshotCleanupWorker(PeriodicWorker):
         retention_days: int,
         *,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         super().__init__(
             name="health_snapshot_cleanup",
@@ -198,6 +205,7 @@ class HealthSnapshotCleanupWorker(PeriodicWorker):
             initial_delay_seconds=60.0,
             jitter_seconds=300.0,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._db_manager = db_manager
         self._retention_days = retention_days

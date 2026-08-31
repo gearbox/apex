@@ -37,6 +37,9 @@ from ._events import publish_status_event
 from ._provisioning import make_onstart_cmd, provision_vastai_instance
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.api.services.billing import BillingService
@@ -147,12 +150,14 @@ class GpuProvisioningWorker(PeriodicWorker):
         job_sweep_service: JobSweepService | None = None,
         ops_event_bus: OpsEventBus | None = None,
         redis_enabled: bool = False,
+        redis_client_factory: Callable[[], Redis],
     ) -> None:
         super().__init__(
             name="gpu_provisioning",
             interval_seconds=settings.gpu_provision_poll_interval_seconds,
             jitter_seconds=2.0,
             redis_enabled=redis_enabled,
+            redis_client_factory=redis_client_factory,
         )
         self._session_factory = session_factory
         self._vastai = vastai_client

@@ -785,10 +785,37 @@ class Settings(BaseSettings):
         le=1000,
         description=(
             "Upper bound on the shared Redis pool, which serves only short-lived operations "
-            "(token revocation, worker leases, SSE tickets, currency cache). 50 is ample "
+            "(token revocation, SSE tickets, currency cache). 50 is ample "
             "because nothing holds a connection across requests - SSE subscriptions use "
             "REDIS_SSE_MAX_CONNECTIONS instead. Effective total per host is this value times "
             "ASGI_WORKERS; check against Redis maxclients before raising."
+        ),
+    )
+    redis_operational_socket_connect_timeout_seconds: float = Field(
+        default=0.5,
+        gt=0,
+        le=5.0,
+        description=(
+            "Redis TCP connect timeout for health checks and worker leader leases. "
+            "This is a placeholder pending real latency_ms p99 data."
+        ),
+    )
+    redis_operational_socket_timeout_seconds: float = Field(
+        default=0.75,
+        gt=0,
+        le=5.0,
+        description=(
+            "Redis read/write timeout for health checks and worker leader leases. "
+            "This is a placeholder pending real latency_ms p99 data."
+        ),
+    )
+    redis_operational_max_connections: int = Field(
+        default=20,
+        gt=0,
+        le=1000,
+        description=(
+            "Upper bound on the Redis pool dedicated to health checks and worker leader "
+            "leases. This is a placeholder pending real latency_ms p99 data."
         ),
     )
     redis_sse_max_connections: int = Field(

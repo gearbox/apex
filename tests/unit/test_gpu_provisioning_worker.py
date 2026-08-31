@@ -158,6 +158,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "billing_service": None,
         "event_bus": None,
         "job_sweep_service": None,
+        "redis_client_factory": MagicMock(),
     } | overrides
     worker = GpuProvisioningWorker(
         session_factory=mocks["session_factory"],
@@ -170,6 +171,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
+        redis_client_factory=mocks["redis_client_factory"],
     )
     return worker, mocks
 

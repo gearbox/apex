@@ -8,6 +8,10 @@ from src.core.product_registry import PRODUCT_REGISTRY
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from redis.asyncio import Redis
+
     from src.api.services.content_retention import ContentRetentionService
 
 
@@ -21,12 +25,19 @@ class ContentRetentionWorker(PeriodicWorker):
     concern worth avoiding.
     """
 
-    def __init__(self, *, service: ContentRetentionService, interval: int) -> None:
+    def __init__(
+        self,
+        *,
+        service: ContentRetentionService,
+        interval: int,
+        redis_client_factory: Callable[[], Redis],
+    ) -> None:
         super().__init__(
             name="content_retention",
             interval_seconds=interval,
             jitter_seconds=5.0,
             use_leader_lease=False,
+            redis_client_factory=redis_client_factory,
         )
         self._service = service
 

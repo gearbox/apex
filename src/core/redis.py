@@ -6,20 +6,22 @@ pub/sub channels are deliberately unnamespaced, so pointing two environments
 at one Redis would cross-deliver SSE broadcasts and ops events and let one
 environment's workers claim the other's leases. Do not consolidate.
 
-Two pools, deliberately. The default pool serves short-lived operations -
-token revocation on every authenticated request, worker lease renewals, SSE
-ticket lookups - and is tuned for fail-fast (50ms socket timeout). The SSE
-pool serves subscribers whose connection count scales with the number of
-connected clients - EventBus.subscribe and health.stream._redis_stream -
-each of which checks out one connection per connected client and holds it
-for the life of the stream.
+Three pools, deliberately. The default pool serves short-lived auth-path
+operations - token revocation on every authenticated request and SSE ticket
+lookups - and is tuned for fail-fast (50ms socket timeout). The operational
+pool serves health checks and worker leader-lease renewal, whose availability
+semantics require a moderate timeout and one retry instead. The SSE pool
+serves subscribers whose connection count scales with the number of connected
+clients - EventBus.subscribe and health.stream._redis_stream - each of which
+checks out one connection per connected client and holds it for the life of
+the stream.
 
 They are separate because redis-py raises ConnectionError on pool exhaustion
 rather than blocking, and ConnectionError is a RedisError: a shared pool
 exhausted by SSE clients would push TokenRevocationService into its fail-open
-branch, silently accepting revoked JWTs, and push LeaderLease into its
-fail-closed branch, stalling every background worker. Long-lived subscribers
-must never be able to starve the auth path.
+branch, silently accepting revoked JWTs. The operational pool keeps
+LeaderLease's fail-closed behavior independent of the deliberately fail-fast
+auth pool. Long-lived subscribers must never be able to starve the auth path.
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ _pool: aioredis.ConnectionPool | None = None
 _pool_url: str | None = None
 _sse_pool: aioredis.ConnectionPool | None = None
 _sse_pool_url: str | None = None
+_operational_pool: aioredis.ConnectionPool | None = None
+_operational_pool_url: str | None = None
 
 
 def _redacted_url(redis_url: str) -> str:
@@ -129,10 +133,80 @@ def get_redis_client() -> aioredis.Redis:
     Never hold this client across an `await` boundary that can span more
     than one request — long-lived consumers (SSE) must use
     `get_sse_redis_client()` instead, or they can exhaust this pool and push
-    TokenRevocationService/LeaderLease into their failure postures. See the
-    module docstring.
+    TokenRevocationService into its failure posture. Health checks and leader
+    leases must use `get_operational_redis_client()` instead. See the module
+    docstring.
     """
     return aioredis.Redis(connection_pool=get_redis_pool())
+
+
+def init_operational_redis_pool(
+    redis_url: str,
+    *,
+    socket_connect_timeout: float = 0.5,
+    socket_timeout: float = 0.75,
+    health_check_interval: float = 30.0,
+    max_connections: int = 20,
+) -> aioredis.ConnectionPool:
+    """Create and store the global operational Redis connection pool.
+
+    This pool serves health checks and worker leader-lease renewal. It is
+    intentionally separate from `init_redis_pool`: the shared auth-hot-path
+    pool must fail open quickly on its 50ms timeout, whereas operational work
+    can tolerate a moderate timeout and redis-py's retry on a transient
+    timeout. The defaults are placeholders until persisted health-check
+    `latency_ms` data provides real p99 measurements.
+
+    Same idempotence contract as `init_redis_pool`: a repeat call with the
+    same URL is a no-op; a different URL raises.
+
+    Raises:
+        RuntimeError: If an operational pool already exists for a different
+            URL.
+    """
+    global _operational_pool, _operational_pool_url
+    if _operational_pool is not None:
+        if _operational_pool_url == redis_url:
+            logger.debug("redis.operational_pool_already_initialized", url=_redacted_url(redis_url))
+            return _operational_pool
+        raise RuntimeError(
+            "Operational Redis pool already initialized with a different URL; "
+            "call close_redis_pool() first."
+        )
+
+    _operational_pool = aioredis.ConnectionPool.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_connect_timeout=socket_connect_timeout,
+        socket_timeout=socket_timeout,
+        retry_on_timeout=True,
+        health_check_interval=health_check_interval,
+        max_connections=max_connections,
+    )
+    _operational_pool_url = redis_url
+    logger.info(
+        "redis.operational_pool_initialized",
+        url=_redacted_url(redis_url),
+        socket_connect_timeout=socket_connect_timeout,
+        socket_timeout=socket_timeout,
+        health_check_interval=health_check_interval,
+        max_connections=max_connections,
+    )
+    return _operational_pool
+
+
+def get_operational_redis_pool() -> aioredis.ConnectionPool:
+    """Get the initialized operational pool. Raises RuntimeError if not initialized."""
+    if _operational_pool is None:
+        raise RuntimeError(
+            "Operational Redis pool not initialized. Call init_operational_redis_pool() first."
+        )
+    return _operational_pool
+
+
+def get_operational_redis_client() -> aioredis.Redis:
+    """Get a Redis client for health checks and leader-lease operations."""
+    return aioredis.Redis(connection_pool=get_operational_redis_pool())
 
 
 def init_sse_redis_pool(
@@ -214,13 +288,18 @@ def get_sse_redis_client() -> aioredis.Redis:
 
 
 async def close_redis_pool() -> None:
-    """Close both the shared and SSE global pools."""
-    global _pool, _pool_url, _sse_pool, _sse_pool_url
+    """Close the shared, operational, and SSE global pools."""
+    global _pool, _pool_url, _operational_pool, _operational_pool_url, _sse_pool, _sse_pool_url
     if _pool is not None:
         await _pool.aclose()
         _pool = None
         _pool_url = None
         logger.info("redis.pool_closed")
+    if _operational_pool is not None:
+        await _operational_pool.aclose()
+        _operational_pool = None
+        _operational_pool_url = None
+        logger.info("redis.operational_pool_closed")
     if _sse_pool is not None:
         await _sse_pool.aclose()
         _sse_pool = None

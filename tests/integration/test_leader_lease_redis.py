@@ -81,7 +81,7 @@ async def unreachable_client() -> AsyncGenerator[aioredis.Redis]:
 
 async def _acquire_via(lease: LeaderLease, client: aioredis.Redis) -> bool:
     """Drive one acquire_or_renew() call bound to a specific Redis client."""
-    with patch("src.workers.base.get_redis_client", return_value=client):
+    with patch.object(lease, "_client_factory", return_value=client):
         return await lease.acquire_or_renew()
 
 
@@ -90,8 +90,12 @@ class TestLeaderLeaseAgainstRealRedis:
         self, redis_clients: tuple[aioredis.Redis, aioredis.Redis]
     ) -> None:
         client_a, client_b = redis_clients
-        lease_a = LeaderLease(key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True)
-        lease_b = LeaderLease(key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True)
+        lease_a = LeaderLease(
+            key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True, client_factory=lambda: client_a
+        )
+        lease_b = LeaderLease(
+            key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True, client_factory=lambda: client_b
+        )
 
         acquired_a = await _acquire_via(lease_a, client_a)
         acquired_b = await _acquire_via(lease_b, client_b)
@@ -105,7 +109,9 @@ class TestLeaderLeaseAgainstRealRedis:
         self, redis_clients: tuple[aioredis.Redis, aioredis.Redis]
     ) -> None:
         client_a, _client_b = redis_clients
-        lease_a = LeaderLease(key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True)
+        lease_a = LeaderLease(
+            key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True, client_factory=lambda: client_a
+        )
 
         assert await _acquire_via(lease_a, client_a) is True
         # Second call hits the renew (compare-and-swap EXPIRE) path, not acquire.
@@ -116,8 +122,12 @@ class TestLeaderLeaseAgainstRealRedis:
         self, redis_clients: tuple[aioredis.Redis, aioredis.Redis]
     ) -> None:
         client_a, client_b = redis_clients
-        lease_a = LeaderLease(key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True)
-        lease_b = LeaderLease(key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True)
+        lease_a = LeaderLease(
+            key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True, client_factory=lambda: client_a
+        )
+        lease_b = LeaderLease(
+            key=_LEASE_KEY, ttl_seconds=10, redis_enabled=True, client_factory=lambda: client_b
+        )
 
         assert await _acquire_via(lease_a, client_a) is True
 
@@ -135,7 +145,9 @@ class TestLeaderLeaseAgainstRealRedis:
     ) -> None:
         client_a, _client_b = redis_clients
         # ttl=8, safety margin=5 -> ~3s grace window after the last real renewal.
-        lease_a = LeaderLease(key=_LEASE_KEY, ttl_seconds=8, redis_enabled=True)
+        lease_a = LeaderLease(
+            key=_LEASE_KEY, ttl_seconds=8, redis_enabled=True, client_factory=lambda: client_a
+        )
 
         assert await _acquire_via(lease_a, client_a) is True
 
@@ -151,7 +163,9 @@ class TestLeaderLeaseAgainstRealRedis:
         unreachable_client: aioredis.Redis,
     ) -> None:
         client_a, _client_b = redis_clients
-        lease_a = LeaderLease(key=_LEASE_KEY, ttl_seconds=8, redis_enabled=True)
+        lease_a = LeaderLease(
+            key=_LEASE_KEY, ttl_seconds=8, redis_enabled=True, client_factory=lambda: client_a
+        )
 
         assert await _acquire_via(lease_a, client_a) is True
 

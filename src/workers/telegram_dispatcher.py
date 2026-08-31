@@ -28,7 +28,7 @@ import structlog
 from src.api.schemas.ops_events import OpsEventEnvelope
 from src.api.services.telegram.mapping import map_ops_event
 from src.core.enums import PLATFORM_SCOPED_NOTIFICATION_CLASSES
-from src.core.redis import get_redis_client
+from src.core.redis import get_operational_redis_client, get_redis_client
 from src.db.repositories.admin_notifications import AdminNotificationRepository
 from src.workers.base import LeaderLease, lease_key
 
@@ -74,6 +74,7 @@ class TelegramDispatcher:
             key=lease_key("telegram_dispatcher"),
             ttl_seconds=_LEASE_TTL_SECONDS,
             redis_enabled=redis_enabled,
+            client_factory=get_operational_redis_client,
         )
         # (user_id, notification_class) -> throttle state. Correct only under
         # single-leader execution — see module docstring.
