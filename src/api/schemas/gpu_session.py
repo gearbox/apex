@@ -8,19 +8,76 @@ from uuid import UUID
 
 import msgspec
 
-from src.core.enums import ModelType
+from src.core.enums import ModelType, OperationKind, OperationStatus, ProvisioningPhase
 
 if TYPE_CHECKING:
     from src.db.models.gpu_session import GpuSession
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 
-class DownloadProgressBody(msgspec.Struct, kw_only=True):
-    """Download-progress snapshot sent by aisha during the 'downloading' phase."""
+class OperationBatchBody(msgspec.Struct, kw_only=True):
+    """Optional batch position in an operation envelope."""
 
-    bytes_done: int
-    bytes_total: int
-    files_done: int
-    files_total: int
+    batch_id: str
+    index: int
+    total: int
+
+
+class OperationTargetBody(msgspec.Struct, kw_only=True):
+    """Bundle target attached to an operation envelope."""
+
+    bundle: str
+    bundle_version: str | None
+    mode: str
+
+
+class OperationWorkBody(msgspec.Struct, kw_only=True):
+    """Completed and total work in a generic operation progress snapshot."""
+
+    completed: int | float
+    total: int | float
+    unit: str
+
+
+class OperationRateBody(msgspec.Struct, kw_only=True):
+    """Current operation throughput measurement."""
+
+    value: float
+    unit: str
+
+
+class OperationProgressBody(msgspec.Struct, kw_only=True):
+    """Generic progress object emitted by Aisha telemetry v2."""
+
+    work: OperationWorkBody
+    items: OperationWorkBody
+    rate: OperationRateBody | None
+    eta_seconds: float | None
+    eta_basis: str | None
+
+
+class OperationEventBody(msgspec.Struct, kw_only=True):
+    """Tolerant-reader schema for an Aisha telemetry v2 operation event."""
+
+    schema_version: int
+    event_id: str
+    session_id: UUID
+    operation_id: UUID
+    operation_kind: OperationKind
+    batch: OperationBatchBody | None
+    sequence: int
+    target: OperationTargetBody | None
+    status: OperationStatus
+    phase: ProvisioningPhase | None
+    started_at: datetime
+    ts: datetime
+    elapsed_seconds: float
+    phase_elapsed_seconds: float | None
+    progress: OperationProgressBody | None
+    plan: dict[str, Any] | None
+    summary: dict[str, Any] | None
+    message: str
+    error: str | None
 
 
 class StartSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
@@ -49,13 +106,21 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
     in_flight_job_count: int = 0
     """Number of QUEUED/RUNNING Aisha jobs on this session. Non-zero only for active
     sessions. Used by the frontend to gate the Pause button."""
+    provisioning_status: str | None = None
+    """Latest status of this session's current bootstrap operation."""
     provisioning_phase: str | None = None
-    """Latest provisioning phase reported via callback (e.g. 'downloading', 'ready')."""
+    """Latest phase of this session's current bootstrap operation."""
     provisioning_progress: dict[str, Any] | None = None
-    """Latest progress blob from node callback (download bytes, message, etc.)."""
+    """Latest generic progress object from this session's bootstrap operation."""
 
     @classmethod
-    def from_model(cls, m: GpuSession, *, in_flight_job_count: int = 0) -> GpuSessionResponse:
+    def from_model(
+        cls,
+        m: GpuSession,
+        *,
+        bootstrap_operation: GpuSessionOperation | None = None,
+        in_flight_job_count: int = 0,
+    ) -> GpuSessionResponse:
         return cls(
             id=m.id,
             user_id=m.user_id,
@@ -72,8 +137,9 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
             stopped_at=m.stopped_at,
             error_message=m.error_message,
             in_flight_job_count=in_flight_job_count,
-            provisioning_phase=m.provisioning_phase,
-            provisioning_progress=m.provisioning_progress,
+            provisioning_status=(str(bootstrap_operation.status) if bootstrap_operation else None),
+            provisioning_phase=(str(bootstrap_operation.phase) if bootstrap_operation else None),
+            provisioning_progress=bootstrap_operation.progress if bootstrap_operation else None,
         )
 
 

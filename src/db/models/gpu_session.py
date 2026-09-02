@@ -6,13 +6,12 @@ Covers the full provisioning, tunnel, pause/resume, and billing workflow:
 - Vast.ai details: offer ID, GPU name, hourly cost captured at creation
 - Provisioning tracking: attempt counter for retry logic
 - Pause/resume timestamps: for billing and UX
-- Phase 2 callbacks: hashed token auth + phase/progress persistence
+- Telemetry v2: hashed node auth plus a pointer to the current bootstrap operation
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -26,7 +25,6 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -185,21 +183,19 @@ class GpuSession(Base):
         nullable=True,
     )
 
-    # Phase 2 callbacks — hashed token auth + provisioning progress
+    # Node callback auth and bootstrap-operation projection
     callback_token_hash: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
         comment="SHA-256 hex digest of the bearer token sent by the node. Plaintext never stored.",
     )
-    provisioning_phase: Mapped[str | None] = mapped_column(
-        String(20),
+    bootstrap_operation_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
         nullable=True,
-        comment="Latest phase reported by the node via callback (e.g. 'downloading', 'ready', 'failed').",
-    )
-    provisioning_progress: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB,
-        nullable=True,
-        comment="Latest progress blob from node callback: {ts, message, download?, error?}.",
+        comment=(
+            "Current bootstrap operation id. No FK: the operation row already references this "
+            "session and a reverse FK would make creation circular."
+        ),
     )
     last_progress_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

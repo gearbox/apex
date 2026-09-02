@@ -17,6 +17,7 @@ from .billing import (
 from .frame_extraction import FrameExtractionJob
 from .generation_model import GenerationModel
 from .gpu_session import GpuSession
+from .gpu_session_operation import GpuSessionOperation
 from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
 from .library import LibraryAssetMetadata
@@ -45,6 +46,7 @@ __all__ = [
     "GenerationModel",
     "GenerationOutput",
     "GpuSession",
+    "GpuSessionOperation",
     "HealthSnapshot",
     "IdempotencyKey",
     "LibraryAssetMetadata",

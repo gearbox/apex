@@ -1,7 +1,7 @@
 """Internal GPU session endpoints — no user auth; node bearer auth validated per-request.
 
-URL contract (must match what aisha's ProvisioningReporter constructs):
-  POST /v1/internal/gpu-sessions/{session_id}/provisioning
+URL contract (must match Aisha telemetry v2):
+  POST /v1/internal/gpu-sessions/{session_id}/operations/{operation_id}/events
   Authorization: Bearer {ACS_APEX_CALLBACK_TOKEN}
 
 This controller has NO guards — authentication is performed in the handler
@@ -11,36 +11,27 @@ callback_token_hash on the session row (constant-time compare).
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
-import msgspec
 import structlog
 from litestar import Controller, Request, Response, post
 from litestar.params import Body
-from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
+    HTTP_404_NOT_FOUND,
+)
 
 from src.api.responses import error_response as _error
-from src.api.schemas.gpu_session import DownloadProgressBody
-from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
+from src.api.schemas.gpu_session import OperationEventBody
+from src.api.services.gpu_session.operation_event_service import OperationEventService
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
-
-
-class ProvisioningCallbackBody(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
-    """Mirrors the payload emitted by aisha's ProvisioningReporter."""
-
-    session_id: UUID
-    phase: str
-    message: str = ""
-    download: DownloadProgressBody | None = None
-    elapsed_seconds: int = 0
-    error: str | None = None
-    ts: datetime
 
 
 class InternalGpuSessionController(Controller):
@@ -50,34 +41,28 @@ class InternalGpuSessionController(Controller):
     tags: Sequence[str] | None = ("Internal",)
     # No guards: node bearer auth is validated in the handler.
 
-    @post("/{session_id:uuid}/provisioning", status_code=HTTP_200_OK)
-    async def provisioning_callback(
+    @post("/{session_id:uuid}/operations/{operation_id:uuid}/events", status_code=HTTP_200_OK)
+    async def operation_event(
         self,
         session_id: UUID,
+        operation_id: UUID,
         request: Request[Any, Any, Any],
-        data: Annotated[ProvisioningCallbackBody, Body()],
-        provisioning_callback_service: ProvisioningCallbackService,
+        data: Annotated[OperationEventBody, Body()],
+        operation_event_service: OperationEventService,
     ) -> Response[dict[str, Any]]:
-        """Receive a provisioning progress callback from a GPU node.
-
-        Returns 401 for missing/invalid bearer token.
-        Returns 400 if path and body session_id disagree.
-        Returns 200 for all other outcomes (status-gated, stale-ts, and successful writes)
-        so the node never retries on a benign race.
-        """
+        """Receive one v2 operation event from a GPU node."""
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             logger.warning(
-                "gpu_session.callback.rejected",
+                "gpu_session.operation.rejected",
                 session_id=str(session_id),
                 reason="missing_bearer",
             )
             return _error("unauthorized", "Missing Bearer token", HTTP_401_UNAUTHORIZED)
         bearer_token = auth_header[len("Bearer ") :]
-
         if not bearer_token:
             logger.warning(
-                "gpu_session.callback.rejected",
+                "gpu_session.operation.rejected",
                 session_id=str(session_id),
                 reason="empty_bearer",
             )
@@ -85,25 +70,35 @@ class InternalGpuSessionController(Controller):
 
         if data.session_id != session_id:
             logger.warning(
-                "gpu_session.callback.rejected",
+                "gpu_session.operation.rejected",
                 session_id=str(session_id),
                 reason="session_id_mismatch",
                 body_session_id=str(data.session_id),
             )
             return _error("bad_request", "session_id mismatch", HTTP_400_BAD_REQUEST)
+        if data.operation_id != operation_id:
+            logger.warning(
+                "gpu_session.operation.rejected",
+                session_id=str(session_id),
+                operation_id=str(operation_id),
+                reason="operation_id_mismatch",
+                body_operation_id=str(data.operation_id),
+            )
+            return _error("bad_request", "operation_id mismatch", HTTP_400_BAD_REQUEST)
+        if data.schema_version != 2:
+            return _error(
+                "bad_request",
+                "Unsupported schema_version; expected 2",
+                HTTP_400_BAD_REQUEST,
+            )
 
-        authorized, _status = await provisioning_callback_service.handle_callback(
+        authorized, status = await operation_event_service.handle_event(
             session_id=session_id,
             bearer_token=bearer_token,
-            phase=data.phase,
-            message=data.message,
-            download=data.download,
-            error=data.error,
-            elapsed_seconds=data.elapsed_seconds,
-            ts=data.ts,
+            event=data,
         )
-
         if not authorized:
             return _error("unauthorized", "Invalid callback token", HTTP_401_UNAUTHORIZED)
-
+        if status == HTTP_404_NOT_FOUND:
+            return _error("not_found", "Unknown operation", HTTP_404_NOT_FOUND)
         return Response(content={"ok": True}, status_code=HTTP_200_OK)

@@ -172,6 +172,9 @@ def _make_mock_session_factory() -> tuple[MagicMock, MagicMock]:
     mock_session = MagicMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
+    # GpuSessionOperationRepository creates the bootstrap operation during
+    # start_session and flushes it within the transaction.
+    mock_session.flush = AsyncMock(return_value=None)
 
     mock_begin = MagicMock()
     mock_begin.__aenter__ = AsyncMock(return_value=None)

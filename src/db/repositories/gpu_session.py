@@ -16,11 +16,6 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-PROVISIONING_STATUSES = frozenset(
-    {GpuSessionStatus.pending, GpuSessionStatus.provisioning, GpuSessionStatus.resuming}
-)
-_PROVISIONING_STATUSES = PROVISIONING_STATUSES  # backward-compat alias
-
 
 class GpuSessionRepository:
     """Repository for GPU session CRUD operations."""
@@ -454,23 +449,19 @@ class GpuSessionRepository:
         )
         await self._session.flush()
 
-    async def update_provisioning_progress(
-        self,
-        session_id: UUID,
-        *,
-        phase: str,
-        progress: dict[str, Any],
-        last_progress_at: datetime,
-    ) -> None:
-        """Write the latest provisioning callback data (latest-state-wins, no history)."""
+    async def update_bootstrap_operation_id(self, session_id: UUID, operation_id: UUID) -> None:
+        """Point a session at the bootstrap operation for its current node attempt."""
         await self._session.execute(
             update(GpuSession)
             .where(GpuSession.id == session_id)
-            .values(
-                provisioning_phase=phase,
-                provisioning_progress=progress,
-                last_progress_at=last_progress_at,
-            )
+            .values(bootstrap_operation_id=operation_id)
+        )
+        await self._session.flush()
+
+    async def touch_last_progress(self, session_id: UUID, at: datetime) -> None:
+        """Advance the bootstrap stall-detector clock after an accepted event."""
+        await self._session.execute(
+            update(GpuSession).where(GpuSession.id == session_id).values(last_progress_at=at)
         )
         await self._session.flush()
 
