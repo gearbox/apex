@@ -29,13 +29,16 @@ import structlog
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.core.enums import (
+    LIVE_DEPLOYMENT_STATUSES,
     STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
+    DeploymentStatus,
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
 )
 from src.core.uid import new_id
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.workers.base import PeriodicWorker
 
@@ -45,6 +48,7 @@ from ._provisioning import make_onstart_cmd, provision_vastai_instance
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from uuid import UUID
 
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -373,7 +377,10 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._retry_or_fail(session, reason=_REASON_NODE_REPORTED_FAILURE)
             return
 
-        reachable = await self._probe_comfyui(session)
+        readiness_marker_node_class = await self._get_primary_readiness_marker(session.id)
+        reachable = await self._probe_comfyui(
+            session, readiness_marker_node_class=readiness_marker_node_class
+        )
         if reachable:
             await self._mark_active(session)
         elif operation is not None and operation.status == OperationStatus.succeeded:
@@ -396,7 +403,10 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._mark_failed(session, "resume_timeout")
             return
 
-        reachable = await self._probe_comfyui(session)
+        readiness_marker_node_class = await self._get_primary_readiness_marker(session.id)
+        reachable = await self._probe_comfyui(
+            session, readiness_marker_node_class=readiness_marker_node_class
+        )
         if reachable:
             await self._mark_active(session)
 
@@ -442,7 +452,26 @@ class GpuProvisioningWorker(PeriodicWorker):
     # ComfyUI probe
     # ------------------------------------------------------------------
 
-    async def _probe_comfyui(self, session: GpuSession) -> bool:
+    async def _get_primary_readiness_marker(self, session_id: UUID) -> str | None:
+        """Fetch the primary deployment's readiness marker for one session.
+
+        readiness_marker_node_class moved off gpu_sessions onto
+        gpu_session_deployments in P2 (see GpuSessionDeployment's module
+        docstring). P2 always has exactly one deployment per session; a
+        missing row (should not happen — the deployment is created atomically
+        with the session) degrades to the same None fallback the marker
+        itself already supports.
+        """
+        async with self._session_factory() as db:
+            deployments = await GpuSessionDeploymentRepository(db).list_for_session(session_id)
+        for deployment in deployments:
+            if deployment.is_primary:
+                return deployment.readiness_marker_node_class
+        return deployments[0].readiness_marker_node_class if deployments else None
+
+    async def _probe_comfyui(
+        self, session: GpuSession, *, readiness_marker_node_class: str | None
+    ) -> bool:
         """Probe ComfyUI for readiness via the CF tunnel.
 
         Returns True only when all applicable conditions hold:
@@ -496,7 +525,7 @@ class GpuProvisioningWorker(PeriodicWorker):
             )
             return False
         checkpoint_check_applicable = len(expected) == 1
-        marker = session.readiness_marker_node_class
+        marker = readiness_marker_node_class
         marker_check_applicable = marker is not None
 
         if not checkpoint_check_applicable:
@@ -799,6 +828,12 @@ class GpuProvisioningWorker(PeriodicWorker):
                 target_mode="full",
             )
             await repo.update_bootstrap_operation_id(session.id, bootstrap_operation_id)
+            # Repoint the existing deployment at the new bootstrap operation — a
+            # retry re-provisions the same model onto a new node; it must not
+            # fork the deployment row (invariant: retry does not fork).
+            await GpuSessionDeploymentRepository(db).update_provision_operation_id(
+                session.id, bootstrap_operation_id
+            )
             await repo.update_instance(
                 session.id,
                 vastai_instance_id=instance_id,
@@ -829,7 +864,14 @@ class GpuProvisioningWorker(PeriodicWorker):
         log_event: str,
         **extra_fields: object,
     ) -> None:
-        """Re-load under SELECT FOR UPDATE, validate status, then write new_status."""
+        """Re-load under SELECT FOR UPDATE, validate status, then write new_status.
+
+        The other of the two D15 lifecycle-cascade chokepoints (the other is
+        GpuSessionService._set_status): a transition to 'active' flips the
+        primary deployment to 'active' and stamps activated_at; a transition to
+        'failed' flips every live deployment to 'failed' and stamps removed_at.
+        Both happen in the same transaction as the session status write.
+        """
         previous_status = str(session.status)
         # Pop error_message so it reaches the SSE event as well as the DB row.
         error_message = extra_fields.get("error_message")
@@ -851,6 +893,21 @@ class GpuProvisioningWorker(PeriodicWorker):
             previous_status = str(current.status)
             await repo.update_status(session.id, new_status, **extra_fields)
             current.status = new_status
+
+            if new_status == GpuSessionStatus.active:
+                await GpuSessionDeploymentRepository(db).mark_status(
+                    session.id,
+                    from_statuses=(DeploymentStatus.deploying,),
+                    to_status=DeploymentStatus.active,
+                    at=datetime.now(UTC),
+                )
+            elif new_status == GpuSessionStatus.failed:
+                await GpuSessionDeploymentRepository(db).mark_status(
+                    session.id,
+                    from_statuses=LIVE_DEPLOYMENT_STATUSES,
+                    to_status=DeploymentStatus.failed,
+                    at=datetime.now(UTC),
+                )
 
         logger.info(log_event, session_id=str(session.id), new_status=new_status.value)
         await self._publish_status_event(

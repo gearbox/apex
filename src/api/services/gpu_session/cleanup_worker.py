@@ -22,6 +22,7 @@ import structlog
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIRateLimitError
 from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
@@ -91,9 +92,11 @@ class OrphanedTunnelCleanupWorker(PeriodicWorker):
         self._settings = settings
 
     async def run_once(self) -> None:
-        """One cleanup sweep: orphaned tunnels AND orphaned Vast.ai instances."""
+        """One cleanup sweep: orphaned tunnels, orphaned Vast.ai instances, and
+        orphaned deployments (D16 self-heal)."""
         await self._sweep_tunnels()
         await self._sweep_instances()
+        await self._sweep_orphaned_deployments()
 
     async def _sweep_tunnels(self) -> None:
         """Find and delete CF tunnels not claimed by any live session."""
@@ -281,3 +284,23 @@ class OrphanedTunnelCleanupWorker(PeriodicWorker):
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             await repo.mark_instance_destroyed(session_id, datetime.now(UTC))
+
+    async def _sweep_orphaned_deployments(self) -> None:
+        """D16 self-heal: mark 'removed' any live deployment whose session is terminal.
+
+        Guards against a future third status-transition site that forgets the
+        D15 cascade — instead of silently leaking a uniqueness slot that blocks
+        the user from ever starting that model again, this produces a loud,
+        self-healing log line on the next sweep.
+        """
+        now = datetime.now(UTC)
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionDeploymentRepository(db)
+            orphaned = await repo.mark_orphaned(at=now)
+
+        for deployment_id, session_id in orphaned:
+            logger.error(
+                "gpu_session.deployment.orphaned",
+                deployment_id=str(deployment_id),
+                session_id=str(session_id),
+            )
