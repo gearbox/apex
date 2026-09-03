@@ -26,12 +26,16 @@ from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
 from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
-from src.core.enums import GpuSessionStatus
+from src.core.enums import GpuSessionStatus, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_operation import GpuSessionOperation
 
 _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 _REPO_PATH = "src.api.services.gpu_session.provisioning_worker.GpuSessionRepository"
+_OPERATION_REPO_PATH = (
+    "src.api.services.gpu_session.provisioning_worker.GpuSessionOperationRepository"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +97,7 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.error_message = None
     session.stale_detected_at = None
     session.stale_notified = False
-    session.provisioning_phase = None
-    session.provisioning_progress = None
+    session.bootstrap_operation_id = None
     session.last_progress_at = None
     for k, v in kwargs.items():
         setattr(session, k, v)
@@ -139,6 +142,8 @@ def _make_mock_session_factory() -> tuple[MagicMock, MagicMock]:
     mock_begin.__aenter__ = AsyncMock(return_value=None)
     mock_begin.__aexit__ = AsyncMock(return_value=None)
     mock_db.begin = MagicMock(return_value=mock_begin)
+    mock_db.get = AsyncMock(return_value=None)
+    mock_db.flush = AsyncMock()
 
     mock_factory = MagicMock(return_value=mock_db)
     return mock_factory, mock_db
@@ -424,6 +429,7 @@ class TestAdvanceProvisioning:
             await worker._advance_provisioning(session)
 
         mock_repo.update_status.assert_not_called()
+        mocks["session_factory"].assert_not_called()
 
     async def test_probe_connection_error_is_noop(self) -> None:
         worker, mocks = _make_worker()
@@ -547,10 +553,12 @@ class TestAdvanceProvisioning:
 
         # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        previous_operation_id = uuid4()
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
             bundle_version="260105-01",
+            bootstrap_operation_id=previous_operation_id,
         )
         mocks["vastai_client"].destroy_instance = AsyncMock()
         bundle = _make_bundle_mapping()
@@ -559,12 +567,14 @@ class TestAdvanceProvisioning:
         mocks["cf_client"].get_tunnel_token.return_value = "fetched-tunnel-token"
         mocks["vastai_client"].create_instance.return_value = 88888
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.increment_provision_attempt.return_value = 2
             reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
             mock_repo.get_by_id.return_value = reloaded
+            operation_repo = AsyncMock()
+            MockOperationRepo.return_value = operation_repo
 
             await worker._retry_or_fail(session, reason="timeout")
 
@@ -591,6 +601,13 @@ class TestAdvanceProvisioning:
         assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
         assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
         assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
+        operation_kwargs = operation_repo.create.await_args.kwargs
+        assert operation_kwargs["id"] != previous_operation_id
+        assert operation_kwargs["kind"] == OperationKind.session_bootstrap
+        assert operation_kwargs["target_mode"] == "full"
+        mock_repo.update_bootstrap_operation_id.assert_awaited_once_with(
+            session.id, operation_kwargs["id"]
+        )
 
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
         """If ai_bundles_github_token is empty, mark session failed before create_instance."""
@@ -2080,14 +2097,21 @@ class TestMatchCheckpoint:
 
 
 class TestReadyProbeMismatch:
-    async def test_probe_false_with_ready_phase_logs_mismatch(self) -> None:
-        """When provisioning_phase='ready' but probe returns False → log ready_probe_mismatch."""
+    async def test_probe_false_with_succeeded_operation_logs_mismatch(self) -> None:
+        """A succeeded bootstrap operation plus a failing probe logs the mismatch."""
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
+        operation_id = uuid4()
         session = _make_gpu_session(
-            status=GpuSessionStatus.provisioning,
-            provisioning_phase="ready",
+            status=GpuSessionStatus.provisioning, bootstrap_operation_id=operation_id
+        )
+        operation = GpuSessionOperation(
+            id=operation_id,
+            session_id=session.id,
+            product_id="vex",
+            kind="session_bootstrap",
+            status=OperationStatus.succeeded,
         )
         mocks["vastai_client"].get_instance.return_value = VastAIInstance(
             id=12345, actual_status="running", cur_state="running"
@@ -2095,9 +2119,12 @@ class TestReadyProbeMismatch:
         # Probe returns False (checkpoint not yet present or ComfyUI not up)
         mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
+            mock_operation_repo = AsyncMock()
+            MockOperationRepo.return_value = mock_operation_repo
+            mock_operation_repo.get.return_value = operation
 
             with capture_logs() as logs:
                 await worker._advance_provisioning(session)
@@ -2111,23 +2138,33 @@ class TestReadyProbeMismatch:
         # Must NOT mark the session active
         mock_repo.update_status.assert_not_called()
 
-    async def test_probe_false_with_non_ready_phase_no_mismatch_log(self) -> None:
-        """When phase is 'downloading' (not 'ready'), probe=False is normal — no mismatch log."""
+    async def test_probe_false_with_running_operation_has_no_mismatch_log(self) -> None:
+        """A still-running bootstrap operation plus a failing probe is normal."""
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
+        operation_id = uuid4()
         session = _make_gpu_session(
-            status=GpuSessionStatus.provisioning,
-            provisioning_phase="downloading",
+            status=GpuSessionStatus.provisioning, bootstrap_operation_id=operation_id
+        )
+        operation = GpuSessionOperation(
+            id=operation_id,
+            session_id=session.id,
+            product_id="vex",
+            kind="session_bootstrap",
+            status=OperationStatus.running,
         )
         mocks["vastai_client"].get_instance.return_value = VastAIInstance(
             id=12345, actual_status="running", cur_state="running"
         )
         mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
+            mock_operation_repo = AsyncMock()
+            MockOperationRepo.return_value = mock_operation_repo
+            mock_operation_repo.get.return_value = operation
 
             with capture_logs() as logs:
                 await worker._advance_provisioning(session)
@@ -2413,32 +2450,50 @@ class TestStallLiveness:
 
 
 class TestNodeReportedFailure:
-    """Worker picks up node-reported failure on next sweep via provisioning_phase column."""
+    """Worker picks up a failed bootstrap operation on its next sweep."""
 
-    async def test_node_failed_phase_triggers_retry(self) -> None:
+    async def test_failed_bootstrap_operation_triggers_retry(self) -> None:
         from src.api.services.gpu_session.provisioning_worker import _REASON_NODE_REPORTED_FAILURE
 
         worker, mocks = _make_worker()
+        operation_id = uuid4()
         session = _make_gpu_session(
-            status=GpuSessionStatus.provisioning,
-            provisioning_phase="failed",
-            provisioning_progress={"error": "comfyui install failed", "ts": "2026-06-09T10:00:00Z"},
+            status=GpuSessionStatus.provisioning, bootstrap_operation_id=operation_id
+        )
+        operation = GpuSessionOperation(
+            id=operation_id,
+            session_id=session.id,
+            product_id="vex",
+            kind="session_bootstrap",
+            status=OperationStatus.failed,
+            error="comfyui install failed",
         )
         mocks["vastai_client"].get_instance.return_value = VastAIInstance(
             id=12345, actual_status="running", cur_state="running"
         )
         worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
 
-        await worker._advance_provisioning(session)
+        with patch(_OPERATION_REPO_PATH) as MockOperationRepo:
+            mock_operation_repo = AsyncMock()
+            MockOperationRepo.return_value = mock_operation_repo
+            mock_operation_repo.get.return_value = operation
+            await worker._advance_provisioning(session)
 
         worker._retry_or_fail.assert_called_once_with(session, reason=_REASON_NODE_REPORTED_FAILURE)
 
-    async def test_non_failed_phase_does_not_trigger_retry(self) -> None:
-        """Other phases (downloading, ready, etc.) should NOT trigger _retry_or_fail."""
+    async def test_running_bootstrap_operation_does_not_trigger_retry(self) -> None:
+        """A running bootstrap operation must not trigger retry machinery."""
         worker, mocks = _make_worker()
+        operation_id = uuid4()
         session = _make_gpu_session(
-            status=GpuSessionStatus.provisioning,
-            provisioning_phase="downloading",
+            status=GpuSessionStatus.provisioning, bootstrap_operation_id=operation_id
+        )
+        operation = GpuSessionOperation(
+            id=operation_id,
+            session_id=session.id,
+            product_id="vex",
+            kind="session_bootstrap",
+            status=OperationStatus.running,
         )
         mocks["vastai_client"].get_instance.return_value = VastAIInstance(
             id=12345, actual_status="running", cur_state="running"
@@ -2446,7 +2501,11 @@ class TestNodeReportedFailure:
         mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
         worker._retry_or_fail = AsyncMock()  # type: ignore[method-assign]
 
-        await worker._advance_provisioning(session)
+        with patch(_OPERATION_REPO_PATH) as MockOperationRepo:
+            mock_operation_repo = AsyncMock()
+            MockOperationRepo.return_value = mock_operation_repo
+            mock_operation_repo.get.return_value = operation
+            await worker._advance_provisioning(session)
 
         worker._retry_or_fail.assert_not_called()
 

@@ -28,8 +28,15 @@ import structlog
 
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.vastai.exceptions import InstanceNotFoundError
-from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
+from src.core.enums import (
+    STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
+    GpuSessionStatus,
+    OperationKind,
+    OperationStatus,
+)
+from src.core.uid import new_id
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.workers.base import PeriodicWorker
 
 from ._env_builder import build_acs_env
@@ -349,13 +356,19 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._retry_or_fail(session, reason=_REASON_PROVISIONING_TIMEOUT)
             return
 
-        # Node-reported failure: receiver wrote provisioning_phase="failed"; worker
-        # picks it up on next sweep and routes into the existing retry machinery.
-        if session.provisioning_phase == "failed":
+        operation = None
+        if session.bootstrap_operation_id is not None:
+            async with self._session_factory() as db:
+                operation = await GpuSessionOperationRepository(db).get(
+                    session.bootstrap_operation_id
+                )
+
+        if operation is not None and operation.status == OperationStatus.failed:
             logger.warning(
                 "gpu_session.provision.node_reported_failure",
                 session_id=str(session.id),
-                error=str((session.provisioning_progress or {}).get("error", "")),
+                operation_id=str(operation.id),
+                error=operation.error or "",
             )
             await self._retry_or_fail(session, reason=_REASON_NODE_REPORTED_FAILURE)
             return
@@ -363,7 +376,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         reachable = await self._probe_comfyui(session)
         if reachable:
             await self._mark_active(session)
-        elif session.provisioning_phase == "ready":
+        elif operation is not None and operation.status == OperationStatus.succeeded:
             # Node reported terminal-ready but our authoritative probe disagrees:
             # strong signal of a provisioning defect (e.g. wrong/absent checkpoint).
             logger.warning(
@@ -728,12 +741,14 @@ class GpuProvisioningWorker(PeriodicWorker):
         # The hash is written to the DB atomically with the new instance info below.
         fresh_callback_token = secrets.token_urlsafe(48)
         fresh_callback_token_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
+        bootstrap_operation_id = new_id()
 
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
         # civitai_api_token, and ACS_GITHUB_TOKEN.
         env = build_acs_env(
             settings=self._settings,
             session_id=session.id,
+            operation_id=bootstrap_operation_id,
             bundle_name=session.bundle_name,
             bundle_version=session.bundle_version,
             comfyui_port=bundle.hardware.comfyui_port,
@@ -763,6 +778,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         now = datetime.now(UTC)
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
+            operation_repo = GpuSessionOperationRepository(db)
             current = await repo.get_by_id(session.id, for_update=True)
             if current is None:
                 return
@@ -773,6 +789,16 @@ class GpuProvisioningWorker(PeriodicWorker):
                 return
             # Rotate the callback token so the old (destroyed) node's token is invalidated.
             await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
+            await operation_repo.create(
+                id=bootstrap_operation_id,
+                session_id=session.id,
+                product_id=current.product_id,
+                kind=OperationKind.session_bootstrap,
+                target_bundle=current.bundle_name,
+                target_bundle_version=current.bundle_version,
+                target_mode="full",
+            )
+            await repo.update_bootstrap_operation_id(session.id, bootstrap_operation_id)
             await repo.update_instance(
                 session.id,
                 vastai_instance_id=instance_id,

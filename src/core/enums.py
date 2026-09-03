@@ -553,6 +553,46 @@ class GpuSessionStatus(StrEnum):
     failed = "failed"  # provisioning or runtime failure
 
 
+# These values mirror gearbox/aisha
+# src/ai_content_service/telemetry_contract.py at a7a65d864231c31709124dfe3c6c74a99ea5a0a9.
+# Change them only in lockstep with that contract.
+class OperationKind(StrEnum):
+    """The provisioning-like activity represented by an operation stream."""
+
+    session_bootstrap = "session_bootstrap"
+    bundle_provision = "bundle_provision"
+    bundle_removal = "bundle_removal"
+    comfyui_restart = "comfyui_restart"
+
+
+class OperationStatus(StrEnum):
+    """Lifecycle state for an operation."""
+
+    queued = "queued"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+
+
+class ProvisioningPhase(StrEnum):
+    """Stable identifiers for individual provisioning phases."""
+
+    preflight = "preflight"
+    comfyui = "comfyui"
+    requirements_base = "requirements_base"
+    requirements_locked = "requirements_locked"
+    custom_nodes = "custom_nodes"
+    models = "models"
+    workflow = "workflow"
+    verifying = "verifying"
+    restart = "restart"
+
+
+TERMINAL_OPERATION_STATUSES: frozenset[OperationStatus] = frozenset(
+    {OperationStatus.succeeded, OperationStatus.failed}
+)
+
+
 # True lifecycle end. A session in one of these states no longer exists for
 # routing purposes and FREES the (user, product, model_type) slot, so a new
 # session may be started. `stopping` is deliberately EXCLUDED — teardown is in

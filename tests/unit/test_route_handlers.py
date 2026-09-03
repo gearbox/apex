@@ -2425,7 +2425,9 @@ class TestGpuSessionRouteHandlers:
         from src.api.routes.gpu_session import GpuSessionController
 
         gpu_session_service = AsyncMock()
-        gpu_session_service.list_user_sessions = AsyncMock(return_value=[MagicMock()])
+        session_row = MagicMock()
+        session_row.bootstrap_operation_id = None
+        gpu_session_service.list_user_sessions = AsyncMock(return_value=[session_row])
 
         with patch(
             "src.api.routes.gpu_session.GpuSessionResponse.from_model",
@@ -2436,6 +2438,7 @@ class TestGpuSessionRouteHandlers:
                 current_user_id=uuid4(),
                 gpu_session_service=gpu_session_service,
                 product_id="vex",
+                session=AsyncMock(),
             )
         assert len(result.sessions) == 1
 
@@ -2491,6 +2494,7 @@ class TestGpuSessionRouteHandlers:
                 session_id=uuid4(),
                 gpu_session_service=gpu_session_service,
                 product_id="vex",
+                session=AsyncMock(),
             )
         assert response.status_code == 200
 
@@ -2511,6 +2515,7 @@ class TestGpuSessionRouteHandlers:
             session_id=uuid4(),
             gpu_session_service=gpu_session_service,
             product_id="vex",
+            session=AsyncMock(),
         )
         assert response.status_code == 409
 
@@ -2527,6 +2532,7 @@ class TestGpuSessionRouteHandlers:
             session_id=uuid4(),
             gpu_session_service=gpu_session_service,
             product_id="vex",
+            session=AsyncMock(),
         )
         assert response.status_code == 404
 
@@ -2546,6 +2552,7 @@ class TestGpuSessionRouteHandlers:
                 session_id=uuid4(),
                 gpu_session_service=gpu_session_service,
                 product_id="vex",
+                session=AsyncMock(),
             )
         assert response.status_code == 200
 
@@ -2562,6 +2569,7 @@ class TestGpuSessionRouteHandlers:
             session_id=uuid4(),
             gpu_session_service=gpu_session_service,
             product_id="vex",
+            session=AsyncMock(),
         )
         assert response.status_code == 404
 
@@ -2593,6 +2601,7 @@ class TestGpuSessionRouteHandlers:
             gpu_session_service=gpu_session_service,
             product_id="vex",
             settings=settings,
+            session=AsyncMock(),
         )
         assert response.status_code == 200
 
@@ -2617,6 +2626,7 @@ class TestGpuSessionRouteHandlers:
                 gpu_session_service=gpu_session_service,
                 product_id="vex",
                 settings=settings,
+                session=AsyncMock(),
             )
         assert response.status_code == 200
 
@@ -2642,6 +2652,7 @@ class TestGpuSessionRouteHandlers:
             gpu_session_service=gpu_session_service,
             product_id="vex",
             settings=settings,
+            session=AsyncMock(),
         )
         assert response.status_code == 409
 
@@ -2662,6 +2673,7 @@ class TestGpuSessionRouteHandlers:
             session_id=uuid4(),
             gpu_session_service=gpu_session_service,
             product_id="vex",
+            session=AsyncMock(),
         )
         assert response.status_code == 409
 
@@ -2683,6 +2695,7 @@ class TestGpuSessionRouteHandlers:
             gpu_session_service=gpu_session_service,
             product_id="vex",
             settings=settings,
+            session=AsyncMock(),
         )
         assert response.status_code == 404
 

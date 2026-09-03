@@ -34,6 +34,7 @@ _EXPECTED_ACS_KEYS = {
     "ACS_CF_TUNNEL_TOKEN",
     "CF_TUNNEL_TOKEN",
     "ACS_APEX_SESSION_ID",
+    "ACS_APEX_OPERATION_ID",
     "ACS_APEX_CALLBACK_URL",
     "ACS_APEX_CALLBACK_TOKEN",
     "ACS_HF_TOKEN",
@@ -64,10 +65,12 @@ def _make_settings(**overrides: object) -> MagicMock:
 def _build(**overrides: object) -> dict[str, str]:
     """Helper: build env with sensible defaults, overridable per-test."""
     session_id: UUID = overrides.pop("session_id", uuid4())  # type: ignore[assignment]
+    operation_id: UUID = overrides.pop("operation_id", uuid4())  # type: ignore[assignment]
     settings: Settings = overrides.pop("settings", _make_settings())  # type: ignore[assignment]
     return build_acs_env(
         settings=settings,
         session_id=session_id,
+        operation_id=operation_id,
         bundle_name=overrides.pop("bundle_name", "wan_2.2_i2v"),  # type: ignore[arg-type]
         bundle_version=overrides.pop("bundle_version", "260105-01"),  # type: ignore[arg-type]
         comfyui_port=overrides.pop("comfyui_port", _DEFAULT_COMFYUI_PORT),  # type: ignore[arg-type]

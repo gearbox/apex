@@ -46,12 +46,35 @@ from src.api.services.gpu_session.service import (
 from src.api.services.vastai.exceptions import NoCapacityError, VastAIError
 from src.core.config import Settings
 from src.core.enums import GpuSessionStatus, UserRole
+from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from src.db.models.gpu_session import GpuSession
+    from src.db.models.gpu_session_operation import GpuSessionOperation
+
 logger = structlog.get_logger(__name__)
+
+
+async def _bootstrap_operations(
+    session: AsyncSession, sessions: Sequence[GpuSession]
+) -> dict[UUID, GpuSessionOperation]:
+    """Fetch all bootstrap response projections in one query, avoiding list N+1s."""
+    operation_ids = {
+        s.bootstrap_operation_id for s in sessions if s.bootstrap_operation_id is not None
+    }
+    return await GpuSessionOperationRepository(session).get_many(operation_ids)
+
+
+async def _bootstrap_operation(
+    session: AsyncSession, gpu_session: GpuSession
+) -> GpuSessionOperation | None:
+    """Fetch the current bootstrap operation projection for one response."""
+    if gpu_session.bootstrap_operation_id is None:
+        return None
+    return await GpuSessionOperationRepository(session).get(gpu_session.bootstrap_operation_id)
 
 
 class GpuSessionController(Controller):
@@ -109,8 +132,9 @@ class GpuSessionController(Controller):
                 HTTP_503_SERVICE_UNAVAILABLE, "provisioning_failed", "GPU provisioning failed"
             )
 
+        operation = await _bootstrap_operation(session, gpu_session)
         return Response(
-            content=GpuSessionResponse.from_model(gpu_session),
+            content=GpuSessionResponse.from_model(gpu_session, bootstrap_operation=operation),
             status_code=HTTP_201_CREATED,
         )
 
@@ -120,6 +144,7 @@ class GpuSessionController(Controller):
         current_user_id: UUID,
         gpu_session_service: GpuSessionService,
         product_id: str,
+        session: AsyncSession,
         include_terminal: Annotated[bool, Parameter(query="include_terminal")] = False,
     ) -> ListSessionsResponse:
         """List GPU sessions for the current user."""
@@ -128,7 +153,20 @@ class GpuSessionController(Controller):
             product_id=product_id,
             include_terminal=include_terminal,
         )
-        return ListSessionsResponse(sessions=[GpuSessionResponse.from_model(s) for s in sessions])
+        operations = await _bootstrap_operations(session, sessions)
+        return ListSessionsResponse(
+            sessions=[
+                GpuSessionResponse.from_model(
+                    gpu_session,
+                    bootstrap_operation=(
+                        operations.get(gpu_session.bootstrap_operation_id)
+                        if gpu_session.bootstrap_operation_id is not None
+                        else None
+                    ),
+                )
+                for gpu_session in sessions
+            ]
+        )
 
     @get("/{session_id:uuid}")
     async def get_session(
@@ -155,7 +193,12 @@ class GpuSessionController(Controller):
             job_repo = JobRepository(session)
             in_flight_count = await job_repo.count_in_flight_for_session(session_id)
 
-        return GpuSessionResponse.from_model(session_row, in_flight_job_count=in_flight_count)
+        operation = await _bootstrap_operation(session, session_row)
+        return GpuSessionResponse.from_model(
+            session_row,
+            bootstrap_operation=operation,
+            in_flight_job_count=in_flight_count,
+        )
 
     @post("/{session_id:uuid}/pause")
     async def pause(
@@ -164,6 +207,7 @@ class GpuSessionController(Controller):
         session_id: UUID,
         gpu_session_service: GpuSessionService,
         product_id: str,
+        session: AsyncSession,
     ) -> Response[GpuSessionResponse | ErrorEnvelope]:
         """Pause an active GPU session."""
         try:
@@ -187,7 +231,11 @@ class GpuSessionController(Controller):
         except GpuSessionError as exc:
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 
-        return Response(content=GpuSessionResponse.from_model(session_row), status_code=HTTP_200_OK)
+        operation = await _bootstrap_operation(session, session_row)
+        return Response(
+            content=GpuSessionResponse.from_model(session_row, bootstrap_operation=operation),
+            status_code=HTTP_200_OK,
+        )
 
     @post("/{session_id:uuid}/resume")
     async def resume(
@@ -196,6 +244,7 @@ class GpuSessionController(Controller):
         session_id: UUID,
         gpu_session_service: GpuSessionService,
         product_id: str,
+        session: AsyncSession,
     ) -> Response[GpuSessionResponse | ErrorEnvelope]:
         """Resume a paused GPU session."""
         try:
@@ -209,7 +258,11 @@ class GpuSessionController(Controller):
         except GpuSessionError as exc:
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 
-        return Response(content=GpuSessionResponse.from_model(session_row), status_code=HTTP_200_OK)
+        operation = await _bootstrap_operation(session, session_row)
+        return Response(
+            content=GpuSessionResponse.from_model(session_row, bootstrap_operation=operation),
+            status_code=HTTP_200_OK,
+        )
 
     @post("/{session_id:uuid}/stop")
     async def stop(
@@ -220,6 +273,7 @@ class GpuSessionController(Controller):
         gpu_session_service: GpuSessionService,
         product_id: str,
         settings: Settings,
+        session: AsyncSession,
     ) -> Response[GpuSessionResponse | StopConfirmationResponse | ErrorEnvelope]:
         """Two-call stop: first call returns cost confirmation, second call executes."""
         try:
@@ -250,7 +304,11 @@ class GpuSessionController(Controller):
                 ),
                 status_code=HTTP_200_OK,
             )
-        return Response(content=GpuSessionResponse.from_model(result), status_code=HTTP_200_OK)
+        operation = await _bootstrap_operation(session, result)
+        return Response(
+            content=GpuSessionResponse.from_model(result, bootstrap_operation=operation),
+            status_code=HTTP_200_OK,
+        )
 
 
 def _error(status_code: int, error: str, message: str) -> Response[Any]:

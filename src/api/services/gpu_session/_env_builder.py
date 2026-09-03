@@ -21,6 +21,7 @@ def build_acs_env(
     *,
     settings: Settings,
     session_id: UUID,
+    operation_id: UUID,
     bundle_name: str,
     bundle_version: str | None,
     comfyui_port: int,
@@ -32,6 +33,7 @@ def build_acs_env(
     Args:
         settings: Apex Settings (provides ai_bundles_*, aisha_*, hf_token, etc.)
         session_id: GpuSession UUID — surfaced to the CLI for log enrichment
+        operation_id: Apex-owned bootstrap operation UUID for telemetry correlation
         bundle_name: Resolved bundle name (e.g. "wan_2.2_i2v")
         bundle_version: Pinned version or None to mean "current"
         comfyui_port: Per-bundle port from bundle.hardware.comfyui_port
@@ -65,6 +67,7 @@ def build_acs_env(
         # field, so it is intentionally unprefixed. Do not rename.
         "CF_TUNNEL_TOKEN": tunnel_token,
         "ACS_APEX_SESSION_ID": str(session_id),
+        "ACS_APEX_OPERATION_ID": str(operation_id),
         "ACS_APEX_CALLBACK_URL": settings.apex_callback_url,
         "ACS_APEX_CALLBACK_TOKEN": callback_token,
         # --- Model download tokens ---

@@ -36,7 +36,7 @@ from src.api.services.gpu_session.node_cooldown import (
     NullNodeCooldownStore,
     RedisNodeCooldownStore,
 )
-from src.api.services.gpu_session.provisioning_callback_service import ProvisioningCallbackService
+from src.api.services.gpu_session.operation_event_service import OperationEventService
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
 from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
@@ -135,8 +135,8 @@ class ServiceContainer:
     billing_reconciler_worker: BillingReconcilerWorker | None = None
     gpu_session_http_client: httpx.AsyncClient | None = None
     bundle_index: BundleIndexService | None = None
-    # Callback receiver — initialized whenever the DB is available (not GPU-stack-gated)
-    provisioning_callback_service: ProvisioningCallbackService | None = None
+    # Operation receiver — initialized whenever the DB is available (not GPU-stack-gated)
+    operation_event_service: OperationEventService | None = None
     # Web Push (optional — requires VAPID keys + Redis)
     push_service: PushService | None = None
     push_dispatcher: PushDispatcher | None = None
@@ -503,13 +503,13 @@ def get_gpu_session_service() -> GpuSessionService:
     return _services.gpu_session_service
 
 
-def get_provisioning_callback_service() -> ProvisioningCallbackService:
-    """Provide ProvisioningCallbackService singleton (503 if DB not initialized)."""
-    if _services.provisioning_callback_service is None:
+def get_operation_event_service() -> OperationEventService:
+    """Provide OperationEventService singleton (503 if DB not initialized)."""
+    if _services.operation_event_service is None:
         from litestar.exceptions import ServiceUnavailableException
 
-        raise ServiceUnavailableException(detail="Provisioning callback service not available")
-    return _services.provisioning_callback_service
+        raise ServiceUnavailableException(detail="Operation event service not available")
+    return _services.operation_event_service
 
 
 def get_push_service() -> PushService:
@@ -634,11 +634,11 @@ async def init_services(settings: Settings) -> JWTService:
     )
     logger.info("db.pool_initialized")
 
-    # Initialize provisioning callback service (only needs the DB session factory).
-    _services.provisioning_callback_service = ProvisioningCallbackService(
+    # Initialize operation event service (only needs the DB session factory).
+    _services.operation_event_service = OperationEventService(
         session_factory=_services.db_manager.session_factory
     )
-    logger.info("provisioning_callback_service.initialized")
+    logger.info("operation_event_service.initialized")
 
     # Initialize Redis (required for pub/sub and rate limiting). Three pools —
     # see src/core/redis.py module docstring: the shared pool serves
@@ -1472,10 +1472,8 @@ dependencies = {
     "health_service": Provide(get_health_service, sync_to_thread=False),
     # GPU sessions
     "gpu_session_service": Provide(get_gpu_session_service, sync_to_thread=False),
-    # Internal provisioning callbacks (node bearer auth validated in handler)
-    "provisioning_callback_service": Provide(
-        get_provisioning_callback_service, sync_to_thread=False
-    ),
+    # Internal operation events (node bearer auth validated in handler)
+    "operation_event_service": Provide(get_operation_event_service, sync_to_thread=False),
     # Web Push
     "push_service": Provide(get_push_service, sync_to_thread=False),
     # Admin ops notifications (Telegram)

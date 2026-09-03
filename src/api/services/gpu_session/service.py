@@ -14,10 +14,16 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.vastai.exceptions import NoCapacityError
-from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus, ModelType
+from src.core.enums import (
+    STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
+    GpuSessionStatus,
+    ModelType,
+    OperationKind,
+)
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
 
 from ._env_builder import build_acs_env
@@ -272,6 +278,7 @@ class GpuSessionService:
 
         # Step 3: generate IDs (no external calls)
         session_id = new_id()
+        bootstrap_operation_id = new_id()
         session_id_short = str(session_id)[:8]
         callback_token = secrets.token_urlsafe(48)
         # SECURITY: only the hash is persisted; plaintext goes into the env and is never logged.
@@ -365,6 +372,7 @@ class GpuSessionService:
         env = build_acs_env(
             settings=self._settings,
             session_id=session_id,
+            operation_id=bootstrap_operation_id,
             bundle_name=bundle.bundle_name,
             bundle_version=bundle.bundle_version,
             comfyui_port=hardware.comfyui_port,
@@ -391,6 +399,7 @@ class GpuSessionService:
         # Step 7: persist session + billing reservation in a single transaction
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
+            operation_repo = GpuSessionOperationRepository(db)
             try:
                 session_row = await repo.create(
                     id=session_id,
@@ -415,6 +424,16 @@ class GpuSessionService:
                         if bundle.readiness_marker is not None
                         else None
                     ),
+                    bootstrap_operation_id=bootstrap_operation_id,
+                )
+                await operation_repo.create(
+                    id=bootstrap_operation_id,
+                    session_id=session_id,
+                    product_id=product_id,
+                    kind=OperationKind.session_bootstrap,
+                    target_bundle=bundle.bundle_name,
+                    target_bundle_version=bundle.bundle_version,
+                    target_mode="full",
                 )
             except IntegrityError:
                 # Race with a concurrent start_session call that slipped past our pre-check.
