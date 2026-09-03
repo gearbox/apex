@@ -43,7 +43,6 @@ class GpuSessionRepository:
         vastai_machine_id: int | None = None,
         callback_token_hash: str | None = None,
         account_id: UUID | None = None,
-        readiness_marker_node_class: str | None = None,
         bootstrap_operation_id: UUID | None = None,
     ) -> GpuSession:
         """Create and persist a new GPU session row.
@@ -89,7 +88,6 @@ class GpuSessionRepository:
             vastai_machine_id=vastai_machine_id,
             callback_token_hash=callback_token_hash,
             account_id=account_id,
-            readiness_marker_node_class=readiness_marker_node_class,
             bootstrap_operation_id=bootstrap_operation_id,
         )
         self._session.add(session_row)
@@ -140,61 +138,6 @@ class GpuSessionRepository:
                 GpuSession.id == session_id,
                 GpuSession.user_id == user_id,
                 GpuSession.product_id == product_id,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def get_active_for_model(
-        self,
-        user_id: UUID,
-        product_id: str,
-        model_type: str,
-    ) -> GpuSession | None:
-        """Get the user's active session for a model type (status='active' only).
-
-        Args:
-            user_id: Owner filter.
-            product_id: Product filter.
-            model_type: ModelType slug filter.
-
-        Returns:
-            Active GpuSession or None.
-        """
-        result = await self._session.execute(
-            select(GpuSession).where(
-                GpuSession.user_id == user_id,
-                GpuSession.product_id == product_id,
-                GpuSession.model_type == model_type,
-                GpuSession.status == GpuSessionStatus.active,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def get_non_terminal_for_model(
-        self,
-        user_id: UUID,
-        product_id: str,
-        model_type: str,
-    ) -> GpuSession | None:
-        """Get any non-terminal session for this (user, product, model_type).
-
-        Used before creating a new session to enforce the uniqueness constraint
-        at the application layer before hitting the DB partial unique index.
-
-        Args:
-            user_id: Owner filter.
-            product_id: Product filter.
-            model_type: ModelType slug filter.
-
-        Returns:
-            Non-terminal GpuSession or None.
-        """
-        result = await self._session.execute(
-            select(GpuSession).where(
-                GpuSession.user_id == user_id,
-                GpuSession.product_id == product_id,
-                GpuSession.model_type == model_type,
-                GpuSession.status.not_in(tuple(TERMINAL_GPU_SESSION_STATUSES)),
             )
         )
         return result.scalar_one_or_none()

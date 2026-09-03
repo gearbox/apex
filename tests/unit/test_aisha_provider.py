@@ -67,6 +67,19 @@ def _make_active_gpu_session() -> MagicMock:
     return gs
 
 
+def _routing(session: MagicMock) -> tuple[MagicMock, MagicMock]:
+    """Build the (session, deployment) pair get_active_session_for_model returns.
+
+    Since P2, generation reads model identity off the deployment, not the
+    session (D18) — see handlers.py. The stand-in deployment mirrors whatever
+    bundle_name/bundle_version the caller's session mock carries.
+    """
+    deployment = MagicMock()
+    deployment.bundle_name = session.bundle_name
+    deployment.bundle_version = session.bundle_version
+    return session, deployment
+
+
 def _make_default_gen_config() -> BundleGenerationConfig:
     return BundleGenerationConfig(
         defaults=GenerationDefaults(
@@ -138,7 +151,7 @@ def _make_provider_with_mocks() -> tuple[AishaGenerationProvider, dict]:
 
     gpu_session_service = AsyncMock()
     gpu_session_service.get_active_session_for_model = AsyncMock(
-        return_value=_make_active_gpu_session()
+        return_value=_routing(_make_active_gpu_session())
     )
     bundle_index = _make_bundle_index_mock()
 
@@ -268,6 +281,59 @@ class TestAishaProviderRouting:
                 product_id="vex",
             )
 
+    async def test_routing_uses_deployment_bundle_identity_not_session(self) -> None:
+        """Invariant 6: with the session's bundle_name deliberately set to a
+        different value than the deployment's, generation must resolve the
+        *deployment's* bundle — see D18."""
+        provider, mocks = _make_provider_with_mocks()
+
+        gpu_session = _make_active_gpu_session()
+        gpu_session.bundle_name = "session_bundle_should_not_be_used"
+        gpu_session.bundle_version = "session-version"
+        deployment = MagicMock()
+        deployment.bundle_name = "deployment_bundle_wins"
+        deployment.bundle_version = "deployment-version"
+        mocks["gpu_session_service"].get_active_session_for_model = AsyncMock(
+            return_value=(gpu_session, deployment)
+        )
+
+        billing = AsyncMock()
+        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+        session = AsyncMock()
+        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+
+        with (
+            patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo,
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as MockComfyClient,
+        ):
+            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
+            mock_client = AsyncMock()
+            mock_client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-routing"})
+            MockComfyClient.return_value = mock_client
+
+            await provider.submit(
+                _make_request(),
+                user_id=uuid4(),
+                session=session,
+                billing_service=billing,
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        # gen_cfg lookup used the deployment's identity.
+        mocks["bundle_index"].get_generation_config.assert_called_once_with(
+            "deployment_bundle_wins", "deployment-version"
+        )
+        # bundle_path lookup used the deployment's identity.
+        mocks["bundle_index"].get_bundle_path.assert_called_once_with("deployment_bundle_wins")
+        # Workflow application received the deployment's identity, not the session's.
+        apply_kwargs = mocks["workflow"].apply.call_args.kwargs
+        assert apply_kwargs["bundle_name"] == "deployment_bundle_wins"
+        assert apply_kwargs["bundle_version"] == "deployment-version"
+        load_args = mocks["workflow"].load.call_args.args
+        assert load_args[1] == "deployment-version"
+
 
 class TestAishaProviderSSRFGuard:
     """Round 4 / Issue 1: tunnel_hostname must end with the configured tunnel
@@ -293,7 +359,9 @@ class TestAishaProviderSSRFGuard:
         malicious_session.tunnel_hostname = "evil.attacker.com"
 
         gpu_session_service = AsyncMock()
-        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=malicious_session)
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_routing(malicious_session)
+        )
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,
@@ -351,7 +419,9 @@ class TestAishaProviderSSRFGuard:
         broken_session.tunnel_hostname = None  # never populated
 
         gpu_session_service = AsyncMock()
-        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=broken_session)
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_routing(broken_session)
+        )
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,
@@ -400,7 +470,9 @@ class TestAishaProviderSSRFGuard:
         sneaky_session.tunnel_hostname = "evil-gpu.test"
 
         gpu_session_service = AsyncMock()
-        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=sneaky_session)
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_routing(sneaky_session)
+        )
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,
@@ -466,7 +538,9 @@ class TestAishaProviderSSRFGuard:
         sneaky_session.tunnel_hostname = hostname
 
         gpu_session_service = AsyncMock()
-        gpu_session_service.get_active_session_for_model = AsyncMock(return_value=sneaky_session)
+        gpu_session_service.get_active_session_for_model = AsyncMock(
+            return_value=_routing(sneaky_session)
+        )
 
         provider = AishaGenerationProvider(
             workflow_service=workflow,
@@ -692,7 +766,7 @@ class TestAishaProviderI2IBridge:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         # R2 returns the source bytes for the configured user image.
@@ -779,7 +853,7 @@ class TestAishaProviderI2IBridge:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         r2 = AsyncMock()
@@ -855,7 +929,7 @@ class TestAishaProviderI2IBridge:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
         r2 = AsyncMock()
         provider = AishaGenerationProvider(
@@ -909,7 +983,7 @@ class TestAishaProviderI2IBridge:
         workflow.load_workflow.return_value = {"3": {"inputs": {}}}
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         provider = AishaGenerationProvider(
@@ -988,9 +1062,11 @@ class TestAishaProviderI2IBridge:
         apply_kwargs = mocks["workflow"].apply.call_args.kwargs
         assert apply_kwargs["media_filenames"] == {}
         # Bound-workflow application receives the bundle name as a string.
-        gpu_session = mocks["gpu_session_service"].get_active_session_for_model.return_value
+        _gpu_session, deployment = mocks[
+            "gpu_session_service"
+        ].get_active_session_for_model.return_value
         assert isinstance(apply_kwargs["bundle_name"], str)
-        assert apply_kwargs["bundle_name"] == gpu_session.bundle_name
+        assert apply_kwargs["bundle_name"] == deployment.bundle_name
 
     async def test_i2i_webp_source_output_converted_to_png_for_comfyui(self) -> None:
         """D2': a Grok-output WebP remixed via source_output_id must reach
@@ -1001,7 +1077,7 @@ class TestAishaProviderI2IBridge:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         webp_bytes = _webp_bytes()
@@ -1070,7 +1146,7 @@ class TestAishaProviderI2IBridge:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         r2 = AsyncMock()
@@ -1126,7 +1202,7 @@ class TestAishaProviderI2IBridge:
         workflow = MagicMock()
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         r2 = AsyncMock()
@@ -1189,7 +1265,7 @@ class TestAishaProviderI2IAspectDerivation:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         r2 = AsyncMock()
@@ -1446,7 +1522,7 @@ class TestAishaProviderI2IDefensive:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         r2 = AsyncMock()
@@ -1560,7 +1636,7 @@ async def _submit_with_config(
 
     gpu_session_service = AsyncMock()
     gpu_session_service.get_active_session_for_model = AsyncMock(
-        return_value=_make_active_gpu_session()
+        return_value=_routing(_make_active_gpu_session())
     )
 
     bundle_index = MagicMock()
@@ -1624,7 +1700,7 @@ class TestAishaProviderResolutionAndSamplerValidation:
         workflow = MagicMock()
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
         bundle_index = MagicMock()
         bundle_index.get_bundle_path = MagicMock(return_value=MagicMock())
@@ -1671,7 +1747,7 @@ class TestAishaProviderResolutionAndSamplerValidation:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         provider = AishaGenerationProvider(
@@ -1714,7 +1790,7 @@ class TestAishaProviderResolutionAndSamplerValidation:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         provider = AishaGenerationProvider(
@@ -1797,7 +1873,7 @@ class TestAishaProviderClampLogging:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         # 400x300 JPEG with EXIF orientation 6 -> displayed 300x400 -> "3:4".
@@ -1864,7 +1940,7 @@ class TestAishaProviderClampLogging:
 
         gpu_session_service = AsyncMock()
         gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_make_active_gpu_session()
+            return_value=_routing(_make_active_gpu_session())
         )
 
         bundle_index = MagicMock()

@@ -35,14 +35,57 @@ from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
 from src.api.services.vastai.schemas import VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
-from src.core.enums import GpuSessionStatus, ModelType
+from src.core.enums import LIVE_DEPLOYMENT_STATUSES, DeploymentStatus, GpuSessionStatus, ModelType
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_deployment import GpuSessionDeployment
 
 _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 _REPO_PATH = "src.api.services.gpu_session.service.GpuSessionRepository"
 _OPERATION_REPO_PATH = "src.api.services.gpu_session.service.GpuSessionOperationRepository"
+_DEPLOYMENT_REPO_PATH = "src.api.services.gpu_session.service.GpuSessionDeploymentRepository"
 _JOB_REPO_PATH = "src.api.services.gpu_session.service.JobRepository"
+
+
+@pytest.fixture(autouse=True)
+def mock_deployment_repo():  # type: ignore[no-untyped-def]
+    """Auto-patch GpuSessionDeploymentRepository for every test in this module.
+
+    Defaults to no live deployment (uniqueness pre-check passes), no routable
+    pair, and an inert `create`/`mark_status` — individual tests override
+    return values or assert on call args as needed. Without this, every status
+    transition that now cascades onto gpu_session_deployments (_set_status)
+    would hit the raw mocked DB session's unconfigured `execute`.
+    """
+    with patch(_DEPLOYMENT_REPO_PATH) as MockDeploymentRepo:
+        mock = AsyncMock()
+        MockDeploymentRepo.return_value = mock
+        mock.get_live_for_model.return_value = None
+        mock.get_routable.return_value = None
+        yield mock
+
+
+def _make_gpu_session_deployment(**kwargs: Any) -> GpuSessionDeployment:
+    now = datetime.now(UTC)
+    deployment = GpuSessionDeployment()
+    deployment.id = uuid4()
+    deployment.session_id = uuid4()
+    deployment.user_id = uuid4()
+    deployment.product_id = "vex"
+    deployment.model_type = "aisha-image"
+    deployment.bundle_name = "wan_2.2_i2v"
+    deployment.bundle_version = "260105-01"
+    deployment.readiness_marker_node_class = None
+    deployment.status = DeploymentStatus.active
+    deployment.pending_restart = False
+    deployment.provision_operation_id = uuid4()
+    deployment.is_primary = True
+    deployment.created_at = now
+    deployment.activated_at = now
+    deployment.removed_at = None
+    for k, v in kwargs.items():
+        setattr(deployment, k, v)
+    return deployment
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +269,7 @@ _TUNNEL_RESULT = ("tunnel-id-xyz", "tunnel-token-secret", "dns-id-xyz", "01abcde
 
 
 class TestStartSession:
-    async def test_happy_path(self) -> None:
+    async def test_happy_path(self, mock_deployment_repo: AsyncMock) -> None:
         service, mocks = _make_service()
         bundle = _make_bundle_mapping()
         mocks["bundle_index"].resolve_bundle.return_value = bundle
@@ -244,7 +287,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             operation_repo = AsyncMock()
             MockOperationRepo.return_value = operation_repo
 
@@ -263,7 +305,9 @@ class TestStartSession:
 
         assert result is expected_session
         mocks["bundle_index"].resolve_bundle.assert_called_once_with("aisha-image")
-        mock_repo.get_non_terminal_for_model.assert_called_once_with(user_id, "vex", "aisha-image")
+        mock_deployment_repo.get_live_for_model.assert_called_once_with(
+            user_id, "vex", "aisha-image"
+        )
         mocks["cf_client"].create_session_tunnel.assert_called_once()
         mocks["vastai_client"].search_offers.assert_called_once_with(
             bundle.hardware, limit=mocks["settings"].vastai_offer_search_limit
@@ -284,6 +328,17 @@ class TestStartSession:
         assert create_kwargs["bootstrap_operation_id"] == operation_kwargs["id"]
         mock_repo.update_bootstrap_operation_id.assert_not_awaited()
 
+        mock_deployment_repo.create.assert_called_once()
+        deployment_kwargs = mock_deployment_repo.create.await_args.kwargs
+        assert deployment_kwargs["status"] == DeploymentStatus.deploying
+        assert deployment_kwargs["is_primary"] is True
+        assert deployment_kwargs["provision_operation_id"] == operation_kwargs["id"]
+        assert deployment_kwargs["bundle_name"] == bundle.bundle_name
+        assert deployment_kwargs["bundle_version"] == bundle.bundle_version
+        assert deployment_kwargs["model_type"] == ModelType.AISHA_IMAGE.value
+        assert deployment_kwargs["user_id"] == user_id
+        assert deployment_kwargs["session_id"] == create_kwargs["id"]
+
     async def test_start_session_persists_vastai_machine_id(self) -> None:
         service, mocks = _make_service()
         bundle = _make_bundle_mapping()
@@ -303,7 +358,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
@@ -334,7 +388,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
@@ -364,7 +417,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
@@ -394,22 +446,20 @@ class TestStartSession:
                 account_id=mocks["account_id"],
             )
 
-    async def test_already_exists_precheck_raises_before_external_calls(self) -> None:
+    async def test_already_exists_precheck_raises_before_external_calls(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
         service, mocks = _make_service()
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mock_deployment_repo.get_live_for_model.return_value = _make_gpu_session_deployment()
 
-        with patch(_REPO_PATH) as MockRepo:
-            mock_repo = AsyncMock()
-            MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = _make_gpu_session()
-
-            with pytest.raises(SessionAlreadyExistsError):
-                await service.start_session(
-                    user_id=uuid4(),
-                    product_id="vex",
-                    model_type=ModelType.AISHA_IMAGE,
-                    account_id=mocks["account_id"],
-                )
+        with pytest.raises(SessionAlreadyExistsError):
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+            )
 
         mocks["cf_client"].create_session_tunnel.assert_not_called()
         mocks["vastai_client"].search_offers.assert_not_called()
@@ -424,7 +474,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(NoCapacityError):
                 await service.start_session(
@@ -455,7 +504,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(NoCapacityError):
                 await service.start_session(
@@ -487,7 +535,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(RuntimeError, match="cf tunnel creation failed"):
                 await service.start_session(
@@ -531,7 +578,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = MagicMock(spec=GpuSession)
 
             await service.start_session(
@@ -563,7 +609,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             result = await service.start_session(
@@ -593,7 +638,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(VastAIError):
                 await service.start_session(
@@ -627,7 +671,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(VastAIError) as exc_info:
                 await service.start_session(
@@ -662,7 +705,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(VastAIError, match="offer_walk_depth must be >= 1"):
                 await service.start_session(
@@ -698,7 +740,6 @@ class TestStartSession:
         ):
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(CustomVastAIError):
                 await service.start_session(
@@ -727,7 +768,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.side_effect = IntegrityError("INSERT", {}, Exception("duplicate key"))
 
             with pytest.raises(SessionAlreadyExistsError):
@@ -743,6 +783,41 @@ class TestStartSession:
             _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
         )
 
+    async def test_deployment_integrity_error_cleans_up_resources(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """Invariant 1: the new unique index lives on gpu_session_deployments,
+        so a race that slips past the step-2 pre-check now surfaces as an
+        IntegrityError from deployment_repo.create(), not repo.create() — and
+        must be handled identically (SessionAlreadyExistsError + cleanup)."""
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 88888
+        mock_deployment_repo.create.side_effect = IntegrityError(
+            "INSERT", {}, Exception("duplicate key")
+        )
+
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+            MockOperationRepo.return_value = AsyncMock()
+
+            with pytest.raises(SessionAlreadyExistsError):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                )
+
+        mocks["vastai_client"].destroy_instance.assert_called_once_with(88888)
+        mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
+            _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
+        )
+
     async def test_persists_expected_env_vars(self) -> None:
         service, mocks = _make_service()
         bundle = _make_bundle_mapping(bundle_version="260201-01")
@@ -754,7 +829,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
@@ -807,7 +881,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
@@ -838,7 +911,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             await service.start_session(
@@ -863,7 +935,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(InsufficientBalanceError):
                 await service.start_session(
@@ -889,7 +960,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = expected_session
 
             await service.start_session(
@@ -933,7 +1003,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
 
             with pytest.raises(InsufficientBalanceError):
@@ -961,7 +1030,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = expected_session
 
             await service.start_session(
@@ -998,7 +1066,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
             mock_repo.create.return_value = expected_session
 
             result = await service.start_session(
@@ -1022,7 +1089,6 @@ class TestStartSession:
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
-            mock_repo.get_non_terminal_for_model.return_value = None
 
             with pytest.raises(NoCapacityError, match="ai_bundles_github_token"):
                 await service.start_session(
@@ -1152,6 +1218,34 @@ class TestPauseSession:
 
         mock_repo.update_status.assert_not_called()
 
+    async def test_pause_does_not_cascade_to_deployment(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """Invariant 4 / D17: pausing a session must not touch
+        gpu_session_deployments — a paused Vast.ai instance keeps its disk, so
+        the deployment stays 'active' and the uniqueness slot stays occupied."""
+        service, _mocks = _make_service()
+        user_id = uuid4()
+        product_id = "vex"
+        session = _make_gpu_session(user_id=user_id, product_id=product_id)
+
+        with patch(_REPO_PATH) as MockRepo, patch(_JOB_REPO_PATH) as MockJobRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            mock_job_repo = AsyncMock()
+            MockJobRepo.return_value = mock_job_repo
+            mock_job_repo.count_in_flight_for_session.return_value = 0
+
+            await service.pause_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=product_id,
+            )
+
+        mock_deployment_repo.mark_status.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # resume_session tests
@@ -1250,6 +1344,28 @@ class TestResumeSession:
                 )
 
         mock_repo.update_status.assert_not_called()
+
+    async def test_resume_does_not_cascade_to_deployment(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """Invariant 4 / D17: resuming does not touch gpu_session_deployments —
+        only 'stopped'/'failed' clear a deployment."""
+        service, _mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.paused, paused_at=None)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.resume_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+            )
+
+        mock_deployment_repo.mark_status.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1399,6 +1515,35 @@ class TestStopSession:
         mocks["vastai_client"].destroy_instance.assert_called_once_with(session.vastai_instance_id)
         mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
             session.cf_tunnel_id, session.cf_dns_record_id
+        )
+
+    async def test_confirmed_stop_cascades_deployment_to_removed(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """Invariant 2: stopping cascades the live deployment to 'removed' in
+        the same transaction as the session's final 'stopped' write — only
+        on the stopping->stopped write, not the active->stopping one."""
+        service, _mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        mock_deployment_repo.mark_status.assert_awaited_once_with(
+            session.id,
+            from_statuses=LIVE_DEPLOYMENT_STATUSES,
+            to_status=DeploymentStatus.removed,
+            at=ANY,
         )
 
     async def test_confirmed_from_paused(self) -> None:
@@ -2568,38 +2713,37 @@ class TestReadMethods:
 
         assert result is None
 
-    async def test_get_active_session_for_model_returns_active_only(self) -> None:
+    async def test_get_active_session_for_model_returns_active_only(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
         service, _ = _make_service()
         user_id = uuid4()
         session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+        deployment = _make_gpu_session_deployment(
+            session_id=session.id, user_id=user_id, status=DeploymentStatus.active
+        )
+        mock_deployment_repo.get_routable.return_value = (session, deployment)
 
-        with patch(_REPO_PATH) as MockRepo:
-            mock_repo = AsyncMock()
-            MockRepo.return_value = mock_repo
-            mock_repo.get_active_for_model.return_value = session
+        result = await service.get_active_session_for_model(
+            user_id=user_id,
+            product_id="vex",
+            model_type=ModelType.AISHA_IMAGE,
+        )
 
-            result = await service.get_active_session_for_model(
-                user_id=user_id,
-                product_id="vex",
-                model_type=ModelType.AISHA_IMAGE,
-            )
+        assert result == (session, deployment)
+        mock_deployment_repo.get_routable.assert_called_once_with(user_id, "vex", "aisha-image")
 
-        assert result is session
-        mock_repo.get_active_for_model.assert_called_once_with(user_id, "vex", "aisha-image")
-
-    async def test_get_active_session_for_model_returns_none_for_paused(self) -> None:
+    async def test_get_active_session_for_model_returns_none_for_paused(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
         service, _ = _make_service()
+        mock_deployment_repo.get_routable.return_value = None
 
-        with patch(_REPO_PATH) as MockRepo:
-            mock_repo = AsyncMock()
-            MockRepo.return_value = mock_repo
-            mock_repo.get_active_for_model.return_value = None
-
-            result = await service.get_active_session_for_model(
-                user_id=uuid4(),
-                product_id="vex",
-                model_type=ModelType.AISHA_IMAGE,
-            )
+        result = await service.get_active_session_for_model(
+            user_id=uuid4(),
+            product_id="vex",
+            model_type=ModelType.AISHA_IMAGE,
+        )
 
         assert result is None
 
@@ -3339,7 +3483,6 @@ class TestStartSessionReadinessMarkerAndTemplateHash:
         bundle: BundleMapping,
     ) -> GpuSession:
         mock_repo = AsyncMock()
-        mock_repo.get_non_terminal_for_model.return_value = None
         session_row = _make_gpu_session(status=GpuSessionStatus.pending)
         mock_repo.create.return_value = session_row
         mocks["bundle_index"].resolve_bundle.return_value = bundle
@@ -3357,24 +3500,28 @@ class TestStartSessionReadinessMarkerAndTemplateHash:
             )
         return result, mock_repo  # type: ignore[return-value]
 
-    async def test_persists_readiness_marker_when_bundle_has_one(self) -> None:
+    async def test_persists_readiness_marker_when_bundle_has_one(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
         service, mocks = _make_service()
         marker = ReadinessMarker(node_class="WanVideoSampler")
         bundle = _make_bundle_mapping(readiness_marker=marker)
 
-        _, mock_repo = await self._call_start_session(service, mocks, bundle)  # type: ignore[misc]
+        await self._call_start_session(service, mocks, bundle)  # type: ignore[misc]
 
-        create_kwargs = mock_repo.create.call_args[1]
-        assert create_kwargs["readiness_marker_node_class"] == "WanVideoSampler"
+        deployment_kwargs = mock_deployment_repo.create.call_args.kwargs
+        assert deployment_kwargs["readiness_marker_node_class"] == "WanVideoSampler"
 
-    async def test_persists_none_when_bundle_has_no_marker(self) -> None:
+    async def test_persists_none_when_bundle_has_no_marker(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
         service, mocks = _make_service()
         bundle = _make_bundle_mapping(readiness_marker=None)
 
-        _, mock_repo = await self._call_start_session(service, mocks, bundle)  # type: ignore[misc]
+        await self._call_start_session(service, mocks, bundle)  # type: ignore[misc]
 
-        create_kwargs = mock_repo.create.call_args[1]
-        assert create_kwargs["readiness_marker_node_class"] is None
+        deployment_kwargs = mock_deployment_repo.create.call_args.kwargs
+        assert deployment_kwargs["readiness_marker_node_class"] is None
 
     async def test_passes_template_hash_to_create_instance(self) -> None:
         service, mocks = _make_service()

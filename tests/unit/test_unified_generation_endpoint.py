@@ -553,7 +553,14 @@ class TestProviderValidationBeforeBilling:
         gpu_session.bundle_name = "my_bundle"
         gpu_session.bundle_version = "current"
         gpu_session.tunnel_hostname = "abc.gpu.test"
-        gpu_session_svc.get_active_session_for_model = AsyncMock(return_value=gpu_session)
+        # Since P2, routing returns (session, deployment) — generation reads
+        # bundle identity off the deployment (D18).
+        deployment = MagicMock()
+        deployment.bundle_name = gpu_session.bundle_name
+        deployment.bundle_version = gpu_session.bundle_version
+        gpu_session_svc.get_active_session_for_model = AsyncMock(
+            return_value=(gpu_session, deployment)
+        )
 
         provider = AishaGenerationProvider(
             workflow_service=MagicMock(),

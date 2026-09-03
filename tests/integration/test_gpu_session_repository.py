@@ -6,9 +6,7 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-import pytest
 import pytest_asyncio
-from sqlalchemy.exc import IntegrityError
 
 from src.core.enums import GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
@@ -117,71 +115,10 @@ async def test_create_persists_all_fields(
 
 
 # ---------------------------------------------------------------------------
-# Tests: get_active_for_model
+# get_active_for_model and get_non_terminal_for_model were removed in P2 —
+# model identity and the uniqueness slot moved to GpuSessionDeploymentRepository
+# (get_routable / get_live_for_model). See test_gpu_session_deployment_repository.py.
 # ---------------------------------------------------------------------------
-
-
-async def test_get_active_for_model_returns_active(
-    gpu_repo: GpuSessionRepository,
-    make_gpu_session: GpuSessionFactory,
-) -> None:
-    row = await make_gpu_session(status=GpuSessionStatus.active)
-    found = await gpu_repo.get_active_for_model(row.user_id, row.product_id, row.model_type)
-    assert found is not None
-    assert found.id == row.id
-
-
-async def test_get_active_for_model_ignores_non_active(
-    gpu_repo: GpuSessionRepository,
-    make_gpu_session: GpuSessionFactory,
-) -> None:
-    for status in (
-        GpuSessionStatus.pending,
-        GpuSessionStatus.provisioning,
-        GpuSessionStatus.stale,
-        GpuSessionStatus.paused,
-    ):
-        row = await make_gpu_session(status=status)
-        found = await gpu_repo.get_active_for_model(row.user_id, row.product_id, row.model_type)
-        assert found is None, f"Expected None for status={status}"
-
-
-# ---------------------------------------------------------------------------
-# Tests: get_non_terminal_for_model
-# ---------------------------------------------------------------------------
-
-
-async def test_get_non_terminal_for_model_returns_non_terminal(
-    gpu_repo: GpuSessionRepository,
-    make_gpu_session: GpuSessionFactory,
-) -> None:
-    for status in (
-        GpuSessionStatus.pending,
-        GpuSessionStatus.provisioning,
-        GpuSessionStatus.active,
-        GpuSessionStatus.stale,
-        GpuSessionStatus.paused,
-        GpuSessionStatus.resuming,
-    ):
-        row = await make_gpu_session(status=status)
-        found = await gpu_repo.get_non_terminal_for_model(
-            row.user_id, row.product_id, row.model_type
-        )
-        assert found is not None, f"Expected a row for status={status}"
-        assert found.id == row.id
-
-
-async def test_get_non_terminal_for_model_excludes_terminal(
-    gpu_repo: GpuSessionRepository,
-    make_gpu_session: GpuSessionFactory,
-) -> None:
-    for status in (GpuSessionStatus.stopped, GpuSessionStatus.failed):
-        row = await make_gpu_session(status=status)
-        found = await gpu_repo.get_non_terminal_for_model(
-            row.user_id, row.product_id, row.model_type
-        )
-        assert found is None, f"Expected None for terminal status={status}"
-
 
 # ---------------------------------------------------------------------------
 # Tests: list_by_status
@@ -228,113 +165,14 @@ async def test_update_status_transition(
 
 
 # ---------------------------------------------------------------------------
-# Tests: partial unique index enforcement
+# Partial unique index enforcement moved off gpu_sessions in P2 — the slot
+# now lives on gpu_session_deployments; see
+# test_gpu_session_deployment_repository.py::TestLiveUserModelIndex.
 # ---------------------------------------------------------------------------
-
-
-async def test_unique_index_blocks_two_non_terminal_same_model(
-    make_gpu_session: GpuSessionFactory,
-    make_user: UserFactory,
-    db_session: AsyncSession,
-) -> None:
-    user = await make_user(email=f"uniq-{uuid4().hex[:8]}@example.com")
-    await make_gpu_session(
-        user=user,
-        product_id="vex",
-        model_type="aisha-image",
-        status=GpuSessionStatus.active,
-    )
-
-    repo2 = GpuSessionRepository(db_session)
-    with pytest.raises(IntegrityError):
-        await repo2.create(
-            id=uuid4(),
-            user_id=user.id,
-            product_id="vex",
-            status=GpuSessionStatus.pending,
-            bundle_name="wan_2.2_i2v",
-            model_type="aisha-image",
-        )
-        await db_session.flush()
-
-
-async def test_unique_index_allows_two_non_terminal_different_models(
-    make_gpu_session: GpuSessionFactory,
-    make_user: UserFactory,
-    db_session: AsyncSession,
-) -> None:
-    """Z-C7: one user can hold concurrent non-terminal sessions for two
-    different model_types (e.g. aisha-image + aisha-image-lite) — the
-    partial unique index is scoped per model_type, not per user."""
-    user = await make_user(email=f"multi-model-{uuid4().hex[:8]}@example.com")
-    await make_gpu_session(
-        user=user,
-        product_id="vex",
-        model_type="aisha-image",
-        status=GpuSessionStatus.active,
-    )
-
-    repo2 = GpuSessionRepository(db_session)
-    second = await repo2.create(
-        id=uuid4(),
-        user_id=user.id,
-        product_id="vex",
-        status=GpuSessionStatus.active,
-        bundle_name="zit_cyberrealistic",
-        model_type="aisha-image-lite",
-    )
-    await db_session.flush()
-
-    assert second.model_type == "aisha-image-lite"
-
-
-async def test_unique_index_allows_terminal_then_new(
-    make_gpu_session: GpuSessionFactory,
-    make_user: UserFactory,
-    db_session: AsyncSession,
-) -> None:
-    user = await make_user(email=f"term-{uuid4().hex[:8]}@example.com")
-    # Create and immediately stop a session
-    stopped = await make_gpu_session(
-        user=user,
-        product_id="vex",
-        model_type="aisha-image",
-        status=GpuSessionStatus.stopped,
-    )
-    assert stopped is not None
-
-    # Should be allowed: previous session is terminal
-    repo2 = GpuSessionRepository(db_session)
-    new_session = await repo2.create(
-        id=uuid4(),
-        user_id=user.id,
-        product_id="vex",
-        status=GpuSessionStatus.pending,
-        bundle_name="wan_2.2_i2v",
-        model_type="aisha-image",
-    )
-    assert new_session.id != stopped.id
-
 
 # ---------------------------------------------------------------------------
 # Tests: stopping is non-terminal at the repo layer (regression)
 # ---------------------------------------------------------------------------
-
-
-async def test_stopping_is_non_terminal_get_non_terminal_for_model(
-    gpu_repo: GpuSessionRepository,
-    make_gpu_session: GpuSessionFactory,
-) -> None:
-    """A session in `stopping` must still be returned by get_non_terminal_for_model.
-
-    Guards against a future consolidation that wrongly adds `stopping` to
-    TERMINAL_GPU_SESSION_STATUSES — which would let a second session start
-    mid-teardown and cause overlapping Vast.ai billing.
-    """
-    row = await make_gpu_session(status=GpuSessionStatus.stopping)
-    found = await gpu_repo.get_non_terminal_for_model(row.user_id, row.product_id, row.model_type)
-    assert found is not None, "stopping session must block the start guard"
-    assert found.id == row.id
 
 
 async def test_stopping_is_non_terminal_list_by_user(

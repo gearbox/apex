@@ -15,11 +15,13 @@ class GpuSessionError(Exception):
 
 
 class SessionAlreadyExistsError(GpuSessionError):
-    """A non-terminal session already exists for this (user, product, model_type).
+    """A live deployment already exists for this (user, product, model_type).
 
-    The uniqueness constraint is enforced at the DB level by the partial
-    unique index `ix_gpu_sessions_active_user_model`. This exception wraps
-    both the pre-check path and the race-condition IntegrityError path.
+    Since P2, the uniqueness constraint is enforced at the DB level by the
+    partial unique index `ix_gpu_session_deployments_live_user_model` on
+    gpu_session_deployments (moved off gpu_sessions — see
+    GpuSessionDeployment's module docstring). This exception wraps both the
+    pre-check path and the race-condition IntegrityError path.
     """
 
 

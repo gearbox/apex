@@ -15,7 +15,9 @@ from sqlalchemy.exc import IntegrityError
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.vastai.exceptions import NoCapacityError
 from src.core.enums import (
+    LIVE_DEPLOYMENT_STATUSES,
     STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
+    DeploymentStatus,
     GpuSessionStatus,
     ModelType,
     OperationKind,
@@ -23,6 +25,7 @@ from src.core.enums import (
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
 
@@ -54,6 +57,7 @@ if TYPE_CHECKING:
     from src.api.services.vastai.schemas import VastAIOffer
     from src.core.config import Settings
     from src.db.models.gpu_session import GpuSession
+    from src.db.models.gpu_session_deployment import GpuSessionDeployment
 
 logger = structlog.get_logger(__name__)
 
@@ -226,7 +230,7 @@ class GpuSessionService:
 
         Steps (in order, with cleanup on failure at each step):
         1. Resolve bundle (default via model_type OR override if provided)
-        2. Pre-check uniqueness via get_non_terminal_for_model (fast fail)
+        2. Pre-check uniqueness via GpuSessionDeploymentRepository.get_live_for_model (fast fail)
         3. Generate session_id (UUIDv7) and callback_token (token_urlsafe)
         1.5. Assert sufficient balance BEFORE creating any external resources
         4. Create CF tunnel + DNS (CloudflareTunnelClient.create_session_tunnel)
@@ -267,8 +271,10 @@ class GpuSessionService:
 
         # Step 2: pre-check uniqueness (short read-only session, fast fail)
         async with self._session_factory() as db:
-            repo = GpuSessionRepository(db)
-            existing = await repo.get_non_terminal_for_model(user_id, product_id, model_type.value)
+            deployment_repo = GpuSessionDeploymentRepository(db)
+            existing = await deployment_repo.get_live_for_model(
+                user_id, product_id, model_type.value
+            )
 
         if existing is not None:
             raise SessionAlreadyExistsError(
@@ -279,6 +285,7 @@ class GpuSessionService:
         # Step 3: generate IDs (no external calls)
         session_id = new_id()
         bootstrap_operation_id = new_id()
+        deployment_id = new_id()
         session_id_short = str(session_id)[:8]
         callback_token = secrets.token_urlsafe(48)
         # SECURITY: only the hash is persisted; plaintext goes into the env and is never logged.
@@ -396,10 +403,11 @@ class GpuSessionService:
             )
             raise
 
-        # Step 7: persist session + billing reservation in a single transaction
+        # Step 7: persist session + deployment + billing reservation in a single transaction
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             operation_repo = GpuSessionOperationRepository(db)
+            deployment_repo = GpuSessionDeploymentRepository(db)
             try:
                 session_row = await repo.create(
                     id=session_id,
@@ -419,11 +427,6 @@ class GpuSessionService:
                     vastai_machine_id=selected_offer.machine_id,
                     callback_token_hash=callback_token_hash,
                     account_id=account_id,
-                    readiness_marker_node_class=(
-                        bundle.readiness_marker.node_class
-                        if bundle.readiness_marker is not None
-                        else None
-                    ),
                     bootstrap_operation_id=bootstrap_operation_id,
                 )
                 await operation_repo.create(
@@ -434,6 +437,27 @@ class GpuSessionService:
                     target_bundle=bundle.bundle_name,
                     target_bundle_version=bundle.bundle_version,
                     target_mode="full",
+                )
+                # The primary deployment is created with the session — see D6/D21.
+                # This insert is what the new partial unique index actually guards;
+                # a race that slips past the step-2 pre-check lands here as an
+                # IntegrityError, not on the session insert above.
+                await deployment_repo.create(
+                    id=deployment_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    product_id=product_id,
+                    model_type=model_type.value,
+                    bundle_name=bundle.bundle_name,
+                    bundle_version=bundle.bundle_version,
+                    readiness_marker_node_class=(
+                        bundle.readiness_marker.node_class
+                        if bundle.readiness_marker is not None
+                        else None
+                    ),
+                    status=DeploymentStatus.deploying,
+                    provision_operation_id=bootstrap_operation_id,
+                    is_primary=True,
                 )
             except IntegrityError:
                 # Race with a concurrent start_session call that slipped past our pre-check.
@@ -544,7 +568,7 @@ class GpuSessionService:
             await self._vastai.stop_instance(session_row.vastai_instance_id)
 
             await self._set_status(
-                repo, session_row, GpuSessionStatus.paused, paused_at=datetime.now(UTC)
+                db, repo, session_row, GpuSessionStatus.paused, paused_at=datetime.now(UTC)
             )
 
         logger.info("gpu_session.pause.done", session_id=str(session_id))
@@ -609,7 +633,7 @@ class GpuSessionService:
                 session_row.total_paused_seconds = session_row.total_paused_seconds + paused_seconds
 
             await self._set_status(
-                repo, session_row, GpuSessionStatus.resuming, resumed_at=datetime.now(UTC)
+                db, repo, session_row, GpuSessionStatus.resuming, resumed_at=datetime.now(UTC)
             )
 
         logger.info("gpu_session.resume.done", session_id=str(session_id))
@@ -726,11 +750,17 @@ class GpuSessionService:
         user_id: UUID,
         product_id: str,
         model_type: ModelType,
-    ) -> GpuSession | None:
+    ) -> tuple[GpuSession, GpuSessionDeployment] | None:
         """Used by AishaGenerationProvider for routing.
 
-        Returns only sessions with status='active'. Paused/stale/provisioning
-        sessions are NOT routable for generation.
+        Returns only a session+deployment pair where the session is 'active'
+        AND the deployment is 'active' — a single joined read (see
+        GpuSessionDeploymentRepository.get_routable), so a session that flips
+        away from active between two sequential reads can never be routed to.
+        Paused/stale/provisioning sessions are NOT routable for generation.
+
+        Model identity for generation (bundle_name/bundle_version) must be read
+        from the returned deployment, not the session — see D18.
 
         Args:
             user_id: Owner filter.
@@ -738,11 +768,11 @@ class GpuSessionService:
             model_type: Model type filter.
 
         Returns:
-            Active GpuSession or None.
+            (GpuSession, GpuSessionDeployment) tuple or None.
         """
         async with self._session_factory() as db:
-            repo = GpuSessionRepository(db)
-            return await repo.get_active_for_model(user_id, product_id, model_type.value)
+            deployment_repo = GpuSessionDeploymentRepository(db)
+            return await deployment_repo.get_routable(user_id, product_id, model_type.value)
 
     async def list_user_sessions(
         self,
@@ -829,6 +859,7 @@ class GpuSessionService:
 
     async def _set_status(
         self,
+        db: AsyncSession,
         repo: GpuSessionRepository,
         session_row: GpuSession,
         new_status: GpuSessionStatus,
@@ -841,6 +872,13 @@ class GpuSessionService:
 
         Extra timestamp fields are only forwarded to the repo when non-None so
         we don't accidentally clobber existing values with NULL.
+
+        One of the two D15 lifecycle-cascade chokepoints (the other is
+        GpuProvisioningWorker._transition): a transition to 'stopped' or
+        'failed' flips every live deployment to 'removed'/'failed' in the same
+        transaction. Pause/resume (paused/resuming) deliberately do not cascade
+        — D17, a paused Vast.ai instance keeps its disk, so the deployment stays
+        'active'.
         """
         extra: dict[str, datetime] = {}
         if paused_at is not None:
@@ -858,6 +896,20 @@ class GpuSessionService:
             session_row.resumed_at = resumed_at
         if stopped_at is not None:
             session_row.stopped_at = stopped_at
+
+        if new_status in (GpuSessionStatus.stopped, GpuSessionStatus.failed):
+            to_status = (
+                DeploymentStatus.removed
+                if new_status == GpuSessionStatus.stopped
+                else DeploymentStatus.failed
+            )
+            deployment_repo = GpuSessionDeploymentRepository(db)
+            await deployment_repo.mark_status(
+                session_row.id,
+                from_statuses=LIVE_DEPLOYMENT_STATUSES,
+                to_status=to_status,
+                at=stopped_at or datetime.now(UTC),
+            )
 
     async def _teardown_external_resources(
         self, session_row: GpuSession, *, log_prefix: str
@@ -1036,7 +1088,7 @@ class GpuSessionService:
                 )
             else:
                 previous_status = str(session_row.status)
-                await self._set_status(repo, session_row, GpuSessionStatus.stopping)
+                await self._set_status(db, repo, session_row, GpuSessionStatus.stopping)
 
         # If the session raced to active under the lock, use the normal stop path.
         if session_row.started_at is not None:
@@ -1082,7 +1134,9 @@ class GpuSessionService:
             if reloaded is None:  # pragma: no cover
                 raise GpuSessionError(f"Session {session_id} disappeared during pre-active stop")
             session_row = reloaded
-            await self._set_status(repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now)
+            await self._set_status(
+                db, repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now
+            )
             await repo.mark_billing_finalized(session_id, stop_now)
 
         logger.info("gpu_session.stop_pre_active.success", session_id=str(session_id))
@@ -1164,7 +1218,7 @@ class GpuSessionService:
                         total_paused_seconds=session_row.total_paused_seconds,
                     )
 
-            await self._set_status(repo, session_row, GpuSessionStatus.stopping)
+            await self._set_status(db, repo, session_row, GpuSessionStatus.stopping)
 
         await self._publish_status_event(
             session_row, previous_status=previous_status, reason=reason
@@ -1207,7 +1261,9 @@ class GpuSessionService:
             if reloaded is None:  # pragma: no cover — race with DB deletion
                 raise GpuSessionError(f"Session {session_id} disappeared during stop teardown")
             session_row = reloaded
-            await self._set_status(repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now)
+            await self._set_status(
+                db, repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now
+            )
 
         logger.info(
             "gpu_session.stop.done",
