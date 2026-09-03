@@ -290,7 +290,7 @@ class TestModelInfoSchema:
 
         info = _build_model_info(
             ModelType.AISHA_IMAGE_LITE,
-            SimpleNamespace(name="Aisha Image Lite", description="", is_enabled=True),
+            SimpleNamespace(name="Aisha Lite", description="", is_enabled=True),
             session_state=None,
             capabilities=capabilities,
             bound_workflow=bound_workflow,
