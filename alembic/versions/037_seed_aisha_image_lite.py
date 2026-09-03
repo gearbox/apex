@@ -38,8 +38,8 @@ _GENERATION_MODELS = [
         "id": UUID(_MODEL_ID_AISHA_IMAGE_LITE),
         "model_key": "aisha-image-lite",
         "provider": "aisha",
-        "name": "Aisha Image Lite",
-        "description": "ComfyUI-based image generation (zit.cyberrealistic, t2i-only)",
+        "name": "Aisha Lite",
+        "description": "GPU-session based image generation (t2i-only)",
         "is_enabled": False,  # Disabled until the bundle is indexed and verified
     },
 ]
