@@ -29,8 +29,9 @@ class GpuSessionDeployment(Base):
       uniqueness index below can be local to this table
 
     Key columns for lifecycle:
-    - is_primary: the deployment created with the session. A record, not a rule —
-      nothing may branch on it in P2 beyond backfill and diagnostics.
+    - is_primary: the deployment created with the session. It is normally a
+      record, not a rule; P2's retry pointer is the one load-bearing exception
+      so a primary-model retry cannot repoint future sibling deployments.
     - pending_restart: forward slot for P4; no writer in P2.
     - provision_operation_id: the operation that created (or, on retry, is
       recreating) this deployment.
@@ -52,7 +53,7 @@ class GpuSessionDeployment(Base):
         comment="Denormalized from the session — the uniqueness index needs it locally.",
     )
     product_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    model_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_type: Mapped[str] = mapped_column(String(50), nullable=False)
     bundle_name: Mapped[str] = mapped_column(String(100), nullable=False)
     bundle_version: Mapped[str | None] = mapped_column(
         String(20),
@@ -60,7 +61,7 @@ class GpuSessionDeployment(Base):
         comment="Specific bundle version. NULL means the 'current' symlink was used.",
     )
     readiness_marker_node_class: Mapped[str | None] = mapped_column(
-        String(100),
+        String(128),
         nullable=True,
         comment=(
             "ComfyUI class name to require in /object_info during readiness probe. "

@@ -1,12 +1,13 @@
 """Integration test for migration 039's gpu_session_deployments backfill and round-trip.
 
-Seeds gpu_sessions rows against the pre-migration (038) schema — one active,
-one provisioning, one stopped — then runs the real ``alembic upgrade``/
-``downgrade`` commands and asserts:
+Seeds gpu_sessions rows against the pre-migration (038) schema — active,
+provisioning, stale, paused, and stopped — then runs the real ``alembic
+upgrade``/``downgrade`` commands and asserts:
 
-- invariant 11 (backfill): exactly two deployment rows are created (for the
-  active and provisioning sessions), with the right statuses and identity
-  copied from the source session; none for the stopped session.
+- invariant 11 (backfill): deployment rows are created for every non-terminal
+  session, with identity copied from the source session. The stale and paused
+  sessions retain their durable activation fact, while the stopped session has
+  no deployment.
 - invariant 12 (round-trip): downgrading to 038 restores
   ``readiness_marker_node_class`` (from each session's primary deployment)
   and ``ix_gpu_sessions_active_user_model``; re-upgrading to 039 re-backfills
@@ -49,9 +50,12 @@ def test_migration_039_backfills_and_round_trips(
     user_id = uuid4()
     active_session_id = uuid4()
     provisioning_session_id = uuid4()
+    stale_session_id = uuid4()
+    paused_session_id = uuid4()
     stopped_session_id = uuid4()
     active_operation_id = uuid4()
     started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    long_readiness_marker = "M" * 128
 
     async def _seed() -> None:
         async with db_engine.begin() as conn:
@@ -70,13 +74,14 @@ def test_migration_039_backfills_and_round_trips(
                     "(id, user_id, product_id, bundle_name, bundle_version, model_type, "
                     " readiness_marker_node_class, status, bootstrap_operation_id, started_at) "
                     "VALUES (:id, :user_id, 'vex', 'wan_2.2_i2v', '260105-01', 'aisha-image', "
-                    " 'WanVideoSampler', 'active', :operation_id, :started_at)"
+                    " :readiness_marker, 'active', :operation_id, :started_at)"
                 ),
                 {
                     "id": active_session_id,
                     "user_id": user_id,
                     "operation_id": active_operation_id,
                     "started_at": started_at,
+                    "readiness_marker": long_readiness_marker,
                 },
             )
             await conn.execute(
@@ -88,6 +93,26 @@ def test_migration_039_backfills_and_round_trips(
                     " 'aisha-image-lite', NULL, 'provisioning')"
                 ),
                 {"id": provisioning_session_id, "user_id": user_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO gpu_sessions "
+                    "(id, user_id, product_id, bundle_name, bundle_version, model_type, "
+                    " readiness_marker_node_class, status, started_at) "
+                    "VALUES (:id, :user_id, 'vex', 'wan_2.2_i2v', '260105-01', 'aisha-video', "
+                    " 'StaleVideoSampler', 'stale', :started_at)"
+                ),
+                {"id": stale_session_id, "user_id": user_id, "started_at": started_at},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO gpu_sessions "
+                    "(id, user_id, product_id, bundle_name, bundle_version, model_type, "
+                    " readiness_marker_node_class, status, started_at) "
+                    "VALUES (:id, :user_id, 'vex', 'wan_2.2_i2v', '260105-01', "
+                    " 'grok-imagine-image', 'PausedImageSampler', 'paused', :started_at)"
+                ),
+                {"id": paused_session_id, "user_id": user_id, "started_at": started_at},
             )
             await conn.execute(
                 text(
@@ -172,7 +197,7 @@ def test_migration_039_backfills_and_round_trips(
         assert d["bundle_name"] == "wan_2.2_i2v"
         assert d["bundle_version"] == "260105-01"
         assert d["model_type"] == "aisha-image"
-        assert d["readiness_marker_node_class"] == "WanVideoSampler"
+        assert d["readiness_marker_node_class"] == long_readiness_marker
         assert d["provision_operation_id"] == active_operation_id
         assert d["activated_at"] is not None
 
@@ -183,6 +208,24 @@ def test_migration_039_backfills_and_round_trips(
         assert d["is_primary"] is True
         assert d["model_type"] == "aisha-image-lite"
         assert d["activated_at"] is None
+
+        stale_deployments = asyncio.run(_deployments_for(stale_session_id))
+        assert len(stale_deployments) == 1
+        d = stale_deployments[0]
+        assert d["status"] == "active"
+        assert d["is_primary"] is True
+        assert d["model_type"] == "aisha-video"
+        assert d["readiness_marker_node_class"] == "StaleVideoSampler"
+        assert d["activated_at"] is not None
+
+        paused_deployments = asyncio.run(_deployments_for(paused_session_id))
+        assert len(paused_deployments) == 1
+        d = paused_deployments[0]
+        assert d["status"] == "active"
+        assert d["is_primary"] is True
+        assert d["model_type"] == "grok-imagine-image"
+        assert d["readiness_marker_node_class"] == "PausedImageSampler"
+        assert d["activated_at"] is not None
 
         stopped_deployments = asyncio.run(_deployments_for(stopped_session_id))
         assert stopped_deployments == []
@@ -202,8 +245,10 @@ def test_migration_039_backfills_and_round_trips(
         assert "ix_gpu_sessions_active_user_model" in session_indexes
 
         # Restored from each session's primary deployment.
-        assert asyncio.run(_session_readiness_marker(active_session_id)) == "WanVideoSampler"
+        assert asyncio.run(_session_readiness_marker(active_session_id)) == long_readiness_marker
         assert asyncio.run(_session_readiness_marker(provisioning_session_id)) is None
+        assert asyncio.run(_session_readiness_marker(stale_session_id)) == "StaleVideoSampler"
+        assert asyncio.run(_session_readiness_marker(paused_session_id)) == "PausedImageSampler"
         # Never had a deployment — nothing to restore from, stays NULL.
         assert asyncio.run(_session_readiness_marker(stopped_session_id)) is None
 
@@ -213,11 +258,21 @@ def test_migration_039_backfills_and_round_trips(
         active_deployments = asyncio.run(_deployments_for(active_session_id))
         assert len(active_deployments) == 1
         assert active_deployments[0]["status"] == "active"
-        assert active_deployments[0]["readiness_marker_node_class"] == "WanVideoSampler"
+        assert active_deployments[0]["readiness_marker_node_class"] == long_readiness_marker
 
         provisioning_deployments = asyncio.run(_deployments_for(provisioning_session_id))
         assert len(provisioning_deployments) == 1
         assert provisioning_deployments[0]["status"] == "deploying"
+
+        stale_deployments = asyncio.run(_deployments_for(stale_session_id))
+        assert len(stale_deployments) == 1
+        assert stale_deployments[0]["status"] == "active"
+        assert stale_deployments[0]["readiness_marker_node_class"] == "StaleVideoSampler"
+
+        paused_deployments = asyncio.run(_deployments_for(paused_session_id))
+        assert len(paused_deployments) == 1
+        assert paused_deployments[0]["status"] == "active"
+        assert paused_deployments[0]["readiness_marker_node_class"] == "PausedImageSampler"
 
         assert asyncio.run(_deployments_for(stopped_session_id)) == []
     finally:

@@ -361,11 +361,16 @@ class GpuProvisioningWorker(PeriodicWorker):
             return
 
         operation = None
-        if session.bootstrap_operation_id is not None:
-            async with self._session_factory() as db:
+        # Fetch both values through one checkout. P2 has one primary deployment;
+        # P4 can preserve this query shape while changing marker selection.
+        async with self._session_factory() as db:
+            if session.bootstrap_operation_id is not None:
                 operation = await GpuSessionOperationRepository(db).get(
                     session.bootstrap_operation_id
                 )
+            readiness_marker_node_class = await self._get_primary_readiness_marker(
+                session.id, db=db
+            )
 
         if operation is not None and operation.status == OperationStatus.failed:
             logger.warning(
@@ -377,7 +382,6 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._retry_or_fail(session, reason=_REASON_NODE_REPORTED_FAILURE)
             return
 
-        readiness_marker_node_class = await self._get_primary_readiness_marker(session.id)
         reachable = await self._probe_comfyui(
             session, readiness_marker_node_class=readiness_marker_node_class
         )
@@ -452,7 +456,9 @@ class GpuProvisioningWorker(PeriodicWorker):
     # ComfyUI probe
     # ------------------------------------------------------------------
 
-    async def _get_primary_readiness_marker(self, session_id: UUID) -> str | None:
+    async def _get_primary_readiness_marker(
+        self, session_id: UUID, *, db: AsyncSession | None = None
+    ) -> str | None:
         """Fetch the primary deployment's readiness marker for one session.
 
         readiness_marker_node_class moved off gpu_sessions onto
@@ -462,7 +468,12 @@ class GpuProvisioningWorker(PeriodicWorker):
         with the session) degrades to the same None fallback the marker
         itself already supports.
         """
-        async with self._session_factory() as db:
+        if db is None:
+            async with self._session_factory() as lookup_session:
+                deployments = await GpuSessionDeploymentRepository(lookup_session).list_for_session(
+                    session_id
+                )
+        else:
             deployments = await GpuSessionDeploymentRepository(db).list_for_session(session_id)
         for deployment in deployments:
             if deployment.is_primary:

@@ -541,16 +541,28 @@ async def test_update_provision_operation_id_repoints_without_forking(
         status=DeploymentStatus.deploying,
         provision_operation_id=original_operation_id,
     )
+    sibling_operation_id = new_id()
+    sibling = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+        provision_operation_id=sibling_operation_id,
+    )
     new_operation_id = new_id()
 
     await deployment_repo.update_provision_operation_id(session.id, new_operation_id)
 
     await db_session.refresh(deployment)
+    await db_session.refresh(sibling)
     assert deployment.provision_operation_id == new_operation_id
-    # Still exactly one deployment for the session — retry did not fork.
+    # A primary-model retry must not repoint a future P4 sibling deployment.
+    assert sibling.provision_operation_id == sibling_operation_id
+    # P2 still has exactly one deployment; the sibling above makes the P4
+    # safeguard explicit without changing the P2 production shape.
     all_deployments = await deployment_repo.list_for_session(session.id)
-    assert len(all_deployments) == 1
-    assert all_deployments[0].status == DeploymentStatus.deploying
+    assert len(all_deployments) == 2
+    assert all(deployment.status == DeploymentStatus.deploying for deployment in all_deployments)
 
 
 # ---------------------------------------------------------------------------

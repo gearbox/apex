@@ -302,6 +302,11 @@ class GpuSessionReconciler:
         Transitions status back to 'active', resets stale tracking, and
         stamps last_reachable_at to ``now``. Handles transient network blips
         — if nodes come back, they don't stay stuck in 'stale'.
+
+        This is the third session-status write site outside the two D15
+        lifecycle chokepoints. It is safe in P2 because any steady-state stale
+        session already has an active deployment; P4 must revisit this when one
+        session can contain deployments in mixed states.
         """
         if not session_ids:
             return

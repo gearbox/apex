@@ -26,10 +26,10 @@ def upgrade() -> None:
         sa.Column("session_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("product_id", sa.String(length=32), nullable=False),
-        sa.Column("model_type", sa.String(length=32), nullable=False),
+        sa.Column("model_type", sa.String(length=50), nullable=False),
         sa.Column("bundle_name", sa.String(length=100), nullable=False),
         sa.Column("bundle_version", sa.String(length=20), nullable=True),
-        sa.Column("readiness_marker_node_class", sa.String(length=100), nullable=True),
+        sa.Column("readiness_marker_node_class", sa.String(length=128), nullable=True),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("pending_restart", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("provision_operation_id", postgresql.UUID(as_uuid=True), nullable=True),
@@ -70,7 +70,7 @@ def upgrade() -> None:
              created_at, activated_at)
         SELECT gen_random_uuid(), s.id, s.user_id, s.product_id, s.model_type, s.bundle_name,
                s.bundle_version, s.readiness_marker_node_class,
-               CASE WHEN s.status = 'active' THEN 'active' ELSE 'deploying' END,
+               CASE WHEN s.started_at IS NOT NULL THEN 'active' ELSE 'deploying' END,
                true, s.bootstrap_operation_id, s.created_at, s.started_at
         FROM gpu_sessions s
         WHERE s.status NOT IN ('stopped', 'failed')

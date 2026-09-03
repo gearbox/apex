@@ -200,18 +200,22 @@ class GpuSessionDeploymentRepository:
         return by_session
 
     async def update_provision_operation_id(self, session_id: UUID, operation_id: UUID) -> None:
-        """Repoint a session's deployment(s) at a new provisioning operation.
+        """Repoint a session's primary deployment at a new provisioning operation.
 
         Used by GpuProvisioningWorker._retry_or_fail: a retry re-provisions the
         same model onto a new node without forking the deployment row — it
         stays 'deploying' throughout and only this pointer rotates, so the UI
-        follows the live attempt. P2 has exactly one deployment per session, so
-        this affects only the primary; mirrors
+        follows the live attempt. P2 has exactly one deployment per session,
+        but filtering to ``is_primary`` is load-bearing: P4 sibling deployments
+        must not be repointed at the primary model's bootstrap operation. Mirrors
         GpuSessionRepository.update_bootstrap_operation_id.
         """
         await self._session.execute(
             update(GpuSessionDeployment)
-            .where(GpuSessionDeployment.session_id == session_id)
+            .where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.is_primary.is_(True),
+            )
             .values(provision_operation_id=operation_id)
         )
         await self._session.flush()
