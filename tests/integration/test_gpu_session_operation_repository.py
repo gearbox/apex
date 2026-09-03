@@ -108,18 +108,101 @@ async def test_apply_event_is_monotonic_and_terminal_once(db_session: AsyncSessi
         summary=None,
         error="late failure",
     )
+    after_terminal = await repo.apply_event(
+        operation_id=operation.id,
+        session_id=gpu_session.id,
+        sequence=2,
+        event_id="late-running-event",
+        status=OperationStatus.running,
+        phase="models",
+        node_started_at=now,
+        event_at=now,
+        message="late progress",
+        progress=None,
+        plan=None,
+        summary=None,
+        error=None,
+    )
 
     await db_session.refresh(operation)
     assert first.applied is True
     assert terminal.applied is True
     assert duplicate.reason == "duplicate"
     assert later.reason == "terminal_after_terminal"
+    assert after_terminal.reason == "after_terminal"
     assert operation.last_sequence == 1
     assert operation.status == OperationStatus.succeeded
     assert operation.phase is None
     assert operation.terminal_at is not None
     assert operation.node_started_at == now
     assert operation.progress == {"work": {"completed": 1, "total": 2, "unit": "files"}}
+
+
+async def test_apply_event_records_resolved_bundle_version_without_overwriting_pin(
+    db_session: AsyncSession,
+) -> None:
+    """Nodes may resolve ``current`` but must not override Apex's pinned choice."""
+    user = User(
+        id=uuid4(),
+        email=f"telemetry-target-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=uuid4(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="qwen_rapid_aio",
+        model_type="aisha-image",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(gpu_session)
+    await db_session.flush()
+
+    repo = GpuSessionOperationRepository(db_session)
+    resolved = await repo.create(
+        id=uuid4(),
+        session_id=gpu_session.id,
+        product_id="vex",
+        kind=OperationKind.session_bootstrap,
+    )
+    pinned = await repo.create(
+        id=uuid4(),
+        session_id=gpu_session.id,
+        product_id="vex",
+        kind=OperationKind.session_bootstrap,
+        target_bundle_version="260101-01",
+    )
+    now = datetime.now(UTC)
+
+    for operation, reported_version in (
+        (resolved, "260105-01"),
+        (pinned, "260106-01"),
+    ):
+        outcome = await repo.apply_event(
+            operation_id=operation.id,
+            session_id=gpu_session.id,
+            sequence=0,
+            event_id=f"target-{operation.id}",
+            status=OperationStatus.running,
+            phase="preflight",
+            node_started_at=now,
+            event_at=now,
+            message="starting",
+            progress=None,
+            plan=None,
+            summary=None,
+            error=None,
+            target_bundle_version=reported_version,
+        )
+        assert outcome.applied is True
+
+    await db_session.refresh(resolved)
+    await db_session.refresh(pinned)
+    assert resolved.target_bundle_version == "260105-01"
+    assert pinned.target_bundle_version == "260101-01"
 
 
 async def test_concurrent_events_apply_once_without_losing_the_higher_sequence(

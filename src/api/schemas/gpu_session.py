@@ -31,31 +31,6 @@ class OperationTargetBody(msgspec.Struct, kw_only=True):
     mode: str
 
 
-class OperationWorkBody(msgspec.Struct, kw_only=True):
-    """Completed and total work in a generic operation progress snapshot."""
-
-    completed: int | float
-    total: int | float
-    unit: str
-
-
-class OperationRateBody(msgspec.Struct, kw_only=True):
-    """Current operation throughput measurement."""
-
-    value: float
-    unit: str
-
-
-class OperationProgressBody(msgspec.Struct, kw_only=True):
-    """Generic progress object emitted by Aisha telemetry v2."""
-
-    work: OperationWorkBody
-    items: OperationWorkBody
-    rate: OperationRateBody | None
-    eta_seconds: float | None
-    eta_basis: str | None
-
-
 class OperationEventBody(msgspec.Struct, kw_only=True):
     """Tolerant-reader schema for an Aisha telemetry v2 operation event."""
 
@@ -73,7 +48,7 @@ class OperationEventBody(msgspec.Struct, kw_only=True):
     ts: datetime
     elapsed_seconds: float
     phase_elapsed_seconds: float | None
-    progress: OperationProgressBody | None
+    progress: dict[str, Any] | None
     plan: dict[str, Any] | None
     summary: dict[str, Any] | None
     message: str
@@ -137,8 +112,8 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
             stopped_at=m.stopped_at,
             error_message=m.error_message,
             in_flight_job_count=in_flight_job_count,
-            provisioning_status=(str(bootstrap_operation.status) if bootstrap_operation else None),
-            provisioning_phase=(str(bootstrap_operation.phase) if bootstrap_operation else None),
+            provisioning_status=(bootstrap_operation.status if bootstrap_operation else None),
+            provisioning_phase=(bootstrap_operation.phase if bootstrap_operation else None),
             provisioning_progress=bootstrap_operation.progress if bootstrap_operation else None,
         )
 

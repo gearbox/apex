@@ -14,7 +14,6 @@ import hmac
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-import msgspec
 import structlog
 
 from src.core.enums import TERMINAL_GPU_SESSION_STATUSES
@@ -102,10 +101,13 @@ class OperationEventService:
                 node_started_at=event.started_at,
                 event_at=event.ts,
                 message=event.message,
-                progress=_to_dict(event.progress),
+                progress=event.progress,
                 plan=event.plan,
                 summary=event.summary,
                 error=event.error,
+                target_bundle_version=(
+                    event.target.bundle_version if event.target is not None else None
+                ),
             )
             if not outcome.applied:
                 log = (
@@ -136,13 +138,3 @@ class OperationEventService:
             sequence=event.sequence,
         )
         return True, 200
-
-
-def _to_dict(value: msgspec.Struct | None) -> dict[str, object] | None:
-    """Serialize a nested msgspec body to the verbatim JSON-compatible shape."""
-    if value is None:
-        return None
-    raw = msgspec.to_builtins(value)
-    if not isinstance(raw, dict):  # pragma: no cover - Struct serialization is always a dict
-        raise TypeError("operation progress must serialize to an object")
-    return raw

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from src.core.enums import TERMINAL_OPERATION_STATUSES, OperationKind, OperationStatus
 from src.db.models.gpu_session_operation import GpuSessionOperation
@@ -97,8 +97,13 @@ class GpuSessionOperationRepository:
         plan: dict[str, Any] | None,
         summary: dict[str, Any] | None,
         error: str | None,
+        target_bundle_version: str | None = None,
     ) -> EventOutcome:
-        """Apply an event using one guarded update rather than a read/write race."""
+        """Apply an event using one guarded update rather than a read/write race.
+
+        Terminal rows are immutable: the terminal guard rejects every later event,
+        including a higher-sequence non-terminal best-effort update.
+        """
         is_terminal = status in TERMINAL_OPERATION_STATUSES
         values: dict[str, object] = {
             "last_sequence": sequence,
@@ -117,6 +122,12 @@ class GpuSessionOperationRepository:
             values["summary"] = summary
         if error is not None:
             values["error"] = error
+        if target_bundle_version is not None:
+            # A node resolves ``current`` to a concrete version. Preserve any version
+            # Apex pinned when creating the operation rather than silently replacing it.
+            values["target_bundle_version"] = func.coalesce(
+                GpuSessionOperation.target_bundle_version, target_bundle_version
+            )
         if is_terminal:
             values["terminal_at"] = event_at
 

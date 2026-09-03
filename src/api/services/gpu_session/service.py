@@ -424,6 +424,7 @@ class GpuSessionService:
                         if bundle.readiness_marker is not None
                         else None
                     ),
+                    bootstrap_operation_id=bootstrap_operation_id,
                 )
                 await operation_repo.create(
                     id=bootstrap_operation_id,
@@ -434,7 +435,6 @@ class GpuSessionService:
                     target_bundle_version=bundle.bundle_version,
                     target_mode="full",
                 )
-                await repo.update_bootstrap_operation_id(session_id, bootstrap_operation_id)
             except IntegrityError:
                 # Race with a concurrent start_session call that slipped past our pre-check.
                 # Clean up external resources so they don't become orphans.

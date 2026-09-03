@@ -356,13 +356,12 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._retry_or_fail(session, reason=_REASON_PROVISIONING_TIMEOUT)
             return
 
-        async with self._session_factory() as db:
-            operation_repo = GpuSessionOperationRepository(db)
-            operation = (
-                await operation_repo.get(session.bootstrap_operation_id)
-                if session.bootstrap_operation_id is not None
-                else None
-            )
+        operation = None
+        if session.bootstrap_operation_id is not None:
+            async with self._session_factory() as db:
+                operation = await GpuSessionOperationRepository(db).get(
+                    session.bootstrap_operation_id
+                )
 
         if operation is not None and operation.status == OperationStatus.failed:
             logger.warning(

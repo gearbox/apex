@@ -26,7 +26,7 @@ from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
 from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
-from src.core.enums import GpuSessionStatus, OperationStatus
+from src.core.enums import GpuSessionStatus, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_operation import GpuSessionOperation
 
@@ -429,6 +429,7 @@ class TestAdvanceProvisioning:
             await worker._advance_provisioning(session)
 
         mock_repo.update_status.assert_not_called()
+        mocks["session_factory"].assert_not_called()
 
     async def test_probe_connection_error_is_noop(self) -> None:
         worker, mocks = _make_worker()
@@ -552,10 +553,12 @@ class TestAdvanceProvisioning:
 
         # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        previous_operation_id = uuid4()
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
             bundle_version="260105-01",
+            bootstrap_operation_id=previous_operation_id,
         )
         mocks["vastai_client"].destroy_instance = AsyncMock()
         bundle = _make_bundle_mapping()
@@ -564,12 +567,14 @@ class TestAdvanceProvisioning:
         mocks["cf_client"].get_tunnel_token.return_value = "fetched-tunnel-token"
         mocks["vastai_client"].create_instance.return_value = 88888
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.increment_provision_attempt.return_value = 2
             reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
             mock_repo.get_by_id.return_value = reloaded
+            operation_repo = AsyncMock()
+            MockOperationRepo.return_value = operation_repo
 
             await worker._retry_or_fail(session, reason="timeout")
 
@@ -596,6 +601,13 @@ class TestAdvanceProvisioning:
         assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
         assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
         assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
+        operation_kwargs = operation_repo.create.await_args.kwargs
+        assert operation_kwargs["id"] != previous_operation_id
+        assert operation_kwargs["kind"] == OperationKind.session_bootstrap
+        assert operation_kwargs["target_mode"] == "full"
+        mock_repo.update_bootstrap_operation_id.assert_awaited_once_with(
+            session.id, operation_kwargs["id"]
+        )
 
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
         """If ai_bundles_github_token is empty, mark session failed before create_instance."""

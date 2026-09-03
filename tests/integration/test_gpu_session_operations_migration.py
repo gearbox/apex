@@ -92,6 +92,7 @@ def test_revision_038_downgrade_upgrade_round_trip(
             "ix_gpu_session_operations_session_created",
             "ix_gpu_session_operations_batch",
         } <= operation_indexes
+        assert "ix_gpu_session_operations_session_id" not in operation_indexes
     finally:
         # Integration tests share the migrated schema, so always restore head.
         command.upgrade(config, "head")

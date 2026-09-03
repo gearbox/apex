@@ -25,7 +25,6 @@ class GpuSessionOperation(Base):
         PG_UUID(as_uuid=True),
         ForeignKey("gpu_sessions.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
         comment="GPU session that owns this operation.",
     )
     product_id: Mapped[str] = mapped_column(

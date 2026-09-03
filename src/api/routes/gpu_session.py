@@ -144,7 +144,7 @@ class GpuSessionController(Controller):
         current_user_id: UUID,
         gpu_session_service: GpuSessionService,
         product_id: str,
-        session: AsyncSession | None = None,
+        session: AsyncSession,
         include_terminal: Annotated[bool, Parameter(query="include_terminal")] = False,
     ) -> ListSessionsResponse:
         """List GPU sessions for the current user."""
@@ -153,7 +153,7 @@ class GpuSessionController(Controller):
             product_id=product_id,
             include_terminal=include_terminal,
         )
-        operations = await _bootstrap_operations(session, sessions) if session is not None else {}
+        operations = await _bootstrap_operations(session, sessions)
         return ListSessionsResponse(
             sessions=[
                 GpuSessionResponse.from_model(
@@ -207,7 +207,7 @@ class GpuSessionController(Controller):
         session_id: UUID,
         gpu_session_service: GpuSessionService,
         product_id: str,
-        session: AsyncSession | None = None,
+        session: AsyncSession,
     ) -> Response[GpuSessionResponse | ErrorEnvelope]:
         """Pause an active GPU session."""
         try:
@@ -231,9 +231,7 @@ class GpuSessionController(Controller):
         except GpuSessionError as exc:
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 
-        operation = (
-            await _bootstrap_operation(session, session_row) if session is not None else None
-        )
+        operation = await _bootstrap_operation(session, session_row)
         return Response(
             content=GpuSessionResponse.from_model(session_row, bootstrap_operation=operation),
             status_code=HTTP_200_OK,
@@ -246,7 +244,7 @@ class GpuSessionController(Controller):
         session_id: UUID,
         gpu_session_service: GpuSessionService,
         product_id: str,
-        session: AsyncSession | None = None,
+        session: AsyncSession,
     ) -> Response[GpuSessionResponse | ErrorEnvelope]:
         """Resume a paused GPU session."""
         try:
@@ -260,9 +258,7 @@ class GpuSessionController(Controller):
         except GpuSessionError as exc:
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 
-        operation = (
-            await _bootstrap_operation(session, session_row) if session is not None else None
-        )
+        operation = await _bootstrap_operation(session, session_row)
         return Response(
             content=GpuSessionResponse.from_model(session_row, bootstrap_operation=operation),
             status_code=HTTP_200_OK,
@@ -277,7 +273,7 @@ class GpuSessionController(Controller):
         gpu_session_service: GpuSessionService,
         product_id: str,
         settings: Settings,
-        session: AsyncSession | None = None,
+        session: AsyncSession,
     ) -> Response[GpuSessionResponse | StopConfirmationResponse | ErrorEnvelope]:
         """Two-call stop: first call returns cost confirmation, second call executes."""
         try:
@@ -308,7 +304,7 @@ class GpuSessionController(Controller):
                 ),
                 status_code=HTTP_200_OK,
             )
-        operation = await _bootstrap_operation(session, result) if session is not None else None
+        operation = await _bootstrap_operation(session, result)
         return Response(
             content=GpuSessionResponse.from_model(result, bootstrap_operation=operation),
             status_code=HTTP_200_OK,

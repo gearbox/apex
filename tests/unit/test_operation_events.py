@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import pytest
 from litestar import Litestar
 from litestar.di import Provide
 from litestar.status_codes import (
@@ -44,6 +45,7 @@ def _event_body(
     status: str = "running",
     phase: str | None = "preflight",
     progress: dict[str, object] | None = None,
+    target_bundle_version: str | None = None,
 ) -> dict[str, object]:
     now = "2026-09-02T10:00:00Z"
     return {
@@ -54,7 +56,11 @@ def _event_body(
         "operation_kind": "session_bootstrap",
         "batch": None,
         "sequence": sequence,
-        "target": {"bundle": "qwen_rapid_aio", "bundle_version": None, "mode": "full"},
+        "target": {
+            "bundle": "qwen_rapid_aio",
+            "bundle_version": target_bundle_version,
+            "mode": "full",
+        },
         "status": status,
         "phase": phase,
         "started_at": now,
@@ -130,7 +136,12 @@ class TestOperationEventService:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         session.bootstrap_operation_id = operation_id
-        event = _decode_event(session_id=session_id, operation_id=operation_id)
+        event = _decode_event(
+            session_id=session_id,
+            operation_id=operation_id,
+            target_bundle_version="260105-01",
+            progress={"future_field": {"preserved": True}},
+        )
         service = OperationEventService(_session_factory())  # type: ignore[arg-type]
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
@@ -150,6 +161,9 @@ class TestOperationEventService:
 
         assert (authorized, status) == (True, HTTP_200_OK)
         session_repo.touch_last_progress.assert_awaited_once()
+        apply_kwargs = operation_repo.apply_event.await_args.kwargs
+        assert apply_kwargs["target_bundle_version"] == "260105-01"
+        assert apply_kwargs["progress"] == {"future_field": {"preserved": True}}
 
     async def test_non_bootstrap_event_never_touches_stall_projection(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
@@ -200,7 +214,7 @@ class TestOperationEventService:
 
         operation_repo.apply_event.assert_not_awaited()
 
-    async def test_auth_and_terminal_session_do_not_write(self) -> None:
+    async def test_missing_session_does_not_write(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
         service = OperationEventService(_session_factory())  # type: ignore[arg-type]
@@ -214,14 +228,81 @@ class TestOperationEventService:
             assert await service.handle_event(
                 session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (False, 401)
-            session_repo.get_by_id.return_value = _gpu_session(
-                session_id=session_id, status=GpuSessionStatus.stopped
+
+        operation_repo.get.assert_not_awaited()
+
+    async def test_existing_session_with_wrong_token_does_not_write(self) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        event = _decode_event(session_id=session_id, operation_id=operation_id)
+        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = _gpu_session(session_id=session_id)
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+
+            assert await service.handle_event(
+                session_id=session_id, bearer_token="wrong-token", event=event
+            ) == (False, 401)
+
+        operation_repo.get.assert_not_awaited()
+        operation_repo.apply_event.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            GpuSessionStatus.active,
+            GpuSessionStatus.stale,
+            GpuSessionStatus.paused,
+            GpuSessionStatus.resuming,
+            GpuSessionStatus.stopping,
+            GpuSessionStatus.pending,
+            GpuSessionStatus.provisioning,
+        ],
+    )
+    async def test_non_terminal_sessions_accept_events(self, status: GpuSessionStatus) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        event = _decode_event(session_id=session_id, operation_id=operation_id)
+        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = _gpu_session(session_id=session_id, status=status)
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id
             )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+
+            assert await service.handle_event(
+                session_id=session_id, bearer_token=_TOKEN, event=event
+            ) == (True, 200)
+
+        operation_repo.apply_event.assert_awaited_once()
+
+    @pytest.mark.parametrize("status", [GpuSessionStatus.stopped, GpuSessionStatus.failed])
+    async def test_terminal_sessions_do_not_write(self, status: GpuSessionStatus) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        event = _decode_event(session_id=session_id, operation_id=operation_id)
+        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = _gpu_session(session_id=session_id, status=status)
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+
             assert await service.handle_event(
                 session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (True, 200)
 
         operation_repo.get.assert_not_awaited()
+        operation_repo.apply_event.assert_not_awaited()
 
 
 def _stub_service(result: tuple[bool, int] = (True, 200)) -> OperationEventService:
@@ -313,17 +394,21 @@ class TestOperationEventController:
         assert event.status == OperationStatus.failed
 
 
-def test_response_projects_bootstrap_operation() -> None:
+@pytest.mark.parametrize(
+    ("status", "phase"),
+    [(OperationStatus.running, "models"), (OperationStatus.succeeded, None)],
+)
+def test_response_projects_bootstrap_operation(status: OperationStatus, phase: str | None) -> None:
     now = datetime.now(UTC)
     session = _gpu_session(session_id=uuid4())
     session.created_at = now
     operation = _operation(operation_id=uuid4(), session_id=session.id)
-    operation.status = OperationStatus.running
-    operation.phase = "models"
+    operation.status = status
+    operation.phase = phase
     operation.progress = {"work": {"completed": 2, "total": 3, "unit": "files"}}
 
     response = GpuSessionResponse.from_model(session, bootstrap_operation=operation)
 
-    assert response.provisioning_status == "running"
-    assert response.provisioning_phase == "models"
+    assert response.provisioning_status == status
+    assert response.provisioning_phase == phase
     assert response.provisioning_progress == operation.progress

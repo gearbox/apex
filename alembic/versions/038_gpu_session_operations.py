@@ -55,9 +55,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
-        "ix_gpu_session_operations_session_id", "gpu_session_operations", ["session_id"]
-    )
-    op.create_index(
         "ix_gpu_session_operations_session_created",
         "gpu_session_operations",
         ["session_id", sa.text("created_at DESC")],

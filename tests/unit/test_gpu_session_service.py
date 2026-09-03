@@ -41,6 +41,7 @@ from src.db.models.gpu_session import GpuSession
 _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
 _REPO_PATH = "src.api.services.gpu_session.service.GpuSessionRepository"
+_OPERATION_REPO_PATH = "src.api.services.gpu_session.service.GpuSessionOperationRepository"
 _JOB_REPO_PATH = "src.api.services.gpu_session.service.JobRepository"
 
 
@@ -240,11 +241,18 @@ class TestStartSession:
             status=GpuSessionStatus.pending,
         )
 
-        with patch(_REPO_PATH) as MockRepo:
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.get_non_terminal_for_model.return_value = None
-            mock_repo.create.return_value = expected_session
+            operation_repo = AsyncMock()
+            MockOperationRepo.return_value = operation_repo
+
+            async def create_session(**kwargs: Any) -> GpuSession:
+                expected_session.bootstrap_operation_id = kwargs["bootstrap_operation_id"]
+                return expected_session
+
+            mock_repo.create.side_effect = create_session
 
             result = await service.start_session(
                 user_id=user_id,
@@ -268,6 +276,13 @@ class TestStartSession:
             onstart_cmd=ANY,
         )
         mock_repo.create.assert_called_once()
+        create_kwargs = mock_repo.create.await_args.kwargs
+        operation_kwargs = operation_repo.create.await_args.kwargs
+        env = mocks["vastai_client"].create_instance.await_args.kwargs["env"]
+        assert expected_session.bootstrap_operation_id == operation_kwargs["id"]
+        assert env["ACS_APEX_OPERATION_ID"] == str(operation_kwargs["id"])
+        assert create_kwargs["bootstrap_operation_id"] == operation_kwargs["id"]
+        mock_repo.update_bootstrap_operation_id.assert_not_awaited()
 
     async def test_start_session_persists_vastai_machine_id(self) -> None:
         service, mocks = _make_service()

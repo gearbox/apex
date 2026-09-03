@@ -44,6 +44,7 @@ class GpuSessionRepository:
         callback_token_hash: str | None = None,
         account_id: UUID | None = None,
         readiness_marker_node_class: str | None = None,
+        bootstrap_operation_id: UUID | None = None,
     ) -> GpuSession:
         """Create and persist a new GPU session row.
 
@@ -65,6 +66,7 @@ class GpuSessionRepository:
             vastai_machine_id: Vast.ai physical machine id of the selected offer.
             callback_token_hash: SHA-256 hex digest of the callback bearer token.
             account_id: Billing account ID for charging; may be None if not yet determined.
+            bootstrap_operation_id: Bootstrap operation created with this session.
 
         Returns:
             Created and flushed GpuSession instance.
@@ -88,6 +90,7 @@ class GpuSessionRepository:
             callback_token_hash=callback_token_hash,
             account_id=account_id,
             readiness_marker_node_class=readiness_marker_node_class,
+            bootstrap_operation_id=bootstrap_operation_id,
         )
         self._session.add(session_row)
         await self._session.flush()
@@ -450,7 +453,7 @@ class GpuSessionRepository:
         await self._session.flush()
 
     async def update_bootstrap_operation_id(self, session_id: UUID, operation_id: UUID) -> None:
-        """Point a session at the bootstrap operation for its current node attempt."""
+        """Point a session at the bootstrap operation; does not synchronize in-session objects."""
         await self._session.execute(
             update(GpuSession)
             .where(GpuSession.id == session_id)
