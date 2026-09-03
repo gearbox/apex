@@ -82,10 +82,17 @@ class TestGpuSessionModelColumns:
         cols = {c.name for c in _table().columns}
         assert "node_host" not in cols
         assert "node_port" not in cols
+        # Moved to gpu_session_deployments in P2 — see GpuSessionDeployment.
+        assert "readiness_marker_node_class" not in cols
 
-    def test_partial_unique_index_exists(self) -> None:
+    def test_uniqueness_index_moved_off_gpu_sessions(self) -> None:
+        """ix_gpu_sessions_active_user_model moved to gpu_session_deployments in P2.
+
+        The two must never coexist (D6) — a session with two live deployments
+        would otherwise be unstartable in one place and startable in another.
+        """
         index_names = {idx.name for idx in _table().indexes}
-        assert "ix_gpu_sessions_active_user_model" in index_names
+        assert "ix_gpu_sessions_active_user_model" not in index_names
 
     def test_active_stale_index_exists(self) -> None:
         index_names = {idx.name for idx in _table().indexes}

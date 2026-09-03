@@ -609,6 +609,36 @@ STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES: frozenset[GpuSessionStatus] = (
 )
 
 
+class DeploymentStatus(StrEnum):
+    """Lifecycle states for one gpu_session_deployments row.
+
+    ``pending_restart`` (P4 forward slot) is a boolean column, not a status —
+    a deployment can be 'active' from a previous restart while a newer
+    sibling awaits one, so it is orthogonal to this vocabulary.
+    """
+
+    deploying = "deploying"  # provisioning in progress; not yet routable
+    active = "active"  # routable — generation may target this deployment
+    removing = "removing"  # forward slot for P4's remove endpoint; no writer in P2
+    removed = "removed"  # torn down; frees the uniqueness slot
+    failed = "failed"  # provisioning or runtime failure; frees the uniqueness slot
+
+
+# Occupies the (user, product, model_type) uniqueness slot. Mirrors the migration
+# 039 partial-index predicate `WHERE status NOT IN ('removed', 'failed')` — the two
+# must always agree; see TERMINAL_DEPLOYMENT_STATUSES below for the other half.
+LIVE_DEPLOYMENT_STATUSES: frozenset[DeploymentStatus] = frozenset(
+    {DeploymentStatus.deploying, DeploymentStatus.active, DeploymentStatus.removing}
+)
+
+# Frees the (user, product, model_type) uniqueness slot. Mirrors the migration 039
+# partial-index predicate `WHERE status NOT IN ('removed', 'failed')` on
+# ix_gpu_session_deployments_live_user_model — see LIVE_DEPLOYMENT_STATUSES above.
+TERMINAL_DEPLOYMENT_STATUSES: frozenset[DeploymentStatus] = frozenset(
+    {DeploymentStatus.removed, DeploymentStatus.failed}
+)
+
+
 class ModelSessionState(StrEnum):
     """Per-user readiness of an on-demand model, derived from GpuSessionStatus."""
 

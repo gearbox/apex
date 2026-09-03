@@ -11,7 +11,10 @@ import msgspec
 from src.core.enums import ModelType, OperationKind, OperationStatus, ProvisioningPhase
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.db.models.gpu_session import GpuSession
+    from src.db.models.gpu_session_deployment import GpuSessionDeployment
     from src.db.models.gpu_session_operation import GpuSessionOperation
 
 
@@ -63,6 +66,38 @@ class StartSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=Tr
     """Admin-only: pin a specific bundle 'name' or 'name:version'. Ignored for non-admins."""
 
 
+class DeploymentResponse(msgspec.Struct, kw_only=True):
+    """Read-only projection of one gpu_session_deployments row.
+
+    P4 will add actions (attach/remove/restart); P2 ships the read model early
+    so frontend work on the shape can start in parallel — see D19.
+    """
+
+    id: UUID
+    model_type: str
+    bundle_name: str
+    bundle_version: str | None
+    status: str
+    pending_restart: bool
+    is_primary: bool
+    created_at: datetime
+    activated_at: datetime | None
+
+    @classmethod
+    def from_model(cls, m: GpuSessionDeployment) -> DeploymentResponse:
+        return cls(
+            id=m.id,
+            model_type=m.model_type,
+            bundle_name=m.bundle_name,
+            bundle_version=m.bundle_version,
+            status=m.status,
+            pending_restart=m.pending_restart,
+            is_primary=m.is_primary,
+            created_at=m.created_at,
+            activated_at=m.activated_at,
+        )
+
+
 class GpuSessionResponse(msgspec.Struct, kw_only=True):
     id: UUID
     user_id: UUID
@@ -87,6 +122,8 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
     """Latest phase of this session's current bootstrap operation."""
     provisioning_progress: dict[str, Any] | None = None
     """Latest generic progress object from this session's bootstrap operation."""
+    deployments: list[DeploymentResponse] = []
+    """This session's deployments — always exactly one in P2 (D19)."""
 
     @classmethod
     def from_model(
@@ -95,6 +132,7 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
         *,
         bootstrap_operation: GpuSessionOperation | None = None,
         in_flight_job_count: int = 0,
+        deployments: Sequence[GpuSessionDeployment] = (),
     ) -> GpuSessionResponse:
         return cls(
             id=m.id,
@@ -115,6 +153,7 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
             provisioning_status=(bootstrap_operation.status if bootstrap_operation else None),
             provisioning_phase=(bootstrap_operation.phase if bootstrap_operation else None),
             provisioning_progress=bootstrap_operation.progress if bootstrap_operation else None,
+            deployments=[DeploymentResponse.from_model(d) for d in deployments],
         )
 
 

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.enums import GpuSessionStatus, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
-from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
+from src.db.repositories.gpu_session_operation import EventOutcome, GpuSessionOperationRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -243,12 +243,12 @@ async def test_concurrent_events_apply_once_without_losing_the_higher_sequence(
         )
         await db.commit()
 
-    async def deliver(*, sequence: int, event_id: str) -> None:
+    async def deliver(*, sequence: int, event_id: str) -> EventOutcome:
         async with (
             AsyncSession(bind=db_engine, expire_on_commit=False) as db,
             db.begin(),
         ):
-            outcome = await GpuSessionOperationRepository(db).apply_event(
+            return await GpuSessionOperationRepository(db).apply_event(
                 operation_id=operation_id,
                 session_id=gpu_session.id,
                 sequence=sequence,
@@ -263,13 +263,20 @@ async def test_concurrent_events_apply_once_without_losing_the_higher_sequence(
                 summary={"winner": event_id} if sequence == 1 else None,
                 error=None,
             )
-            assert outcome.applied is True
 
     try:
-        await asyncio.gather(
+        lower_outcome, terminal_outcome = await asyncio.gather(
             deliver(sequence=0, event_id="concurrent-start"),
             deliver(sequence=1, event_id="concurrent-terminal"),
         )
+        # The terminal event cannot be lost to a concurrently delivered lower
+        # sequence. The lower delivery either wins first or is correctly
+        # rejected once the terminal state is durable.
+        assert terminal_outcome.applied is True
+        if lower_outcome.applied:
+            assert lower_outcome.reason == "applied"
+        else:
+            assert lower_outcome.reason in {"stale", "after_terminal"}
 
         async with AsyncSession(bind=db_engine, expire_on_commit=False) as db:
             operation = await GpuSessionOperationRepository(db).get(operation_id)

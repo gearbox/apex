@@ -7,6 +7,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from src.api.services.cloudflare.client import CloudflareTunnelClient
 from src.api.services.cloudflare.schemas import TunnelListEntry
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
@@ -17,6 +19,22 @@ from src.core.enums import GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 
 _REPO_PATH = "src.api.services.gpu_session.cleanup_worker.GpuSessionRepository"
+_DEPLOYMENT_REPO_PATH = "src.api.services.gpu_session.cleanup_worker.GpuSessionDeploymentRepository"
+
+
+@pytest.fixture(autouse=True)
+def mock_deployment_repo():  # type: ignore[no-untyped-def]
+    """Auto-patch GpuSessionDeploymentRepository for every test in this module.
+
+    D16's orphan sweep (_sweep_orphaned_deployments) runs unconditionally on
+    every run_once() call. Defaults to no orphans found; the dedicated D16
+    tests below override mark_orphaned's return value.
+    """
+    with patch(_DEPLOYMENT_REPO_PATH) as MockDeploymentRepo:
+        mock = AsyncMock()
+        MockDeploymentRepo.return_value = mock
+        mock.mark_orphaned.return_value = []
+        yield mock
 
 
 # ---------------------------------------------------------------------------
@@ -537,3 +555,63 @@ class TestInstanceSweep:
 
         # Only the two successful 404s stamped in DB; third candidate aborted the sweep.
         assert mock_repo.mark_instance_destroyed.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# TestOrphanedDeploymentSweep — D16 self-heal (P2 invariant 9)
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedDeploymentSweep:
+    async def test_run_once_calls_deployment_sweep(self, mock_deployment_repo: AsyncMock) -> None:
+        """run_once() drives all three sweeps, including the D16 guard."""
+        worker, mocks = _make_worker()
+        mocks["cf_client"].list_tunnels.return_value = []
+
+        with patch(_INSTANCE_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_orphaned_instance_candidates.return_value = []
+            mock_repo.list_by_status.return_value = []
+
+            await worker.run_once()
+
+        mock_deployment_repo.mark_orphaned.assert_awaited_once()
+
+    async def test_orphan_found_logs_error_with_both_ids(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """A live deployment whose session is terminal is logged at ERROR with
+        both ids — the loud, self-healing signal D16 exists to produce."""
+        worker, _mocks = _make_worker()
+        deployment_id = uuid4()
+        session_id = uuid4()
+        mock_deployment_repo.mark_orphaned.return_value = [(deployment_id, session_id)]
+
+        with patch("src.api.services.gpu_session.cleanup_worker.logger") as mock_logger:
+            await worker._sweep_orphaned_deployments()
+
+        mock_logger.error.assert_called_once_with(
+            "gpu_session.deployment.orphaned",
+            deployment_id=str(deployment_id),
+            session_id=str(session_id),
+        )
+
+    async def test_no_orphans_logs_nothing(self, mock_deployment_repo: AsyncMock) -> None:
+        worker, _mocks = _make_worker()
+        mock_deployment_repo.mark_orphaned.return_value = []
+
+        with patch("src.api.services.gpu_session.cleanup_worker.logger") as mock_logger:
+            await worker._sweep_orphaned_deployments()
+
+        mock_logger.error.assert_not_called()
+
+    async def test_multiple_orphans_each_logged(self, mock_deployment_repo: AsyncMock) -> None:
+        pairs = [(uuid4(), uuid4()) for _ in range(3)]
+        mock_deployment_repo.mark_orphaned.return_value = pairs
+        worker, _mocks = _make_worker()
+
+        with patch("src.api.services.gpu_session.cleanup_worker.logger") as mock_logger:
+            await worker._sweep_orphaned_deployments()
+
+        assert mock_logger.error.call_count == 3

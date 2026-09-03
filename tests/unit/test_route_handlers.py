@@ -2304,6 +2304,24 @@ class TestOrganizationRouteHandlers:
 
 
 class TestGpuSessionRouteHandlers:
+    @pytest.fixture(autouse=True)
+    def _mock_deployment_repo(self):  # type: ignore[no-untyped-def]
+        """Auto-patch GpuSessionDeploymentRepository for this class.
+
+        These tests pass a bare AsyncMock() as the `session: AsyncSession`
+        dependency, so `result.scalars()` on an awaited `session.execute(...)`
+        would itself be treated as async (AsyncMock children propagate) and
+        break the synchronous `.scalars().all()` chain. Patching the repo
+        avoids exercising that chain at all — same pattern as
+        test_gpu_session_service.py's mock_deployment_repo fixture.
+        """
+        with patch("src.api.routes.gpu_session.GpuSessionDeploymentRepository") as MockRepo:
+            mock = AsyncMock()
+            MockRepo.return_value = mock
+            mock.list_for_session.return_value = []
+            mock.list_for_sessions.return_value = {}
+            yield mock
+
     async def test_start_session_success(self) -> None:
         from src.api.routes.gpu_session import GpuSessionController
 

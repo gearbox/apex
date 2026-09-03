@@ -304,22 +304,26 @@ class AishaImageGenerationHandler:
                 "GPU sessions are not configured on this server. "
                 "Vast.ai and Cloudflare Tunnel settings are required."
             )
-        gpu_session = await self._gpu_session_service.get_active_session_for_model(
+        routing = await self._gpu_session_service.get_active_session_for_model(
             user_id=user_id,
             product_id=product_id,
             model_type=request.model,
         )
-        if gpu_session is None:
+        if routing is None:
             raise NoActiveSessionError(
                 f"No active GPU session for model {request.model.value}. "
                 "Start a session first via POST /v1/sessions."
             )
+        gpu_session, deployment = routing
 
         # Resolve the source before billing so invalid input cannot leave a debit.
         i2i_input = await self._resolve_input_image(source_media)
         effective_aspect = await self._resolve_effective_aspect_ratio(request, i2i_input)
+        # Model identity for generation comes from the deployment, not the
+        # session — see D18. gpu_session.bundle_name/bundle_version are the
+        # provisioning-time record only.
         gen_cfg: BundleGenerationConfig = self._bundle_index.get_generation_config(
-            gpu_session.bundle_name, gpu_session.bundle_version
+            deployment.bundle_name, deployment.bundle_version
         )
 
         tier = request.image_resolution or gen_cfg.defaults.resolution
@@ -459,20 +463,20 @@ class AishaImageGenerationHandler:
                 resolved_input=i2i_input,
             )
             try:
-                bundle_dir = self._bundle_index.get_bundle_path(gpu_session.bundle_name)
+                bundle_dir = self._bundle_index.get_bundle_path(deployment.bundle_name)
             except BundleNotFoundError as exc:
                 raise NoActiveSessionError(
-                    f"Bundle '{gpu_session.bundle_name}' not found in index. "
+                    f"Bundle '{deployment.bundle_name}' not found in index. "
                     "Wait for the bundle index to sync and try again."
                 ) from exc
-            bound = self._workflow.load(bundle_dir, gpu_session.bundle_version)
+            bound = self._workflow.load(bundle_dir, deployment.bundle_version)
             configured = self._workflow.apply(
                 bound,
                 request=legacy_request,
                 media_filenames=media_filenames,
                 filename_prefix=f"gen_{str(job_id)[:8]}",
-                bundle_name=gpu_session.bundle_name,
-                bundle_version=gpu_session.bundle_version,
+                bundle_name=deployment.bundle_name,
+                bundle_version=deployment.bundle_version,
             )
             result = await client.queue_prompt(configured)
         finally:

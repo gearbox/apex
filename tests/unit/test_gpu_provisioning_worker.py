@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import httpx
+import pytest
 
 from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.bundle_index import BundleIndexService
@@ -26,7 +27,13 @@ from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
 from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
-from src.core.enums import GpuSessionStatus, OperationKind, OperationStatus
+from src.core.enums import (
+    LIVE_DEPLOYMENT_STATUSES,
+    DeploymentStatus,
+    GpuSessionStatus,
+    OperationKind,
+    OperationStatus,
+)
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_operation import GpuSessionOperation
 
@@ -36,6 +43,27 @@ _REPO_PATH = "src.api.services.gpu_session.provisioning_worker.GpuSessionReposit
 _OPERATION_REPO_PATH = (
     "src.api.services.gpu_session.provisioning_worker.GpuSessionOperationRepository"
 )
+_DEPLOYMENT_REPO_PATH = (
+    "src.api.services.gpu_session.provisioning_worker.GpuSessionDeploymentRepository"
+)
+
+
+@pytest.fixture(autouse=True)
+def mock_deployment_repo():  # type: ignore[no-untyped-def]
+    """Auto-patch GpuSessionDeploymentRepository for every test in this module.
+
+    Defaults to an empty deployment list (readiness marker resolves to None,
+    matching pre-P2 behavior for tests that don't care about it) and inert
+    cascade/repoint calls — individual tests override as needed. Without this,
+    the P2 cascade in _transition and the readiness-marker lookup in
+    _advance_provisioning/_advance_resuming would hit the raw mocked DB
+    session's unconfigured `execute`.
+    """
+    with patch(_DEPLOYMENT_REPO_PATH) as MockDeploymentRepo:
+        mock = AsyncMock()
+        MockDeploymentRepo.return_value = mock
+        mock.list_for_session.return_value = []
+        yield mock
 
 
 # ---------------------------------------------------------------------------
@@ -428,8 +456,10 @@ class TestAdvanceProvisioning:
 
             await worker._advance_provisioning(session)
 
+        # No session status transition — the one session_factory call that does
+        # happen is the P2 readiness-marker lookup on gpu_session_deployments
+        # ahead of the probe (see _get_primary_readiness_marker), not a status write.
         mock_repo.update_status.assert_not_called()
-        mocks["session_factory"].assert_not_called()
 
     async def test_probe_connection_error_is_noop(self) -> None:
         worker, mocks = _make_worker()
@@ -808,6 +838,118 @@ class TestAdvanceResuming:
         await worker._advance_resuming(session)
 
         worker._mark_failed.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestDeploymentCascade — P2 invariants 7 and 8
+# ---------------------------------------------------------------------------
+
+
+class TestDeploymentCascade:
+    """D15's provisioning_worker._transition cascade, and the D15-pitfall
+    retry-does-not-fork contract on _retry_or_fail."""
+
+    async def test_mark_active_flips_deploying_deployment_to_active(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """Invariant 7: activation cascades — _mark_active flips the primary
+        deployment to 'active' and stamps activated_at."""
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_active(session)
+
+        mock_deployment_repo.mark_status.assert_awaited_once_with(
+            session.id,
+            from_statuses=(DeploymentStatus.deploying,),
+            to_status=DeploymentStatus.active,
+            at=ANY,
+        )
+
+    async def test_mark_failed_flips_live_deployments_to_failed(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """The other half of D15: a transition to 'failed' flips every live
+        deployment to 'failed' (frees the uniqueness slot — invariant 3)."""
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test failure")
+
+        mock_deployment_repo.mark_status.assert_awaited_once_with(
+            session.id,
+            from_statuses=LIVE_DEPLOYMENT_STATUSES,
+            to_status=DeploymentStatus.failed,
+            at=ANY,
+        )
+
+    async def test_pending_to_provisioning_transition_does_not_cascade(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """A transition to a status other than 'active'/'failed' (e.g.
+        pending -> provisioning) must not touch gpu_session_deployments at all."""
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._transition(
+                session,
+                new_status=GpuSessionStatus.provisioning,
+                log_event="gpu_session.provision.instance_running",
+            )
+
+        mock_deployment_repo.mark_status.assert_not_awaited()
+
+    async def test_retry_or_fail_repoints_operation_without_forking(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """Invariant 8: after _retry_or_fail, the session still has exactly one
+        deployment — still 'deploying' — with provision_operation_id repointed
+        to the new bootstrap operation. No second deployment is created."""
+        # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            vastai_instance_id=11111,
+            vastai_machine_id=999,
+            provision_attempt=1,
+        )
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "tunnel-token"
+        mocks["vastai_client"].create_instance.return_value = 22222
+
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            MockOperationRepo.return_value = operation_repo
+
+            await worker._retry_or_fail(session, reason="provisioning_stalled")
+
+        # No second deployment was created for the retry.
+        mock_deployment_repo.create.assert_not_called()
+
+        new_operation_id = operation_repo.create.await_args.kwargs["id"]
+        mock_deployment_repo.update_provision_operation_id.assert_awaited_once_with(
+            session.id, new_operation_id
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1802,23 +1944,25 @@ def _make_object_info_with_checkpoint(
 class TestProbeComfyui:
     async def test_marker_present_class_in_response_returns_true(self) -> None:
         worker, mocks = _make_worker()
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_response(
             ["WanVideoSampler", "KSampler", "CLIPTextEncode"]
         )
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is True
 
     async def test_marker_present_class_missing_returns_false(self) -> None:
         worker, mocks = _make_worker()
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_response(
             ["KSampler", "CLIPTextEncode"]
         )
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
 
@@ -1828,11 +1972,12 @@ class TestProbeComfyui:
 
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = []
-        session = _make_gpu_session(readiness_marker_node_class=None)
+        marker = None
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_response(["KSampler"])
 
         with capture_logs() as logs:
-            result = await worker._probe_comfyui(session)
+            result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is True
         unverifiable_logs = [
@@ -1847,13 +1992,14 @@ class TestProbeComfyui:
 
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = None
-        session = _make_gpu_session(readiness_marker_node_class=None)
+        marker = None
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_response(
             ["Qwen-Rapid-AIO-NSFW-v19.safetensors"]
         )
 
         with capture_logs() as logs:
-            result = await worker._probe_comfyui(session)
+            result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
         assert any(
@@ -1863,14 +2009,15 @@ class TestProbeComfyui:
 
     async def test_invalid_json_returns_false(self) -> None:
         worker, mocks = _make_worker()
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         resp = MagicMock(spec=httpx.Response)
         resp.status_code = 200
         resp.content = b"not valid json {"
 
         mocks["http_client"].get.return_value = resp
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
 
@@ -1878,35 +2025,38 @@ class TestProbeComfyui:
         import json
 
         worker, mocks = _make_worker()
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         resp = MagicMock(spec=httpx.Response)
         resp.status_code = 200
         resp.content = json.dumps(["KSampler", "CLIPTextEncode"]).encode()
 
         mocks["http_client"].get.return_value = resp
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
 
     async def test_non_200_returns_false(self) -> None:
         worker, mocks = _make_worker()
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         resp = MagicMock(spec=httpx.Response)
         resp.status_code = 503
 
         mocks["http_client"].get.return_value = resp
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
 
     async def test_httpx_error_returns_false(self) -> None:
         worker, mocks = _make_worker()
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
 
@@ -1914,12 +2064,13 @@ class TestProbeComfyui:
         from structlog.testing import capture_logs
 
         worker, mocks = _make_worker()
-        session = _make_gpu_session(readiness_marker_node_class="MissingNode")
+        marker = "MissingNode"
+        session = _make_gpu_session()
         all_classes = [f"Node{i}" for i in range(10)]
         mocks["http_client"].get.return_value = _make_object_info_response(all_classes)
 
         with capture_logs() as logs:
-            result = await worker._probe_comfyui(session)
+            result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
         missing_logs = [
@@ -1944,13 +2095,14 @@ class TestProbeComfyui:
         mocks["bundle_index"].get_model_filenames.return_value = [
             "Qwen-Rapid-AIO-NSFW-v19.safetensors"
         ]
-        session = _make_gpu_session(readiness_marker_node_class=None)
+        marker = None
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["Qwen-Rapid-AIO-NSFW-v19.safetensors", "some_other.safetensors"]
         )
 
         with capture_logs() as logs:
-            result = await worker._probe_comfyui(session)
+            result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is True
         assert all(
@@ -1965,13 +2117,14 @@ class TestProbeComfyui:
 
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = ["Model.safetensors"]
-        session = _make_gpu_session(readiness_marker_node_class=None)
+        marker = None
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["sub/Model.safetensors"]
         )
 
         with capture_logs() as logs:
-            result = await worker._probe_comfyui(session)
+            result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is True
         mismatch_logs = [
@@ -1990,14 +2143,15 @@ class TestProbeComfyui:
         mocks["bundle_index"].get_model_filenames.return_value = [
             "Qwen-Rapid-AIO-NSFW-v19.safetensors"
         ]
-        session = _make_gpu_session(readiness_marker_node_class=None)
+        marker = None
+        session = _make_gpu_session()
         # ComfyUI only has a stock SD1.5 ckpt, not the declared Qwen checkpoint
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["v1-5-pruned-emaonly.safetensors"]
         )
 
         with capture_logs() as logs:
-            result = await worker._probe_comfyui(session)
+            result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
         missing_logs = [
@@ -2016,7 +2170,8 @@ class TestProbeComfyui:
 
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
-        session = _make_gpu_session(readiness_marker_node_class=None)
+        marker = None
+        session = _make_gpu_session()
         # Response has CheckpointLoaderSimple but with wrong shape (empty dict instead of nested)
         resp = MagicMock(spec=httpx.Response)
         resp.status_code = 200
@@ -2024,7 +2179,7 @@ class TestProbeComfyui:
         mocks["http_client"].get.return_value = resp
 
         with capture_logs() as logs:
-            result = await worker._probe_comfyui(session)
+            result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
         shape_logs = [
@@ -2039,13 +2194,14 @@ class TestProbeComfyui:
         """Both checkpoint and marker checks pass → True."""
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["Qwen.safetensors"],
             extra_classes=["WanVideoSampler"],
         )
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is True
 
@@ -2053,13 +2209,14 @@ class TestProbeComfyui:
         """Checkpoint passes, but marker class absent → False."""
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
-        session = _make_gpu_session(readiness_marker_node_class="WanVideoSampler")
+        marker = "WanVideoSampler"
+        session = _make_gpu_session()
         mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
             available_checkpoints=["Qwen.safetensors"]
             # WanVideoSampler NOT in extra_classes
         )
 
-        result = await worker._probe_comfyui(session)
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
         assert result is False
 

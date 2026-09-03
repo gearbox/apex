@@ -46,10 +46,16 @@ class GpuSession(Base):
     - stale_notified: prevents duplicate admin notifications
 
     Key columns for provisioning:
-    - bundle_name / bundle_version / model_type: what was deployed
+    - bundle_name / bundle_version / model_type: what was deployed. This is the
+      provisioning-time record only — it selects hardware and builds the boot
+      env. Since P2 (gpu_session_deployments), the generation path reads model
+      identity from the deployment, not from these columns.
     - vastai_offer_id / vastai_gpu_name / vastai_machine_id: Vast.ai node selected
     - provision_attempt: retry counter
     - cf_tunnel_id / cf_dns_record_id / tunnel_hostname: routing
+
+    Since P2, the (user, product, model_type) uniqueness slot and
+    readiness_marker_node_class live on GpuSessionDeployment, not here.
     """
 
     __tablename__ = "gpu_sessions"
@@ -88,14 +94,6 @@ class GpuSession(Base):
         String(50),
         nullable=False,
         comment="ModelType slug that triggered this session (e.g. aisha-image)",
-    )
-    readiness_marker_node_class: Mapped[str | None] = mapped_column(
-        String(128),
-        nullable=True,
-        comment=(
-            "ComfyUI class name to require in /object_info during readiness probe. "
-            "NULL = fall back to 200-OK with ERROR log."
-        ),
     )
 
     # Session status
@@ -298,13 +296,5 @@ class GpuSession(Base):
             "status",
             "stale_detected_at",
             postgresql_where=text("status IN ('active', 'stale', 'paused', 'resuming')"),
-        ),
-        Index(
-            "ix_gpu_sessions_active_user_model",
-            "user_id",
-            "product_id",
-            "model_type",
-            unique=True,
-            postgresql_where=text("status NOT IN ('stopped', 'failed')"),
         ),
     )
