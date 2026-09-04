@@ -33,6 +33,7 @@ _SESSION_REPO = "src.api.services.gpu_session.operation_event_service.GpuSession
 _OPERATION_REPO = (
     "src.api.services.gpu_session.operation_event_service.GpuSessionOperationRepository"
 )
+_COMMAND_REPO = "src.api.services.gpu_session.operation_event_service.GpuSessionCommandRepository"
 _TOKEN = "callback-token"
 
 
@@ -98,11 +99,14 @@ def _gpu_session(
     return session
 
 
-def _operation(*, operation_id: UUID, session_id: UUID) -> GpuSessionOperation:
+def _operation(
+    *, operation_id: UUID, session_id: UUID, command_id: UUID | None = None
+) -> GpuSessionOperation:
     return GpuSessionOperation(
         id=operation_id,
         session_id=session_id,
         product_id="vex",
+        command_id=command_id,
         kind="session_bootstrap",
         status=OperationStatus.queued,
         last_sequence=-1,
@@ -164,6 +168,92 @@ class TestOperationEventService:
         apply_kwargs = operation_repo.apply_event.await_args.kwargs
         assert apply_kwargs["target_bundle_version"] == "260105-01"
         assert apply_kwargs["progress"] == {"future_field": {"preserved": True}}
+
+    async def test_terminal_event_on_command_backed_operation_closes_the_command(self) -> None:
+        """P3/D27: a terminal event on an operation carrying a command_id also
+        closes the paired command, in the same transaction."""
+        session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = _decode_event(session_id=session_id, operation_id=operation_id, status="succeeded")
+        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_OPERATION_REPO) as OperationRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id, command_id=command_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+            command_repo = AsyncMock()
+            CommandRepo.return_value = command_repo
+            command_repo.mark_terminal.return_value = True
+
+            assert await service.handle_event(
+                session_id=session_id, bearer_token=_TOKEN, event=event
+            ) == (True, 200)
+
+        command_repo.mark_terminal.assert_awaited_once()
+        kwargs = command_repo.mark_terminal.await_args.kwargs
+        assert command_repo.mark_terminal.await_args.args == (command_id,)
+        assert kwargs["status"] == "succeeded"
+        assert kwargs["at"] == event.ts
+
+    async def test_non_terminal_event_does_not_close_the_command(self) -> None:
+        session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = _decode_event(session_id=session_id, operation_id=operation_id, status="running")
+        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_OPERATION_REPO) as OperationRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id, command_id=command_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+
+            await service.handle_event(session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        CommandRepo.assert_not_called()
+
+    async def test_terminal_event_on_operation_without_command_id_skips_command_repo(self) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = _decode_event(session_id=session_id, operation_id=operation_id, status="failed")
+        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_OPERATION_REPO) as OperationRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id, command_id=None
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+
+            await service.handle_event(session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        CommandRepo.assert_not_called()
 
     async def test_non_bootstrap_event_never_touches_stall_projection(self) -> None:
         session_id, operation_id = uuid4(), uuid4()

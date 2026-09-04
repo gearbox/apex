@@ -639,6 +639,31 @@ TERMINAL_DEPLOYMENT_STATUSES: frozenset[DeploymentStatus] = frozenset(
 )
 
 
+class CommandStatus(StrEnum):
+    """Lifecycle states for one gpu_session_commands row (P3)."""
+
+    queued = "queued"  # created, waiting to be claimed by the node agent
+    claimed = "claimed"  # handed to an agent; deadline_at is armed
+    succeeded = "succeeded"  # paired operation reached a succeeded terminal event
+    failed = "failed"  # paired operation reached a failed terminal event
+    expired = "expired"  # claimed past deadline_at with no terminal event
+    cancelled = "cancelled"  # session tore down while queued/claimed (D31)
+
+
+# Mirrors migration 040's ix_gpu_session_commands_one_claimed (status = 'claimed')
+# and ix_gpu_session_commands_queue (status = 'queued') partial-index predicates —
+# every status outside those two is terminal, and the two frozensets must always
+# stay complementary.
+TERMINAL_COMMAND_STATUSES: frozenset[CommandStatus] = frozenset(
+    {
+        CommandStatus.succeeded,
+        CommandStatus.failed,
+        CommandStatus.expired,
+        CommandStatus.cancelled,
+    }
+)
+
+
 class ModelSessionState(StrEnum):
     """Per-user readiness of an on-demand model, derived from GpuSessionStatus."""
 

@@ -58,6 +58,13 @@ class OperationEventBody(msgspec.Struct, kw_only=True):
     error: str | None
 
 
+class ClaimCommandRequest(msgspec.Struct, kw_only=True):
+    """Tolerant-reader schema for the node agent's command claim request."""
+
+    agent_id: str
+    schema_version: int
+
+
 class StartSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     model: ModelType
     """The model to provision a GPU session for."""

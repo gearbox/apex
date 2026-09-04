@@ -1972,10 +1972,22 @@ def _write_bundle_yaml_with_models(
     *,
     bundle_version: str = "current",
     model_type: str = "checkpoints",
+    model_sizes: list[int | None] | None = None,
 ) -> None:
-    """Create a valid bundle contract with model declarations."""
+    """Create a valid bundle contract with model declarations.
+
+    model_sizes, when given, must be the same length as model_filenames — each
+    entry becomes that file's declared size_bytes (None serializes as YAML null,
+    which get_declared_model_bytes treats identically to an omitted key).
+    """
     version_dir = bundle_path / bundle_version
     version_dir.mkdir(parents=True, exist_ok=True)
+    files: list[dict[str, object]] = []
+    for index, filename in enumerate(model_filenames):
+        file_entry: dict[str, object] = {"filename": filename}
+        if model_sizes is not None:
+            file_entry["size_bytes"] = model_sizes[index]
+        files.append(file_entry)
     data: dict[str, object] = {
         "hardware": _HW_YAML,
         "workflow_api_file": "workflow.api.json",
@@ -2008,7 +2020,7 @@ def _write_bundle_yaml_with_models(
         "models": [
             {
                 "model_type": model_type,
-                "files": [{"filename": fn} for fn in model_filenames],
+                "files": files,
             }
         ],
     }
@@ -2035,11 +2047,14 @@ class TestGetModelFilenames:
         model_filenames: list[str],
         *,
         bundle_version: str = "current",
+        model_sizes: list[int | None] | None = None,
     ) -> BundleIndexService:
         """Build a BundleIndexService with the named bundle in its index."""
         bundle_rel = f"bundles/{bundle_name}"
         bundle_abs = tmp_path / bundle_rel
-        _write_bundle_yaml_with_models(bundle_abs, model_filenames, bundle_version=bundle_version)
+        _write_bundle_yaml_with_models(
+            bundle_abs, model_filenames, bundle_version=bundle_version, model_sizes=model_sizes
+        )
         # Also create 'current' symlink when a versioned dir is requested.
         if bundle_version != "current":
             current = bundle_abs / "current"
@@ -2228,3 +2243,126 @@ class TestGetModelFilenames:
         yaml_path.write_text(yaml.dump(data))
         r2 = svc.get_model_filenames(bundle_name, None, "checkpoints")
         assert r2 == ["recovered.safetensors"]
+
+
+# ---------------------------------------------------------------------------
+# TestGetDeclaredModelBytes — F8 (invariant #19)
+# ---------------------------------------------------------------------------
+
+
+class TestGetDeclaredModelBytes:
+    """BundleIndexService.get_declared_model_bytes() contract tests."""
+
+    def _make_populated_service(
+        self,
+        tmp_path: Path,
+        bundle_name: str,
+        model_filenames: list[str],
+        model_sizes: list[int | None],
+        *,
+        bundle_version: str = "current",
+    ) -> BundleIndexService:
+        bundle_rel = f"bundles/{bundle_name}"
+        bundle_abs = tmp_path / bundle_rel
+        _write_bundle_yaml_with_models(
+            bundle_abs, model_filenames, bundle_version=bundle_version, model_sizes=model_sizes
+        )
+        if bundle_version != "current":
+            current = bundle_abs / "current"
+            if not current.exists():
+                current.symlink_to(bundle_version)
+        _write_index(
+            tmp_path,
+            [
+                {
+                    "name": bundle_name,
+                    "path": bundle_rel,
+                    "model_type": "aisha-image",
+                    "default_bundle": True,
+                }
+            ],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+        return svc
+
+    def test_sums_declared_sizes_when_all_files_declare_them(self, tmp_path: Path) -> None:
+        svc = self._make_populated_service(
+            tmp_path, "sized_bundle", ["a.safetensors", "b.safetensors"], [1000, 2000]
+        )
+        result = svc.get_declared_model_bytes("sized_bundle", None)
+        assert result == 3000
+
+    def test_returns_none_when_any_file_omits_size_bytes(self, tmp_path: Path) -> None:
+        """A partial sum is worse than no sum — one missing size disarms the whole
+        result, not just that file's contribution."""
+        svc = self._make_populated_service(
+            tmp_path, "partial_bundle", ["a.safetensors", "b.safetensors"], [1000, None]
+        )
+        result = svc.get_declared_model_bytes("partial_bundle", None)
+        assert result is None
+
+    def test_returns_zero_for_zero_declared_files(self, tmp_path: Path) -> None:
+        svc = self._make_populated_service(tmp_path, "empty_bundle", [], [])
+        result = svc.get_declared_model_bytes("empty_bundle", None)
+        assert result == 0
+
+    def test_returns_none_for_missing_bundle(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path)
+        result = svc.get_declared_model_bytes("nonexistent_bundle", None)
+        assert result is None
+
+    def test_sums_across_every_models_entry_regardless_of_asset_category(
+        self, tmp_path: Path
+    ) -> None:
+        """Deliberately bundle-wide (invariant per F8): a bundle whose models[] list
+        mixes asset categories (e.g. checkpoints + loras) sums every declared file,
+        not just one models[].model_type — unlike get_model_filenames's filter."""
+        bundle_rel = "bundles/mixed_bundle"
+        bundle_abs = tmp_path / bundle_rel
+        _write_bundle_yaml_with_models(bundle_abs, ["ckpt.safetensors"], model_sizes=[1000])
+        # Second models[] entry, different asset category, appended by hand.
+        yaml_path = bundle_abs / "current" / "bundle.yaml"
+        data = yaml.safe_load(yaml_path.read_text())
+        data["models"].append(
+            {"model_type": "loras", "files": [{"filename": "lora.safetensors", "size_bytes": 500}]}
+        )
+        yaml_path.write_text(yaml.dump(data))
+        _write_index(
+            tmp_path,
+            [{"name": "mixed_bundle", "path": bundle_rel, "model_type": "aisha-image"}],
+        )
+        svc = _make_service(tmp_path)
+        svc._parse_index()
+
+        result = svc.get_declared_model_bytes("mixed_bundle", None)
+        assert result == 1500
+
+    def test_resolve_bundle_exposes_declared_model_bytes(self, tmp_path: Path) -> None:
+        """Wiring test: _build_entry computes this at index-build time (not via
+        get_bundle_path, which would 404 before the index is populated), and
+        resolve_bundle() returns it for free."""
+        svc = self._make_populated_service(tmp_path, "wired_bundle", ["a.safetensors"], [4096])
+        mapping = svc.resolve_bundle("aisha-image")
+        assert mapping.declared_model_bytes == 4096
+
+    def test_resolve_bundle_override_recomputes_for_the_overridden_version(
+        self, tmp_path: Path
+    ) -> None:
+        """A version override reads a different bundle.yaml — its declared size
+        must not be copied from the 'current' entry's cached value."""
+        svc = self._make_populated_service(
+            tmp_path,
+            "versioned_bundle",
+            ["a.safetensors"],
+            [1000],
+            bundle_version="260101-01",
+        )
+        # Write a second version with a different declared size.
+        bundle_abs = tmp_path / "bundles/versioned_bundle"
+        _write_bundle_yaml_with_models(
+            bundle_abs, ["a.safetensors"], bundle_version="260202-02", model_sizes=[9999]
+        )
+
+        overridden = svc.resolve_bundle_override("versioned_bundle:260202-02")
+        assert overridden.declared_model_bytes == 9999
