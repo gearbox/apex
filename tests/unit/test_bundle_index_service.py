@@ -2302,10 +2302,10 @@ class TestGetDeclaredModelBytes:
         result = svc.get_declared_model_bytes("partial_bundle", None)
         assert result is None
 
-    def test_returns_zero_for_zero_declared_files(self, tmp_path: Path) -> None:
+    def test_returns_none_for_zero_declared_files(self, tmp_path: Path) -> None:
         svc = self._make_populated_service(tmp_path, "empty_bundle", [], [])
         result = svc.get_declared_model_bytes("empty_bundle", None)
-        assert result == 0
+        assert result is None
 
     def test_returns_none_for_missing_bundle(self, tmp_path: Path) -> None:
         svc = _make_service(tmp_path)

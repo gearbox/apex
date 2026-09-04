@@ -52,7 +52,9 @@ class ProvisionCommand:
     verify: bool = True
     declared_model_bytes: int | None = None
     """F8: summed models[].files[].size_bytes for this bundle. None omits the wire
-    key entirely; only ever emitted on batch index 0 (or a non-batch command)."""
+    key entirely; it is only emitted on batch index 0. Every provision is wrapped in
+    a batch, including a batch of one, so the arc-level batch-headroom guard runs for
+    every provision."""
 
     kind: ClassVar[OperationKind] = OperationKind.bundle_provision
 

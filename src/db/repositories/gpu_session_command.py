@@ -9,9 +9,11 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import BigInteger, Text, case, func, select, update
+from sqlalchemy import cast as sql_cast
 
-from src.core.enums import CommandStatus, OperationKind
+from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, CommandStatus, OperationKind
+from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
 
 if TYPE_CHECKING:
@@ -76,20 +78,34 @@ class GpuSessionCommandRepository:
         now: datetime,
         deadline_for: Callable[[str], int],
     ) -> GpuSessionCommand | None:
-        """D22+D23 in one guarded statement — no read-then-write.
+        """D22+D23 in one guarded update statement — no read-then-write.
 
         The target row is either (a) a command this exact ``agent_id`` already holds
         claimed — a lost-response retry lands back on it, ``claimed_at``/``deadline_at``
         untouched (D23) — or (b) the oldest queued command, gated by NOT EXISTS on any
         claimed row for the session (D9's one-in-flight rule; the partial unique index
         on the table is the backstop, not the mechanism). The two branches are
-        mutually exclusive by construction, so exactly one can ever match. FOR UPDATE
-        SKIP LOCKED inside the same statement is what makes two concurrent claims on
-        the same session race-free without an application lock.
+        mutually exclusive by construction, so exactly one can ever match. A narrow
+        transaction-scoped advisory lock serializes claims for this one session before
+        the guarded update: SKIP LOCKED protects selected rows, but cannot protect the
+        uncorrelated ``already_claimed`` predicate from a concurrent transaction's
+        snapshot. The partial unique index remains the final data-integrity backstop.
 
         Returns None (→ 204) when nothing matches: a different agent already holds
         the session's one in-flight command, or the queue is empty.
         """
+        # This is not a row-selection lock: D22's candidate choice remains a single
+        # guarded UPDATE below. It only closes the snapshot race between two claims
+        # for the same session, which would otherwise select two different queued
+        # rows and contend on ix_gpu_session_commands_one_claimed at commit.
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(sql_cast(str(session_id), Text), sql_cast(0, BigInteger))
+                )
+            )
+        )
+
         already_claimed = (
             select(GpuSessionCommand.id)
             .where(
@@ -193,6 +209,33 @@ class GpuSessionCommandRepository:
                 GpuSessionCommand.deadline_at < now,
             )
             .values(status=CommandStatus.expired, terminal_at=now, error="deadline exceeded")
+            .returning(GpuSessionCommand)
+            .execution_options(populate_existing=True)
+        )
+        await self._session.flush()
+        return result.scalars().all()
+
+    async def cancel_queued_for_terminal_sessions(
+        self, *, at: datetime
+    ) -> Sequence[GpuSessionCommand]:
+        """Cancel queued commands whose session has already reached a terminal state.
+
+        This is the sweep's race safety net for an enqueue that observed an active
+        session immediately before a concurrent lifecycle transition. The caller
+        fails each returned paired operation in the same transaction.
+        """
+        result = await self._session.execute(
+            update(GpuSessionCommand)
+            .where(
+                GpuSessionCommand.session_id == GpuSession.id,
+                GpuSessionCommand.status == CommandStatus.queued,
+                GpuSession.status.in_(tuple(TERMINAL_GPU_SESSION_STATUSES)),
+            )
+            .values(
+                status=CommandStatus.cancelled,
+                terminal_at=at,
+                error="session reached a terminal state before command could be claimed",
+            )
             .returning(GpuSessionCommand)
             .execution_options(populate_existing=True)
         )

@@ -8,21 +8,25 @@ guards on mark_terminal/expire_overdue, and D31's cancel_for_session cascade.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from sqlalchemy import update
+import pytest
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.enums import CommandStatus, OperationKind
+from src.core.enums import CommandStatus, GpuSessionStatus, OperationKind
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
+from src.db.models.user import User
 from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 GpuSessionFactory = Callable[..., Coroutine[Any, Any, GpuSession]]
@@ -177,6 +181,73 @@ async def test_claim_is_stable_for_the_same_agent(
     assert second.deadline_at == first.deadline_at
 
 
+@pytest.mark.parametrize("agent_ids", [("agent-a", "agent-a"), ("agent-a", "agent-b")])
+async def test_concurrent_claims_never_raise_or_claim_two_commands(
+    db_engine: AsyncEngine, agent_ids: tuple[str, str]
+) -> None:
+    """Two real connections serialize a session's claims behind its advisory lock."""
+    user = User(
+        id=uuid4(),
+        email=f"command-race-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    session = GpuSession(
+        id=uuid4(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.active,
+        bundle_name="wan_2.2_i2v",
+        model_type="aisha-image",
+    )
+
+    async with AsyncSession(bind=db_engine, expire_on_commit=False) as db:
+        db.add(user)
+        await db.flush()
+        db.add(session)
+        await db.flush()
+        await _make_command(db, session=session)
+        await _make_command(db, session=session)
+        await db.commit()
+
+    async def claim(agent_id: str) -> GpuSessionCommand | None:
+        async with (
+            AsyncSession(bind=db_engine, expire_on_commit=False) as db,
+            db.begin(),
+        ):
+            return await GpuSessionCommandRepository(db).claim(
+                session.id,
+                agent_id,
+                now=datetime.now(UTC),
+                deadline_for=_deadline_for,
+            )
+
+    try:
+        first, second = await asyncio.gather(*(claim(agent_id) for agent_id in agent_ids))
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as db:
+            commands = (
+                (
+                    await db.execute(
+                        select(GpuSessionCommand).where(GpuSessionCommand.session_id == session.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert sum(command.status == CommandStatus.claimed for command in commands) == 1
+        if agent_ids[0] == agent_ids[1]:
+            assert first is not None
+            assert second is not None
+            assert first.id == second.id
+        else:
+            assert (first is None) != (second is None)
+    finally:
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as db:
+            await db.execute(delete(User).where(User.id == user.id))
+            await db.commit()
+
+
 async def test_claim_fifo_within_batch_by_index(
     db_session: AsyncSession, make_gpu_session: GpuSessionFactory
 ) -> None:
@@ -328,6 +399,27 @@ async def test_expire_overdue_leaves_commands_not_yet_due(
     assert expired == []
     await db_session.refresh(claimed)
     assert claimed.status == CommandStatus.claimed
+
+
+# ---------------------------------------------------------------------------
+# terminal-session orphan sweep
+# ---------------------------------------------------------------------------
+
+
+async def test_cancel_queued_for_terminal_sessions_marks_orphans_cancelled(
+    db_session: AsyncSession, make_gpu_session: GpuSessionFactory
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.stopped)
+    command = await _make_command(db_session, session=session)
+    now = datetime.now(UTC)
+
+    orphaned = await command_repo(db_session).cancel_queued_for_terminal_sessions(at=now)
+
+    assert [item.id for item in orphaned] == [command.id]
+    await db_session.refresh(command)
+    assert command.status == CommandStatus.cancelled
+    assert command.terminal_at == now
+    assert command.error == "session reached a terminal state before command could be claimed"
 
 
 # ---------------------------------------------------------------------------

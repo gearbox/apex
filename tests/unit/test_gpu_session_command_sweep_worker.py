@@ -57,6 +57,18 @@ def _expired_command(*, claimed_at: datetime, deadline_at: datetime) -> GpuSessi
     )
 
 
+def _orphaned_command() -> GpuSessionCommand:
+    return GpuSessionCommand(
+        id=uuid4(),
+        session_id=uuid4(),
+        product_id="vex",
+        operation_id=uuid4(),
+        kind="bundle_provision",
+        payload={},
+        status=CommandStatus.cancelled,
+    )
+
+
 async def test_run_once_fails_operations_for_every_expired_command() -> None:
     worker = _make_worker()
     now = datetime.now(UTC)
@@ -68,6 +80,7 @@ async def test_run_once_fails_operations_for_every_expired_command() -> None:
         command_repo = AsyncMock()
         CommandRepo.return_value = command_repo
         command_repo.expire_overdue.return_value = [command]
+        command_repo.cancel_queued_for_terminal_sessions.return_value = []
         operation_repo = AsyncMock()
         OperationRepo.return_value = operation_repo
 
@@ -88,9 +101,33 @@ async def test_run_once_is_a_no_op_when_nothing_expired() -> None:
         command_repo = AsyncMock()
         CommandRepo.return_value = command_repo
         command_repo.expire_overdue.return_value = []
+        command_repo.cancel_queued_for_terminal_sessions.return_value = []
         operation_repo = AsyncMock()
         OperationRepo.return_value = operation_repo
 
         await worker.run_once()
 
     operation_repo.close_failed.assert_not_awaited()
+
+
+async def test_run_once_fails_operations_for_queued_terminal_session_orphans() -> None:
+    worker = _make_worker()
+    command = _orphaned_command()
+
+    with patch(_COMMAND_REPO) as CommandRepo, patch(_OPERATION_REPO) as OperationRepo:
+        command_repo = AsyncMock()
+        CommandRepo.return_value = command_repo
+        command_repo.expire_overdue.return_value = []
+        command_repo.cancel_queued_for_terminal_sessions.return_value = [command]
+        operation_repo = AsyncMock()
+        OperationRepo.return_value = operation_repo
+
+        await worker.run_once()
+
+    command_repo.cancel_queued_for_terminal_sessions.assert_awaited_once()
+    operation_repo.close_failed.assert_awaited_once()
+    call = operation_repo.close_failed.await_args
+    assert call.args[0] == command.operation_id
+    assert (
+        call.kwargs["error"] == "session reached a terminal state before command could be claimed"
+    )

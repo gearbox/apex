@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from src.api.services.gpu_session.command_payload import (
     BatchPosition,
@@ -38,6 +39,10 @@ if TYPE_CHECKING:
     from src.db.models.gpu_session_command import GpuSessionCommand
 
 logger = structlog.get_logger(__name__)
+
+
+class CommandEnqueueSessionError(ValueError):
+    """A command cannot be enqueued because its GPU session is unavailable."""
 
 
 def _validate_token(presented: str, stored_hash: str | None) -> bool:
@@ -103,6 +108,7 @@ class GpuSessionCommandService:
         """Enqueue one command outside of a batch."""
         payload = _validate(command, batch=None)
         async with self._session_factory() as db, db.begin():
+            await self._ensure_session_is_enqueueable(db, session_id)
             return await self._create_one(
                 db,
                 session_id=session_id,
@@ -155,6 +161,7 @@ class GpuSessionCommandService:
             validated.append((resolved, _validate(resolved, batch=batch)))
 
         async with self._session_factory() as db, db.begin():
+            await self._ensure_session_is_enqueueable(db, session_id)
             created: list[GpuSessionCommand] = []
             for index, (command, payload) in enumerate(validated):
                 created.append(
@@ -180,42 +187,54 @@ class GpuSessionCommandService:
         Returns (status, envelope_or_None) mapped directly onto the HTTP response.
         Never raises for a normal-path outcome (D29 — the endpoint must never 5xx).
         """
-        async with self._session_factory() as db, db.begin():
-            session_repo = GpuSessionRepository(db)
-            session = await session_repo.get_by_id(session_id)
-            if session is None:
-                return 401, None
-            if not _validate_token(bearer_token, session.callback_token_hash):
-                return 401, None
-            if session.status in TERMINAL_GPU_SESSION_STATUSES:
-                # The node is going away; an ERROR log + 60s backoff is the wrong
-                # response to normal shutdown (D29) — not 404, not 409.
-                return 204, None
+        try:
+            async with self._session_factory() as db, db.begin():
+                session_repo = GpuSessionRepository(db)
+                session = await session_repo.get_by_id(session_id)
+                if session is None:
+                    return 401, None
+                if not _validate_token(bearer_token, session.callback_token_hash):
+                    return 401, None
+                if session.status in TERMINAL_GPU_SESSION_STATUSES:
+                    # The node is going away; an ERROR log + 60s backoff is the wrong
+                    # response to normal shutdown (D29) — not 404, not 409.
+                    return 204, None
 
-            now = datetime.now(UTC)
-            claimed = await GpuSessionCommandRepository(db).claim(
-                session_id, agent_id, now=now, deadline_for=self._deadline_for
-            )
-            if claimed is None:
-                return 204, None
-
-            batch: BatchPosition | None = None
-            if claimed.batch_id is not None:
-                # batch_id/batch_index/batch_total are always written together by
-                # _create_one — never independently None once batch_id is set.
-                batch = BatchPosition(
-                    batch_id=claimed.batch_id,
-                    index=cast("int", claimed.batch_index),
-                    total=cast("int", claimed.batch_total),
+                now = datetime.now(UTC)
+                claimed = await GpuSessionCommandRepository(db).claim(
+                    session_id, agent_id, now=now, deadline_for=self._deadline_for
                 )
-            envelope = build_envelope(
-                command_id=str(claimed.id),
-                operation_id=str(claimed.operation_id),
-                kind=OperationKind(claimed.kind),
-                batch=batch,
-                payload=claimed.payload,
+                if claimed is None:
+                    return 204, None
+
+                batch: BatchPosition | None = None
+                if claimed.batch_id is not None:
+                    # batch_id/batch_index/batch_total are always written together by
+                    # _create_one — never independently None once batch_id is set.
+                    batch = BatchPosition(
+                        batch_id=claimed.batch_id,
+                        index=cast("int", claimed.batch_index),
+                        total=cast("int", claimed.batch_total),
+                    )
+                envelope = build_envelope(
+                    command_id=str(claimed.id),
+                    operation_id=str(claimed.operation_id),
+                    kind=OperationKind(claimed.kind),
+                    batch=batch,
+                    payload=claimed.payload,
+                )
+                claimed_id, operation_id, kind = claimed.id, claimed.operation_id, claimed.kind
+        except IntegrityError:
+            # The per-session advisory lock makes this unreachable for concurrent
+            # claims, but keep the unique index's last-resort conflict on the normal
+            # 204 path. The transaction has rolled back on context-manager exit;
+            # retrying inside it would use a poisoned transaction.
+            logger.info(
+                "gpu_session.command.claim_raced",
+                session_id=str(session_id),
+                agent_id=agent_id,
             )
-            claimed_id, operation_id, kind = claimed.id, claimed.operation_id, claimed.kind
+            return 204, None
 
         logger.info(
             "gpu_session.command.claimed",
@@ -226,6 +245,14 @@ class GpuSessionCommandService:
             kind=kind,
         )
         return 200, envelope
+
+    async def _ensure_session_is_enqueueable(self, db: AsyncSession, session_id: UUID) -> None:
+        """Reject a command that would otherwise remain queued forever."""
+        session = await GpuSessionRepository(db).get_by_id(session_id)
+        if session is None:
+            raise CommandEnqueueSessionError(f"GPU session {session_id} does not exist")
+        if session.status in TERMINAL_GPU_SESSION_STATUSES:
+            raise CommandEnqueueSessionError(f"GPU session {session_id} is terminal")
 
     async def _create_one(
         self,

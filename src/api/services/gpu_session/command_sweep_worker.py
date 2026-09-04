@@ -50,7 +50,7 @@ class GpuSessionCommandSweepWorker(PeriodicWorker):
         self._session_factory = session_factory
 
     async def run_once(self) -> None:
-        """One sweep: expire overdue claimed commands, fail their operations."""
+        """Expire overdue claims and cancel queued commands orphaned by a terminal session."""
         now = datetime.now(UTC)
         async with self._session_factory() as db, db.begin():
             command_repo = GpuSessionCommandRepository(db)
@@ -75,4 +75,16 @@ class GpuSessionCommandSweepWorker(PeriodicWorker):
                     session_id=str(command.session_id),
                     kind=command.kind,
                     elapsed_seconds=elapsed_seconds,
+                )
+
+            orphaned = await command_repo.cancel_queued_for_terminal_sessions(at=now)
+            for command in orphaned:
+                message = "session reached a terminal state before command could be claimed"
+                await operation_repo.close_failed(command.operation_id, at=now, error=message)
+                logger.warning(
+                    "gpu_session.command.orphaned",
+                    command_id=str(command.id),
+                    operation_id=str(command.operation_id),
+                    session_id=str(command.session_id),
+                    kind=command.kind,
                 )

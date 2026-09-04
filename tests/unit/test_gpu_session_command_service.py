@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.api.services.gpu_session.command_payload import (
     CommandBuildError,
@@ -22,7 +23,10 @@ from src.api.services.gpu_session.command_payload import (
     RemovalCommand,
     RestartCommand,
 )
-from src.api.services.gpu_session.command_service import GpuSessionCommandService
+from src.api.services.gpu_session.command_service import (
+    CommandEnqueueSessionError,
+    GpuSessionCommandService,
+)
 from src.core.enums import CommandStatus, GpuSessionStatus
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
@@ -43,6 +47,7 @@ def _session_factory() -> MagicMock:
     db = MagicMock()
     db.__aenter__ = AsyncMock(return_value=db)
     db.__aexit__ = AsyncMock(return_value=None)
+    db.get = AsyncMock(return_value=_gpu_session(session_id=uuid4()))
     begin = MagicMock()
     begin.__aenter__ = AsyncMock(return_value=None)
     begin.__aexit__ = AsyncMock(return_value=None)
@@ -135,6 +140,24 @@ class TestEnqueue:
         assert op_kwargs["target_bundle"] is None
         assert op_kwargs["target_mode"] is None
 
+    async def test_missing_session_is_rejected_before_creating_an_operation(self) -> None:
+        service = _make_service()
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = None
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+
+            with pytest.raises(CommandEnqueueSessionError, match="does not exist"):
+                await service.enqueue(
+                    session_id=uuid4(),
+                    product_id="vex",
+                    command=ProvisionCommand(bundle="wan_2.2_i2v", mode="full"),
+                )
+
+        operation_repo.create.assert_not_awaited()
+
 
 class TestEnqueueBatch:
     async def test_empty_batch_is_rejected(self) -> None:
@@ -226,6 +249,27 @@ class TestEnqueueBatch:
         with pytest.raises(CommandBuildError, match="enqueue_batch's own parameter"):
             await service.enqueue_batch(session_id=uuid4(), product_id="vex", commands=commands)
 
+    async def test_terminal_session_is_rejected_before_creating_batch_operations(self) -> None:
+        session_id = uuid4()
+        service = _make_service()
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = _gpu_session(
+                session_id=session_id, status=GpuSessionStatus.stopped
+            )
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+
+            with pytest.raises(CommandEnqueueSessionError, match="is terminal"):
+                await service.enqueue_batch(
+                    session_id=session_id,
+                    product_id="vex",
+                    commands=[ProvisionCommand(bundle="wan_2.2_i2v", mode="full")],
+                )
+
+        operation_repo.create.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # claim — D29 status codes
@@ -306,6 +350,23 @@ class TestClaim:
             command_repo = AsyncMock()
             CommandRepo.return_value = command_repo
             command_repo.claim.return_value = None
+
+            result = await service.claim(
+                session_id=session_id, bearer_token=_TOKEN, agent_id="agent-a"
+            )
+
+        assert result == (204, None)
+
+    async def test_unique_claim_race_returns_204_after_transaction_rollback(self) -> None:
+        session_id = uuid4()
+        service = _make_service()
+        with patch(_SESSION_REPO) as SessionRepo, patch(_COMMAND_REPO) as CommandRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = _gpu_session(session_id=session_id)
+            command_repo = AsyncMock()
+            CommandRepo.return_value = command_repo
+            command_repo.claim.side_effect = IntegrityError("UPDATE", {}, Exception("unique"))
 
             result = await service.claim(
                 session_id=session_id, bearer_token=_TOKEN, agent_id="agent-a"

@@ -17,11 +17,12 @@ from .billing import (
 from .frame_extraction import FrameExtractionJob
 from .generation_model import GenerationModel
 from .gpu_session import GpuSession
+from .gpu_session_command import GpuSessionCommand
 from .gpu_session_deployment import GpuSessionDeployment
 from .gpu_session_operation import GpuSessionOperation
 from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
-from .library import LibraryAssetMetadata
+from .library import LibraryAssetMetadata, LibraryAssetTag, LibraryProject, LibraryTag
 from .push_subscription import PushSubscription
 from .storage import (
     GenerationJob,
@@ -47,11 +48,15 @@ __all__ = [
     "GenerationModel",
     "GenerationOutput",
     "GpuSession",
+    "GpuSessionCommand",
     "GpuSessionDeployment",
     "GpuSessionOperation",
     "HealthSnapshot",
     "IdempotencyKey",
     "LibraryAssetMetadata",
+    "LibraryAssetTag",
+    "LibraryProject",
+    "LibraryTag",
     "Organization",
     "OrganizationMember",
     "PasswordResetToken",

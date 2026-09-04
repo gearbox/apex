@@ -408,7 +408,8 @@ class BundleIndexService:
         with the bundle_path it already computed locally: at build time self._bundle_index
         doesn't contain this entry yet (the atomic swap happens after the whole index
         is built), so get_bundle_path/get_declared_model_bytes would wrongly report
-        the bundle as not-yet-found.
+        the bundle as not-yet-found. Returns None when no files are declared: zero
+        would incorrectly assert a known model-footprint size.
         """
         try:
             with bundle_yaml_path.open() as fh:
@@ -425,6 +426,7 @@ class BundleIndexService:
             return None
 
         total = 0
+        files_summed = 0
         for model in data.get("models", []) or []:
             if not isinstance(model, dict):
                 continue
@@ -435,7 +437,8 @@ class BundleIndexService:
                 if not isinstance(size_bytes, int) or isinstance(size_bytes, bool):
                     return None
                 total += size_bytes
-        return total
+                files_summed += 1
+        return total if files_summed else None
 
     def get_capabilities(
         self, bundle_name: str, bundle_version: str | None = None
