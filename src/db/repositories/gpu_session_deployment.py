@@ -8,15 +8,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import BigInteger, Text, func, select, update
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.orm import aliased
 
 from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
     TERMINAL_GPU_SESSION_STATUSES,
     DeploymentStatus,
     GpuSessionStatus,
+    OperationKind,
 )
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_command import GpuSessionCommand
 from src.db.models.gpu_session_deployment import GpuSessionDeployment
 
 if TYPE_CHECKING:
@@ -31,6 +35,12 @@ if TYPE_CHECKING:
 # These queries run once per orchestration tick across every tenant. Oldest-first
 # bounded pages keep one tick's database work flat while eventually reaching every row.
 _ORCHESTRATION_CANDIDATE_LIMIT = 100
+
+# CO2 advisory-lock keyspaces: command claims hash the bare session id (see
+# GPU_SESSION_COMMAND_CLAIM_ADVISORY_LOCK_NAMESPACE in gpu_session_command.py).
+# Deployment removal must never contend with the claim path, whose latency is
+# part of the node agent's 30-second budget.
+GPU_SESSION_DEPLOYMENT_REMOVAL_ADVISORY_LOCK_NAMESPACE = "deployment:"
 
 
 class GpuSessionDeploymentRepository:
@@ -258,6 +268,12 @@ class GpuSessionDeploymentRepository:
             values["activated_at"] = at
         elif to_status in (DeploymentStatus.removed, DeploymentStatus.failed):
             values["removed_at"] = at
+            # A stopped/failed session must not leave a deployment eligible for
+            # a late restart outcome.  resolve_restart_outcome also guards on
+            # status='deploying', but clear the dead workflow state here too.
+            values["pending_restart"] = False
+            values["pending_restart_since"] = None
+            values["restart_operation_id"] = None
 
         result = cast(
             "CursorResult[Any]",
@@ -316,16 +332,60 @@ class GpuSessionDeploymentRepository:
         )
         await self._session.flush()
 
-    async def mark_removing(self, deployment_id: UUID) -> bool:
-        """P4 remove: guarded active -> removing. False if the row raced away from 'active'."""
+    async def acquire_removal_lock(self, session_id: UUID) -> None:
+        """Serialize P4 removal transitions for one session within the current transaction.
+
+        This deliberately uses a deployment-namespaced hash, not the bare
+        session-id hash used by the P3 command-claim path.  See the module
+        constant for the two CO2 keyspaces.
+        """
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(
+                        sql_cast(
+                            f"{GPU_SESSION_DEPLOYMENT_REMOVAL_ADVISORY_LOCK_NAMESPACE}{session_id}",
+                            Text,
+                        ),
+                        sql_cast(0, BigInteger),
+                    )
+                )
+            )
+        )
+
+    async def mark_removing(
+        self, deployment_id: UUID, *, require_another_active: bool = False
+    ) -> bool:
+        """Guardedly move an active deployment to ``removing``.
+
+        When ``require_another_active`` is true, the last-deployment rule is
+        evaluated in the same UPDATE as the state transition.  ``removing``
+        deliberately does not satisfy that correlated EXISTS: a serialized
+        second removal must not use the first in-progress removal as permission
+        to leave the session with no active deployment.
+        """
+        conditions = [
+            GpuSessionDeployment.id == deployment_id,
+            GpuSessionDeployment.status == DeploymentStatus.active,
+        ]
+        if require_another_active:
+            other = aliased(GpuSessionDeployment)
+            another_active = (
+                select(other.id)
+                .where(
+                    other.session_id == GpuSessionDeployment.session_id,
+                    other.id != GpuSessionDeployment.id,
+                    other.status == DeploymentStatus.active,
+                )
+                .correlate(GpuSessionDeployment)
+                .exists()
+            )
+            conditions.append(another_active)
         result = cast(
             "CursorResult[Any]",
             await self._session.execute(
                 update(GpuSessionDeployment)
-                .where(
-                    GpuSessionDeployment.id == deployment_id,
-                    GpuSessionDeployment.status == DeploymentStatus.active,
-                )
+                .where(*conditions)
                 .values(status=DeploymentStatus.removing)
             ),
         )
@@ -438,6 +498,7 @@ class GpuSessionDeploymentRepository:
         result = await self._session.execute(
             select(GpuSessionDeployment)
             .where(
+                GpuSessionDeployment.status == DeploymentStatus.deploying,
                 GpuSessionDeployment.pending_restart.is_(True),
                 GpuSessionDeployment.restart_operation_id.is_not(None),
             )
@@ -463,6 +524,7 @@ class GpuSessionDeploymentRepository:
                 update(GpuSessionDeployment)
                 .where(
                     GpuSessionDeployment.id.in_(tuple(deployment_ids)),
+                    GpuSessionDeployment.status == DeploymentStatus.deploying,
                     GpuSessionDeployment.pending_restart.is_(True),
                 )
                 .values(**values)
@@ -480,6 +542,70 @@ class GpuSessionDeploymentRepository:
             .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
         )
         return result.scalars().all()
+
+    async def list_orphaned_removals_without_command(
+        self, *, created_before: datetime
+    ) -> Sequence[GpuSessionDeployment]:
+        """Find old ``removing`` rows that never received a removal command.
+
+        New removals write their state transition and command in one transaction,
+        so ``created_at`` is only a grace-period backstop for rows stranded by
+        older code or an unexpected partial failure.  There is no normal
+        committed removing-without-command window to race here.
+        """
+        removal_command_exists = (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.deployment_id == GpuSessionDeployment.id,
+                GpuSessionCommand.kind == OperationKind.bundle_removal,
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
+        result = await self._session.execute(
+            select(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.status == DeploymentStatus.removing,
+                GpuSessionDeployment.created_at < created_before,
+                ~removal_command_exists,
+            )
+            .order_by(GpuSessionDeployment.created_at.asc())
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
+        )
+        return result.scalars().all()
+
+    async def restore_orphaned_removal_without_command(
+        self, deployment_id: UUID, *, created_before: datetime
+    ) -> bool:
+        """Guardedly return a stranded removal to ``active``.
+
+        Repeating the no-command and grace predicates in the UPDATE prevents a
+        concurrent legitimate enqueue from being undone by the reaper.
+        """
+        removal_command_exists = (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.deployment_id == GpuSessionDeployment.id,
+                GpuSessionCommand.kind == OperationKind.bundle_removal,
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id == deployment_id,
+                    GpuSessionDeployment.status == DeploymentStatus.removing,
+                    GpuSessionDeployment.created_at < created_before,
+                    ~removal_command_exists,
+                )
+                .values(status=DeploymentStatus.active)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
 
     async def list_orphaned_deployments_without_provision_command(
         self, *, created_before: datetime

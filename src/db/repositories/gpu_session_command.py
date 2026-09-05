@@ -25,6 +25,13 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
+# CO2 advisory-lock keyspaces: command claims use the historical bare session
+# identifier, while P4 deployment removals use the ``deployment:`` prefix
+# defined in gpu_session_deployment.py.  Keeping the prefixes explicit avoids
+# unrelated subsystems contending on the same 64-bit hash key.
+GPU_SESSION_COMMAND_CLAIM_ADVISORY_LOCK_NAMESPACE = ""
+
+
 class GpuSessionCommandRepository:
     """Persist and atomically claim/close GPU session command-queue rows."""
 
@@ -139,7 +146,13 @@ class GpuSessionCommandRepository:
         await self._session.execute(
             select(
                 func.pg_advisory_xact_lock(
-                    func.hashtextextended(sql_cast(str(session_id), Text), sql_cast(0, BigInteger))
+                    func.hashtextextended(
+                        sql_cast(
+                            f"{GPU_SESSION_COMMAND_CLAIM_ADVISORY_LOCK_NAMESPACE}{session_id}",
+                            Text,
+                        ),
+                        sql_cast(0, BigInteger),
+                    )
                 )
             )
         )

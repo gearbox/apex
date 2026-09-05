@@ -104,9 +104,30 @@ class GpuSessionCommandService:
         product_id: str,
         command: CommandInput,
         deployment_id: UUID | None = None,
+        db: AsyncSession | None = None,
     ) -> GpuSessionCommand:
-        """Enqueue one command outside of a batch."""
+        """Enqueue one command outside of a batch.
+
+        Normally this method owns its transaction.  ``db`` is the deliberately
+        narrow escape hatch for a caller which must atomically transition a
+        related record and enqueue its command (the P4 removal path).  That
+        caller owns the supplied session's transaction.
+        """
         payload = _validate(command, batch=None)
+        if db is not None:
+            await self._ensure_session_is_enqueueable(db, session_id)
+            return await self._create_one(
+                db,
+                session_id=session_id,
+                product_id=product_id,
+                deployment_id=deployment_id,
+                command=command,
+                payload=payload,
+                batch_id=None,
+                batch_index=None,
+                batch_total=None,
+            )
+
         async with self._session_factory() as db, db.begin():
             await self._ensure_session_is_enqueueable(db, session_id)
             return await self._create_one(

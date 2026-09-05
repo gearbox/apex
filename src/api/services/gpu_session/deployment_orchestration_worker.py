@@ -9,8 +9,9 @@ LeaderLease) of every other PeriodicWorker in this codebase.
 Five independent steps per tick, in this order so a batch that finishes and drains in
 the same tick doesn't wait a full interval for its restart:
   1. Reap an attach that committed but never enqueued a provision command.
+  1b. Reap a removal stranded without its removal command.
   2. Provision finished  -> pending_restart=true (success) or 'failed' (failure).
-  3. Session drain       -> enqueue one comfyui_restart, stamp restart_operation_id.
+  3. Session drain       -> enqueue one comfyui_restart per readiness marker.
   4. Restart finished    -> 'active' (success) or 'failed', no retry (D34).
   5. Removal finished    -> 'removed' (success) or back to 'active' (failure).
 """
@@ -87,6 +88,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
 
     async def run_once(self) -> None:
         await self._reap_orphaned_deployments_without_provision_command()
+        await self._reap_orphaned_removals_without_command()
         await self._process_provision_results()
         await self._process_restart_enqueue()
         await self._process_restart_results()
@@ -125,6 +127,35 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 self._event_bus,
                 deployment,
                 error_message="provision command was not enqueued",
+            )
+
+    async def _reap_orphaned_removals_without_command(self) -> None:
+        """Return old removing rows to active if no removal command was persisted."""
+        now = datetime.now(UTC)
+        created_before = now - _ORPHANED_DEPLOYMENT_GRACE
+        async with self._session_factory() as db:
+            candidates = await GpuSessionDeploymentRepository(
+                db
+            ).list_orphaned_removals_without_command(created_before=created_before)
+        for deployment in candidates:
+            async with self._session_factory() as db, db.begin():
+                applied = await GpuSessionDeploymentRepository(
+                    db
+                ).restore_orphaned_removal_without_command(
+                    deployment.id, created_before=created_before
+                )
+            if not applied:
+                continue
+            deployment.status = DeploymentStatus.active
+            logger.error(
+                "gpu_session.deployment.removing_no_command",
+                session_id=str(deployment.session_id),
+                deployment_id=str(deployment.id),
+            )
+            await publish_deployment_event(
+                self._event_bus,
+                deployment,
+                error_message="removal command was not enqueued",
             )
 
     # ------------------------------------------------------------------
@@ -206,11 +237,13 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
     async def _process_one_restart_session(
         self, session_id: UUID, candidates: Sequence[GpuSessionDeployment]
     ) -> None:
-        """Restart every ready deployment on one session exactly once.
+        """Restart each ready marker cohort on one session exactly once.
 
         Every attach has its own provision batch, but ComfyUI restarts are a session
         concern. A batch that is still provisioning is excluded without making an
-        already-complete sibling batch wait for it.
+        already-complete sibling batch wait for it.  Different readiness markers
+        cannot share an aisha restart command, because its contract carries only
+        one ``node_class`` to verify.
         """
         by_batch: dict[str | None, list[GpuSessionDeployment]] = {}
         for deployment in candidates:
@@ -238,16 +271,38 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         if not ready_members:
             return
 
-        product_id = ready_members[0].product_id
-
         async with self._session_factory() as db:
             in_flight = await JobRepository(db).count_in_flight_for_session(session_id)
 
+        cohorts: dict[str | None, list[GpuSessionDeployment]] = {}
+        for member in ready_members:
+            cohorts.setdefault(member.readiness_marker_node_class, []).append(member)
+
+        for marker, members in cohorts.items():
+            await self._enqueue_restart_cohort(
+                session_id=session_id,
+                members=members,
+                in_flight=in_flight,
+                readiness_marker_node_class=marker,
+            )
+
+    async def _enqueue_restart_cohort(
+        self,
+        *,
+        session_id: UUID,
+        members: Sequence[GpuSessionDeployment],
+        in_flight: int,
+        readiness_marker_node_class: str | None,
+    ) -> None:
+        """Drain and enqueue one restart for deployments sharing one marker."""
         now = datetime.now(UTC)
-        pending_restart_since = max(
+        # D35 is an upper bound for the oldest ready deployment, not the most
+        # recent attach in a busy session.  Cohorts are marker-specific, so take
+        # the oldest timestamp within this cohort.
+        pending_restart_since = min(
             (
                 member.pending_restart_since
-                for member in ready_members
+                for member in members
                 if member.pending_restart_since is not None
             ),
             default=None,
@@ -264,16 +319,16 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             logger.warning(
                 "gpu_session.deployment.restart_drain_timeout",
                 session_id=str(session_id),
-                batch_ids=sorted({member.batch_id for member in ready_members if member.batch_id}),
+                batch_ids=sorted({member.batch_id for member in members if member.batch_id}),
                 in_flight_count=in_flight,
+                readiness_marker_node_class=readiness_marker_node_class,
             )
 
-        newest = max(ready_members, key=lambda member: member.created_at)
         try:
             command = await self._command_service.enqueue(
                 session_id=session_id,
-                product_id=product_id,
-                command=RestartCommand(node_class=newest.readiness_marker_node_class),
+                product_id=members[0].product_id,
+                command=RestartCommand(node_class=readiness_marker_node_class),
             )
         except CommandEnqueueSessionError:
             # Session went terminal — the D15 chokepoint cascade already flipped these
@@ -282,22 +337,23 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             logger.info(
                 "gpu_session.deployment.restart_enqueue_skipped_session_unavailable",
                 session_id=str(session_id),
-                batch_ids=sorted({member.batch_id for member in ready_members if member.batch_id}),
+                batch_ids=sorted({member.batch_id for member in members if member.batch_id}),
             )
             return
 
         async with self._session_factory() as db, db.begin():
             updated = await GpuSessionDeploymentRepository(db).set_restart_pointer(
-                [member.id for member in ready_members], operation_id=command.operation_id
+                [member.id for member in members], operation_id=command.operation_id
             )
         logger.info(
             "gpu_session.deployment.restart_enqueued",
             session_id=str(session_id),
-            batch_ids=sorted({member.batch_id for member in ready_members if member.batch_id}),
+            batch_ids=sorted({member.batch_id for member in members if member.batch_id}),
             operation_id=str(command.operation_id),
             deployment_count=updated,
+            readiness_marker_node_class=readiness_marker_node_class,
         )
-        for member in ready_members:
+        for member in members:
             member.restart_operation_id = command.operation_id
             await publish_deployment_event(self._event_bus, member)
 
@@ -339,6 +395,11 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             updated = await GpuSessionDeploymentRepository(db).resolve_restart_outcome(
                 ids, succeeded=succeeded, at=now
             )
+        # A terminal session cascade can win after the candidate query.  Its
+        # guarded UPDATE intentionally returns zero; do not publish a stale
+        # active/failed deployment event in that case.
+        if updated == 0:
+            return
         if succeeded:
             logger.info(
                 "gpu_session.deployment.activated",

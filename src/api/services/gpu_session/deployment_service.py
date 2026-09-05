@@ -214,22 +214,40 @@ class GpuSessionDeploymentService:
         if session_row is None:
             raise GpuSessionError(f"Session {session_id} not found or access denied")
 
-        async with self._session_factory() as db:
+        # P4 removal is one serialized state transition.  In particular, do not
+        # split active -> removing from the in-flight count or command enqueue:
+        # after the transition no new request can resolve this deployment for
+        # routing, and an exception rolls the entire transition back to active.
+        async with self._session_factory() as db, db.begin():
             repo = GpuSessionDeploymentRepository(db)
+            await repo.acquire_removal_lock(session_id)
+
             deployment = await repo.get_live_for_session_and_model(session_id, model_type.value)
             if deployment is None:
                 raise DeploymentNotLiveError(
                     f"No live deployment for model_type={model_type.value} on session {session_id}"
                 )
 
-            live = await repo.list_live_for_session(session_id)
-            if len(live) <= 1 and not force:
-                raise LastDeploymentRequiresForceError(
-                    f"Removing the last deployment on session {session_id} requires "
-                    "?force=true; the session will keep running and billing with "
-                    "nothing deployed on it"
+            marked = await repo.mark_removing(deployment.id, require_another_active=not force)
+            if not marked:
+                if not force and deployment.status == DeploymentStatus.active:
+                    # With the per-session removal lock held, an active target
+                    # which missed the correlated UPDATE is necessarily the last
+                    # active deployment.  This read is error classification only;
+                    # the guard itself lives in mark_removing's UPDATE.
+                    raise LastDeploymentRequiresForceError(
+                        f"Removing the last deployment on session {session_id} requires "
+                        "?force=true; the session will keep running and billing with "
+                        "nothing deployed on it"
+                    )
+                raise DeploymentNotLiveError(
+                    f"Deployment {deployment.id} is no longer active (concurrent state change)"
                 )
 
+            # Transition before counting: once the transaction commits this row
+            # is no longer routable, so the count closes the arrival window for
+            # new same-model work.  A non-zero count raises and rolls the status
+            # transition back to active with the surrounding transaction.
             job_repo = JobRepository(db)
             in_flight = await job_repo.count_in_flight_for_session_and_model(
                 session_id, model_type.value
@@ -239,6 +257,10 @@ class GpuSessionDeploymentService:
                     deployment_id=deployment.id, in_flight_count=in_flight
                 )
 
+            # Build retention from the post-transition live set.  The target is
+            # still live as 'removing' until its command succeeds, so exclude it
+            # explicitly; every other live bundle must be retained by aisha.
+            live = await repo.list_live_for_session(session_id)
             retain_bundles: list[str] = []
             for other in live:
                 if other.id == deployment.id:
@@ -256,21 +278,18 @@ class GpuSessionDeploymentService:
                 # version suffix here.
                 retain_bundles.append(other.bundle_name)
 
-        async with self._session_factory() as db, db.begin():
-            marked = await GpuSessionDeploymentRepository(db).mark_removing(deployment.id)
-        if not marked:
-            raise DeploymentNotLiveError(
-                f"Deployment {deployment.id} is no longer active (concurrent state change)"
+            # Supplying the active transaction makes the queue write atomic with
+            # the state transition.  Any enqueue exception rolls both back, which
+            # is the active-state compensation required for a retry to remain safe.
+            command = await self._command_service.enqueue(
+                session_id=session_id,
+                product_id=product_id,
+                command=RemovalCommand(
+                    bundle=deployment.bundle_name, retain_bundles=tuple(retain_bundles)
+                ),
+                deployment_id=deployment.id,
+                db=db,
             )
-
-        command = await self._command_service.enqueue(
-            session_id=session_id,
-            product_id=product_id,
-            command=RemovalCommand(
-                bundle=deployment.bundle_name, retain_bundles=tuple(retain_bundles)
-            ),
-            deployment_id=deployment.id,
-        )
 
         deployment.status = DeploymentStatus.removing
         logger.info(
