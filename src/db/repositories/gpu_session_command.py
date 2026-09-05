@@ -70,6 +70,44 @@ class GpuSessionCommandRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_by_batch(self, batch_id: str) -> Sequence[GpuSessionCommand]:
+        """P4 orchestration worker step 2: every command enqueued in one batch.
+
+        Used to determine "every member is terminal, and at least one succeeded"
+        (D34) — checked against command.status directly rather than joining
+        gpu_session_operations, since OperationEventService.mark_terminal already
+        mirrors the operation's terminal outcome onto the command in the same
+        transaction (P3/D27).
+        """
+        result = await self._session.execute(
+            select(GpuSessionCommand).where(GpuSessionCommand.batch_id == batch_id)
+        )
+        return result.scalars().all()
+
+    async def get_latest_by_deployment_and_kind(
+        self, deployment_id: UUID, kind: OperationKind | str
+    ) -> GpuSessionCommand | None:
+        """P4: the most recent command of one kind enqueued for one deployment.
+
+        A deployment can accumulate at most one provision command (attach) and,
+        later, at most one removal command (remove) over its lifetime — both
+        share deployment_id, so the kind filter disambiguates which phase a
+        caller is asking about. Restart commands are never looked up this way:
+        one restart can cover many deployments, so they're found via each
+        deployment's own restart_operation_id instead (get_by_operation).
+        """
+        kind_value = kind.value if isinstance(kind, OperationKind) else kind
+        result = await self._session.execute(
+            select(GpuSessionCommand)
+            .where(
+                GpuSessionCommand.deployment_id == deployment_id,
+                GpuSessionCommand.kind == kind_value,
+            )
+            .order_by(GpuSessionCommand.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def claim(
         self,
         session_id: UUID,

@@ -76,8 +76,8 @@ class StartSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=Tr
 class DeploymentResponse(msgspec.Struct, kw_only=True):
     """Read-only projection of one gpu_session_deployments row.
 
-    P4 will add actions (attach/remove/restart); P2 ships the read model early
-    so frontend work on the shape can start in parallel — see D19.
+    P4 adds attach/remove actions; the read model shipped early in P2 so
+    frontend work on the shape could start in parallel — see D19.
     """
 
     id: UUID
@@ -89,6 +89,8 @@ class DeploymentResponse(msgspec.Struct, kw_only=True):
     is_primary: bool
     created_at: datetime
     activated_at: datetime | None
+    restart_operation_id: UUID | None = None
+    """The restart operation that will make this deployment routable, once pending_restart (D33)."""
 
     @classmethod
     def from_model(cls, m: GpuSessionDeployment) -> DeploymentResponse:
@@ -102,7 +104,19 @@ class DeploymentResponse(msgspec.Struct, kw_only=True):
             is_primary=m.is_primary,
             created_at=m.created_at,
             activated_at=m.activated_at,
+            restart_operation_id=m.restart_operation_id,
         )
+
+
+class AttachDeploymentRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    model: ModelType
+    """The model to attach to this already-running session."""
+
+
+class AttachDeploymentResponse(msgspec.Struct, kw_only=True):
+    deployment: DeploymentResponse
+    operation_id: UUID
+    """The provision operation the client can poll/subscribe to for progress."""
 
 
 class GpuSessionResponse(msgspec.Struct, kw_only=True):

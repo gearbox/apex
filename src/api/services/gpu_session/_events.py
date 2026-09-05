@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.api.schemas.events import EventType, GpuSessionStatusPayload
+from src.api.schemas.events import EventType, GpuDeploymentStatusPayload, GpuSessionStatusPayload
 from src.api.schemas.ops_events import GpuNodeStartedOpsPayload, OpsEventType
 from src.core.enums import GpuSessionStatus
 
@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
     from src.api.services.ops_event_bus import OpsEventBus
     from src.db.models.gpu_session import GpuSession
+    from src.db.models.gpu_session_deployment import GpuSessionDeployment
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
 
@@ -91,4 +93,51 @@ async def publish_status_event(
                 user_id=session.user_id,
                 model_type=session.model_type,
             ),
+        )
+
+
+async def publish_deployment_event(
+    event_bus: EventBus | None,
+    deployment: GpuSessionDeployment,
+    *,
+    operation: GpuSessionOperation | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Fire-and-forget SSE publish for a P4 deployment state change (Part 4).
+
+    ``operation`` is whichever operation currently governs the deployment's progress
+    (its provision or restart operation) — pass it when already loaded in the same
+    transaction as the state write; omit it when a fresh fetch isn't worth the round
+    trip (phase/progress are None on a just-created operation anyway).
+    """
+    if event_bus is None:
+        return
+    try:
+        await asyncio.wait_for(
+            event_bus.publish(
+                user_id=deployment.user_id,
+                event_type=EventType.GPU_DEPLOYMENT_STATUS_CHANGED,
+                payload=GpuDeploymentStatusPayload(
+                    deployment_id=deployment.id,
+                    session_id=deployment.session_id,
+                    model_type=deployment.model_type,
+                    status=str(deployment.status),
+                    pending_restart=deployment.pending_restart,
+                    operation_id=operation.id if operation is not None else None,
+                    operation_phase=operation.phase if operation is not None else None,
+                    operation_progress=operation.progress if operation is not None else None,
+                    error_message=error_message,
+                ),
+            ),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "gpu_session.deployment.event_publish_timeout",
+            deployment_id=str(deployment.id),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except Exception:
+        logger.exception(
+            "gpu_session.deployment.event_publish_failed", deployment_id=str(deployment.id)
         )

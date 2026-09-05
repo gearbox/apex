@@ -396,6 +396,38 @@ class JobRepository(BaseRepository[GenerationJob]):
         )
         return int(result.scalar_one())
 
+    async def count_in_flight_for_session_and_model(
+        self,
+        gpu_session_id: UUID,
+        model_type: str,
+    ) -> int:
+        """Count Aisha jobs that are QUEUED/RUNNING for one GPU session and model type.
+
+        Used by the P4 remove endpoint (D37): removal is blocked by an in-flight
+        job of the model type being removed, but not by jobs on another model
+        sharing the same session.
+
+        Args:
+            gpu_session_id: Session whose in-flight jobs to count.
+            model_type: ModelType value to filter on.
+
+        Returns:
+            Count of QUEUED/RUNNING non-deleted jobs for the session+model pair.
+        """
+        from sqlalchemy import func
+
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(GenerationJob)
+            .where(
+                GenerationJob.gpu_session_id == gpu_session_id,
+                GenerationJob.model == model_type,
+                GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                GenerationJob.is_deleted.is_(False),
+            )
+        )
+        return int(result.scalar_one())
+
     async def list_pending_video_jobs(
         self,
         provider: Provider = Provider.GROK,

@@ -268,6 +268,237 @@ class GpuSessionDeploymentRepository:
         await self._session.flush()
         return result.rowcount
 
+    async def get_live_for_session_and_model(
+        self, session_id: UUID, model_type: str
+    ) -> GpuSessionDeployment | None:
+        """Get the live deployment for one session+model_type pair, if any.
+
+        Used by the P4 remove endpoint to resolve the target deployment —
+        session-scoped (unlike get_live_for_model, which is user-scoped and
+        used for the attach-time uniqueness pre-check).
+        """
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.model_type == model_type,
+                GpuSessionDeployment.status.in_(tuple(LIVE_DEPLOYMENT_STATUSES)),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_live_for_session(self, session_id: UUID) -> Sequence[GpuSessionDeployment]:
+        """List every live deployment for one session (P4: last-deployment guard, D11 retain_bundles)."""
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.status.in_(tuple(LIVE_DEPLOYMENT_STATUSES)),
+            )
+        )
+        return result.scalars().all()
+
+    async def set_provision_pointer(
+        self, deployment_id: UUID, *, operation_id: UUID, batch_id: str
+    ) -> None:
+        """P4 attach: point a freshly-created deployment at its provision batch.
+
+        Unlike update_provision_operation_id (scoped to is_primary, CO6), this
+        targets one deployment by id — the correct pointer for a P4 sibling.
+        """
+        await self._session.execute(
+            update(GpuSessionDeployment)
+            .where(GpuSessionDeployment.id == deployment_id)
+            .values(provision_operation_id=operation_id, batch_id=batch_id)
+        )
+        await self._session.flush()
+
+    async def mark_removing(self, deployment_id: UUID) -> bool:
+        """P4 remove: guarded active -> removing. False if the row raced away from 'active'."""
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id == deployment_id,
+                    GpuSessionDeployment.status == DeploymentStatus.active,
+                )
+                .values(status=DeploymentStatus.removing)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def list_deploying_awaiting_provision_result(self) -> Sequence[GpuSessionDeployment]:
+        """P4 orchestration worker step 1 candidates: siblings whose provision command
+        may have finished. is_primary is excluded — the primary's 'deploying' -> 'active'
+        transition is owned entirely by GpuProvisioningWorker._transition (session
+        bootstrap/resume), never by a P3 command."""
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.status == DeploymentStatus.deploying,
+                GpuSessionDeployment.pending_restart.is_(False),
+                GpuSessionDeployment.is_primary.is_(False),
+            )
+        )
+        return result.scalars().all()
+
+    async def resolve_provision_outcome(
+        self, deployment_id: UUID, *, succeeded: bool, at: datetime
+    ) -> bool:
+        """P4 orchestration worker step 1: apply one deployment's provision-command outcome.
+
+        Success (D33): stays 'deploying', flips pending_restart so it's picked up by the
+        batch-restart step. Failure: 'failed' + removed_at, same as any other terminal write.
+        """
+        values: dict[str, Any] = (
+            {"pending_restart": True}
+            if succeeded
+            else {"status": DeploymentStatus.failed, "removed_at": at}
+        )
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id == deployment_id,
+                    GpuSessionDeployment.status == DeploymentStatus.deploying,
+                    GpuSessionDeployment.pending_restart.is_(False),
+                )
+                .values(**values)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def list_pending_restart_awaiting_operation(self) -> Sequence[GpuSessionDeployment]:
+        """P4 orchestration worker step 2 candidates: provisioned, no restart enqueued yet."""
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.pending_restart.is_(True),
+                GpuSessionDeployment.restart_operation_id.is_(None),
+            )
+        )
+        return result.scalars().all()
+
+    async def set_restart_pointer(
+        self, deployment_ids: Sequence[UUID], *, operation_id: UUID
+    ) -> int:
+        """P4 orchestration worker step 2: stamp the one restart operation onto every
+        pending-restart deployment in a batch. Guarded on restart_operation_id IS NULL so a
+        crash-then-duplicate-enqueue orphans the second command instead of corrupting state."""
+        if not deployment_ids:
+            return 0
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id.in_(tuple(deployment_ids)),
+                    GpuSessionDeployment.pending_restart.is_(True),
+                    GpuSessionDeployment.restart_operation_id.is_(None),
+                )
+                .values(restart_operation_id=operation_id)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount
+
+    async def list_pending_restart_awaiting_outcome(self) -> Sequence[GpuSessionDeployment]:
+        """P4 orchestration worker step 3 candidates: restart enqueued, outcome not yet applied."""
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.pending_restart.is_(True),
+                GpuSessionDeployment.restart_operation_id.is_not(None),
+            )
+        )
+        return result.scalars().all()
+
+    async def resolve_restart_outcome(
+        self, deployment_ids: Sequence[UUID], *, succeeded: bool, at: datetime
+    ) -> int:
+        """P4 orchestration worker step 3: apply the restart outcome to every deployment
+        in the batch (D33/D34). Success -> active/routable; failure -> failed, no retry (D34)."""
+        if not deployment_ids:
+            return 0
+        values: dict[str, Any] = (
+            {"status": DeploymentStatus.active, "pending_restart": False, "activated_at": at}
+            if succeeded
+            else {"status": DeploymentStatus.failed, "pending_restart": False, "removed_at": at}
+        )
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id.in_(tuple(deployment_ids)),
+                    GpuSessionDeployment.pending_restart.is_(True),
+                )
+                .values(**values)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount
+
+    async def list_removing(self) -> Sequence[GpuSessionDeployment]:
+        """P4 orchestration worker step 4 candidates: removal in flight."""
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.status == DeploymentStatus.removing
+            )
+        )
+        return result.scalars().all()
+
+    async def resolve_removal_outcome(
+        self, deployment_id: UUID, *, succeeded: bool, at: datetime
+    ) -> bool:
+        """P4 orchestration worker step 4: apply one removal-command outcome.
+
+        Success -> 'removed' (frees the slot). Failure -> back to 'active' (invariant #13);
+        the bundle is still resident, so the deployment is still usable.
+        """
+        values: dict[str, Any] = (
+            {"status": DeploymentStatus.removed, "removed_at": at}
+            if succeeded
+            else {"status": DeploymentStatus.active}
+        )
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id == deployment_id,
+                    GpuSessionDeployment.status == DeploymentStatus.removing,
+                )
+                .values(**values)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def mark_primary_active(self, session_id: UUID, *, at: datetime) -> int:
+        """D15/D33 active-cascade, scoped to only the primary deployment.
+
+        Used by GpuProvisioningWorker._transition instead of the general mark_status
+        cascade: unlike a primary's bootstrap/resume, a P4 sibling's 'deploying' ->
+        'active' transition is driven exclusively by its own restart-command outcome
+        (see resolve_restart_outcome). A session-level active transition (session
+        bootstrap, or resume racing a concurrent attach) must never short-circuit that
+        and mark a still-provisioning sibling routable before its restart even ran.
+        """
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.session_id == session_id,
+                    GpuSessionDeployment.status == DeploymentStatus.deploying,
+                    GpuSessionDeployment.is_primary.is_(True),
+                )
+                .values(status=DeploymentStatus.active, activated_at=at)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount
+
     async def mark_orphaned(self, *, at: datetime) -> Sequence[tuple[UUID, UUID]]:
         """D16 self-heal: mark 'removed' any live deployment whose session is terminal.
 

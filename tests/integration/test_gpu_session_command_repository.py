@@ -12,7 +12,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select, update
@@ -55,6 +55,7 @@ async def _make_command(
     batch_id: str | None = None,
     batch_index: int | None = None,
     batch_total: int | None = None,
+    deployment_id: UUID | None = None,
 ) -> GpuSessionCommand:
     repo = GpuSessionCommandRepository(db_session)
     return await repo.create(
@@ -62,6 +63,7 @@ async def _make_command(
         session_id=session.id,
         product_id=session.product_id,
         operation_id=new_id(),
+        deployment_id=deployment_id,
         kind=kind,
         payload=payload or {"bundle": "wan_2.2_i2v", "mode": "full", "verify": True},
         batch_id=batch_id,
@@ -482,3 +484,98 @@ async def test_cancel_for_session_leaves_terminal_commands_untouched(
     assert cancelled == []
     await db_session.refresh(command)
     assert command.status == CommandStatus.succeeded
+
+
+# ---------------------------------------------------------------------------
+# P4: list_by_batch / get_latest_by_deployment_and_kind
+# ---------------------------------------------------------------------------
+
+
+async def test_list_by_batch_returns_every_member(
+    db_session: AsyncSession, make_gpu_session: GpuSessionFactory
+) -> None:
+    session = await make_gpu_session()
+    a = await _make_command(
+        db_session, session=session, batch_id="batch-a", batch_index=0, batch_total=2
+    )
+    b = await _make_command(
+        db_session, session=session, batch_id="batch-a", batch_index=1, batch_total=2
+    )
+    await _make_command(
+        db_session, session=session, batch_id="batch-b", batch_index=0, batch_total=1
+    )
+
+    found = await command_repo(db_session).list_by_batch("batch-a")
+
+    assert {c.id for c in found} == {a.id, b.id}
+
+
+async def test_list_by_batch_unknown_batch_returns_empty(
+    db_session: AsyncSession, make_gpu_session: GpuSessionFactory
+) -> None:
+    session = await make_gpu_session()
+    await _make_command(db_session, session=session, batch_id="batch-a")
+
+    found = await command_repo(db_session).list_by_batch("does-not-exist")
+
+    assert found == []
+
+
+async def test_get_latest_by_deployment_and_kind_disambiguates_by_kind(
+    db_session: AsyncSession, make_gpu_session: GpuSessionFactory
+) -> None:
+    """A deployment accumulates a provision command at attach and, later, a
+    removal command at remove — both share deployment_id; kind disambiguates."""
+    session = await make_gpu_session()
+    deployment_id = uuid4()
+    provision = await _make_command(
+        db_session,
+        session=session,
+        kind=OperationKind.bundle_provision,
+        deployment_id=deployment_id,
+    )
+    removal = await _make_command(
+        db_session,
+        session=session,
+        kind=OperationKind.bundle_removal,
+        deployment_id=deployment_id,
+    )
+    repo = command_repo(db_session)
+
+    found_provision = await repo.get_latest_by_deployment_and_kind(
+        deployment_id, OperationKind.bundle_provision
+    )
+    found_removal = await repo.get_latest_by_deployment_and_kind(
+        deployment_id, OperationKind.bundle_removal
+    )
+
+    assert found_provision is not None and found_provision.id == provision.id
+    assert found_removal is not None and found_removal.id == removal.id
+
+
+async def test_get_latest_by_deployment_and_kind_returns_none_when_absent(
+    db_session: AsyncSession,
+) -> None:
+    found = await command_repo(db_session).get_latest_by_deployment_and_kind(
+        uuid4(), OperationKind.bundle_provision
+    )
+    assert found is None
+
+
+async def test_get_latest_by_deployment_and_kind_ignores_other_deployments(
+    db_session: AsyncSession, make_gpu_session: GpuSessionFactory
+) -> None:
+    session = await make_gpu_session()
+    other_deployment_id = uuid4()
+    await _make_command(
+        db_session,
+        session=session,
+        kind=OperationKind.bundle_provision,
+        deployment_id=other_deployment_id,
+    )
+
+    found = await command_repo(db_session).get_latest_by_deployment_and_kind(
+        uuid4(), OperationKind.bundle_provision
+    )
+
+    assert found is None

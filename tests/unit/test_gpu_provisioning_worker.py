@@ -871,8 +871,11 @@ class TestDeploymentCascade:
     async def test_mark_active_flips_deploying_deployment_to_active(
         self, mock_deployment_repo: AsyncMock
     ) -> None:
-        """Invariant 7: activation cascades — _mark_active flips the primary
-        deployment to 'active' and stamps activated_at."""
+        """Invariant 7 (P4-revised): activation cascades — _mark_active flips only
+        the PRIMARY deployment to 'active' and stamps activated_at. Scoped to
+        is_primary (mirroring update_provision_operation_id/CO6) so a P4 sibling
+        mid-attach is never marked routable by an unrelated session-level resume —
+        see mark_primary_active's docstring."""
         worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
 
@@ -883,12 +886,7 @@ class TestDeploymentCascade:
 
             await worker._mark_active(session)
 
-        mock_deployment_repo.mark_status.assert_awaited_once_with(
-            session.id,
-            from_statuses=(DeploymentStatus.deploying,),
-            to_status=DeploymentStatus.active,
-            at=ANY,
-        )
+        mock_deployment_repo.mark_primary_active.assert_awaited_once_with(session.id, at=ANY)
 
     async def test_mark_failed_flips_live_deployments_to_failed(
         self, mock_deployment_repo: AsyncMock

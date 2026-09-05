@@ -879,12 +879,16 @@ class GpuProvisioningWorker(PeriodicWorker):
         """Re-load under SELECT FOR UPDATE, validate status, then write new_status.
 
         The other of the two D15 lifecycle-cascade chokepoints (the other is
-        GpuSessionService._set_status): a transition to 'active' flips the
-        primary deployment to 'active' and stamps activated_at; a transition to
-        'failed' flips every live deployment to 'failed' and stamps removed_at,
-        and (D31) every queued/claimed command to 'cancelled' with its
-        operation failed. All happen in the same transaction as the session
-        status write.
+        GpuSessionService._set_status): a transition to 'active' flips only the
+        PRIMARY deployment to 'active' and stamps activated_at (mark_primary_active,
+        scoped like update_provision_operation_id/CO6 — a P4 sibling's 'deploying' ->
+        'active' transition is driven exclusively by its own restart-command outcome,
+        never by this session-level transition; otherwise a resume racing a concurrent
+        attach would mark a still-provisioning sibling routable before its restart even
+        ran, violating D33). A transition to 'failed' flips every live deployment to
+        'failed' and stamps removed_at, and (D31) every queued/claimed command to
+        'cancelled' with its operation failed. All happen in the same transaction as
+        the session status write.
         """
         previous_status = str(session.status)
         # Pop error_message so it reaches the SSE event as well as the DB row.
@@ -909,11 +913,8 @@ class GpuProvisioningWorker(PeriodicWorker):
             current.status = new_status
 
             if new_status == GpuSessionStatus.active:
-                await GpuSessionDeploymentRepository(db).mark_status(
-                    session.id,
-                    from_statuses=(DeploymentStatus.deploying,),
-                    to_status=DeploymentStatus.active,
-                    at=datetime.now(UTC),
+                await GpuSessionDeploymentRepository(db).mark_primary_active(
+                    session.id, at=datetime.now(UTC)
                 )
             elif new_status == GpuSessionStatus.failed:
                 cascade_at = datetime.now(UTC)

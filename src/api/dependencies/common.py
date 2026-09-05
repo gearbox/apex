@@ -33,6 +33,10 @@ from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWor
 from src.api.services.gpu_session.command_service import GpuSessionCommandService
 from src.api.services.gpu_session.command_sweep_worker import GpuSessionCommandSweepWorker
 from src.api.services.gpu_session.credit_guard import SessionCreditGuard
+from src.api.services.gpu_session.deployment_orchestration_worker import (
+    DeploymentOrchestrationWorker,
+)
+from src.api.services.gpu_session.deployment_service import GpuSessionDeploymentService
 from src.api.services.gpu_session.node_cooldown import (
     NodeCooldownStore,
     NullNodeCooldownStore,
@@ -142,6 +146,9 @@ class ServiceContainer:
     # (not GPU-stack-gated; the claim endpoint must 204 cleanly even without Vast.ai/CF)
     operation_event_service: OperationEventService | None = None
     gpu_session_command_service: GpuSessionCommandService | None = None
+    # P4: deployment orchestration (attach/remove additional models on a session)
+    gpu_session_deployment_service: GpuSessionDeploymentService | None = None
+    deployment_orchestration_worker: DeploymentOrchestrationWorker | None = None
     # Web Push (optional — requires VAPID keys + Redis)
     push_service: PushService | None = None
     push_dispatcher: PushDispatcher | None = None
@@ -524,6 +531,17 @@ def get_gpu_session_command_service() -> GpuSessionCommandService:
 
         raise ServiceUnavailableException(detail="GPU session command service not available")
     return _services.gpu_session_command_service
+
+
+def get_gpu_session_deployment_service() -> GpuSessionDeploymentService:
+    """Provide GpuSessionDeploymentService singleton (503 if GPU stack not configured)."""
+    if _services.gpu_session_deployment_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(
+            detail="GPU session deployment service not available (Vast.ai/CF not configured)"
+        )
+    return _services.gpu_session_deployment_service
 
 
 def get_push_service() -> PushService:
@@ -1031,6 +1049,18 @@ async def init_services(settings: Settings) -> JWTService:
             ops_event_bus=_services.ops_event_bus,
         )
 
+        if _services.gpu_session_command_service is None:
+            raise RuntimeError(
+                "gpu_session_command_service must be initialized before "
+                "gpu_session_deployment_service"
+            )
+        _services.gpu_session_deployment_service = GpuSessionDeploymentService(
+            session_factory=_services.db_manager.session_factory,
+            bundle_index=_services.bundle_index,
+            command_service=_services.gpu_session_command_service,
+            event_bus=_services.event_bus,
+        )
+
         if workers_enabled:
             _services.gpu_provisioning_worker = GpuProvisioningWorker(
                 session_factory=_services.db_manager.session_factory,
@@ -1079,6 +1109,21 @@ async def init_services(settings: Settings) -> JWTService:
                 redis_client_factory=get_operational_redis_client,
             )
             await _services.gpu_session_command_sweep_worker.start()
+
+            if _services.gpu_session_command_service is None:
+                raise RuntimeError(
+                    "gpu_session_command_service must be initialized before "
+                    "deployment_orchestration_worker"
+                )
+            _services.deployment_orchestration_worker = DeploymentOrchestrationWorker(
+                session_factory=_services.db_manager.session_factory,
+                command_service=_services.gpu_session_command_service,
+                settings=settings,
+                event_bus=_services.event_bus,
+                redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
+            )
+            await _services.deployment_orchestration_worker.start()
 
         logger.info("gpu_session_stack.initialized")
     else:
@@ -1340,6 +1385,7 @@ async def init_services(settings: Settings) -> JWTService:
             _services.orphaned_tunnel_cleanup_worker,
             _services.billing_reconciler_worker,
             _services.gpu_session_command_sweep_worker,
+            _services.deployment_orchestration_worker,
             _services.health_snapshot_worker,
             _services.health_snapshot_cleanup_worker,
             _services.grok_video_worker,
@@ -1369,6 +1415,9 @@ async def shutdown_services() -> None:
 
     if _services.gpu_session_command_sweep_worker is not None:
         await _services.gpu_session_command_sweep_worker.stop()
+
+    if _services.deployment_orchestration_worker is not None:
+        await _services.deployment_orchestration_worker.stop()
 
     if _services.orphaned_tunnel_cleanup_worker is not None:
         await _services.orphaned_tunnel_cleanup_worker.stop()
@@ -1510,6 +1559,10 @@ dependencies = {
     "operation_event_service": Provide(get_operation_event_service, sync_to_thread=False),
     # Internal command queue claim (node bearer auth validated in handler)
     "gpu_session_command_service": Provide(get_gpu_session_command_service, sync_to_thread=False),
+    # P4: attach/remove additional model deployments on a session
+    "gpu_session_deployment_service": Provide(
+        get_gpu_session_deployment_service, sync_to_thread=False
+    ),
     # Web Push
     "push_service": Provide(get_push_service, sync_to_thread=False),
     # Admin ops notifications (Telegram)
