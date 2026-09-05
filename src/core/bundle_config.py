@@ -86,3 +86,13 @@ class BundleMapping:
 
     capabilities: BundleCapabilities | None = None
     """Bound-workflow capabilities for this resolved bundle, when indexed."""
+
+    declared_model_bytes: int | None = None
+    """Sum of this bundle's models[].files[].size_bytes across the whole bundle (F8).
+
+    None when no model files are declared or any declared file omits size_bytes — a
+    partial (or invented zero) sum would let a batch-headroom guard downstream pass
+    a batch that will not actually fit, so "unknown" must stay unknown rather than
+    becoming a wrong number. Fed to GpuSessionCommandService.enqueue_batch, which
+    puts it on batch index 0 only.
+    """

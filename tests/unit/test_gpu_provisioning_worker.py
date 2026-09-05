@@ -29,12 +29,14 @@ from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
 from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
+    CommandStatus,
     DeploymentStatus,
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
 )
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_command import GpuSessionCommand
 from src.db.models.gpu_session_operation import GpuSessionOperation
 
 _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
@@ -46,6 +48,7 @@ _OPERATION_REPO_PATH = (
 _DEPLOYMENT_REPO_PATH = (
     "src.api.services.gpu_session.provisioning_worker.GpuSessionDeploymentRepository"
 )
+_COMMAND_REPO_PATH = "src.api.services.gpu_session.provisioning_worker.GpuSessionCommandRepository"
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +66,22 @@ def mock_deployment_repo():  # type: ignore[no-untyped-def]
         mock = AsyncMock()
         MockDeploymentRepo.return_value = mock
         mock.list_for_session.return_value = []
+        yield mock
+
+
+@pytest.fixture(autouse=True)
+def mock_command_repo():  # type: ignore[no-untyped-def]
+    """Auto-patch GpuSessionCommandRepository for every test in this module.
+
+    Defaults to no cancelled commands (D31's cascade in _transition is a no-op
+    by default) — individual tests override return_value to assert the cascade.
+    Without this, every transition to 'failed' would hit the raw mocked DB
+    session's unconfigured `execute`.
+    """
+    with patch(_COMMAND_REPO_PATH) as MockCommandRepo:
+        mock = AsyncMock()
+        MockCommandRepo.return_value = mock
+        mock.cancel_for_session.return_value = []
         yield mock
 
 
@@ -891,6 +910,43 @@ class TestDeploymentCascade:
             from_statuses=LIVE_DEPLOYMENT_STATUSES,
             to_status=DeploymentStatus.failed,
             at=ANY,
+        )
+
+    async def test_mark_failed_cancels_queued_and_claimed_commands(
+        self, mock_command_repo: AsyncMock
+    ) -> None:
+        """D31: a transition to 'failed' also cancels every non-terminal command
+        for the session and fails its paired operation."""
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        command = GpuSessionCommand(
+            id=uuid4(),
+            session_id=session.id,
+            product_id="vex",
+            operation_id=uuid4(),
+            kind=OperationKind.bundle_provision,
+            payload={},
+            status=CommandStatus.claimed,
+        )
+        mock_command_repo.cancel_for_session.return_value = [command]
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch(_OPERATION_REPO_PATH) as MockOperationRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+            mock_operation_repo = AsyncMock()
+            MockOperationRepo.return_value = mock_operation_repo
+
+            await worker._mark_failed(session, reason="test failure")
+
+        mock_command_repo.cancel_for_session.assert_awaited_once_with(
+            session.id, at=ANY, reason="session failed"
+        )
+        mock_operation_repo.close_failed.assert_awaited_once_with(
+            command.operation_id, at=ANY, error="session failed"
         )
 
     async def test_pending_to_provisioning_transition_does_not_cascade(

@@ -381,6 +381,39 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- GPU Session Commands (P3) ---
+    gpu_command_provision_timeout_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description=(
+            "Deadline for a claimed bundle_provision command before the expiry "
+            "sweep marks it expired. Generous — a cold-cache download legitimately "
+            "runs 30+ minutes."
+        ),
+    )
+    gpu_command_removal_timeout_seconds: int = Field(
+        default=600,
+        ge=30,
+        le=86400,
+        description="Deadline for a claimed bundle_removal command before it expires.",
+    )
+    gpu_command_restart_timeout_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=86400,
+        description=(
+            "Deadline for a claimed comfyui_restart command before it expires. A "
+            "restart that takes this long is broken, not slow."
+        ),
+    )
+    gpu_command_sweep_interval_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=600,
+        description="How often GpuSessionCommandSweepWorker scans for overdue claimed commands.",
+    )
+
     # --- Billing Finalization Reconciler ---
     billing_reconciler_interval_minutes: int = Field(
         default=10,

@@ -16,8 +16,14 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.core.enums import TERMINAL_GPU_SESSION_STATUSES
+from src.core.enums import (
+    TERMINAL_GPU_SESSION_STATUSES,
+    TERMINAL_OPERATION_STATUSES,
+    CommandStatus,
+    OperationStatus,
+)
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 
 if TYPE_CHECKING:
@@ -130,6 +136,29 @@ class OperationEventService:
 
             if event.operation_id == session.bootstrap_operation_id:
                 await session_repo.touch_last_progress(session.id, datetime.now(UTC))
+
+            # P3/D27: a terminal event on a command-backed operation also closes the
+            # command, in the same transaction. mark_terminal's own terminal_at IS
+            # NULL guard makes a duplicate terminal event a no-op here too.
+            if event.status in TERMINAL_OPERATION_STATUSES and operation.command_id is not None:
+                closed = await GpuSessionCommandRepository(db).mark_terminal(
+                    operation.command_id,
+                    status=(
+                        CommandStatus.succeeded
+                        if event.status == OperationStatus.succeeded
+                        else CommandStatus.failed
+                    ),
+                    at=event.ts,
+                    error=event.error,
+                )
+                if closed:
+                    logger.info(
+                        "gpu_session.command.closed",
+                        session_id=str(session_id),
+                        command_id=str(operation.command_id),
+                        operation_id=str(event.operation_id),
+                        status=event.status.value,
+                    )
 
         logger.info(
             "gpu_session.operation.applied",

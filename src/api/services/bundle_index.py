@@ -170,6 +170,7 @@ class BundleIndexService:
         self._generation_config_cache: dict[str, BundleGenerationConfig] = {}
         self._invalid_generation_config_paths: dict[str, Path] = {}
         self._model_filenames_cache: dict[tuple[str, str], list[str]] = {}
+        self._declared_bytes_cache: dict[str, int | None] = {}
         self._on_resync: list[Callable[[], None]] = []
 
     def register_on_resync(self, callback: Callable[[], None]) -> None:
@@ -299,13 +300,16 @@ class BundleIndexService:
         if version is None:
             return entry.mapping
 
-        # Return a new BundleMapping with the specified version
+        # Return a new BundleMapping with the specified version. declared_model_bytes
+        # is recomputed (not copied from entry.mapping) — a version override reads a
+        # different bundle.yaml, whose declared sizes may differ from 'current'.
         return BundleMapping(
             bundle_name=entry.mapping.bundle_name,
             bundle_version=version,
             hardware=entry.mapping.hardware,
             readiness_marker=entry.mapping.readiness_marker,
             capabilities=entry.mapping.capabilities,
+            declared_model_bytes=self.get_declared_model_bytes(entry.mapping.bundle_name, version),
         )
 
     def get_model_filenames(
@@ -362,6 +366,79 @@ class BundleIndexService:
                 )
         self._model_filenames_cache[cache_key] = filenames
         return filenames
+
+    def get_declared_model_bytes(self, bundle_name: str, bundle_version: str | None) -> int | None:
+        """Sum declared models[].files[].size_bytes across the whole bundle (F8).
+
+        Deliberately bundle-wide, not scoped to one ``models[].model_type`` — unlike
+        get_model_filenames's asset-category filter (e.g. "checkpoints"), this is a
+        disk-headroom figure for everything a provision command's download would
+        pull, so every declared file counts.
+
+        Returns:
+            The exact sum when every declared file declares size_bytes. None on any
+            lookup/read/parse error, AND the moment any file's size_bytes is missing
+            or null — a partial sum is worse than no sum, because it under-reports
+            and would let a batch-headroom guard downstream pass a batch that will
+            not actually fit. Never raises.
+        """
+        try:
+            bundle_dir = self.get_bundle_path(bundle_name)
+        except BundleNotFoundError:
+            logger.debug(
+                "bundle_index.declared_model_bytes.bundle_not_found",
+                bundle_name=bundle_name,
+                bundle_version=bundle_version,
+            )
+            return None
+
+        bundle_yaml_path = bundle_dir / (bundle_version or "current") / "bundle.yaml"
+        cache_key = str(bundle_yaml_path)
+        if cache_key in self._declared_bytes_cache:
+            return self._declared_bytes_cache[cache_key]
+
+        result = self._sum_declared_model_bytes(bundle_yaml_path)
+        self._declared_bytes_cache[cache_key] = result
+        return result
+
+    def _sum_declared_model_bytes(self, bundle_yaml_path: Path) -> int | None:
+        """Core summation given an already-resolved bundle.yaml path — no caching.
+
+        Split out from get_declared_model_bytes so _build_entry can call it directly
+        with the bundle_path it already computed locally: at build time self._bundle_index
+        doesn't contain this entry yet (the atomic swap happens after the whole index
+        is built), so get_bundle_path/get_declared_model_bytes would wrongly report
+        the bundle as not-yet-found. Returns None when no files are declared: zero
+        would incorrectly assert a known model-footprint size.
+        """
+        try:
+            with bundle_yaml_path.open() as fh:
+                data = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.info(
+                "bundle_index.declared_model_bytes.read_error",
+                bundle_yaml_path=str(bundle_yaml_path),
+                error=str(exc),
+            )
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        total = 0
+        files_summed = 0
+        for model in data.get("models", []) or []:
+            if not isinstance(model, dict):
+                continue
+            for file_entry in model.get("files", []) or []:
+                if not isinstance(file_entry, dict):
+                    continue
+                size_bytes = file_entry.get("size_bytes")
+                if not isinstance(size_bytes, int) or isinstance(size_bytes, bool):
+                    return None
+                total += size_bytes
+                files_summed += 1
+        return total if files_summed else None
 
     def get_capabilities(
         self, bundle_name: str, bundle_version: str | None = None
@@ -838,6 +915,7 @@ class BundleIndexService:
 
         self._generation_config_cache.clear()
         self._model_filenames_cache.clear()
+        self._declared_bytes_cache.clear()
         logger.info("bundle_index.workflow_and_generation_caches_cleared")
         for cb in self._on_resync:
             try:
@@ -1078,12 +1156,20 @@ class BundleIndexService:
                 parameters=no_request_source,
             )
 
+        # Read directly from the locally-known bundle_path (mirrors _parse_hardware/
+        # _parse_workflow above) rather than calling get_declared_model_bytes: the
+        # index isn't populated yet at build time, so that lookup would 404.
+        declared_bytes_yaml_path = bundle_path / "current" / "bundle.yaml"
+        declared_model_bytes = self._sum_declared_model_bytes(declared_bytes_yaml_path)
+        self._declared_bytes_cache[str(declared_bytes_yaml_path)] = declared_model_bytes
+
         mapping = BundleMapping(
             bundle_name=name,
             bundle_version=None,
             hardware=hardware,
             readiness_marker=readiness_marker,
             capabilities=capabilities,
+            declared_model_bytes=declared_model_bytes,
         )
         return _BundleIndexEntry(
             bundle_name=name,

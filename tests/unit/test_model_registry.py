@@ -1,11 +1,17 @@
-"""Tests for the model metadata registry."""
+"""Tests for the model metadata registry and Alembic model imports."""
 
 from __future__ import annotations
 
+import importlib
+import inspect
+import pkgutil
+
 import pytest
 
+import src.db.models as models
 from src.core.enums import AspectRatio, GenerationType, ModelType
 from src.core.model_registry import MODEL_METADATA, get_model_meta
+from src.db.models.base import Base
 
 
 class TestModelRegistryCompleteness:
@@ -140,3 +146,16 @@ class TestGenerationTypeInputRequirements:
     ) -> None:
         assert generation_type.requires_image_input is requires_image
         assert generation_type.requires_video_input is requires_video
+
+
+def test_every_declarative_model_is_exported_from_models_registry() -> None:
+    """Alembic only sees models imported by src.db.models through Base.metadata."""
+    for module_info in pkgutil.iter_modules(models.__path__):
+        if module_info.name == "base":
+            continue
+        module = importlib.import_module(f"{models.__name__}.{module_info.name}")
+        for name, candidate in inspect.getmembers(module, inspect.isclass):
+            if candidate.__module__ != module.__name__ or not issubclass(candidate, Base):
+                continue
+            assert name in models.__all__
+            assert getattr(models, name) is candidate

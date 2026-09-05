@@ -38,6 +38,7 @@ from src.core.enums import (
 )
 from src.core.uid import new_id
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.workers.base import PeriodicWorker
@@ -880,8 +881,10 @@ class GpuProvisioningWorker(PeriodicWorker):
         The other of the two D15 lifecycle-cascade chokepoints (the other is
         GpuSessionService._set_status): a transition to 'active' flips the
         primary deployment to 'active' and stamps activated_at; a transition to
-        'failed' flips every live deployment to 'failed' and stamps removed_at.
-        Both happen in the same transaction as the session status write.
+        'failed' flips every live deployment to 'failed' and stamps removed_at,
+        and (D31) every queued/claimed command to 'cancelled' with its
+        operation failed. All happen in the same transaction as the session
+        status write.
         """
         previous_status = str(session.status)
         # Pop error_message so it reaches the SSE event as well as the DB row.
@@ -913,12 +916,29 @@ class GpuProvisioningWorker(PeriodicWorker):
                     at=datetime.now(UTC),
                 )
             elif new_status == GpuSessionStatus.failed:
+                cascade_at = datetime.now(UTC)
                 await GpuSessionDeploymentRepository(db).mark_status(
                     session.id,
                     from_statuses=LIVE_DEPLOYMENT_STATUSES,
                     to_status=DeploymentStatus.failed,
-                    at=datetime.now(UTC),
+                    at=cascade_at,
                 )
+                reason = f"session {new_status.value}"
+                cancelled = await GpuSessionCommandRepository(db).cancel_for_session(
+                    session.id, at=cascade_at, reason=reason
+                )
+                operation_repo = GpuSessionOperationRepository(db)
+                for command in cancelled:
+                    await operation_repo.close_failed(
+                        command.operation_id, at=cascade_at, error=reason
+                    )
+                    logger.info(
+                        "gpu_session.command.cancelled",
+                        session_id=str(session.id),
+                        command_id=str(command.id),
+                        operation_id=str(command.operation_id),
+                        reason=reason,
+                    )
 
         logger.info(log_event, session_id=str(session.id), new_status=new_status.value)
         await self._publish_status_event(

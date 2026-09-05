@@ -35,8 +35,16 @@ from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
 from src.api.services.vastai.schemas import VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
-from src.core.enums import LIVE_DEPLOYMENT_STATUSES, DeploymentStatus, GpuSessionStatus, ModelType
+from src.core.enums import (
+    LIVE_DEPLOYMENT_STATUSES,
+    CommandStatus,
+    DeploymentStatus,
+    GpuSessionStatus,
+    ModelType,
+    OperationKind,
+)
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_command import GpuSessionCommand
 from src.db.models.gpu_session_deployment import GpuSessionDeployment
 
 _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
@@ -44,6 +52,7 @@ _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_
 _REPO_PATH = "src.api.services.gpu_session.service.GpuSessionRepository"
 _OPERATION_REPO_PATH = "src.api.services.gpu_session.service.GpuSessionOperationRepository"
 _DEPLOYMENT_REPO_PATH = "src.api.services.gpu_session.service.GpuSessionDeploymentRepository"
+_COMMAND_REPO_PATH = "src.api.services.gpu_session.service.GpuSessionCommandRepository"
 _JOB_REPO_PATH = "src.api.services.gpu_session.service.JobRepository"
 
 
@@ -62,6 +71,22 @@ def mock_deployment_repo():  # type: ignore[no-untyped-def]
         MockDeploymentRepo.return_value = mock
         mock.get_live_for_model.return_value = None
         mock.get_routable.return_value = None
+        yield mock
+
+
+@pytest.fixture(autouse=True)
+def mock_command_repo():  # type: ignore[no-untyped-def]
+    """Auto-patch GpuSessionCommandRepository for every test in this module.
+
+    Defaults to no cancelled commands (D31's cascade in _set_status is a no-op
+    by default) — individual tests override return_value to assert the cascade.
+    Without this, every stop/fail transition would hit the raw mocked DB
+    session's unconfigured `execute`.
+    """
+    with patch(_COMMAND_REPO_PATH) as MockCommandRepo:
+        mock = AsyncMock()
+        MockCommandRepo.return_value = mock
+        mock.cancel_for_session.return_value = []
         yield mock
 
 
@@ -1544,6 +1569,49 @@ class TestStopSession:
             from_statuses=LIVE_DEPLOYMENT_STATUSES,
             to_status=DeploymentStatus.removed,
             at=ANY,
+        )
+
+    async def test_confirmed_stop_cancels_queued_and_claimed_commands(
+        self, mock_command_repo: AsyncMock
+    ) -> None:
+        """D31: stopping also cancels every non-terminal command for the session
+        and fails its paired operation, in the same transaction."""
+        service, _mocks = _make_service()
+        user_id = uuid4()
+        session = _make_gpu_session(user_id=user_id, status=GpuSessionStatus.active)
+        command = GpuSessionCommand(
+            id=uuid4(),
+            session_id=session.id,
+            product_id="vex",
+            operation_id=uuid4(),
+            kind=OperationKind.bundle_provision,
+            payload={},
+            status=CommandStatus.queued,
+        )
+        mock_command_repo.cancel_for_session.return_value = [command]
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch(_OPERATION_REPO_PATH) as MockOperationRepo,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+            mock_operation_repo = AsyncMock()
+            MockOperationRepo.return_value = mock_operation_repo
+
+            await service.stop_session(
+                session_id=session.id,
+                user_id=user_id,
+                product_id=session.product_id,
+                confirmed=True,
+            )
+
+        mock_command_repo.cancel_for_session.assert_awaited_once_with(
+            session.id, at=ANY, reason="session stopped"
+        )
+        mock_operation_repo.close_failed.assert_awaited_once_with(
+            command.operation_id, at=ANY, error="session stopped"
         )
 
     async def test_confirmed_from_paused(self) -> None:

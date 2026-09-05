@@ -30,6 +30,8 @@ from src.api.services.generation.provider_billing_policy import ProviderBillingP
 from src.api.services.generation.service import GenerationService
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
+from src.api.services.gpu_session.command_service import GpuSessionCommandService
+from src.api.services.gpu_session.command_sweep_worker import GpuSessionCommandSweepWorker
 from src.api.services.gpu_session.credit_guard import SessionCreditGuard
 from src.api.services.gpu_session.node_cooldown import (
     NodeCooldownStore,
@@ -133,10 +135,13 @@ class ServiceContainer:
     gpu_provisioning_worker: GpuProvisioningWorker | None = None
     orphaned_tunnel_cleanup_worker: OrphanedTunnelCleanupWorker | None = None
     billing_reconciler_worker: BillingReconcilerWorker | None = None
+    gpu_session_command_sweep_worker: GpuSessionCommandSweepWorker | None = None
     gpu_session_http_client: httpx.AsyncClient | None = None
     bundle_index: BundleIndexService | None = None
-    # Operation receiver — initialized whenever the DB is available (not GPU-stack-gated)
+    # Operation receiver + command queue — initialized whenever the DB is available
+    # (not GPU-stack-gated; the claim endpoint must 204 cleanly even without Vast.ai/CF)
     operation_event_service: OperationEventService | None = None
+    gpu_session_command_service: GpuSessionCommandService | None = None
     # Web Push (optional — requires VAPID keys + Redis)
     push_service: PushService | None = None
     push_dispatcher: PushDispatcher | None = None
@@ -512,6 +517,15 @@ def get_operation_event_service() -> OperationEventService:
     return _services.operation_event_service
 
 
+def get_gpu_session_command_service() -> GpuSessionCommandService:
+    """Provide GpuSessionCommandService singleton (503 if DB not initialized)."""
+    if _services.gpu_session_command_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(detail="GPU session command service not available")
+    return _services.gpu_session_command_service
+
+
 def get_push_service() -> PushService:
     """Provide PushService singleton (503 if push is not configured)."""
     if _services.push_service is None:
@@ -639,6 +653,14 @@ async def init_services(settings: Settings) -> JWTService:
         session_factory=_services.db_manager.session_factory
     )
     logger.info("operation_event_service.initialized")
+
+    # Initialize the command queue service (DB + settings only, not GPU-stack-gated —
+    # the claim endpoint must 204 cleanly for an agent even without Vast.ai/CF).
+    _services.gpu_session_command_service = GpuSessionCommandService(
+        session_factory=_services.db_manager.session_factory,
+        settings=settings,
+    )
+    logger.info("gpu_session_command_service.initialized")
 
     # Initialize Redis (required for pub/sub and rate limiting). Three pools —
     # see src/core/redis.py module docstring: the shared pool serves
@@ -1050,6 +1072,14 @@ async def init_services(settings: Settings) -> JWTService:
             )
             await _services.billing_reconciler_worker.start()
 
+            _services.gpu_session_command_sweep_worker = GpuSessionCommandSweepWorker(
+                session_factory=_services.db_manager.session_factory,
+                settings=settings,
+                redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
+            )
+            await _services.gpu_session_command_sweep_worker.start()
+
         logger.info("gpu_session_stack.initialized")
     else:
         logger.warning(
@@ -1309,6 +1339,7 @@ async def init_services(settings: Settings) -> JWTService:
             _services.gpu_provisioning_worker,
             _services.orphaned_tunnel_cleanup_worker,
             _services.billing_reconciler_worker,
+            _services.gpu_session_command_sweep_worker,
             _services.health_snapshot_worker,
             _services.health_snapshot_cleanup_worker,
             _services.grok_video_worker,
@@ -1335,6 +1366,9 @@ async def shutdown_services() -> None:
 
     if _services.billing_reconciler_worker is not None:
         await _services.billing_reconciler_worker.stop()
+
+    if _services.gpu_session_command_sweep_worker is not None:
+        await _services.gpu_session_command_sweep_worker.stop()
 
     if _services.orphaned_tunnel_cleanup_worker is not None:
         await _services.orphaned_tunnel_cleanup_worker.stop()
@@ -1474,6 +1508,8 @@ dependencies = {
     "gpu_session_service": Provide(get_gpu_session_service, sync_to_thread=False),
     # Internal operation events (node bearer auth validated in handler)
     "operation_event_service": Provide(get_operation_event_service, sync_to_thread=False),
+    # Internal command queue claim (node bearer auth validated in handler)
+    "gpu_session_command_service": Provide(get_gpu_session_command_service, sync_to_thread=False),
     # Web Push
     "push_service": Provide(get_push_service, sync_to_thread=False),
     # Admin ops notifications (Telegram)

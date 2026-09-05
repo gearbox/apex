@@ -25,6 +25,7 @@ from src.core.enums import (
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
@@ -875,10 +876,12 @@ class GpuSessionService:
 
         One of the two D15 lifecycle-cascade chokepoints (the other is
         GpuProvisioningWorker._transition): a transition to 'stopped' or
-        'failed' flips every live deployment to 'removed'/'failed' in the same
-        transaction. Pause/resume (paused/resuming) deliberately do not cascade
-        — D17, a paused Vast.ai instance keeps its disk, so the deployment stays
-        'active'.
+        'failed' flips every live deployment to 'removed'/'failed', and (D31)
+        every queued/claimed command to 'cancelled' with its operation failed,
+        in the same transaction. Pause/resume (paused/resuming) deliberately do
+        not cascade either cascade — D17, a paused Vast.ai instance keeps its
+        disk, so the deployment stays 'active' and any in-flight command keeps
+        running.
         """
         extra: dict[str, datetime] = {}
         if paused_at is not None:
@@ -903,13 +906,29 @@ class GpuSessionService:
                 if new_status == GpuSessionStatus.stopped
                 else DeploymentStatus.failed
             )
+            at = stopped_at or datetime.now(UTC)
             deployment_repo = GpuSessionDeploymentRepository(db)
             await deployment_repo.mark_status(
                 session_row.id,
                 from_statuses=LIVE_DEPLOYMENT_STATUSES,
                 to_status=to_status,
-                at=stopped_at or datetime.now(UTC),
+                at=at,
             )
+
+            reason = f"session {new_status.value}"
+            cancelled = await GpuSessionCommandRepository(db).cancel_for_session(
+                session_row.id, at=at, reason=reason
+            )
+            operation_repo = GpuSessionOperationRepository(db)
+            for command in cancelled:
+                await operation_repo.close_failed(command.operation_id, at=at, error=reason)
+                logger.info(
+                    "gpu_session.command.cancelled",
+                    session_id=str(session_row.id),
+                    command_id=str(command.id),
+                    operation_id=str(command.operation_id),
+                    reason=reason,
+                )
 
     async def _teardown_external_resources(
         self, session_row: GpuSession, *, log_prefix: str

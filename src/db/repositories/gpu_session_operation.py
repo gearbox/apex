@@ -165,3 +165,26 @@ class GpuSessionOperationRepository:
                 return EventOutcome(applied=False, reason="terminal_after_terminal")
             return EventOutcome(applied=False, reason="after_terminal")
         return EventOutcome(applied=False, reason="stale")
+
+    async def close_failed(self, operation_id: UUID, *, at: datetime, error: str) -> bool:
+        """Guarded out-of-band terminal write for a command that never got a real event.
+
+        Used by the P3 command-expiry sweep and the D31 teardown cascade to fail an
+        operation whose paired command timed out or was cancelled rather than
+        completing through a node-reported apply_event. Same terminal_at IS NULL
+        guard as apply_event, so a real event that already closed the operation is
+        never overwritten — whichever of the two arrives first wins.
+        """
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionOperation)
+                .where(
+                    GpuSessionOperation.id == operation_id,
+                    GpuSessionOperation.terminal_at.is_(None),
+                )
+                .values(status=OperationStatus.failed, terminal_at=at, error=error, message=error)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
