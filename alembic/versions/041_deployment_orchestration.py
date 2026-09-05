@@ -29,6 +29,10 @@ def upgrade() -> None:
         "gpu_session_deployments",
         sa.Column("batch_id", sa.String(length=64), nullable=True),
     )
+    op.add_column(
+        "gpu_session_deployments",
+        sa.Column("pending_restart_since", sa.DateTime(timezone=True), nullable=True),
+    )
     op.create_index(
         "ix_gpu_session_deployments_pending_restart",
         "gpu_session_deployments",
@@ -43,4 +47,5 @@ def downgrade() -> None:
         "ix_gpu_session_deployments_pending_restart", table_name="gpu_session_deployments"
     )
     op.drop_column("gpu_session_deployments", "batch_id")
+    op.drop_column("gpu_session_deployments", "pending_restart_since")
     op.drop_column("gpu_session_deployments", "restart_operation_id")

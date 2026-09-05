@@ -81,6 +81,14 @@ class GpuSessionDeployment(Base):
         server_default=text("false"),
         comment="Forward slot for P4's restart flow; no writer in P2.",
     )
+    pending_restart_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "Apex server time when provision succeeded and this deployment began waiting "
+            "to restart. Never derived from node-reported command timestamps."
+        ),
+    )
     provision_operation_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         nullable=True,

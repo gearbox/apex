@@ -22,21 +22,25 @@ succeeded -> routable flow required by the P4 definition of done.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.schemas.gpu_session import OperationEventBody
 from src.api.services.gpu_session.command_payload import ProvisionCommand
 from src.api.services.gpu_session.command_service import GpuSessionCommandService
 from src.api.services.gpu_session.deployment_orchestration_worker import (
+    _ALREADY_REMOVED_ERROR_MARKER,
     DeploymentOrchestrationWorker,
+    _is_already_removed_error,
 )
 from src.api.services.gpu_session.deployment_service import GpuSessionDeploymentService
 from src.api.services.gpu_session.exceptions import (
@@ -307,10 +311,11 @@ async def _mark_terminal(
     *,
     status: CommandStatus,
     error: str | None = None,
+    at: datetime | None = None,
 ) -> None:
     async with session_factory() as session, session.begin():
         applied = await GpuSessionCommandRepository(session).mark_terminal(
-            command_id, status=status, at=datetime.now(UTC), error=error
+            command_id, status=status, at=at or datetime.now(UTC), error=error
         )
         assert applied is True
 
@@ -452,6 +457,81 @@ async def test_provision_failure_frees_the_slot(
         model_type=ModelType.AISHA_VIDEO,
     )
     assert second.id != deployment.id
+
+
+# ---------------------------------------------------------------------------
+# O1: attach compensation and no-command orphan reaper
+# ---------------------------------------------------------------------------
+
+
+async def test_attach_compensates_for_any_enqueue_failure(
+    orchestration_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-session enqueue failure must not strand the committed deployment row."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    monkeypatch.setattr(
+        command_service,
+        "enqueue_batch",
+        AsyncMock(side_effect=ConnectionError("Redis temporarily unavailable")),
+    )
+
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+
+    with pytest.raises(ConnectionError, match="Redis temporarily unavailable"):
+        await deployment_service.attach(
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type=ModelType.AISHA_VIDEO,
+        )
+
+    async with orchestration_session_factory() as session:
+        deployment = await GpuSessionDeploymentRepository(session).get_live_for_model(
+            user.id, "vex", ModelType.AISHA_VIDEO.value
+        )
+    assert deployment is None
+
+
+async def test_orphan_reaper_fails_old_deployment_without_provision_command(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The second line of defense frees a row if attach's compensation could not run."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    deployment = await _create_deployment(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type=ModelType.AISHA_VIDEO.value,
+    )
+
+    async with orchestration_session_factory() as session:
+        await session.execute(
+            update(GpuSessionDeployment)
+            .where(GpuSessionDeployment.id == deployment.id)
+            .values(created_at=datetime.now(UTC) - timedelta(minutes=2))
+        )
+        await session.commit()
+
+    await worker.run_once()
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.status == DeploymentStatus.failed
+    assert deployment.removed_at is not None
+    async with orchestration_session_factory() as session:
+        assert (
+            await GpuSessionDeploymentRepository(session).get_live_for_model(
+                user.id, "vex", ModelType.AISHA_VIDEO.value
+            )
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -855,9 +935,159 @@ async def test_restart_fires_anyway_after_drain_timeout(
     assert deployment.restart_operation_id is not None  # forced through despite the in-flight job
 
 
+async def test_node_clock_behind_does_not_shorten_restart_drain_window(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A node terminal timestamp older than the timeout is not a server timeout."""
+    settings = _StubSettings(restart_drain_timeout_seconds=900)
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    await _create_job(
+        orchestration_session_factory,
+        user=user,
+        gpu_session=gpu_session,
+        model=ModelType.AISHA_IMAGE.value,
+    )
+
+    deployment, operation_id = await deployment_service.attach(
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type=ModelType.AISHA_VIDEO,
+    )
+    command = await _get_command_by_operation(orchestration_session_factory, operation_id)
+    await _mark_terminal(
+        orchestration_session_factory,
+        command.id,
+        status=CommandStatus.succeeded,
+        at=datetime.now(UTC) - timedelta(seconds=901),
+    )
+
+    await worker.run_once()
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.pending_restart is True
+    assert deployment.pending_restart_since is not None
+    assert deployment.restart_operation_id is None
+
+
+async def test_node_clock_ahead_does_not_extend_restart_drain_window(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A future node terminal timestamp cannot prevent an already-due restart."""
+    settings = _StubSettings(restart_drain_timeout_seconds=0)
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    await _create_job(
+        orchestration_session_factory,
+        user=user,
+        gpu_session=gpu_session,
+        model=ModelType.AISHA_IMAGE.value,
+    )
+
+    deployment, operation_id = await deployment_service.attach(
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type=ModelType.AISHA_VIDEO,
+    )
+    command = await _get_command_by_operation(orchestration_session_factory, operation_id)
+    await _mark_terminal(
+        orchestration_session_factory,
+        command.id,
+        status=CommandStatus.succeeded,
+        at=datetime.now(UTC) + timedelta(seconds=901),
+    )
+
+    await worker.run_once()
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.pending_restart is True
+    assert deployment.restart_operation_id is not None
+
+
+# ---------------------------------------------------------------------------
+# O3: one restart per ready session, not per attach batch
+# ---------------------------------------------------------------------------
+
+
+async def test_two_ready_attach_batches_share_one_restart(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+
+    video, lite = await asyncio.gather(
+        deployment_service.attach(
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type=ModelType.AISHA_VIDEO,
+        ),
+        deployment_service.attach(
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type=ModelType.AISHA_IMAGE_LITE,
+        ),
+    )
+    video_deployment, video_operation_id = video
+    lite_deployment, lite_operation_id = lite
+    video_command = await _get_command_by_operation(
+        orchestration_session_factory, video_operation_id
+    )
+    lite_command = await _get_command_by_operation(orchestration_session_factory, lite_operation_id)
+    await _mark_terminal(
+        orchestration_session_factory, video_command.id, status=CommandStatus.succeeded
+    )
+    await _mark_terminal(
+        orchestration_session_factory, lite_command.id, status=CommandStatus.succeeded
+    )
+
+    await worker.run_once()
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
+    assert video_deployment.restart_operation_id is not None
+    assert video_deployment.restart_operation_id == lite_deployment.restart_operation_id
+
+    restart_command = await _get_command_by_operation(
+        orchestration_session_factory, video_deployment.restart_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory, restart_command.id, status=CommandStatus.succeeded
+    )
+    await worker.run_once()
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
+    assert video_deployment.status == DeploymentStatus.active
+    assert lite_deployment.status == DeploymentStatus.active
+
+
 # ---------------------------------------------------------------------------
 # CO5 / invariant #13: removal outcomes
 # ---------------------------------------------------------------------------
+
+
+def test_already_removed_marker_matches_pinned_aisha_message_format() -> None:
+    """Keep the intentional coupling to aisha's pinned remover.py prose visible."""
+    aisha_error = (
+        "bundle 'video-bundle' is not recorded in residency; "
+        "resident bundles: primary-bundle, video-bundle"
+    )
+    assert _ALREADY_REMOVED_ERROR_MARKER in aisha_error
+    assert _is_already_removed_error(aisha_error)
 
 
 async def test_removal_tolerates_already_removed_bundle(

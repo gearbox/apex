@@ -144,23 +144,35 @@ class GpuSessionDeploymentService:
                 deployment_id=deployment_id,
                 declared_model_bytes=bundle.declared_model_bytes,
             )
-        except CommandEnqueueSessionError as exc:
-            # Session went non-active between our pre-check and the enqueue attempt.
-            # Compensate: the deployment row must not be left 'deploying' forever.
-            async with self._session_factory() as db, db.begin():
-                await GpuSessionDeploymentRepository(db).resolve_provision_outcome(
-                    deployment_id, succeeded=False, at=datetime.now(UTC)
+        except Exception as exc:
+            # The row is committed before enqueue_batch opens its own transaction. Any
+            # enqueue failure, not only a session-state race, must therefore release
+            # the live-deployment slot. If this compensating write also fails, the
+            # worker's orphan reaper will repair the row after its short grace period.
+            try:
+                async with self._session_factory() as db, db.begin():
+                    await GpuSessionDeploymentRepository(db).resolve_provision_outcome(
+                        deployment_id, succeeded=False, at=datetime.now(UTC)
+                    )
+            except Exception:
+                logger.exception(
+                    "gpu_session.deployment.attach_enqueue_compensation_failed",
+                    session_id=str(session_id),
+                    deployment_id=str(deployment_id),
                 )
-            logger.warning(
-                "gpu_session.deployment.attach_race_session_unavailable",
-                session_id=str(session_id),
-                deployment_id=str(deployment_id),
-            )
-            raise InvalidSessionStateError(
-                f"Session {session_id} became unavailable while attaching: {exc}",
-                current_status="unknown",
-                operation="attach",
-            ) from exc
+
+            if isinstance(exc, CommandEnqueueSessionError):
+                logger.warning(
+                    "gpu_session.deployment.attach_race_session_unavailable",
+                    session_id=str(session_id),
+                    deployment_id=str(deployment_id),
+                )
+                raise InvalidSessionStateError(
+                    f"Session {session_id} became unavailable while attaching: {exc}",
+                    current_status="unknown",
+                    operation="attach",
+                ) from exc
+            raise
 
         command = commands[0]
         # enqueue_batch always stamps a fresh batch_id (D8: every provision is a

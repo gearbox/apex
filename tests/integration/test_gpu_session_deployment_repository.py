@@ -841,14 +841,14 @@ async def test_resolve_provision_outcome_success_sets_pending_restart(
         session=session, status=DeploymentStatus.deploying, is_primary=False
     )
 
-    applied = await deployment_repo.resolve_provision_outcome(
-        deployment.id, succeeded=True, at=datetime.now(UTC)
-    )
+    at = datetime.now(UTC)
+    applied = await deployment_repo.resolve_provision_outcome(deployment.id, succeeded=True, at=at)
 
     assert applied is True
     await db_session.refresh(deployment)
     assert deployment.status == DeploymentStatus.deploying  # D33: stays 'deploying'
     assert deployment.pending_restart is True
+    assert deployment.pending_restart_since == at
 
 
 async def test_resolve_provision_outcome_failure_fails_deployment(

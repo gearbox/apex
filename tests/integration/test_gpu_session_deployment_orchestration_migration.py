@@ -1,6 +1,6 @@
 """Integration test for migration 041's round-trip (invariant 16: 041 -> 040 -> 041).
 
-Additive only, no backfill — the round trip only has to prove the two new columns
+Additive only, no backfill — the round trip only has to prove the three new columns
 and the new partial index appear/disappear cleanly across 041 <-> 040 <-> 041.
 
 Synchronous test function, same pattern as test_gpu_session_commands_migration.py:
@@ -57,11 +57,12 @@ def test_migration_041_round_trips(
             return columns, indexes
 
     try:
-        # Start from 040 (no restart_operation_id/batch_id columns).
+        # Start from 040 (no P4 orchestration columns).
         command.downgrade(config, "040")
         columns, indexes = asyncio.run(_columns_and_indexes())
         assert "restart_operation_id" not in columns
         assert "batch_id" not in columns
+        assert "pending_restart_since" not in columns
         assert "ix_gpu_session_deployments_pending_restart" not in indexes
 
         # --- invariant 16: round-trip ------------------------------------
@@ -69,17 +70,20 @@ def test_migration_041_round_trips(
         columns, indexes = asyncio.run(_columns_and_indexes())
         assert "restart_operation_id" in columns
         assert "batch_id" in columns
+        assert "pending_restart_since" in columns
         assert "ix_gpu_session_deployments_pending_restart" in indexes
 
         command.downgrade(config, "040")
         columns, indexes = asyncio.run(_columns_and_indexes())
         assert "restart_operation_id" not in columns
         assert "batch_id" not in columns
+        assert "pending_restart_since" not in columns
 
         command.upgrade(config, "041")
         columns, indexes = asyncio.run(_columns_and_indexes())
         assert "restart_operation_id" in columns
         assert "batch_id" in columns
+        assert "pending_restart_since" in columns
         assert "ix_gpu_session_deployments_pending_restart" in indexes
     finally:
         # Integration tests share the migrated schema, so always restore head.

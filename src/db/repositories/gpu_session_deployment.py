@@ -28,6 +28,11 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
+# These queries run once per orchestration tick across every tenant. Oldest-first
+# bounded pages keep one tick's database work flat while eventually reaching every row.
+_ORCHESTRATION_CANDIDATE_LIMIT = 100
+
+
 class GpuSessionDeploymentRepository:
     """Repository for GPU session deployment CRUD and routing queries.
 
@@ -333,11 +338,14 @@ class GpuSessionDeploymentRepository:
         transition is owned entirely by GpuProvisioningWorker._transition (session
         bootstrap/resume), never by a P3 command."""
         result = await self._session.execute(
-            select(GpuSessionDeployment).where(
+            select(GpuSessionDeployment)
+            .where(
                 GpuSessionDeployment.status == DeploymentStatus.deploying,
                 GpuSessionDeployment.pending_restart.is_(False),
                 GpuSessionDeployment.is_primary.is_(False),
             )
+            .order_by(GpuSessionDeployment.created_at.asc())
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
         )
         return result.scalars().all()
 
@@ -350,7 +358,7 @@ class GpuSessionDeploymentRepository:
         batch-restart step. Failure: 'failed' + removed_at, same as any other terminal write.
         """
         values: dict[str, Any] = (
-            {"pending_restart": True}
+            {"pending_restart": True, "pending_restart_since": at}
             if succeeded
             else {"status": DeploymentStatus.failed, "removed_at": at}
         )
@@ -372,10 +380,33 @@ class GpuSessionDeploymentRepository:
     async def list_pending_restart_awaiting_operation(self) -> Sequence[GpuSessionDeployment]:
         """P4 orchestration worker step 2 candidates: provisioned, no restart enqueued yet."""
         result = await self._session.execute(
-            select(GpuSessionDeployment).where(
+            select(GpuSessionDeployment)
+            .where(
                 GpuSessionDeployment.pending_restart.is_(True),
                 GpuSessionDeployment.restart_operation_id.is_(None),
             )
+            .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
+        )
+        return result.scalars().all()
+
+    async def list_pending_restart_awaiting_operation_for_session(
+        self, session_id: UUID
+    ) -> Sequence[GpuSessionDeployment]:
+        """Return the complete restart cohort for a session selected by the bounded scan.
+
+        The global scan is deliberately capped, but a restart must cover every ready
+        deployment on a selected session. This narrow follow-up query prevents a
+        large global backlog from splitting one session's restart across ticks.
+        """
+        result = await self._session.execute(
+            select(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.pending_restart.is_(True),
+                GpuSessionDeployment.restart_operation_id.is_(None),
+            )
+            .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
         )
         return result.scalars().all()
 
@@ -405,10 +436,12 @@ class GpuSessionDeploymentRepository:
     async def list_pending_restart_awaiting_outcome(self) -> Sequence[GpuSessionDeployment]:
         """P4 orchestration worker step 3 candidates: restart enqueued, outcome not yet applied."""
         result = await self._session.execute(
-            select(GpuSessionDeployment).where(
+            select(GpuSessionDeployment)
+            .where(
                 GpuSessionDeployment.pending_restart.is_(True),
                 GpuSessionDeployment.restart_operation_id.is_not(None),
             )
+            .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
         )
         return result.scalars().all()
 
@@ -441,11 +474,55 @@ class GpuSessionDeploymentRepository:
     async def list_removing(self) -> Sequence[GpuSessionDeployment]:
         """P4 orchestration worker step 4 candidates: removal in flight."""
         result = await self._session.execute(
-            select(GpuSessionDeployment).where(
-                GpuSessionDeployment.status == DeploymentStatus.removing
-            )
+            select(GpuSessionDeployment)
+            .where(GpuSessionDeployment.status == DeploymentStatus.removing)
+            .order_by(GpuSessionDeployment.created_at.asc())
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
         )
         return result.scalars().all()
+
+    async def list_orphaned_deployments_without_provision_command(
+        self, *, created_before: datetime
+    ) -> Sequence[GpuSessionDeployment]:
+        """Find non-primary deployments committed before command enqueue failed.
+
+        The grace period is owned by the caller. It leaves the normal, millisecond-sized
+        create -> enqueue -> provision-pointer window alone while repairing a committed
+        deployment that can otherwise permanently occupy a uniqueness slot.
+        """
+        result = await self._session.execute(
+            select(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.status == DeploymentStatus.deploying,
+                GpuSessionDeployment.is_primary.is_(False),
+                GpuSessionDeployment.provision_operation_id.is_(None),
+                GpuSessionDeployment.created_at < created_before,
+            )
+            .order_by(GpuSessionDeployment.created_at.asc())
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
+        )
+        return result.scalars().all()
+
+    async def fail_orphaned_deployment_without_provision_command(
+        self, deployment_id: UUID, *, created_before: datetime, at: datetime
+    ) -> bool:
+        """Guardedly fail one deployment still stranded before command enqueue."""
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id == deployment_id,
+                    GpuSessionDeployment.status == DeploymentStatus.deploying,
+                    GpuSessionDeployment.is_primary.is_(False),
+                    GpuSessionDeployment.provision_operation_id.is_(None),
+                    GpuSessionDeployment.created_at < created_before,
+                )
+                .values(status=DeploymentStatus.failed, removed_at=at)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
 
     async def resolve_removal_outcome(
         self, deployment_id: UUID, *, succeeded: bool, at: datetime

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
@@ -383,8 +383,6 @@ class JobRepository(BaseRepository[GenerationJob]):
         Returns:
             Count of QUEUED/RUNNING non-deleted jobs for the session.
         """
-        from sqlalchemy import func
-
         result = await self._session.execute(
             select(func.count())
             .select_from(GenerationJob)
@@ -414,8 +412,6 @@ class JobRepository(BaseRepository[GenerationJob]):
         Returns:
             Count of QUEUED/RUNNING non-deleted jobs for the session+model pair.
         """
-        from sqlalchemy import func
-
         result = await self._session.execute(
             select(func.count())
             .select_from(GenerationJob)

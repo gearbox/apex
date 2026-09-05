@@ -6,17 +6,18 @@ the P4 counterpart to GpuSessionCommandSweepWorker: each tick it looks for deplo
 whose current command finished and advances them, exactly mirroring the shape (and the
 LeaderLease) of every other PeriodicWorker in this codebase.
 
-Four independent steps per tick, in this order so a batch that finishes and drains in
+Five independent steps per tick, in this order so a batch that finishes and drains in
 the same tick doesn't wait a full interval for its restart:
-  1. Provision finished  -> pending_restart=true (success) or 'failed' (failure).
-  2. Batch drained        -> enqueue one comfyui_restart, stamp restart_operation_id.
-  3. Restart finished     -> 'active' (success) or 'failed', no retry (D34).
-  4. Removal finished     -> 'removed' (success) or back to 'active' (failure).
+  1. Reap an attach that committed but never enqueued a provision command.
+  2. Provision finished  -> pending_restart=true (success) or 'failed' (failure).
+  3. Session drain       -> enqueue one comfyui_restart, stamp restart_operation_id.
+  4. Restart finished    -> 'active' (success) or 'failed', no retry (D34).
+  5. Removal finished    -> 'removed' (success) or back to 'active' (failure).
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -52,6 +53,7 @@ logger = structlog.get_logger(__name__)
 # removal command twice; the second run's failure must not fail an operation whose weights are
 # already gone.
 _ALREADY_REMOVED_ERROR_MARKER = "is not recorded in residency"
+_ORPHANED_DEPLOYMENT_GRACE = timedelta(minutes=1)
 
 
 def _is_already_removed_error(error: str | None) -> bool:
@@ -84,13 +86,49 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         self._event_bus = event_bus
 
     async def run_once(self) -> None:
+        await self._reap_orphaned_deployments_without_provision_command()
         await self._process_provision_results()
         await self._process_restart_enqueue()
         await self._process_restart_results()
         await self._process_removal_results()
 
     # ------------------------------------------------------------------
-    # Step 1 — provision finished
+    # Step 1 — committed attach with no provision command
+    # ------------------------------------------------------------------
+
+    async def _reap_orphaned_deployments_without_provision_command(self) -> None:
+        now = datetime.now(UTC)
+        created_before = now - _ORPHANED_DEPLOYMENT_GRACE
+        async with self._session_factory() as db:
+            candidates = await GpuSessionDeploymentRepository(
+                db
+            ).list_orphaned_deployments_without_provision_command(created_before=created_before)
+        for deployment in candidates:
+            async with self._session_factory() as db, db.begin():
+                applied = await GpuSessionDeploymentRepository(
+                    db
+                ).fail_orphaned_deployment_without_provision_command(
+                    deployment.id,
+                    created_before=created_before,
+                    at=now,
+                )
+            if not applied:
+                continue
+            deployment.status = DeploymentStatus.failed
+            deployment.removed_at = now
+            logger.error(
+                "gpu_session.deployment.orphaned_no_command",
+                session_id=str(deployment.session_id),
+                deployment_id=str(deployment.id),
+            )
+            await publish_deployment_event(
+                self._event_bus,
+                deployment,
+                error_message="provision command was not enqueued",
+            )
+
+    # ------------------------------------------------------------------
+    # Step 2 — provision finished
     # ------------------------------------------------------------------
 
     async def _process_provision_results(self) -> None:
@@ -144,7 +182,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             await publish_deployment_event(self._event_bus, deployment, error_message=command.error)
 
     # ------------------------------------------------------------------
-    # Step 2 — batch drained -> enqueue restart
+    # Step 3 — session drain -> enqueue restart
     # ------------------------------------------------------------------
 
     async def _process_restart_enqueue(self) -> None:
@@ -152,47 +190,71 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             candidates = await GpuSessionDeploymentRepository(
                 db
             ).list_pending_restart_awaiting_operation()
-        groups: dict[str | None, list[GpuSessionDeployment]] = {}
-        for deployment in candidates:
-            groups.setdefault(deployment.batch_id, []).append(deployment)
-        for batch_id, members in groups.items():
+        session_ids = {deployment.session_id for deployment in candidates}
+        for session_id in session_ids:
             try:
-                await self._process_one_restart_batch(batch_id, members)
+                async with self._session_factory() as db:
+                    members = await GpuSessionDeploymentRepository(
+                        db
+                    ).list_pending_restart_awaiting_operation_for_session(session_id)
+                await self._process_one_restart_session(session_id, members)
             except Exception:
-                logger.exception("gpu_session.deployment.restart_enqueue_error", batch_id=batch_id)
+                logger.exception(
+                    "gpu_session.deployment.restart_enqueue_error", session_id=str(session_id)
+                )
 
-    async def _process_one_restart_batch(
-        self, batch_id: str | None, members: list[GpuSessionDeployment]
+    async def _process_one_restart_session(
+        self, session_id: UUID, candidates: Sequence[GpuSessionDeployment]
     ) -> None:
-        if batch_id is None:
-            # Every attach stamps batch_id at enqueue time (CO4) — a pending-restart
-            # deployment with no batch_id means that write was skipped somewhere.
-            logger.error(
-                "gpu_session.deployment.pending_restart_missing_batch_id",
-                deployment_ids=[str(m.id) for m in members],
-            )
+        """Restart every ready deployment on one session exactly once.
+
+        Every attach has its own provision batch, but ComfyUI restarts are a session
+        concern. A batch that is still provisioning is excluded without making an
+        already-complete sibling batch wait for it.
+        """
+        by_batch: dict[str | None, list[GpuSessionDeployment]] = {}
+        for deployment in candidates:
+            by_batch.setdefault(deployment.batch_id, []).append(deployment)
+
+        ready_members: list[GpuSessionDeployment] = []
+        async with self._session_factory() as db:
+            command_repo = GpuSessionCommandRepository(db)
+            for batch_id, members in by_batch.items():
+                if batch_id is None:
+                    # Every attach stamps batch_id at enqueue time (CO4) — a
+                    # pending-restart deployment with no batch_id means that write
+                    # was skipped somewhere.
+                    logger.error(
+                        "gpu_session.deployment.pending_restart_missing_batch_id",
+                        deployment_ids=[str(member.id) for member in members],
+                    )
+                    continue
+                batch_commands = await command_repo.list_by_batch(batch_id)
+                if batch_commands and all(
+                    command.status in TERMINAL_COMMAND_STATUSES for command in batch_commands
+                ):
+                    ready_members.extend(members)
+
+        if not ready_members:
             return
 
-        async with self._session_factory() as db:
-            batch_commands = await GpuSessionCommandRepository(db).list_by_batch(batch_id)
-        if not batch_commands or any(
-            c.status not in TERMINAL_COMMAND_STATUSES for c in batch_commands
-        ):
-            return  # not every member has finished yet
-
-        session_id = members[0].session_id
-        product_id = members[0].product_id
+        product_id = ready_members[0].product_id
 
         async with self._session_factory() as db:
             in_flight = await JobRepository(db).count_in_flight_for_session(session_id)
 
         now = datetime.now(UTC)
-        batch_complete_at = max(
-            (c.terminal_at for c in batch_commands if c.terminal_at is not None), default=None
+        pending_restart_since = max(
+            (
+                member.pending_restart_since
+                for member in ready_members
+                if member.pending_restart_since is not None
+            ),
+            default=None,
         )
         timed_out = (
-            batch_complete_at is not None
-            and (now - batch_complete_at).total_seconds()
+            pending_restart_since is not None
+            and (now - pending_restart_since).total_seconds()
             >= self._settings.gpu_deployment_restart_drain_timeout_seconds
         )
 
@@ -202,11 +264,11 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             logger.warning(
                 "gpu_session.deployment.restart_drain_timeout",
                 session_id=str(session_id),
-                batch_id=batch_id,
+                batch_ids=sorted({member.batch_id for member in ready_members if member.batch_id}),
                 in_flight_count=in_flight,
             )
 
-        newest = max(members, key=lambda m: m.created_at)
+        newest = max(ready_members, key=lambda member: member.created_at)
         try:
             command = await self._command_service.enqueue(
                 session_id=session_id,
@@ -220,27 +282,27 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             logger.info(
                 "gpu_session.deployment.restart_enqueue_skipped_session_unavailable",
                 session_id=str(session_id),
-                batch_id=batch_id,
+                batch_ids=sorted({member.batch_id for member in ready_members if member.batch_id}),
             )
             return
 
         async with self._session_factory() as db, db.begin():
             updated = await GpuSessionDeploymentRepository(db).set_restart_pointer(
-                [m.id for m in members], operation_id=command.operation_id
+                [member.id for member in ready_members], operation_id=command.operation_id
             )
         logger.info(
             "gpu_session.deployment.restart_enqueued",
             session_id=str(session_id),
-            batch_id=batch_id,
+            batch_ids=sorted({member.batch_id for member in ready_members if member.batch_id}),
             operation_id=str(command.operation_id),
             deployment_count=updated,
         )
-        for member in members:
+        for member in ready_members:
             member.restart_operation_id = command.operation_id
             await publish_deployment_event(self._event_bus, member)
 
     # ------------------------------------------------------------------
-    # Step 3 — restart finished
+    # Step 4 — restart finished
     # ------------------------------------------------------------------
 
     async def _process_restart_results(self) -> None:
@@ -303,7 +365,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 await publish_deployment_event(self._event_bus, member, error_message=command.error)
 
     # ------------------------------------------------------------------
-    # Step 4 — removal finished
+    # Step 5 — removal finished
     # ------------------------------------------------------------------
 
     async def _process_removal_results(self) -> None:
