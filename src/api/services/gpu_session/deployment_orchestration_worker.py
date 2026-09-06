@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from src.core.config import Settings
     from src.db.models.gpu_session_command import GpuSessionCommand
     from src.db.models.gpu_session_deployment import GpuSessionDeployment
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
 
@@ -190,9 +191,14 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 session_id=str(deployment.session_id),
                 deployment_id=str(deployment.id),
             )
+            # S1: explicit None, not the fallback — a row returned to 'active'
+            # because its removal command was never persisted genuinely has no
+            # governing operation; reporting a stale restart_operation_id here
+            # would be worse than reporting nothing.
             await publish_deployment_event(
                 self._event_bus,
                 deployment,
+                operation_id=None,
                 error_message="removal command was not enqueued",
             )
 
@@ -215,12 +221,16 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 )
 
     async def _process_one_provision_result(self, deployment: GpuSessionDeployment) -> None:
+        # S4: fetch the command and the operation it governs in the same
+        # session — one fewer connection checkout than fetching them
+        # separately, since the operation lookup only ever needs command.id.
         async with self._session_factory() as db:
             command = await GpuSessionCommandRepository(db).get_latest_by_deployment_and_kind(
                 deployment.id, OperationKind.bundle_provision
             )
-        if command is None or command.status not in TERMINAL_COMMAND_STATUSES:
-            return
+            if command is None or command.status not in TERMINAL_COMMAND_STATUSES:
+                return
+            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
 
         succeeded = command.status == CommandStatus.succeeded
         now = datetime.now(UTC)
@@ -230,11 +240,6 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             )
         if not applied:
             return
-        # The command was just fetched above — the operation it governs is one
-        # cheap lookup away, so the SSE event can carry the node's own terminal
-        # phase/progress rather than falling back to id-only (N4).
-        async with self._session_factory() as db:
-            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
         if succeeded:
             deployment.pending_restart = True
             logger.info(
@@ -262,6 +267,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
     # ------------------------------------------------------------------
 
     async def _process_restart_enqueue(self) -> None:
+        await self._reap_pending_restart_missing_batch_id()
         async with self._session_factory() as db:
             candidates = await GpuSessionDeploymentRepository(
                 db
@@ -279,36 +285,69 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                     "gpu_session.deployment.restart_enqueue_error", session_id=str(session_id)
                 )
 
+    async def _reap_pending_restart_missing_batch_id(self) -> None:
+        """S3: a pending-restart row with no batch_id never matches the
+        correlated EXISTS the candidate queries use to skip batches that are
+        still mid-provision-retry, so — unlike every other incomplete-batch
+        case, which clears on its own — it would otherwise pin the bounded
+        restart-enqueue page forever. Should be unreachable (every writer of
+        pending_restart also stamps batch_id); fail it once, loudly, rather
+        than re-log and re-skip it on every tick.
+        """
+        now = datetime.now(UTC)
+        async with self._session_factory() as db:
+            candidates = await GpuSessionDeploymentRepository(
+                db
+            ).list_pending_restart_missing_batch_id()
+        for deployment in candidates:
+            async with self._session_factory() as db, db.begin():
+                applied = await GpuSessionDeploymentRepository(
+                    db
+                ).fail_pending_restart_missing_batch_id(deployment.id, at=now)
+            if not applied:
+                continue
+            deployment.status = DeploymentStatus.failed
+            deployment.pending_restart = False
+            deployment.removed_at = now
+            logger.error(
+                "gpu_session.deployment.pending_restart_missing_batch_id",
+                session_id=str(deployment.session_id),
+                deployment_id=str(deployment.id),
+            )
+            await publish_deployment_event(
+                self._event_bus,
+                deployment,
+                error_message="pending_restart deployment has no batch_id",
+            )
+
     async def _process_one_restart_session(
-        self, session_id: UUID, candidates: Sequence[GpuSessionDeployment]
+        self, session_id: UUID, ready_members: Sequence[GpuSessionDeployment]
     ) -> None:
         """Restart each ready marker cohort on one session exactly once.
 
         Every attach has its own provision batch, but ComfyUI restarts are a session
-        concern. ``candidates`` already excludes any batch still provisioning (N2's
-        batch-readiness predicate lives in
-        list_pending_restart_awaiting_operation_for_session now, not here), so this
-        only needs to filter the one invariant-violation case that predicate can't
-        express. Different readiness markers cannot share an aisha restart command,
-        because its contract carries only one ``node_class`` to verify.
+        concern. ``ready_members`` already excludes any batch still provisioning
+        (N2) and any invariant-violating no-batch_id row (S3) — both predicates
+        live in list_pending_restart_awaiting_operation_for_session now, not
+        here. Different readiness markers cannot share an aisha restart
+        command, because its contract carries only one ``node_class`` to verify.
         """
-        ready_members: list[GpuSessionDeployment] = []
-        for deployment in candidates:
-            if deployment.batch_id is None:
-                # Every attach stamps batch_id at enqueue time (CO4) — a
-                # pending-restart deployment with no batch_id means that write
-                # was skipped somewhere.
-                logger.error(
-                    "gpu_session.deployment.pending_restart_missing_batch_id",
-                    deployment_id=str(deployment.id),
-                )
-                continue
-            ready_members.append(deployment)
-
         if not ready_members:
             return
 
-        async with self._session_factory() as db:
+        # S5: suspend routing for every currently-active deployment on this
+        # session, in the same transaction as the in-flight count, before that
+        # count is read — a restart takes the whole node down, not only the
+        # deployment(s) being restarted, so a generation must not be able to
+        # resolve this session's routable deployments between this drain check
+        # and the restart actually happening. The suspension is deliberately
+        # never rolled back here on a non-zero count (only cleared once the
+        # whole restart cycle resolves, in step 4) — that monotonicity is what
+        # makes D35's drain timeout an actual bound rather than a hope.
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionDeploymentRepository(db)
+            await repo.acquire_removal_lock(session_id)
+            await repo.suspend_routing_for_session(session_id)
             in_flight = await JobRepository(db).count_in_flight_for_session(session_id)
 
         cohorts: dict[str | None, list[GpuSessionDeployment]] = {}
@@ -403,93 +442,137 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             candidates = await GpuSessionDeploymentRepository(
                 db
             ).list_pending_restart_awaiting_outcome()
-        groups: dict[UUID, list[GpuSessionDeployment]] = {}
+        sessions: dict[UUID, list[GpuSessionDeployment]] = {}
         for deployment in candidates:
             if deployment.restart_operation_id is None:  # pragma: no cover — query guarantees this
                 continue
-            groups.setdefault(deployment.restart_operation_id, []).append(deployment)
-        for operation_id, members in groups.items():
+            sessions.setdefault(deployment.session_id, []).append(deployment)
+        for session_id, members in sessions.items():
             try:
-                await self._process_one_restart_outcome(operation_id, members)
+                await self._process_one_restart_cycle(session_id, members)
             except Exception:
                 logger.exception(
                     "gpu_session.deployment.restart_outcome_error",
-                    operation_id=str(operation_id),
+                    session_id=str(session_id),
                 )
 
-    async def _process_one_restart_outcome(
-        self, operation_id: UUID, members: Sequence[GpuSessionDeployment]
+    async def _process_one_restart_cycle(
+        self, session_id: UUID, members: Sequence[GpuSessionDeployment]
     ) -> None:
-        async with self._session_factory() as db:
-            command = await GpuSessionCommandRepository(db).get_by_operation(operation_id)
-        if command is None or command.status not in TERMINAL_COMMAND_STATUSES:
+        """S6: a restart cycle activates only once EVERY restart enqueued
+        within it has succeeded, and fails as a whole the moment ANY of them
+        fails or is expired by the P3 sweep — never on mere terminality
+        (which says nothing about whether ComfyUI actually came back up), and
+        never only the one cohort whose own command happened to resolve.
+
+        R3 splits one session's restart into a cohort per readiness marker,
+        and the command queue serializes them one in-flight at a time, so
+        cohorts in one cycle can go terminal on different ticks. A failure or
+        expiry anywhere in the cycle means Apex no longer knows which node
+        classes ComfyUI actually has loaded, so every deployment in the cycle
+        is failed immediately — D34 already rules out a retry, so there is
+        nothing to gain by waiting on a still-pending sibling's own outcome.
+        Success is the opposite: it can only be declared once every member's
+        command is terminal, since any one of them could still turn out to be
+        the failure that dooms the whole cycle.
+
+        ``members`` is exactly "every deployment on this session still
+        pending_restart with a restart_operation_id assigned" — the whole
+        cycle, by construction: a cohort whose restart gets enqueued after
+        this tick started shows up in this same query on the tick that
+        processes it, pulling it into the group too.
+        """
+        operation_ids = sorted(
+            {member.restart_operation_id for member in members if member.restart_operation_id},
+            key=str,
+        )
+        if not operation_ids:  # pragma: no cover — every member has one by construction
             return
 
-        succeeded = command.status == CommandStatus.succeeded
         now = datetime.now(UTC)
+        commands: dict[UUID, GpuSessionCommand] = {}
+        operations: dict[UUID, GpuSessionOperation] = {}
+        # S4: fetch every command and the operation it governs in one session —
+        # same data as two separate lookups per operation, fewer connections.
+        async with self._session_factory() as db:
+            command_repo = GpuSessionCommandRepository(db)
+            operation_repo = GpuSessionOperationRepository(db)
+            for operation_id in operation_ids:
+                command = await command_repo.get_by_operation(operation_id)
+                if command is not None:
+                    commands[operation_id] = command
+                operation = await operation_repo.get(operation_id)
+                if operation is not None:
+                    operations[operation_id] = operation
 
-        if succeeded:
-            # N1: R3 splits one session's restart into a cohort per readiness
-            # marker, and the command queue serializes them one in-flight at a
-            # time — so this cohort's restart can go terminal while a sibling
-            # cohort's restart for the same session is still queued or claimed.
-            # Activating this cohort now would make it briefly routable right
-            # before that sibling restart takes ComfyUI down again. Defer: the
-            # pending sibling either succeeds, fails, or is expired by the P3
-            # sweep, all of which are terminal and clear this gate on a later tick.
-            session_id = members[0].session_id
-            async with self._session_factory() as db:
-                other_restart = await GpuSessionCommandRepository(
-                    db
-                ).get_non_terminal_by_session_and_kind(session_id, OperationKind.comfyui_restart)
-            if other_restart is not None:
+        failed_commands = [
+            command
+            for command in commands.values()
+            if command.status in TERMINAL_COMMAND_STATUSES
+            and command.status != CommandStatus.succeeded
+        ]
+        if not failed_commands:
+            still_pending = len(commands) < len(operation_ids) or any(
+                command.status not in TERMINAL_COMMAND_STATUSES for command in commands.values()
+            )
+            if still_pending:
                 logger.info(
-                    "gpu_session.deployment.restart_outcome_deferred_pending_sibling",
-                    operation_id=str(operation_id),
+                    "gpu_session.deployment.restart_cycle_pending",
                     session_id=str(session_id),
+                    deployment_count=len(members),
                 )
                 return
 
-        ids = [m.id for m in members]
+        succeeded = not failed_commands
+        ids = [member.id for member in members]
         async with self._session_factory() as db, db.begin():
-            updated = await GpuSessionDeploymentRepository(db).resolve_restart_outcome(
-                ids, succeeded=succeeded, at=now
-            )
+            repo = GpuSessionDeploymentRepository(db)
+            updated = await repo.resolve_restart_outcome(ids, succeeded=succeeded, at=now)
+            # S5/S6: the whole cycle clears the session's routing suspension
+            # together, in the same transaction, on either path — suspension
+            # was applied session-wide (every active deployment, not only
+            # this cycle's members), so release must cover the same set.
+            await repo.clear_routing_suspended_for_session(session_id)
         # A terminal session cascade can win after the candidate query.  Its
         # guarded UPDATE intentionally returns zero; do not publish a stale
         # active/failed deployment event in that case.
         if updated == 0:
             return
-        # The command was just fetched above — the operation it governs is one
-        # cheap lookup away, so the SSE event can carry the node's own terminal
-        # phase/progress rather than falling back to id-only (N4).
-        async with self._session_factory() as db:
-            operation = await GpuSessionOperationRepository(db).get(operation_id)
-        if succeeded:
+
+        error_message: str | None = None
+        if not succeeded:
+            failing_description = ", ".join(
+                f"{command.operation_id} ({command.error or command.status})"
+                for command in failed_commands
+            )
+            error_message = f"restart cycle failed: {failing_description}"
+            logger.warning(
+                "gpu_session.deployment.restart_cycle_failed",
+                session_id=str(session_id),
+                deployment_count=updated,
+                failing_operation_ids=[str(command.operation_id) for command in failed_commands],
+            )
+        else:
             logger.info(
                 "gpu_session.deployment.activated",
-                operation_id=str(operation_id),
+                session_id=str(session_id),
                 deployment_count=updated,
             )
-            for member in members:
+
+        for member in members:
+            operation = (
+                operations.get(member.restart_operation_id) if member.restart_operation_id else None
+            )
+            member.pending_restart = False
+            if succeeded:
                 member.status = DeploymentStatus.active
-                member.pending_restart = False
                 member.activated_at = now
                 await publish_deployment_event(self._event_bus, member, operation=operation)
-        else:
-            logger.warning(
-                "gpu_session.deployment.restart_failed",
-                operation_id=str(operation_id),
-                deployment_count=updated,
-                command_status=str(command.status),
-                error=command.error,
-            )
-            for member in members:
+            else:
                 member.status = DeploymentStatus.failed
-                member.pending_restart = False
                 member.removed_at = now
                 await publish_deployment_event(
-                    self._event_bus, member, operation=operation, error_message=command.error
+                    self._event_bus, member, operation=operation, error_message=error_message
                 )
 
     # ------------------------------------------------------------------
@@ -509,12 +592,16 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 )
 
     async def _process_one_removal_result(self, deployment: GpuSessionDeployment) -> None:
+        # S4: fetch the command and the operation it governs in the same
+        # session — one fewer connection checkout than fetching them
+        # separately, since the operation lookup only ever needs command.id.
         async with self._session_factory() as db:
             command = await GpuSessionCommandRepository(db).get_latest_by_deployment_and_kind(
                 deployment.id, OperationKind.bundle_removal
             )
-        if command is None or command.status not in TERMINAL_COMMAND_STATUSES:
-            return
+            if command is None or command.status not in TERMINAL_COMMAND_STATUSES:
+                return
+            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
 
         succeeded = self._removal_succeeded(command)
         now = datetime.now(UTC)
@@ -524,11 +611,6 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             )
         if not applied:
             return
-        # The command was just fetched above — the operation it governs is one
-        # cheap lookup away, so the SSE event can carry the node's own terminal
-        # phase/progress rather than falling back to id-only (N4).
-        async with self._session_factory() as db:
-            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
         if succeeded:
             deployment.status = DeploymentStatus.removed
             deployment.removed_at = now

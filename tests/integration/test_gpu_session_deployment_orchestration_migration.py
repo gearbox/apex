@@ -63,6 +63,7 @@ def test_migration_041_round_trips(
         assert "restart_operation_id" not in columns
         assert "batch_id" not in columns
         assert "pending_restart_since" not in columns
+        assert "routing_suspended" not in columns
         assert "ix_gpu_session_deployments_pending_restart" not in indexes
 
         # --- invariant 16: round-trip ------------------------------------
@@ -71,6 +72,7 @@ def test_migration_041_round_trips(
         assert "restart_operation_id" in columns
         assert "batch_id" in columns
         assert "pending_restart_since" in columns
+        assert "routing_suspended" in columns
         assert "ix_gpu_session_deployments_pending_restart" in indexes
 
         command.downgrade(config, "040")
@@ -78,12 +80,14 @@ def test_migration_041_round_trips(
         assert "restart_operation_id" not in columns
         assert "batch_id" not in columns
         assert "pending_restart_since" not in columns
+        assert "routing_suspended" not in columns
 
         command.upgrade(config, "041")
         columns, indexes = asyncio.run(_columns_and_indexes())
         assert "restart_operation_id" in columns
         assert "batch_id" in columns
         assert "pending_restart_since" in columns
+        assert "routing_suspended" in columns
         assert "ix_gpu_session_deployments_pending_restart" in indexes
     finally:
         # Integration tests share the migrated schema, so always restore head.

@@ -27,6 +27,9 @@ class GpuSessionDeployment(Base):
     Key columns for routing:
     - status: only 'active' deployments under an 'active' session are routable
       (see GpuSessionDeploymentRepository.get_routable)
+    - routing_suspended: also required false for routing — set session-wide
+      while a restart cohort is draining/running, since a restart takes the
+      whole node down, not only the deployment(s) being restarted
     - user_id / product_id / model_type: denormalized from the session so the
       uniqueness index below can be local to this table
 
@@ -116,6 +119,17 @@ class GpuSessionDeployment(Base):
         String(64),
         nullable=True,
         comment="P4: the enqueued batch that created this deployment (matches gpu_session_commands.batch_id).",
+    )
+    routing_suspended: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+        comment=(
+            "P4 round-4: set session-wide on every 'active' deployment the moment a "
+            "restart cohort becomes ready, so get_routable stays closed for the whole "
+            "node until the restart cycle resolves — a restart takes ComfyUI down for "
+            "every deployment on the session, not only the ones being restarted."
+        ),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

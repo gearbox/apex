@@ -148,7 +148,13 @@ class GpuSessionDeploymentRepository:
         One joined statement requiring GpuSession.status == active AND
         GpuSessionDeployment.status == active — not two sequential reads, which
         would open a window where a session that flips to 'stopping' between
-        them still gets routed a job onto a dying node.
+        them still gets routed a job onto a dying node. Also requires
+        routing_suspended IS FALSE (S5): a restart cohort becoming ready
+        suspends routing for every active deployment on the session before its
+        drain check even runs, since a restart takes the whole node down, not
+        only the deployment(s) being restarted — without this a generation
+        could resolve, reserve credit, and call queue_prompt just as ComfyUI
+        goes down for the restart.
 
         Args:
             user_id: Owner filter.
@@ -166,6 +172,7 @@ class GpuSessionDeploymentRepository:
                 GpuSessionDeployment.product_id == product_id,
                 GpuSessionDeployment.model_type == model_type,
                 GpuSessionDeployment.status == DeploymentStatus.active,
+                GpuSessionDeployment.routing_suspended.is_(False),
                 GpuSession.status == GpuSessionStatus.active,
             )
         )
@@ -275,6 +282,11 @@ class GpuSessionDeploymentRepository:
             values["pending_restart"] = False
             values["pending_restart_since"] = None
             values["restart_operation_id"] = None
+            # S5: a deployment suspended for an in-progress restart must not
+            # carry that suspension into a terminal state forever — this is the
+            # third of the three routing_suspended-clearing sites alongside a
+            # resolved restart cycle's success/failure paths.
+            values["routing_suspended"] = False
 
         result = cast(
             "CursorResult[Any]",
@@ -334,7 +346,10 @@ class GpuSessionDeploymentRepository:
         await self._session.flush()
 
     async def acquire_removal_lock(self, session_id: UUID) -> None:
-        """Serialize P4 removal transitions for one session within the current transaction.
+        """Serialize P4 removal *and* restart-suspend transitions for one session
+        within the current transaction (S5: a restart and a removal on the same
+        session genuinely should not interleave, since both reason about the
+        live set — reused rather than adding a third advisory-lock namespace).
 
         This deliberately uses a deployment-namespaced hash, not the bare
         session-id hash used by the P3 command-claim path.  See the module
@@ -353,6 +368,50 @@ class GpuSessionDeploymentRepository:
                 )
             )
         )
+
+    async def suspend_routing_for_session(self, session_id: UUID) -> int:
+        """S5: close routing for every 'active' deployment on a session before
+        the restart drain check runs, so the in-flight count read right after
+        this is monotonically non-increasing — the property that makes D35's
+        timeout an actual bound instead of a hope. Caller must hold
+        ``acquire_removal_lock`` in the same transaction first. Idempotent: a
+        cohort that is still draining on a later tick re-suspends a no-op set.
+        """
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.session_id == session_id,
+                    GpuSessionDeployment.status == DeploymentStatus.active,
+                )
+                .values(routing_suspended=True)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount
+
+    async def clear_routing_suspended_for_session(self, session_id: UUID) -> int:
+        """S5/S6: release a whole-session routing suspension once its restart
+        cycle resolves (success or failure alike). Session-scoped rather than
+        limited to the cycle's own deployment ids: suspension was applied to
+        every active deployment on the session (S5), including ones that were
+        already active and are not part of the cycle being resolved (e.g. the
+        primary), so releasing it must cover the same set.
+        """
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.session_id == session_id,
+                    GpuSessionDeployment.routing_suspended.is_(True),
+                )
+                .values(routing_suspended=False)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount
 
     async def mark_removing(
         self, deployment_id: UUID, *, require_another_active: bool = False
@@ -465,12 +524,18 @@ class GpuSessionDeploymentRepository:
         incomplete) can no longer occupy a slot on this bounded page while
         contributing nothing, which is what let a large backlog starve newer,
         genuinely ready batches.
+
+        Excludes batch_id IS NULL (S3): that row can never match the correlated
+        EXISTS above (SQL NULL = NULL is unknown), so it would otherwise pin this
+        page forever. Reachable only as an invariant violation — see
+        list_pending_restart_missing_batch_id, which reaps it instead.
         """
         result = await self._session.execute(
             select(GpuSessionDeployment)
             .where(
                 GpuSessionDeployment.pending_restart.is_(True),
                 GpuSessionDeployment.restart_operation_id.is_(None),
+                GpuSessionDeployment.batch_id.is_not(None),
                 ~self._batch_has_non_terminal_command(),
             )
             .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
@@ -486,9 +551,9 @@ class GpuSessionDeploymentRepository:
         The global scan is deliberately capped, but a restart must cover every ready
         deployment on a selected session. This narrow follow-up query prevents a
         large global backlog from splitting one session's restart across ticks, and
-        carries the same batch-readiness predicate as the global scan (N2) so every
-        row it returns is already known-ready — the caller no longer needs to
-        re-derive readiness in Python.
+        carries the same batch-readiness predicate as the global scan (N2), including
+        the batch_id IS NOT NULL exclusion (S3), so every row it returns is already
+        known-ready — the caller no longer needs to re-derive readiness in Python.
         """
         result = await self._session.execute(
             select(GpuSessionDeployment)
@@ -496,11 +561,59 @@ class GpuSessionDeploymentRepository:
                 GpuSessionDeployment.session_id == session_id,
                 GpuSessionDeployment.pending_restart.is_(True),
                 GpuSessionDeployment.restart_operation_id.is_(None),
+                GpuSessionDeployment.batch_id.is_not(None),
                 ~self._batch_has_non_terminal_command(),
             )
             .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
         )
         return result.scalars().all()
+
+    async def list_pending_restart_missing_batch_id(self) -> Sequence[GpuSessionDeployment]:
+        """S3: a pending-restart row with no batch_id can never match the
+        correlated EXISTS in list_pending_restart_awaiting_operation (SQL
+        NULL = NULL is unknown), so without this exclusion it would sit at the
+        head of that bounded page forever — the N2 starvation shape, reborn for
+        an invariant-violating row. Should be unreachable in practice: both
+        set_provision_pointer and recover_provision_pointer always write
+        batch_id alongside the provision pointer that leads here.
+        """
+        result = await self._session.execute(
+            select(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.pending_restart.is_(True),
+                GpuSessionDeployment.restart_operation_id.is_(None),
+                GpuSessionDeployment.batch_id.is_(None),
+            )
+            .order_by(GpuSessionDeployment.created_at.asc())
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
+        )
+        return result.scalars().all()
+
+    async def fail_pending_restart_missing_batch_id(
+        self, deployment_id: UUID, *, at: datetime
+    ) -> bool:
+        """S3: guardedly fail one invariant-violating pending-restart row so it
+        is reported once instead of skipped on every tick forever."""
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id == deployment_id,
+                    GpuSessionDeployment.pending_restart.is_(True),
+                    GpuSessionDeployment.restart_operation_id.is_(None),
+                    GpuSessionDeployment.batch_id.is_(None),
+                )
+                .values(
+                    status=DeploymentStatus.failed,
+                    removed_at=at,
+                    pending_restart=False,
+                    pending_restart_since=None,
+                )
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
 
     @staticmethod
     def _batch_has_non_terminal_command() -> Exists:

@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from src.core.enums import (
@@ -479,6 +479,30 @@ async def test_get_routable_none_when_deployment_not_active(
 ) -> None:
     session = await make_gpu_session(status=GpuSessionStatus.active)
     await make_deployment(session=session, status=deployment_status)
+
+    result = await deployment_repo.get_routable(
+        session.user_id, session.product_id, session.model_type
+    )
+    assert result is None
+
+
+async def test_get_routable_none_when_routing_suspended(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """S5: a restart cohort becoming ready suspends routing for every active
+    deployment on the session — get_routable must honor that even though
+    status alone still says 'active', since a restart takes the whole node
+    down and status is set by a separate step."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(session=session, status=DeploymentStatus.active)
+    await db_session.execute(
+        update(GpuSessionDeployment)
+        .where(GpuSessionDeployment.id == deployment.id)
+        .values(routing_suspended=True)
+    )
 
     result = await deployment_repo.get_routable(
         session.user_id, session.product_id, session.model_type
@@ -1194,6 +1218,34 @@ async def test_list_pending_restart_awaiting_operation_excludes_stalled_batches(
     candidates = await deployment_repo.list_pending_restart_awaiting_operation()
 
     assert [c.id for c in candidates] == [ready.id]
+
+
+async def test_list_pending_restart_awaiting_operation_excludes_null_batch_id(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    """S3: a row with no batch_id can never match the batch-readiness
+    correlation (SQL NULL = NULL is unknown), so without this exclusion it
+    would pin the bounded page forever — the N2 starvation shape, reborn for
+    an invariant-violating row. It's surfaced instead by
+    list_pending_restart_missing_batch_id, which the orchestration worker
+    fails outright rather than leaving on this page."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    no_batch_id = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-no-batch-id",
+        pending_restart=True,
+    )
+    assert no_batch_id.batch_id is None
+
+    candidates = await deployment_repo.list_pending_restart_awaiting_operation()
+    assert no_batch_id.id not in {c.id for c in candidates}
+
+    missing_batch_id = await deployment_repo.list_pending_restart_missing_batch_id()
+    assert [c.id for c in missing_batch_id] == [no_batch_id.id]
 
 
 async def test_list_removing_excludes_stalled_rows(

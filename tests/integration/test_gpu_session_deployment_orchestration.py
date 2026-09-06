@@ -1004,6 +1004,52 @@ async def test_remove_refuses_when_a_sibling_bundle_name_is_unresolvable(
 
 
 # ---------------------------------------------------------------------------
+# S3: an invariant-violating no-batch_id row is failed, not skipped forever
+# ---------------------------------------------------------------------------
+
+
+async def test_pending_restart_missing_batch_id_is_failed_not_skipped(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """S3: a pending_restart row with no batch_id can never match the
+    batch-readiness correlation (SQL NULL = NULL is unknown), so it would
+    otherwise sit at the head of the bounded restart-enqueue page forever —
+    logged and skipped every tick. Should be unreachable in practice (every
+    writer of pending_restart also stamps batch_id); the fix makes the
+    invariant enforceable: fail the row once, loudly, instead."""
+    settings = _StubSettings()
+    worker = _worker(
+        orchestration_session_factory,
+        _command_service(orchestration_session_factory, settings),
+        settings,
+    )
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    deployment = await _create_deployment(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type=ModelType.AISHA_VIDEO.value,
+        pending_restart=True,
+    )
+    assert deployment.batch_id is None
+
+    await worker.run_once()
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.status == DeploymentStatus.failed
+    assert deployment.pending_restart is False
+    assert deployment.removed_at is not None
+
+    async with orchestration_session_factory() as session:
+        candidates = await GpuSessionDeploymentRepository(
+            session
+        ).list_pending_restart_awaiting_operation()
+    assert deployment.id not in {candidate.id for candidate in candidates}
+
+
+# ---------------------------------------------------------------------------
 # D34: one restart per batch, fires even when one member failed
 # ---------------------------------------------------------------------------
 
@@ -1114,6 +1160,72 @@ async def test_restart_waits_for_in_flight_jobs_to_drain(
     deployment = await _get_deployment(orchestration_session_factory, deployment.id)
     assert deployment.pending_restart is True
     assert deployment.restart_operation_id is None  # blocked: a job is still in flight
+
+
+async def test_restart_suspends_routing_before_the_drain_count_and_it_persists(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S5: routing must close before the in-flight count is read — the count is
+    only a real bound on newly-admitted work if nothing new can be admitted
+    while it's read — and the suspension must not be rolled back just because
+    the session hasn't drained yet; it survives across ticks until the whole
+    restart cycle resolves."""
+    settings = _StubSettings(restart_drain_timeout_seconds=900)
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    primary = await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
+    await _create_job(
+        orchestration_session_factory,
+        user=user,
+        gpu_session=gpu_session,
+        model=ModelType.AISHA_IMAGE.value,
+        status="running",
+    )
+
+    observed_suspended: list[bool] = []
+    original_count = JobRepository.count_in_flight_for_session
+
+    async def count_after_suspend(self: JobRepository, gpu_session_id: Any) -> int:
+        current = await self._session.get(GpuSessionDeployment, primary.id)
+        assert current is not None
+        observed_suspended.append(current.routing_suspended)
+        return await original_count(self, gpu_session_id)
+
+    monkeypatch.setattr(JobRepository, "count_in_flight_for_session", count_after_suspend)
+
+    deployment, operation_id = await deployment_service.attach(
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type=ModelType.AISHA_VIDEO,
+    )
+    command = await _get_command_by_operation(orchestration_session_factory, operation_id)
+    await _mark_terminal(orchestration_session_factory, command.id, status=CommandStatus.succeeded)
+
+    await worker.run_once()
+
+    assert observed_suspended == [True]  # suspended before the count was read
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.restart_operation_id is None  # still draining
+    async with orchestration_session_factory() as session:
+        assert (
+            await GpuSessionDeploymentRepository(session).get_routable(
+                user.id, "vex", ModelType.AISHA_IMAGE.value
+            )
+            is None
+        )
+
+    # A second tick with the job still in flight must not lift the suspension.
+    await worker.run_once()
+
+    assert observed_suspended == [True, True]
+    primary = await _get_deployment(orchestration_session_factory, primary.id)
+    assert primary.routing_suspended is True
 
 
 async def test_restart_fires_anyway_after_drain_timeout(
@@ -1235,9 +1347,13 @@ async def test_node_clock_ahead_does_not_extend_restart_drain_window(
 # ---------------------------------------------------------------------------
 
 
-async def test_different_readiness_markers_get_independent_restart_outcomes(
+async def test_different_readiness_markers_get_independent_restart_commands(
     orchestration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Each marker cohort gets its own restart command with the correct
+    node_class payload — but per S6, the OUTCOME is shared across the whole
+    session's restart cycle, not resolved independently per marker; see
+    test_restart_cycle_fails_every_cohort_when_one_restart_fails for that."""
     settings = _StubSettings()
     command_service = _command_service(orchestration_session_factory, settings)
     deployment_service = _deployment_service(orchestration_session_factory, command_service)
@@ -1292,17 +1408,14 @@ async def test_different_readiness_markers_get_independent_restart_outcomes(
         orchestration_session_factory, video_restart_command.id, status=CommandStatus.succeeded
     )
     await _mark_terminal(
-        orchestration_session_factory,
-        lite_restart_command.id,
-        status=CommandStatus.failed,
-        error="marker did not register",
+        orchestration_session_factory, lite_restart_command.id, status=CommandStatus.succeeded
     )
     await worker.run_once()
 
     video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
     lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
     assert video_deployment.status == DeploymentStatus.active
-    assert lite_deployment.status == DeploymentStatus.failed
+    assert lite_deployment.status == DeploymentStatus.active
 
 
 # ---------------------------------------------------------------------------
@@ -1412,9 +1525,11 @@ async def test_restart_success_defers_activation_while_a_sibling_restart_is_pend
 async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibling(
     orchestration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """N1's activation gate applies only to the success path: a failed cohort is
-    never going to become routable, so there is nothing to protect by delaying it
-    behind an unrelated sibling restart."""
+    """S6: a failed restart is never going to become routable, and D34 rules out
+    a retry, so there is nothing to gain by waiting on a still-pending sibling's
+    own outcome before failing — the failure cascades to the whole cycle
+    immediately, including a sibling whose own restart command hasn't even
+    resolved yet."""
     settings = _StubSettings()
     command_service = _command_service(orchestration_session_factory, settings)
     deployment_service = _deployment_service(orchestration_session_factory, command_service)
@@ -1422,7 +1537,7 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
     user = await _create_user(orchestration_session_factory)
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
 
-    video_deployment, _lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
+    video_deployment, lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
         orchestration_session_factory, worker, deployment_service, gpu_session, user
     )
     video_restart_command = await _get_command_by_operation(
@@ -1440,8 +1555,109 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
     await worker.run_once()
 
     video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
     assert video_deployment.status == DeploymentStatus.failed  # not deferred
     assert video_deployment.pending_restart is False
+    # S6: the still-queued sibling is failed too — Apex no longer knows which
+    # node classes ComfyUI has loaded, so nothing from this cycle is routable.
+    assert lite_deployment.status == DeploymentStatus.failed
+    assert lite_deployment.pending_restart is False
+
+
+async def test_restart_cycle_fails_every_cohort_when_a_sibling_restart_fails(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """S6: the earlier cohort's own restart succeeding does not license routing
+    when a later restart of the same node did not — mere terminality of a
+    sibling command is the wrong bar (that's what let this cohort activate
+    incorrectly before S6); the sibling must also have succeeded."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+
+    video_deployment, lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
+        orchestration_session_factory, worker, deployment_service, gpu_session, user
+    )
+    video_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, video_deployment.restart_operation_id
+    )
+    # The first cohort's restart succeeds and defers (lite's is still pending).
+    await _mark_terminal(
+        orchestration_session_factory, video_restart_command.id, status=CommandStatus.succeeded
+    )
+    await worker.run_once()
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    assert video_deployment.status == DeploymentStatus.deploying  # deferred
+
+    # The second cohort's restart later fails.
+    lite_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, lite_deployment.restart_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory,
+        lite_restart_command.id,
+        status=CommandStatus.failed,
+        error="marker did not register",
+    )
+    await worker.run_once()
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
+    assert video_deployment.status == DeploymentStatus.failed  # never activated
+    assert lite_deployment.status == DeploymentStatus.failed
+    async with orchestration_session_factory() as session:
+        assert (
+            await GpuSessionDeploymentRepository(session).get_routable(
+                user.id, "vex", ModelType.AISHA_VIDEO.value
+            )
+            is None
+        )
+
+
+async def test_restart_cycle_fails_every_cohort_when_a_sibling_restart_expires(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Companion to the failed-sibling case: an operation the P3 sweep expires
+    is just as terminal-but-not-succeeded as an explicit failure, and the
+    terminality gate this round fixes got that case wrong too."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+
+    video_deployment, lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
+        orchestration_session_factory, worker, deployment_service, gpu_session, user
+    )
+    video_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, video_deployment.restart_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory, video_restart_command.id, status=CommandStatus.succeeded
+    )
+    await worker.run_once()
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    assert video_deployment.status == DeploymentStatus.deploying  # deferred
+
+    lite_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, lite_deployment.restart_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory,
+        lite_restart_command.id,
+        status=CommandStatus.expired,
+        error="deadline exceeded",
+    )
+    await worker.run_once()
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
+    assert video_deployment.status == DeploymentStatus.failed
+    assert lite_deployment.status == DeploymentStatus.failed
 
 
 # ---------------------------------------------------------------------------
@@ -1482,6 +1698,82 @@ async def test_restart_enqueued_event_carries_operation_id(
         call.kwargs["payload"].operation_id for call in event_bus.publish.call_args_list
     }
     assert deployment.restart_operation_id in published_operation_ids
+
+
+# ---------------------------------------------------------------------------
+# S1: a removal event must not report a stale restart_operation_id
+# ---------------------------------------------------------------------------
+
+
+async def test_remove_event_reports_the_removal_operation_not_a_stale_restart(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """S1: resolve_restart_outcome never clears restart_operation_id on
+    activation (only the D15 terminal cascade does), so a deployment that was
+    ever restarted carries a stale restart_operation_id for the rest of its
+    active life. remove()'s event must name its own removal operation
+    explicitly instead of falling back to that stale id — otherwise a client
+    that follows it sees an operation which never changes and concludes the
+    removal isn't progressing, the exact "stuck UI" failure N4 was introduced
+    to eliminate, relocated to the removal path. Fails against the pre-S1
+    code, which publishes remove()'s event with no operation/operation_id at
+    all and so falls back to the stale restart id."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    event_bus = AsyncMock()
+    deployment_service = GpuSessionDeploymentService(
+        session_factory=orchestration_session_factory,
+        bundle_index=_FakeBundleIndex(),  # type: ignore[arg-type]
+        command_service=command_service,
+        event_bus=event_bus,
+    )
+    worker = _worker(orchestration_session_factory, command_service, settings, event_bus=event_bus)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)  # primary
+
+    deployment, operation_id = await deployment_service.attach(
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type=ModelType.AISHA_VIDEO,
+    )
+    command = await _get_command_by_operation(orchestration_session_factory, operation_id)
+    await _mark_terminal(orchestration_session_factory, command.id, status=CommandStatus.succeeded)
+    await worker.run_once()  # pending_restart -> restart enqueued
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    restart_command = await _get_command_by_operation(
+        orchestration_session_factory, deployment.restart_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory, restart_command.id, status=CommandStatus.succeeded
+    )
+    await worker.run_once()  # restart succeeded -> active
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.status == DeploymentStatus.active
+    stale_restart_operation_id = deployment.restart_operation_id
+    assert stale_restart_operation_id is not None  # never cleared on activation — the bug's cause
+
+    event_bus.reset_mock()
+    removed = await deployment_service.remove(
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type=ModelType.AISHA_VIDEO,
+        force=False,
+    )
+
+    async with orchestration_session_factory() as session:
+        removal_command = await GpuSessionCommandRepository(
+            session
+        ).get_latest_by_deployment_and_kind(removed.id, OperationKind.bundle_removal)
+    assert removal_command is not None
+
+    published = event_bus.publish.call_args_list[-1]
+    assert published.kwargs["payload"].operation_id == removal_command.operation_id
+    assert published.kwargs["payload"].operation_id != stale_restart_operation_id
 
 
 async def test_oldest_ready_deployment_sets_the_restart_drain_deadline(

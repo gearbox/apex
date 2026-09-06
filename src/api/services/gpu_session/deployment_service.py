@@ -300,5 +300,11 @@ class GpuSessionDeploymentService:
             operation_id=str(command.operation_id),
             retain_bundles=retain_bundles,
         )
-        await publish_deployment_event(self._event_bus, deployment)
+        # S1: name the removal's own operation explicitly — the fallback in
+        # publish_deployment_event would otherwise report a stale
+        # restart_operation_id from a restart that finished long ago, since
+        # resolve_restart_outcome never clears that pointer on activation.
+        await publish_deployment_event(
+            self._event_bus, deployment, operation_id=command.operation_id
+        )
         return deployment
