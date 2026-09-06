@@ -431,6 +431,8 @@ class GpuSessionController(Controller):
             )
         except RetainBundlesUnresolvableError as exc:
             return _error(HTTP_409_CONFLICT, "retain_bundles_unresolvable", str(exc))
+        except InvalidSessionStateError as exc:
+            return _error(HTTP_409_CONFLICT, "invalid_state", str(exc))
         except GpuSessionError as exc:
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 

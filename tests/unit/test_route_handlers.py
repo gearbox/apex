@@ -2958,6 +2958,30 @@ class TestGpuSessionRouteHandlers:
         assert response.status_code == 409
         assert response.content.detail == {"in_flight_count": 2}
 
+    async def test_remove_deployment_invalid_state_is_409(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import InvalidSessionStateError
+
+        service = AsyncMock()
+        service.remove = AsyncMock(
+            side_effect=InvalidSessionStateError(
+                "session became terminal", current_status="unknown", operation="remove"
+            )
+        )
+
+        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            model_type="aisha-video",
+            gpu_session_deployment_service=service,
+            product_id="vex",
+            force=False,
+        )
+
+        assert response.status_code == 409
+        assert response.content.error == "invalid_state"
+
     async def test_remove_deployment_session_not_found_is_404(self) -> None:
         from src.api.routes.gpu_session import GpuSessionController
         from src.api.services.gpu_session.exceptions import GpuSessionError

@@ -6,7 +6,7 @@ the P4 counterpart to GpuSessionCommandSweepWorker: each tick it looks for deplo
 whose current command finished and advances them, exactly mirroring the shape (and the
 LeaderLease) of every other PeriodicWorker in this codebase.
 
-Six independent steps per tick, in this order so a batch that finishes and drains in
+Eight independent steps per tick, in this order so a batch that finishes and drains in
 the same tick doesn't wait a full interval for its restart:
   0. Recover a deployment's provision pointer lost between commit and enqueue.
   1. Reap an attach that committed but never enqueued a provision command.
@@ -15,6 +15,7 @@ the same tick doesn't wait a full interval for its restart:
   3. Session drain       -> enqueue one comfyui_restart per readiness marker.
   4. Restart finished    -> 'active' (success) or 'failed', no retry (D34).
   5. Removal finished    -> 'removed' (success) or back to 'active' (failure).
+  6. Reconcile orphaned routing suspensions after every restart owner is terminal.
 """
 
 from __future__ import annotations
@@ -29,7 +30,10 @@ from src.api.services.gpu_session.command_payload import RestartCommand
 from src.api.services.gpu_session.command_service import CommandEnqueueSessionError
 from src.core.enums import TERMINAL_COMMAND_STATUSES, CommandStatus, DeploymentStatus, OperationKind
 from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
-from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
+from src.db.repositories.gpu_session_deployment import (
+    RESTART_COHORT_SANITY_LIMIT,
+    GpuSessionDeploymentRepository,
+)
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
@@ -97,6 +101,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         await self._process_restart_enqueue()
         await self._process_restart_results()
         await self._process_removal_results()
+        await self._reconcile_orphaned_routing_suspensions()
 
     # ------------------------------------------------------------------
     # Step 0 — repair a lost provision pointer before the reaper can see it
@@ -279,6 +284,13 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                     members = await GpuSessionDeploymentRepository(
                         db
                     ).list_pending_restart_awaiting_operation_for_session(session_id)
+                if len(members) > RESTART_COHORT_SANITY_LIMIT:
+                    logger.error(
+                        "gpu_session.deployment.restart_cohort_implausible",
+                        session_id=str(session_id),
+                        count=len(members),
+                    )
+                    continue
                 await self._process_one_restart_session(session_id, members)
             except Exception:
                 logger.exception(
@@ -528,11 +540,39 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionDeploymentRepository(db)
             updated = await repo.resolve_restart_outcome(ids, succeeded=succeeded, at=now)
-            # S5/S6: the whole cycle clears the session's routing suspension
-            # together, in the same transaction, on either path — suspension
-            # was applied session-wide (every active deployment, not only
-            # this cycle's members), so release must cover the same set.
-            await repo.clear_routing_suspended_for_session(session_id)
+            if succeeded:
+                # Per-row hygiene above clears the cycle members' flags.  This
+                # session-wide release handles non-members such as the primary.
+                await repo.clear_routing_suspended_for_session(session_id)
+            else:
+                cancellation_reason = "restart cycle failed before command could be claimed"
+                cancelled = await GpuSessionCommandRepository(
+                    db
+                ).cancel_non_terminal_by_session_and_kind(
+                    session_id,
+                    OperationKind.comfyui_restart,
+                    at=now,
+                    reason=cancellation_reason,
+                )
+                operation_repo = GpuSessionOperationRepository(db)
+                for command in cancelled:
+                    await operation_repo.close_failed(
+                        command.operation_id,
+                        at=now,
+                        error=cancellation_reason,
+                    )
+
+                # A claimed sibling may already be restarting ComfyUI.  It must
+                # keep the session-wide suspension until it reaches a terminal
+                # state; cancelling that row would be a lie.
+                has_remaining_restart = await GpuSessionCommandRepository(
+                    db
+                ).has_non_terminal_by_session_and_kind(session_id, OperationKind.comfyui_restart)
+                if not has_remaining_restart:
+                    # resolve_restart_outcome is per-row hygiene for the cycle
+                    # members. This session-wide release is what reopens active
+                    # non-members such as the primary.
+                    await repo.clear_routing_suspended_for_session(session_id)
         # A terminal session cascade can win after the candidate query.  Its
         # guarded UPDATE intentionally returns zero; do not publish a stale
         # active/failed deployment event in that case.
@@ -573,6 +613,28 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 member.removed_at = now
                 await publish_deployment_event(
                     self._event_bus, member, operation=operation, error_message=error_message
+                )
+
+    # ------------------------------------------------------------------
+    # Step 6 — release a suspension that no longer has a restart owner
+    # ------------------------------------------------------------------
+
+    async def _reconcile_orphaned_routing_suspensions(self) -> None:
+        """Repair a session-wide suspension stranded outside the normal cycle path."""
+        async with self._session_factory() as db:
+            session_ids = await GpuSessionDeploymentRepository(
+                db
+            ).list_orphaned_routing_suspension_session_ids()
+        for session_id in session_ids:
+            async with self._session_factory() as db, db.begin():
+                released = await GpuSessionDeploymentRepository(
+                    db
+                ).clear_orphaned_routing_suspension(session_id)
+            if released:
+                logger.warning(
+                    "gpu_session.deployment.routing_suspension_released",
+                    session_id=str(session_id),
+                    deployment_count=released,
                 )
 
     # ------------------------------------------------------------------

@@ -13,6 +13,7 @@ from sqlalchemy import BigInteger, Text, case, func, select, update
 from sqlalchemy import cast as sql_cast
 
 from src.core.enums import (
+    TERMINAL_COMMAND_STATUSES,
     TERMINAL_GPU_SESSION_STATUSES,
     CommandStatus,
     OperationKind,
@@ -296,6 +297,55 @@ class GpuSessionCommandRepository:
         )
         await self._session.flush()
         return result.scalars().all()
+
+    async def cancel_non_terminal_by_session_and_kind(
+        self,
+        session_id: UUID,
+        kind: OperationKind | str,
+        *,
+        at: datetime,
+        reason: str,
+    ) -> Sequence[GpuSessionCommand]:
+        """Cancel queued commands of one kind for a session.
+
+        A queued command has not reached the node and can safely be cancelled.
+        A claimed command must be left alone: its agent may already be restarting
+        ComfyUI, so changing only the database row would falsely claim that work
+        will not happen.  The status guard also makes a claim racing this update
+        resolve cleanly in either direction.
+        """
+        kind_value = kind.value if isinstance(kind, OperationKind) else kind
+        result = await self._session.execute(
+            update(GpuSessionCommand)
+            .where(
+                GpuSessionCommand.session_id == session_id,
+                GpuSessionCommand.kind == kind_value,
+                GpuSessionCommand.status == CommandStatus.queued,
+            )
+            .values(status=CommandStatus.cancelled, terminal_at=at, error=reason)
+            .returning(GpuSessionCommand)
+            .execution_options(populate_existing=True)
+        )
+        await self._session.flush()
+        return result.scalars().all()
+
+    async def has_non_terminal_by_session_and_kind(
+        self, session_id: UUID, kind: OperationKind | str
+    ) -> bool:
+        """Return whether a session still has work of this kind in progress."""
+        kind_value = kind.value if isinstance(kind, OperationKind) else kind
+        result = await self._session.execute(
+            select(
+                select(GpuSessionCommand.id)
+                .where(
+                    GpuSessionCommand.session_id == session_id,
+                    GpuSessionCommand.kind == kind_value,
+                    GpuSessionCommand.status.notin_(tuple(TERMINAL_COMMAND_STATUSES)),
+                )
+                .exists()
+            )
+        )
+        return bool(result.scalar())
 
     async def cancel_for_session(
         self, session_id: UUID, *, at: datetime, reason: str

@@ -1022,6 +1022,11 @@ async def test_resolve_restart_outcome_success_activates_every_member(
         model_type="aisha-video",
         pending_restart=True,
     )
+    await db_session.execute(
+        update(GpuSessionDeployment)
+        .where(GpuSessionDeployment.id.in_((d1.id, d2.id)))
+        .values(routing_suspended=True)
+    )
     at = datetime.now(UTC)
 
     updated = await deployment_repo.resolve_restart_outcome([d1.id, d2.id], succeeded=True, at=at)
@@ -1032,6 +1037,7 @@ async def test_resolve_restart_outcome_success_activates_every_member(
         assert d.status == DeploymentStatus.active
         assert d.pending_restart is False
         assert d.activated_at == at
+        assert d.routing_suspended is False
 
 
 async def test_resolve_restart_outcome_failure_fails_every_member_no_retry(
@@ -1046,6 +1052,11 @@ async def test_resolve_restart_outcome_failure_fails_every_member_no_retry(
     deployment = await make_deployment(
         session=session, status=DeploymentStatus.deploying, is_primary=False, pending_restart=True
     )
+    await db_session.execute(
+        update(GpuSessionDeployment)
+        .where(GpuSessionDeployment.id == deployment.id)
+        .values(routing_suspended=True)
+    )
     at = datetime.now(UTC)
 
     updated = await deployment_repo.resolve_restart_outcome([deployment.id], succeeded=False, at=at)
@@ -1055,6 +1066,7 @@ async def test_resolve_restart_outcome_failure_fails_every_member_no_retry(
     assert deployment.status == DeploymentStatus.failed
     assert deployment.pending_restart is False
     assert deployment.removed_at == at
+    assert deployment.routing_suspended is False
 
 
 async def test_list_removing_and_resolve_removal_outcome_success(

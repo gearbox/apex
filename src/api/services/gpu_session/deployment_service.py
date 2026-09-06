@@ -281,15 +281,22 @@ class GpuSessionDeploymentService:
             # Supplying the active transaction makes the queue write atomic with
             # the state transition.  Any enqueue exception rolls both back, which
             # is the active-state compensation required for a retry to remain safe.
-            command = await self._command_service.enqueue(
-                session_id=session_id,
-                product_id=product_id,
-                command=RemovalCommand(
-                    bundle=deployment.bundle_name, retain_bundles=tuple(retain_bundles)
-                ),
-                deployment_id=deployment.id,
-                db=db,
-            )
+            try:
+                command = await self._command_service.enqueue(
+                    session_id=session_id,
+                    product_id=product_id,
+                    command=RemovalCommand(
+                        bundle=deployment.bundle_name, retain_bundles=tuple(retain_bundles)
+                    ),
+                    deployment_id=deployment.id,
+                    db=db,
+                )
+            except CommandEnqueueSessionError as exc:
+                raise InvalidSessionStateError(
+                    f"Session {session_id} became unavailable while removing: {exc}",
+                    current_status="unknown",
+                    operation="remove",
+                ) from exc
 
         deployment.status = DeploymentStatus.removing
         logger.info(

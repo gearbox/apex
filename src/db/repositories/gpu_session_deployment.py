@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 # These queries run once per orchestration tick across every tenant. Oldest-first
 # bounded pages keep one tick's database work flat while eventually reaching every row.
 _ORCHESTRATION_CANDIDATE_LIMIT = 100
+# A session normally has one deployment per supported model.  This guard is
+# deliberately generous, but prevents an invariant violation from turning the
+# unbounded per-session cohort query into an unbounded worker round trip.
+RESTART_COHORT_SANITY_LIMIT = 1_000
 
 # CO2 advisory-lock keyspaces: command claims hash the bare session id (see
 # GPU_SESSION_COMMAND_CLAIM_ADVISORY_LOCK_NAMESPACE in gpu_session_command.py).
@@ -283,9 +287,9 @@ class GpuSessionDeploymentRepository:
             values["pending_restart_since"] = None
             values["restart_operation_id"] = None
             # S5: a deployment suspended for an in-progress restart must not
-            # carry that suspension into a terminal state forever — this is the
-            # third of the three routing_suspended-clearing sites alongside a
-            # resolved restart cycle's success/failure paths.
+            # carry that suspension into a terminal state forever. The normal
+            # restart path and its orphan reconciler separately release active
+            # non-members such as the primary deployment.
             values["routing_suspended"] = False
 
         result = cast(
@@ -393,11 +397,12 @@ class GpuSessionDeploymentRepository:
 
     async def clear_routing_suspended_for_session(self, session_id: UUID) -> int:
         """S5/S6: release a whole-session routing suspension once its restart
-        cycle resolves (success or failure alike). Session-scoped rather than
-        limited to the cycle's own deployment ids: suspension was applied to
-        every active deployment on the session (S5), including ones that were
-        already active and are not part of the cycle being resolved (e.g. the
-        primary), so releasing it must cover the same set.
+        cycle resolves and no claimed sibling can still restart the node.
+        Session-scoped rather than limited to the cycle's own deployment ids:
+        suspension was applied to every active deployment on the session (S5),
+        including ones that were already active and are not part of the cycle
+        being resolved (e.g. the primary), so releasing it must cover the same
+        set.
         """
         result = cast(
             "CursorResult[Any]",
@@ -554,6 +559,10 @@ class GpuSessionDeploymentRepository:
         carries the same batch-readiness predicate as the global scan (N2), including
         the batch_id IS NOT NULL exclusion (S3), so every row it returns is already
         known-ready — the caller no longer needs to re-derive readiness in Python.
+
+        Fetch one row beyond the generous sanity ceiling.  The worker rejects an
+        oversized cohort rather than truncating it: activating a partial cohort
+        would leave some readiness markers unverified.
         """
         result = await self._session.execute(
             select(GpuSessionDeployment)
@@ -565,6 +574,7 @@ class GpuSessionDeploymentRepository:
                 ~self._batch_has_non_terminal_command(),
             )
             .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
+            .limit(RESTART_COHORT_SANITY_LIMIT + 1)
         )
         return result.scalars().all()
 
@@ -677,9 +687,19 @@ class GpuSessionDeploymentRepository:
         if not deployment_ids:
             return 0
         values: dict[str, Any] = (
-            {"status": DeploymentStatus.active, "pending_restart": False, "activated_at": at}
+            {
+                "status": DeploymentStatus.active,
+                "pending_restart": False,
+                "activated_at": at,
+                "routing_suspended": False,
+            }
             if succeeded
-            else {"status": DeploymentStatus.failed, "pending_restart": False, "removed_at": at}
+            else {
+                "status": DeploymentStatus.failed,
+                "pending_restart": False,
+                "removed_at": at,
+                "routing_suspended": False,
+            }
         )
         result = cast(
             "CursorResult[Any]",
@@ -691,6 +711,87 @@ class GpuSessionDeploymentRepository:
                     GpuSessionDeployment.pending_restart.is_(True),
                 )
                 .values(**values)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount
+
+    async def list_orphaned_routing_suspension_session_ids(self) -> Sequence[UUID]:
+        """Find sessions whose restart suspension no longer has an owner.
+
+        A suspension is owned while a deployment is pending restart or a restart
+        command is queued/claimed.  Step 4 normally releases it; this query is the
+        recovery backstop for a member that reaches a terminal state another way.
+        """
+        pending = aliased(GpuSessionDeployment)
+        pending_restart_exists = (
+            select(pending.id)
+            .where(
+                pending.session_id == GpuSessionDeployment.session_id,
+                pending.pending_restart.is_(True),
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
+        non_terminal_restart_exists = (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.session_id == GpuSessionDeployment.session_id,
+                GpuSessionCommand.kind == OperationKind.comfyui_restart,
+                GpuSessionCommand.status.notin_(tuple(TERMINAL_COMMAND_STATUSES)),
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
+        result = await self._session.execute(
+            select(GpuSessionDeployment.session_id)
+            .where(
+                GpuSessionDeployment.routing_suspended.is_(True),
+                ~pending_restart_exists,
+                ~non_terminal_restart_exists,
+            )
+            .distinct()
+        )
+        return result.scalars().all()
+
+    async def clear_orphaned_routing_suspension(self, session_id: UUID) -> int:
+        """Release an orphaned suspension if it still has no restart owner.
+
+        The predicates are repeated on the UPDATE rather than trusting the prior
+        candidate read, so a concurrent restart enqueue cannot be reopened by the
+        reconciler between detection and repair.
+        """
+        pending = aliased(GpuSessionDeployment)
+        pending_restart_exists = (
+            select(pending.id)
+            .where(
+                pending.session_id == GpuSessionDeployment.session_id,
+                pending.pending_restart.is_(True),
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
+        non_terminal_restart_exists = (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.session_id == GpuSessionDeployment.session_id,
+                GpuSessionCommand.kind == OperationKind.comfyui_restart,
+                GpuSessionCommand.status.notin_(tuple(TERMINAL_COMMAND_STATUSES)),
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.session_id == session_id,
+                    GpuSessionDeployment.routing_suspended.is_(True),
+                    ~pending_restart_exists,
+                    ~non_terminal_restart_exists,
+                )
+                .values(routing_suspended=False)
             ),
         )
         await self._session.flush()

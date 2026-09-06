@@ -26,7 +26,7 @@ import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -36,7 +36,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.schemas.gpu_session import OperationEventBody
 from src.api.services.gpu_session.command_payload import ProvisionCommand
-from src.api.services.gpu_session.command_service import GpuSessionCommandService
+from src.api.services.gpu_session.command_service import (
+    CommandEnqueueSessionError,
+    GpuSessionCommandService,
+)
 from src.api.services.gpu_session.deployment_orchestration_worker import (
     _ALREADY_REMOVED_ERROR_MARKER,
     DeploymentOrchestrationWorker,
@@ -61,18 +64,20 @@ from src.core.enums import (
 )
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_command import GpuSessionCommand
 from src.db.models.gpu_session_deployment import GpuSessionDeployment
 from src.db.models.storage import GenerationJob
 from src.db.models.user import User
 from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
-from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
+from src.db.repositories.gpu_session_deployment import (
+    RESTART_COHORT_SANITY_LIMIT,
+    GpuSessionDeploymentRepository,
+)
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
-
-    from src.db.models.gpu_session_command import GpuSessionCommand
 
 
 class _StubSettings:
@@ -745,6 +750,43 @@ async def test_remove_enqueue_failure_rolls_the_deployment_back_to_active(
     assert command is None
 
 
+async def test_remove_converts_terminal_session_enqueue_race_to_invalid_state(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3: a terminal-session race is a normal 409, not a raw command-service error."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
+    target = await _create_deployment(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        is_primary=False,
+        model_type=ModelType.AISHA_VIDEO.value,
+    )
+    monkeypatch.setattr(
+        command_service,
+        "enqueue",
+        AsyncMock(side_effect=CommandEnqueueSessionError("GPU session became terminal")),
+    )
+
+    with pytest.raises(InvalidSessionStateError, match="became unavailable") as exc_info:
+        await deployment_service.remove(
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type=ModelType.AISHA_VIDEO,
+            force=False,
+        )
+
+    assert exc_info.value.operation == "remove"
+    target = await _get_deployment(orchestration_session_factory, target.id)
+    assert target.status == DeploymentStatus.active
+
+
 async def test_two_concurrent_non_forced_removals_leave_one_active(
     orchestration_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1047,6 +1089,94 @@ async def test_pending_restart_missing_batch_id_is_failed_not_skipped(
             session
         ).list_pending_restart_awaiting_operation()
     assert deployment.id not in {candidate.id for candidate in candidates}
+
+
+async def test_orphaned_routing_suspension_is_released_after_missing_batch_reaper(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """T2: a terminal outcome outside step 4 cannot strand session-wide routing."""
+    settings = _StubSettings()
+    worker = _worker(
+        orchestration_session_factory,
+        _command_service(orchestration_session_factory, settings),
+        settings,
+    )
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    primary = await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
+    pending = await _create_deployment(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type=ModelType.AISHA_VIDEO.value,
+        pending_restart=True,
+    )
+    async with orchestration_session_factory() as session:
+        await session.execute(
+            update(GpuSessionDeployment)
+            .where(GpuSessionDeployment.id == primary.id)
+            .values(routing_suspended=True)
+        )
+        await session.commit()
+
+    await worker.run_once()
+
+    pending = await _get_deployment(orchestration_session_factory, pending.id)
+    primary = await _get_deployment(orchestration_session_factory, primary.id)
+    assert pending.status == DeploymentStatus.failed
+    assert primary.routing_suspended is False
+
+
+async def test_implausible_restart_cohort_is_skipped_without_enqueuing(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T5: never silently truncate a restart cohort to make the worker progress."""
+    from src.api.services.gpu_session import deployment_orchestration_worker
+
+    settings = _StubSettings()
+    command_service = AsyncMock()
+    worker = _worker(orchestration_session_factory, command_service, settings)  # type: ignore[arg-type]
+    session_id = uuid4()
+    log = MagicMock()
+
+    async def list_candidates(
+        self: GpuSessionDeploymentRepository,
+    ) -> list[MagicMock]:
+        del self
+        candidate = MagicMock()
+        candidate.session_id = session_id
+        return [candidate]
+
+    async def list_members(
+        self: GpuSessionDeploymentRepository, candidate_session_id: Any
+    ) -> list[MagicMock]:
+        del self
+        assert candidate_session_id == session_id
+        return [MagicMock()] * (RESTART_COHORT_SANITY_LIMIT + 1)
+
+    monkeypatch.setattr(
+        GpuSessionDeploymentRepository,
+        "list_pending_restart_awaiting_operation",
+        list_candidates,
+    )
+    monkeypatch.setattr(
+        GpuSessionDeploymentRepository,
+        "list_pending_restart_awaiting_operation_for_session",
+        list_members,
+    )
+    monkeypatch.setattr(worker, "_reap_pending_restart_missing_batch_id", AsyncMock())
+    monkeypatch.setattr(deployment_orchestration_worker, "logger", log)
+
+    await worker._process_restart_enqueue()
+
+    command_service.enqueue.assert_not_awaited()
+    log.error.assert_called_once_with(
+        "gpu_session.deployment.restart_cohort_implausible",
+        session_id=str(session_id),
+        count=RESTART_COHORT_SANITY_LIMIT + 1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1486,6 +1616,13 @@ async def test_restart_success_defers_activation_while_a_sibling_restart_is_pend
     video_deployment, lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
         orchestration_session_factory, worker, deployment_service, gpu_session, user
     )
+    async with orchestration_session_factory() as session:
+        assert (
+            await GpuSessionDeploymentRepository(session).get_routable(
+                user.id, "vex", ModelType.AISHA_IMAGE.value
+            )
+            is None
+        )
     video_restart_command = await _get_command_by_operation(
         orchestration_session_factory, video_deployment.restart_operation_id
     )
@@ -1536,12 +1673,16 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
     worker = _worker(orchestration_session_factory, command_service, settings)
     user = await _create_user(orchestration_session_factory)
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    primary = await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
 
     video_deployment, lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
         orchestration_session_factory, worker, deployment_service, gpu_session, user
     )
     video_restart_command = await _get_command_by_operation(
         orchestration_session_factory, video_deployment.restart_operation_id
+    )
+    lite_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, lite_deployment.restart_operation_id
     )
     # Only the video cohort's restart finishes this tick — with a failure — while
     # lite's restart command stays queued.
@@ -1562,6 +1703,99 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
     # node classes ComfyUI has loaded, so nothing from this cycle is routable.
     assert lite_deployment.status == DeploymentStatus.failed
     assert lite_deployment.pending_restart is False
+    lite_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, lite_deployment.restart_operation_id
+    )
+    assert lite_restart_command.status == CommandStatus.cancelled
+
+    # T1: cancelling the queued sibling means no restart remains that could
+    # take ComfyUI down, so the session-wide primary suspension clears in the
+    # same failed-cycle transaction.
+    primary = await _get_deployment(orchestration_session_factory, primary.id)
+    assert primary.routing_suspended is False
+    async with orchestration_session_factory() as session:
+        routable = await GpuSessionDeploymentRepository(session).get_routable(
+            user.id, "vex", ModelType.AISHA_IMAGE.value
+        )
+    assert routable is not None
+
+
+async def test_failed_restart_cycle_keeps_routing_suspended_for_claimed_sibling(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """T1/T2: a claimed sibling can still restart the node, so it owns the suspension.
+
+    Once it becomes terminal, the reconciler releases the orphaned suspension;
+    it must not do so while the command is non-terminal.
+    """
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    primary = await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
+
+    video_deployment, lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
+        orchestration_session_factory, worker, deployment_service, gpu_session, user
+    )
+    async with orchestration_session_factory() as session:
+        assert (
+            await GpuSessionDeploymentRepository(session).get_routable(
+                user.id, "vex", ModelType.AISHA_IMAGE.value
+            )
+            is None
+        )
+    video_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, video_deployment.restart_operation_id
+    )
+    lite_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, lite_deployment.restart_operation_id
+    )
+    async with orchestration_session_factory() as session:
+        await session.execute(
+            update(GpuSessionCommand)
+            .where(GpuSessionCommand.id == lite_restart_command.id)
+            .values(status=CommandStatus.claimed)
+        )
+        await session.commit()
+    await _mark_terminal(
+        orchestration_session_factory,
+        video_restart_command.id,
+        status=CommandStatus.failed,
+        error="node agent crashed",
+    )
+
+    await worker.run_once()
+
+    primary = await _get_deployment(orchestration_session_factory, primary.id)
+    lite_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, lite_deployment.restart_operation_id
+    )
+    assert lite_restart_command.status == CommandStatus.claimed
+    assert primary.routing_suspended is True
+    async with orchestration_session_factory() as session:
+        assert (
+            await GpuSessionDeploymentRepository(session).get_routable(
+                user.id, "vex", ModelType.AISHA_IMAGE.value
+            )
+            is None
+        )
+
+    await _mark_terminal(
+        orchestration_session_factory, lite_restart_command.id, status=CommandStatus.succeeded
+    )
+    await worker.run_once()
+
+    primary = await _get_deployment(orchestration_session_factory, primary.id)
+    assert primary.routing_suspended is False
+    async with orchestration_session_factory() as session:
+        assert (
+            await GpuSessionDeploymentRepository(session).get_routable(
+                user.id, "vex", ModelType.AISHA_IMAGE.value
+            )
+            is not None
+        )
 
 
 async def test_restart_cycle_fails_every_cohort_when_a_sibling_restart_fails(
