@@ -107,11 +107,21 @@ async def publish_deployment_event(
 
     ``operation`` is whichever operation currently governs the deployment's progress
     (its provision or restart operation) — pass it when already loaded in the same
-    transaction as the state write; omit it when a fresh fetch isn't worth the round
-    trip (phase/progress are None on a just-created operation anyway).
+    tick as the state write, so ``operation_phase``/``operation_progress`` reflect
+    the node's own telemetry. When omitted, ``operation_id`` still falls back to
+    ``deployment.restart_operation_id or deployment.provision_operation_id`` (N4)
+    so every caller's event carries an id the client can poll, even one that never
+    loads the operation row — restart_operation_id takes precedence because, once
+    it's set, the restart (not the original provision) is what currently governs
+    the deployment's progress.
     """
     if event_bus is None:
         return
+    operation_id = (
+        operation.id
+        if operation is not None
+        else deployment.restart_operation_id or deployment.provision_operation_id
+    )
     try:
         await asyncio.wait_for(
             event_bus.publish(
@@ -123,7 +133,7 @@ async def publish_deployment_event(
                     model_type=deployment.model_type,
                     status=str(deployment.status),
                     pending_restart=deployment.pending_restart,
-                    operation_id=operation.id if operation is not None else None,
+                    operation_id=operation_id,
                     operation_phase=operation.phase if operation is not None else None,
                     operation_progress=operation.progress if operation is not None else None,
                     error_message=error_message,

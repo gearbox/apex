@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import BigInteger, Text, func, select, update
+from sqlalchemy import BigInteger, Exists, Text, func, select, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.orm import aliased
 
 from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
+    TERMINAL_COMMAND_STATUSES,
     TERMINAL_GPU_SESSION_STATUSES,
     DeploymentStatus,
     GpuSessionStatus,
@@ -396,13 +397,31 @@ class GpuSessionDeploymentRepository:
         """P4 orchestration worker step 1 candidates: siblings whose provision command
         may have finished. is_primary is excluded — the primary's 'deploying' -> 'active'
         transition is owned entirely by GpuProvisioningWorker._transition (session
-        bootstrap/resume), never by a P3 command."""
+        bootstrap/resume), never by a P3 command.
+
+        Requires a terminal bundle_provision command to exist (N2). D31 only cancels
+        commands on a terminal *session* transition, so a session paused mid-attach
+        leaves its provision command queued with no agent to claim it — without this
+        predicate that row would sit at the head of this bounded page forever,
+        starving every newer deployment behind it.
+        """
+        terminal_provision_exists = (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.deployment_id == GpuSessionDeployment.id,
+                GpuSessionCommand.kind == OperationKind.bundle_provision,
+                GpuSessionCommand.status.in_(tuple(TERMINAL_COMMAND_STATUSES)),
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
         result = await self._session.execute(
             select(GpuSessionDeployment)
             .where(
                 GpuSessionDeployment.status == DeploymentStatus.deploying,
                 GpuSessionDeployment.pending_restart.is_(False),
                 GpuSessionDeployment.is_primary.is_(False),
+                terminal_provision_exists,
             )
             .order_by(GpuSessionDeployment.created_at.asc())
             .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
@@ -438,12 +457,21 @@ class GpuSessionDeploymentRepository:
         return result.rowcount == 1
 
     async def list_pending_restart_awaiting_operation(self) -> Sequence[GpuSessionDeployment]:
-        """P4 orchestration worker step 2 candidates: provisioned, no restart enqueued yet."""
+        """P4 orchestration worker step 2 candidates: provisioned, no restart enqueued yet.
+
+        Excludes a row whose batch still has a non-terminal command (N2) — the same
+        condition the worker used to evaluate in Python, per-batch, after fetching
+        every row on the page. A batch stuck mid-provision-retry (or otherwise
+        incomplete) can no longer occupy a slot on this bounded page while
+        contributing nothing, which is what let a large backlog starve newer,
+        genuinely ready batches.
+        """
         result = await self._session.execute(
             select(GpuSessionDeployment)
             .where(
                 GpuSessionDeployment.pending_restart.is_(True),
                 GpuSessionDeployment.restart_operation_id.is_(None),
+                ~self._batch_has_non_terminal_command(),
             )
             .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
             .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
@@ -453,11 +481,14 @@ class GpuSessionDeploymentRepository:
     async def list_pending_restart_awaiting_operation_for_session(
         self, session_id: UUID
     ) -> Sequence[GpuSessionDeployment]:
-        """Return the complete restart cohort for a session selected by the bounded scan.
+        """Return the complete restart-ready cohort for a session selected by the bounded scan.
 
         The global scan is deliberately capped, but a restart must cover every ready
         deployment on a selected session. This narrow follow-up query prevents a
-        large global backlog from splitting one session's restart across ticks.
+        large global backlog from splitting one session's restart across ticks, and
+        carries the same batch-readiness predicate as the global scan (N2) so every
+        row it returns is already known-ready — the caller no longer needs to
+        re-derive readiness in Python.
         """
         result = await self._session.execute(
             select(GpuSessionDeployment)
@@ -465,10 +496,29 @@ class GpuSessionDeploymentRepository:
                 GpuSessionDeployment.session_id == session_id,
                 GpuSessionDeployment.pending_restart.is_(True),
                 GpuSessionDeployment.restart_operation_id.is_(None),
+                ~self._batch_has_non_terminal_command(),
             )
             .order_by(GpuSessionDeployment.pending_restart_since.asc().nulls_first())
         )
         return result.scalars().all()
+
+    @staticmethod
+    def _batch_has_non_terminal_command() -> Exists:
+        """Correlated EXISTS: this row's batch still has a queued/claimed command.
+
+        A NULL batch_id never matches the correlation (SQL NULL = NULL is unknown),
+        so a row with no batch_id — an invariant violation the worker logs and
+        skips — is left for the caller to handle rather than silently filtered here.
+        """
+        return (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.batch_id == GpuSessionDeployment.batch_id,
+                GpuSessionCommand.status.notin_(tuple(TERMINAL_COMMAND_STATUSES)),
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
 
     async def set_restart_pointer(
         self, deployment_ids: Sequence[UUID], *, operation_id: UUID
@@ -534,10 +584,30 @@ class GpuSessionDeploymentRepository:
         return result.rowcount
 
     async def list_removing(self) -> Sequence[GpuSessionDeployment]:
-        """P4 orchestration worker step 4 candidates: removal in flight."""
+        """P4 orchestration worker step 4 candidates: removal in flight with a
+        resolvable outcome.
+
+        Requires a terminal bundle_removal command to exist (N2), for the same
+        starvation reason as list_deploying_awaiting_provision_result: a removal
+        command stranded queued by a mid-removal session pause must not occupy a
+        slot on this bounded page forever.
+        """
+        terminal_removal_exists = (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.deployment_id == GpuSessionDeployment.id,
+                GpuSessionCommand.kind == OperationKind.bundle_removal,
+                GpuSessionCommand.status.in_(tuple(TERMINAL_COMMAND_STATUSES)),
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
         result = await self._session.execute(
             select(GpuSessionDeployment)
-            .where(GpuSessionDeployment.status == DeploymentStatus.removing)
+            .where(
+                GpuSessionDeployment.status == DeploymentStatus.removing,
+                terminal_removal_exists,
+            )
             .order_by(GpuSessionDeployment.created_at.asc())
             .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
         )
@@ -607,6 +677,72 @@ class GpuSessionDeploymentRepository:
         await self._session.flush()
         return result.rowcount == 1
 
+    @staticmethod
+    def _provision_command_exists() -> Exists:
+        """Correlated EXISTS: a bundle_provision command was persisted for this deployment.
+
+        Used by both the pointer-recovery candidate query and the orphan reaper (N3)
+        so the reaper's predicate states, in SQL, exactly the condition its name
+        implies — "no command" — rather than relying only on recovery running first
+        in the same tick.
+        """
+        return (
+            select(GpuSessionCommand.id)
+            .where(
+                GpuSessionCommand.deployment_id == GpuSessionDeployment.id,
+                GpuSessionCommand.kind == OperationKind.bundle_provision,
+            )
+            .correlate(GpuSessionDeployment)
+            .exists()
+        )
+
+    async def list_deployments_missing_provision_pointer(self) -> Sequence[GpuSessionDeployment]:
+        """N3 pointer-recovery candidates: deploying, no pointer, might have a real command.
+
+        attach's create() commits in its own transaction before enqueue_batch's
+        commit and set_provision_pointer's separate transaction — a process death
+        between the two leaves a deployment with a real, queued provision command
+        but a null provision_operation_id. Unlike the orphan reaper below, this scan
+        has no grace period: recovery is a no-op guarded UPDATE when no command
+        exists yet (the normal millisecond-sized window), so running it every tick
+        is safe and lets a real pointer loss heal on the very next tick rather than
+        waiting out the reaper's grace window.
+        """
+        result = await self._session.execute(
+            select(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.status == DeploymentStatus.deploying,
+                GpuSessionDeployment.is_primary.is_(False),
+                GpuSessionDeployment.provision_operation_id.is_(None),
+            )
+            .order_by(GpuSessionDeployment.created_at.asc())
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
+        )
+        return result.scalars().all()
+
+    async def recover_provision_pointer(
+        self, deployment_id: UUID, *, operation_id: UUID, batch_id: str | None
+    ) -> bool:
+        """N3: repair a deployment's provision pointer from its real command row.
+
+        Guarded on provision_operation_id IS NULL so a concurrent legitimate write
+        (the normal attach path finishing its own set_provision_pointer) always wins
+        over this repair.
+        """
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GpuSessionDeployment)
+                .where(
+                    GpuSessionDeployment.id == deployment_id,
+                    GpuSessionDeployment.provision_operation_id.is_(None),
+                )
+                .values(provision_operation_id=operation_id, batch_id=batch_id)
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
     async def list_orphaned_deployments_without_provision_command(
         self, *, created_before: datetime
     ) -> Sequence[GpuSessionDeployment]:
@@ -615,6 +751,11 @@ class GpuSessionDeploymentRepository:
         The grace period is owned by the caller. It leaves the normal, millisecond-sized
         create -> enqueue -> provision-pointer window alone while repairing a committed
         deployment that can otherwise permanently occupy a uniqueness slot.
+
+        NOT EXISTS a bundle_provision command for this deployment (N3): pointer
+        recovery runs earlier in the same tick, but this predicate should state what
+        it means on its own — a deployment with a real, queued command must never be
+        reaped just because its pointer write was lost.
         """
         result = await self._session.execute(
             select(GpuSessionDeployment)
@@ -623,6 +764,7 @@ class GpuSessionDeploymentRepository:
                 GpuSessionDeployment.is_primary.is_(False),
                 GpuSessionDeployment.provision_operation_id.is_(None),
                 GpuSessionDeployment.created_at < created_before,
+                ~self._provision_command_exists(),
             )
             .order_by(GpuSessionDeployment.created_at.asc())
             .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
@@ -643,6 +785,7 @@ class GpuSessionDeploymentRepository:
                     GpuSessionDeployment.is_primary.is_(False),
                     GpuSessionDeployment.provision_operation_id.is_(None),
                     GpuSessionDeployment.created_at < created_before,
+                    ~self._provision_command_exists(),
                 )
                 .values(status=DeploymentStatus.failed, removed_at=at)
             ),

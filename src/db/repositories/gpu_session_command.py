@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import BigInteger, Text, case, func, select, update
 from sqlalchemy import cast as sql_cast
 
-from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, CommandStatus, OperationKind
+from src.core.enums import (
+    TERMINAL_COMMAND_STATUSES,
+    TERMINAL_GPU_SESSION_STATUSES,
+    CommandStatus,
+    OperationKind,
+)
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
 
@@ -111,6 +116,30 @@ class GpuSessionCommandRepository:
                 GpuSessionCommand.kind == kind_value,
             )
             .order_by(GpuSessionCommand.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_non_terminal_by_session_and_kind(
+        self, session_id: UUID, kind: OperationKind | str
+    ) -> GpuSessionCommand | None:
+        """N1: does this session have a queued/claimed command of this kind right now?
+
+        Used to gate restart-outcome activation on the whole session, not just the
+        cohort that just finished: the command queue serializes one comfyui_restart
+        at a time per session, so a second restart can still be queued or claimed
+        while an earlier one has already gone terminal. Activating a deployment
+        while a sibling restart is pending would make it briefly routable right
+        before ComfyUI restarts underneath it.
+        """
+        kind_value = kind.value if isinstance(kind, OperationKind) else kind
+        result = await self._session.execute(
+            select(GpuSessionCommand)
+            .where(
+                GpuSessionCommand.session_id == session_id,
+                GpuSessionCommand.kind == kind_value,
+                GpuSessionCommand.status.notin_(tuple(TERMINAL_COMMAND_STATUSES)),
+            )
             .limit(1)
         )
         return result.scalar_one_or_none()

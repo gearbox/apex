@@ -145,11 +145,14 @@ def _worker(
     session_factory: async_sessionmaker[AsyncSession],
     command_service: GpuSessionCommandService,
     settings: _StubSettings,
+    *,
+    event_bus: Any = None,
 ) -> DeploymentOrchestrationWorker:
     return DeploymentOrchestrationWorker(
         session_factory=session_factory,
         command_service=command_service,
         settings=settings,  # type: ignore[arg-type]
+        event_bus=event_bus,
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
     )
@@ -535,6 +538,54 @@ async def test_orphan_reaper_fails_old_deployment_without_provision_command(
             )
             is None
         )
+
+
+async def test_orphan_reaper_recovers_pointer_instead_of_failing_when_command_exists(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """N3: attach's create() and enqueue_batch() commit in separate transactions —
+    a process death between them can leave a real, queued provision command with
+    the deployment's provision_operation_id still null. That must be repaired, not
+    reaped: the node may already be downloading weights for it."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    deployment = await _create_deployment(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type=ModelType.AISHA_VIDEO.value,
+    )
+    batch_id = f"batch-{uuid4().hex}"
+    command = await _create_raw_batch_command(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        deployment=deployment,
+        batch_id=batch_id,
+        batch_index=0,
+        batch_total=1,
+    )
+
+    # Age the row past the reaper's grace window — recovery must still win even
+    # though the reaper's own predicate would otherwise be ready to fire.
+    async with orchestration_session_factory() as session:
+        await session.execute(
+            update(GpuSessionDeployment)
+            .where(GpuSessionDeployment.id == deployment.id)
+            .values(created_at=datetime.now(UTC) - timedelta(minutes=2))
+        )
+        await session.commit()
+
+    await worker.run_once()
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.status == DeploymentStatus.deploying
+    assert deployment.removed_at is None
+    assert deployment.provision_operation_id == command.operation_id
+    assert deployment.batch_id == batch_id
 
 
 # ---------------------------------------------------------------------------
@@ -1252,6 +1303,185 @@ async def test_different_readiness_markers_get_independent_restart_outcomes(
     lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
     assert video_deployment.status == DeploymentStatus.active
     assert lite_deployment.status == DeploymentStatus.failed
+
+
+# ---------------------------------------------------------------------------
+# N1: a completed cohort must not activate while a sibling restart is pending
+# ---------------------------------------------------------------------------
+
+
+async def _attach_two_marker_cohorts_and_enqueue_restarts(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+    worker: DeploymentOrchestrationWorker,
+    deployment_service: GpuSessionDeploymentService,
+    gpu_session: GpuSession,
+    user: User,
+) -> tuple[GpuSessionDeployment, GpuSessionDeployment]:
+    """Shared N1 setup: two independent readiness-marker cohorts on one session,
+    both provisioned and both with a restart already enqueued (but not yet
+    terminal) — the point at which the two cohorts' restart outcomes can race."""
+    video, lite = await asyncio.gather(
+        deployment_service.attach(
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type=ModelType.AISHA_VIDEO,
+        ),
+        deployment_service.attach(
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type=ModelType.AISHA_IMAGE_LITE,
+        ),
+    )
+    video_deployment, video_operation_id = video
+    lite_deployment, lite_operation_id = lite
+    video_command = await _get_command_by_operation(
+        orchestration_session_factory, video_operation_id
+    )
+    lite_command = await _get_command_by_operation(orchestration_session_factory, lite_operation_id)
+    await _mark_terminal(
+        orchestration_session_factory, video_command.id, status=CommandStatus.succeeded
+    )
+    await _mark_terminal(
+        orchestration_session_factory, lite_command.id, status=CommandStatus.succeeded
+    )
+
+    await worker.run_once()  # enqueues one restart command per marker cohort
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
+    assert video_deployment.restart_operation_id is not None
+    assert lite_deployment.restart_operation_id is not None
+    return video_deployment, lite_deployment
+
+
+async def test_restart_success_defers_activation_while_a_sibling_restart_is_pending(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """N1: R3's per-marker cohorts made this possible — one cohort's restart can
+    finish while a sibling cohort's restart for the same session is still queued.
+    Activating the finished cohort immediately would make it briefly routable
+    right before the sibling restart takes ComfyUI down again."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+
+    video_deployment, lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
+        orchestration_session_factory, worker, deployment_service, gpu_session, user
+    )
+    video_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, video_deployment.restart_operation_id
+    )
+    # Only the video cohort's restart finishes this tick — lite's stays queued.
+    await _mark_terminal(
+        orchestration_session_factory, video_restart_command.id, status=CommandStatus.succeeded
+    )
+
+    await worker.run_once()
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    assert video_deployment.status == DeploymentStatus.deploying  # deferred, not activated
+    assert video_deployment.pending_restart is True
+    async with orchestration_session_factory() as session:
+        routable = await GpuSessionDeploymentRepository(session).get_routable(
+            user.id, "vex", ModelType.AISHA_VIDEO.value
+        )
+    assert routable is None  # and therefore not routable either
+
+    # Once the sibling restart also goes terminal, the deferred cohort clears on
+    # the very next tick.
+    lite_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, lite_deployment.restart_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory, lite_restart_command.id, status=CommandStatus.succeeded
+    )
+
+    await worker.run_once()
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    lite_deployment = await _get_deployment(orchestration_session_factory, lite_deployment.id)
+    assert video_deployment.status == DeploymentStatus.active
+    assert lite_deployment.status == DeploymentStatus.active
+
+
+async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibling(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """N1's activation gate applies only to the success path: a failed cohort is
+    never going to become routable, so there is nothing to protect by delaying it
+    behind an unrelated sibling restart."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+
+    video_deployment, _lite_deployment = await _attach_two_marker_cohorts_and_enqueue_restarts(
+        orchestration_session_factory, worker, deployment_service, gpu_session, user
+    )
+    video_restart_command = await _get_command_by_operation(
+        orchestration_session_factory, video_deployment.restart_operation_id
+    )
+    # Only the video cohort's restart finishes this tick — with a failure — while
+    # lite's restart command stays queued.
+    await _mark_terminal(
+        orchestration_session_factory,
+        video_restart_command.id,
+        status=CommandStatus.failed,
+        error="node agent crashed",
+    )
+
+    await worker.run_once()
+
+    video_deployment = await _get_deployment(orchestration_session_factory, video_deployment.id)
+    assert video_deployment.status == DeploymentStatus.failed  # not deferred
+    assert video_deployment.pending_restart is False
+
+
+# ---------------------------------------------------------------------------
+# N4: deployment SSE events carry an operation id
+# ---------------------------------------------------------------------------
+
+
+async def test_restart_enqueued_event_carries_operation_id(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """N4: the client needs operation_id on the restart-enqueued event to poll the
+    operation it's waiting on, instead of sitting on 'pending restart' until it
+    independently refetches the session."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    event_bus = AsyncMock()
+    worker = _worker(orchestration_session_factory, command_service, settings, event_bus=event_bus)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+
+    deployment, operation_id = await deployment_service.attach(
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type=ModelType.AISHA_VIDEO,
+    )
+    command = await _get_command_by_operation(orchestration_session_factory, operation_id)
+    await _mark_terminal(orchestration_session_factory, command.id, status=CommandStatus.succeeded)
+
+    event_bus.reset_mock()
+    await worker.run_once()
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.restart_operation_id is not None
+
+    published_operation_ids = {
+        call.kwargs["payload"].operation_id for call in event_bus.publish.call_args_list
+    }
+    assert deployment.restart_operation_id in published_operation_ids
 
 
 async def test_oldest_ready_deployment_sets_the_restart_drain_deadline(

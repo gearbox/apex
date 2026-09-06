@@ -6,8 +6,9 @@ the P4 counterpart to GpuSessionCommandSweepWorker: each tick it looks for deplo
 whose current command finished and advances them, exactly mirroring the shape (and the
 LeaderLease) of every other PeriodicWorker in this codebase.
 
-Five independent steps per tick, in this order so a batch that finishes and drains in
+Six independent steps per tick, in this order so a batch that finishes and drains in
 the same tick doesn't wait a full interval for its restart:
+  0. Recover a deployment's provision pointer lost between commit and enqueue.
   1. Reap an attach that committed but never enqueued a provision command.
   1b. Reap a removal stranded without its removal command.
   2. Provision finished  -> pending_restart=true (success) or 'failed' (failure).
@@ -29,6 +30,7 @@ from src.api.services.gpu_session.command_service import CommandEnqueueSessionEr
 from src.core.enums import TERMINAL_COMMAND_STATUSES, CommandStatus, DeploymentStatus, OperationKind
 from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
+from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
@@ -87,12 +89,48 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         self._event_bus = event_bus
 
     async def run_once(self) -> None:
+        await self._recover_deployments_missing_provision_pointer()
         await self._reap_orphaned_deployments_without_provision_command()
         await self._reap_orphaned_removals_without_command()
         await self._process_provision_results()
         await self._process_restart_enqueue()
         await self._process_restart_results()
         await self._process_removal_results()
+
+    # ------------------------------------------------------------------
+    # Step 0 — repair a lost provision pointer before the reaper can see it
+    # ------------------------------------------------------------------
+
+    async def _recover_deployments_missing_provision_pointer(self) -> None:
+        """N3: attach's create() and enqueue_batch() commit in separate transactions,
+        so a process death between them can leave a deployment with a real, queued
+        provision command but a null provision_operation_id. Repairing the pointer
+        here — before the orphan reaper runs below in the same tick — means the
+        reaper only ever fires on a deployment that genuinely has no command.
+        """
+        async with self._session_factory() as db:
+            candidates = await GpuSessionDeploymentRepository(
+                db
+            ).list_deployments_missing_provision_pointer()
+        for deployment in candidates:
+            async with self._session_factory() as db:
+                command = await GpuSessionCommandRepository(db).get_latest_by_deployment_and_kind(
+                    deployment.id, OperationKind.bundle_provision
+                )
+            if command is None:
+                continue
+            async with self._session_factory() as db, db.begin():
+                recovered = await GpuSessionDeploymentRepository(db).recover_provision_pointer(
+                    deployment.id, operation_id=command.operation_id, batch_id=command.batch_id
+                )
+            if not recovered:
+                continue
+            logger.warning(
+                "gpu_session.deployment.provision_pointer_recovered",
+                session_id=str(deployment.session_id),
+                deployment_id=str(deployment.id),
+                operation_id=str(command.operation_id),
+            )
 
     # ------------------------------------------------------------------
     # Step 1 — committed attach with no provision command
@@ -192,6 +230,11 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             )
         if not applied:
             return
+        # The command was just fetched above — the operation it governs is one
+        # cheap lookup away, so the SSE event can carry the node's own terminal
+        # phase/progress rather than falling back to id-only (N4).
+        async with self._session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
         if succeeded:
             deployment.pending_restart = True
             logger.info(
@@ -199,7 +242,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 session_id=str(deployment.session_id),
                 deployment_id=str(deployment.id),
             )
-            await publish_deployment_event(self._event_bus, deployment)
+            await publish_deployment_event(self._event_bus, deployment, operation=operation)
         else:
             deployment.status = DeploymentStatus.failed
             deployment.removed_at = now
@@ -210,7 +253,9 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 command_status=str(command.status),
                 error=command.error,
             )
-            await publish_deployment_event(self._event_bus, deployment, error_message=command.error)
+            await publish_deployment_event(
+                self._event_bus, deployment, operation=operation, error_message=command.error
+            )
 
     # ------------------------------------------------------------------
     # Step 3 — session drain -> enqueue restart
@@ -240,33 +285,25 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         """Restart each ready marker cohort on one session exactly once.
 
         Every attach has its own provision batch, but ComfyUI restarts are a session
-        concern. A batch that is still provisioning is excluded without making an
-        already-complete sibling batch wait for it.  Different readiness markers
-        cannot share an aisha restart command, because its contract carries only
-        one ``node_class`` to verify.
+        concern. ``candidates`` already excludes any batch still provisioning (N2's
+        batch-readiness predicate lives in
+        list_pending_restart_awaiting_operation_for_session now, not here), so this
+        only needs to filter the one invariant-violation case that predicate can't
+        express. Different readiness markers cannot share an aisha restart command,
+        because its contract carries only one ``node_class`` to verify.
         """
-        by_batch: dict[str | None, list[GpuSessionDeployment]] = {}
-        for deployment in candidates:
-            by_batch.setdefault(deployment.batch_id, []).append(deployment)
-
         ready_members: list[GpuSessionDeployment] = []
-        async with self._session_factory() as db:
-            command_repo = GpuSessionCommandRepository(db)
-            for batch_id, members in by_batch.items():
-                if batch_id is None:
-                    # Every attach stamps batch_id at enqueue time (CO4) — a
-                    # pending-restart deployment with no batch_id means that write
-                    # was skipped somewhere.
-                    logger.error(
-                        "gpu_session.deployment.pending_restart_missing_batch_id",
-                        deployment_ids=[str(member.id) for member in members],
-                    )
-                    continue
-                batch_commands = await command_repo.list_by_batch(batch_id)
-                if batch_commands and all(
-                    command.status in TERMINAL_COMMAND_STATUSES for command in batch_commands
-                ):
-                    ready_members.extend(members)
+        for deployment in candidates:
+            if deployment.batch_id is None:
+                # Every attach stamps batch_id at enqueue time (CO4) — a
+                # pending-restart deployment with no batch_id means that write
+                # was skipped somewhere.
+                logger.error(
+                    "gpu_session.deployment.pending_restart_missing_batch_id",
+                    deployment_id=str(deployment.id),
+                )
+                continue
+            ready_members.append(deployment)
 
         if not ready_members:
             return
@@ -390,6 +427,29 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
 
         succeeded = command.status == CommandStatus.succeeded
         now = datetime.now(UTC)
+
+        if succeeded:
+            # N1: R3 splits one session's restart into a cohort per readiness
+            # marker, and the command queue serializes them one in-flight at a
+            # time — so this cohort's restart can go terminal while a sibling
+            # cohort's restart for the same session is still queued or claimed.
+            # Activating this cohort now would make it briefly routable right
+            # before that sibling restart takes ComfyUI down again. Defer: the
+            # pending sibling either succeeds, fails, or is expired by the P3
+            # sweep, all of which are terminal and clear this gate on a later tick.
+            session_id = members[0].session_id
+            async with self._session_factory() as db:
+                other_restart = await GpuSessionCommandRepository(
+                    db
+                ).get_non_terminal_by_session_and_kind(session_id, OperationKind.comfyui_restart)
+            if other_restart is not None:
+                logger.info(
+                    "gpu_session.deployment.restart_outcome_deferred_pending_sibling",
+                    operation_id=str(operation_id),
+                    session_id=str(session_id),
+                )
+                return
+
         ids = [m.id for m in members]
         async with self._session_factory() as db, db.begin():
             updated = await GpuSessionDeploymentRepository(db).resolve_restart_outcome(
@@ -400,6 +460,11 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         # active/failed deployment event in that case.
         if updated == 0:
             return
+        # The command was just fetched above — the operation it governs is one
+        # cheap lookup away, so the SSE event can carry the node's own terminal
+        # phase/progress rather than falling back to id-only (N4).
+        async with self._session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(operation_id)
         if succeeded:
             logger.info(
                 "gpu_session.deployment.activated",
@@ -410,7 +475,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 member.status = DeploymentStatus.active
                 member.pending_restart = False
                 member.activated_at = now
-                await publish_deployment_event(self._event_bus, member)
+                await publish_deployment_event(self._event_bus, member, operation=operation)
         else:
             logger.warning(
                 "gpu_session.deployment.restart_failed",
@@ -423,7 +488,9 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 member.status = DeploymentStatus.failed
                 member.pending_restart = False
                 member.removed_at = now
-                await publish_deployment_event(self._event_bus, member, error_message=command.error)
+                await publish_deployment_event(
+                    self._event_bus, member, operation=operation, error_message=command.error
+                )
 
     # ------------------------------------------------------------------
     # Step 5 — removal finished
@@ -457,6 +524,11 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             )
         if not applied:
             return
+        # The command was just fetched above — the operation it governs is one
+        # cheap lookup away, so the SSE event can carry the node's own terminal
+        # phase/progress rather than falling back to id-only (N4).
+        async with self._session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
         if succeeded:
             deployment.status = DeploymentStatus.removed
             deployment.removed_at = now
@@ -465,7 +537,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 session_id=str(deployment.session_id),
                 deployment_id=str(deployment.id),
             )
-            await publish_deployment_event(self._event_bus, deployment)
+            await publish_deployment_event(self._event_bus, deployment, operation=operation)
         else:
             deployment.status = DeploymentStatus.active
             logger.warning(
@@ -475,7 +547,9 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 command_status=str(command.status),
                 error=command.error,
             )
-            await publish_deployment_event(self._event_bus, deployment, error_message=command.error)
+            await publish_deployment_event(
+                self._event_bus, deployment, operation=operation, error_message=command.error
+            )
 
     @staticmethod
     def _removal_succeeded(command: GpuSessionCommand) -> bool:

@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
+    CommandStatus,
     DeploymentStatus,
     GpuSessionStatus,
     OperationKind,
@@ -122,6 +123,47 @@ async def make_deployment(
         )
 
     return _factory
+
+
+async def _make_command(
+    db_session: AsyncSession,
+    *,
+    session: GpuSession,
+    deployment: GpuSessionDeployment,
+    kind: OperationKind,
+    batch_id: str | None = None,
+    terminal: bool = False,
+) -> None:
+    """Create one command row for a deployment, optionally already terminal.
+
+    Mirrors _create_raw_batch_command in test_gpu_session_deployment_orchestration.py,
+    adapted to this file's SAVEPOINT-scoped db_session instead of a committing
+    session factory.
+    """
+    operation_id = new_id()
+    command_id = new_id()
+    await GpuSessionOperationRepository(db_session).create(
+        id=operation_id,
+        session_id=session.id,
+        product_id=session.product_id,
+        kind=kind,
+        command_id=command_id,
+        batch_id=batch_id,
+    )
+    await GpuSessionCommandRepository(db_session).create(
+        id=command_id,
+        session_id=session.id,
+        product_id=session.product_id,
+        operation_id=operation_id,
+        deployment_id=deployment.id,
+        kind=kind,
+        payload={"bundle": "video-bundle", "mode": "additive", "verify": True},
+        batch_id=batch_id,
+    )
+    if terminal:
+        await GpuSessionCommandRepository(db_session).mark_terminal(
+            command_id, status=CommandStatus.succeeded, at=datetime.now(UTC)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +845,7 @@ async def test_list_deploying_awaiting_provision_result_excludes_primary_and_pen
     deployment_repo: GpuSessionDeploymentRepository,
     make_gpu_session: GpuSessionFactory,
     make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
 ) -> None:
     session = await make_gpu_session(status=GpuSessionStatus.active)
     # The primary's 'deploying' -> 'active' path is owned by GpuProvisioningWorker,
@@ -813,6 +856,14 @@ async def test_list_deploying_awaiting_provision_result_excludes_primary_and_pen
         status=DeploymentStatus.deploying,
         is_primary=False,
         model_type="aisha-video",
+    )
+    # N2: a candidate must have a terminal provision command to be picked up.
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=sibling,
+        kind=OperationKind.bundle_provision,
+        terminal=True,
     )
     already_flagged = await make_deployment(
         session=session,
@@ -990,6 +1041,14 @@ async def test_list_removing_and_resolve_removal_outcome_success(
 ) -> None:
     session = await make_gpu_session(status=GpuSessionStatus.active)
     deployment = await make_deployment(session=session, status=DeploymentStatus.removing)
+    # N2: a candidate must have a terminal removal command to be picked up.
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=deployment,
+        kind=OperationKind.bundle_removal,
+        terminal=True,
+    )
 
     removing = await deployment_repo.list_removing()
     assert deployment.id in {d.id for d in removing}
@@ -1026,6 +1085,157 @@ async def test_resolve_removal_outcome_failure_returns_to_active(
         session.user_id, session.product_id, deployment.model_type
     )
     assert found is not None and found.id == deployment.id
+
+
+# ---------------------------------------------------------------------------
+# N2: bounded candidate pages exclude stalled rows, so they can't starve newer
+# ones. The candidate limit is patched down so the test doesn't need to create
+# 100+ rows to exceed it.
+# ---------------------------------------------------------------------------
+
+
+async def test_list_deploying_awaiting_provision_result_excludes_stalled_rows(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment whose provision command never went terminal (D31 only cancels
+    commands on a terminal *session* transition, so a session paused mid-attach
+    leaves it queued indefinitely) must not occupy a page slot — otherwise enough
+    stalled rows permanently starve every newer, genuinely ready deployment."""
+    monkeypatch.setattr(
+        "src.db.repositories.gpu_session_deployment._ORCHESTRATION_CANDIDATE_LIMIT", 2
+    )
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    for i in range(3):
+        stalled = await make_deployment(
+            session=session,
+            status=DeploymentStatus.deploying,
+            is_primary=False,
+            model_type=f"aisha-stalled-{i}",
+        )
+        await _make_command(
+            db_session, session=session, deployment=stalled, kind=OperationKind.bundle_provision
+        )
+    ready = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-ready",
+    )
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=ready,
+        kind=OperationKind.bundle_provision,
+        terminal=True,
+    )
+
+    candidates = await deployment_repo.list_deploying_awaiting_provision_result()
+
+    assert [c.id for c in candidates] == [ready.id]
+
+
+async def test_list_pending_restart_awaiting_operation_excludes_stalled_batches(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch still mid-provision-retry (its provision command never went
+    terminal) must not occupy a page slot on this bounded scan — the same
+    starvation risk as list_deploying_awaiting_provision_result, one step later."""
+    monkeypatch.setattr(
+        "src.db.repositories.gpu_session_deployment._ORCHESTRATION_CANDIDATE_LIMIT", 2
+    )
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    for i in range(3):
+        stalled_batch_id = f"batch-stalled-{i}"
+        stalled = await make_deployment(
+            session=session,
+            status=DeploymentStatus.deploying,
+            is_primary=False,
+            model_type=f"aisha-stalled-{i}",
+            pending_restart=True,
+        )
+        await deployment_repo.set_provision_pointer(
+            stalled.id, operation_id=new_id(), batch_id=stalled_batch_id
+        )
+        await _make_command(
+            db_session,
+            session=session,
+            deployment=stalled,
+            kind=OperationKind.bundle_provision,
+            batch_id=stalled_batch_id,
+        )
+    ready_batch_id = "batch-ready"
+    ready = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-ready",
+        pending_restart=True,
+    )
+    await deployment_repo.set_provision_pointer(
+        ready.id, operation_id=new_id(), batch_id=ready_batch_id
+    )
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=ready,
+        kind=OperationKind.bundle_provision,
+        batch_id=ready_batch_id,
+        terminal=True,
+    )
+
+    candidates = await deployment_repo.list_pending_restart_awaiting_operation()
+
+    assert [c.id for c in candidates] == [ready.id]
+
+
+async def test_list_removing_excludes_stalled_rows(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A removal command stranded queued by a mid-removal session pause must not
+    occupy a page slot on this bounded scan."""
+    monkeypatch.setattr(
+        "src.db.repositories.gpu_session_deployment._ORCHESTRATION_CANDIDATE_LIMIT", 2
+    )
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    for i in range(3):
+        stalled = await make_deployment(
+            session=session,
+            status=DeploymentStatus.removing,
+            is_primary=False,
+            model_type=f"aisha-stalled-{i}",
+        )
+        await _make_command(
+            db_session, session=session, deployment=stalled, kind=OperationKind.bundle_removal
+        )
+    ready = await make_deployment(
+        session=session,
+        status=DeploymentStatus.removing,
+        is_primary=False,
+        model_type="aisha-ready",
+    )
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=ready,
+        kind=OperationKind.bundle_removal,
+        terminal=True,
+    )
+
+    candidates = await deployment_repo.list_removing()
+
+    assert [c.id for c in candidates] == [ready.id]
 
 
 async def test_mark_primary_active_ignores_sibling_deployments(
