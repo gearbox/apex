@@ -405,6 +405,18 @@ class GpuProvisioningWorker(PeriodicWorker):
         session-level gate, but a sibling with a missing marker must be failed
         before the session becomes routable again; otherwise its active row
         would send work to a workflow ComfyUI cannot load.
+
+        A live set with no primary is not always an invariant violation: P4's
+        force-remove (`DELETE /deployments/{model_type}?force=true`) can retire
+        the primary while siblings stay active, which is a supported user
+        action, not corruption — see `EXISTS(a removed primary row)` below. In
+        that state ``readiness_marker_node_class`` resolves to None and
+        ``_probe_comfyui`` accepts a bare 200. That is a deliberate choice, not
+        an accident of list ordering: the per-sibling marker check right below
+        still fails any live deployment whose own marker doesn't register, so
+        gating on an arbitrary sibling's marker here would add no additional
+        verification — it would only make the session-activation gate as
+        strict as whichever deployment happened to sort first.
         """
         if self._resuming_timeout_exceeded(session):
             logger.warning(
@@ -425,11 +437,24 @@ class GpuProvisioningWorker(PeriodicWorker):
             (deployment for deployment in live_deployments if deployment.is_primary), None
         )
         if primary is None and live_deployments:
-            logger.error(
-                "gpu_session.resume.primary_deployment_missing",
-                session_id=str(session.id),
-                deployment_ids=[str(deployment.id) for deployment in live_deployments],
-            )
+            # list_for_session returns every deployment ever created for this
+            # session, live or not, so a row with is_primary=True here (just
+            # no longer live) means the primary was legitimately removed —
+            # the force-remove case above. No such row at all means this
+            # session never had a primary deployment, which is the real
+            # invariant violation worth paging on.
+            if any(deployment.is_primary for deployment in deployments):
+                logger.warning(
+                    "gpu_session.resume.primary_deployment_removed",
+                    session_id=str(session.id),
+                    deployment_ids=[str(deployment.id) for deployment in live_deployments],
+                )
+            else:
+                logger.error(
+                    "gpu_session.resume.primary_deployment_missing",
+                    session_id=str(session.id),
+                    deployment_ids=[str(deployment.id) for deployment in live_deployments],
+                )
         readiness_marker_node_class = (
             primary.readiness_marker_node_class if primary is not None else None
         )
