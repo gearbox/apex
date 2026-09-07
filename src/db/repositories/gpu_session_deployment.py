@@ -412,6 +412,12 @@ class GpuSessionDeploymentRepository:
         cohort that is still draining on a later tick re-suspends a no-op set.
         Returns only rows whose flag changed, so callers can publish an exact
         deployment SSE update after their transaction commits.
+
+        Invariant: this deliberately updates only ``active`` rows. A
+        ``deploying`` row, including every pending-restart cycle member,
+        therefore carries ``routing_suspended=False`` throughout its cycle.
+        The event projection and missing-batch reaper rely on that fact; do
+        not widen this predicate without updating those paths together.
         """
         result = await self._session.execute(
             update(GpuSessionDeployment)
@@ -688,6 +694,10 @@ class GpuSessionDeploymentRepository:
                     removed_at=at,
                     pending_restart=False,
                     pending_restart_since=None,
+                    # ``suspend_routing_for_session`` only marks active rows;
+                    # this pending-restart row is deploying and is therefore
+                    # already unsuspended. Keep that invariant visible rather
+                    # than masking a future predicate change here.
                 )
             ),
         )

@@ -422,9 +422,14 @@ class GpuProvisioningWorker(PeriodicWorker):
             if deployment.status in LIVE_DEPLOYMENT_STATUSES
         ]
         primary = next(
-            (deployment for deployment in live_deployments if deployment.is_primary),
-            live_deployments[0] if live_deployments else None,
+            (deployment for deployment in live_deployments if deployment.is_primary), None
         )
+        if primary is None and live_deployments:
+            logger.error(
+                "gpu_session.resume.primary_deployment_missing",
+                session_id=str(session.id),
+                deployment_ids=[str(deployment.id) for deployment in live_deployments],
+            )
         readiness_marker_node_class = (
             primary.readiness_marker_node_class if primary is not None else None
         )
@@ -442,34 +447,34 @@ class GpuProvisioningWorker(PeriodicWorker):
         if not reachable:
             return
 
-        if registered_node_classes is not None:
-            missing_markers = markers - registered_node_classes
-            if missing_markers:
-                now = datetime.now(UTC)
-                async with self._session_factory() as db, db.begin():
-                    failed_siblings = await GpuSessionDeploymentRepository(
-                        db
-                    ).fail_active_siblings_with_missing_readiness_markers(
-                        session.id,
-                        markers=missing_markers,
-                        at=now,
-                    )
-                for deployment in failed_siblings:
-                    marker = deployment.readiness_marker_node_class
-                    error_message = f"readiness marker missing after resume: {marker or '<none>'}"
-                    logger.error(
-                        "gpu_session.resume.sibling_marker_missing",
-                        session_id=str(session.id),
-                        deployment_id=str(deployment.id),
-                        model_type=deployment.model_type,
-                        missing_marker=marker,
-                    )
-                    await publish_deployment_event(
-                        self._event_bus,
-                        deployment,
-                        operation_id=None,
-                        error_message=error_message,
-                    )
+        if registered_node_classes is not None and (
+            missing_markers := markers - registered_node_classes
+        ):
+            now = datetime.now(UTC)
+            async with self._session_factory() as db, db.begin():
+                failed_siblings = await GpuSessionDeploymentRepository(
+                    db
+                ).fail_active_siblings_with_missing_readiness_markers(
+                    session.id,
+                    markers=missing_markers,
+                    at=now,
+                )
+            for deployment in failed_siblings:
+                marker = deployment.readiness_marker_node_class
+                error_message = f"readiness marker missing after resume: {marker or '<none>'}"
+                logger.error(
+                    "gpu_session.resume.sibling_marker_missing",
+                    session_id=str(session.id),
+                    deployment_id=str(deployment.id),
+                    model_type=deployment.model_type,
+                    missing_marker=marker,
+                )
+                await publish_deployment_event(
+                    self._event_bus,
+                    deployment,
+                    operation_id=None,
+                    error_message=error_message,
+                )
 
         await self._mark_active(session)
 

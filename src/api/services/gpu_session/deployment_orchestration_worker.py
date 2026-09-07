@@ -635,6 +635,9 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 operations.get(member.restart_operation_id) if member.restart_operation_id else None
             )
             member.pending_restart = False
+            # suspend_routing_for_session only marks active rows. These cycle
+            # members stayed deploying until resolve_restart_outcome above, so
+            # their projected event flag is invariantly already False.
             if succeeded:
                 member.status = DeploymentStatus.active
                 member.activated_at = now

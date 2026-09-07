@@ -907,6 +907,39 @@ class TestAdvanceResuming:
         worker._mark_active.assert_awaited_once_with(session)
         assert session.status == GpuSessionStatus.active
 
+    async def test_missing_primary_is_logged_without_using_a_sibling_as_the_gate(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """A corrupted live set must not turn an arbitrary sibling into the primary."""
+        from structlog.testing import capture_logs
+
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.resuming,
+            resumed_at=datetime.now(UTC),
+        )
+        sibling = MagicMock()
+        sibling.id = uuid4()
+        sibling.is_primary = False
+        sibling.readiness_marker_node_class = "SiblingMarker"
+        sibling.status = DeploymentStatus.active
+        mock_deployment_repo.list_for_session.return_value = [sibling]
+        worker._probe_comfyui = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            await worker._advance_resuming(session)
+
+        worker._probe_comfyui.assert_awaited_once_with(
+            session,
+            readiness_marker_node_class=None,
+            registered_node_classes=set(),
+        )
+        assert any(
+            event["event"] == "gpu_session.resume.primary_deployment_missing"
+            and event["session_id"] == str(session.id)
+            for event in logs
+        )
+
     async def test_timeout_marks_failed_without_retry(self) -> None:
         worker, _mocks = _make_worker()
         old_resumed = datetime.now(UTC) - timedelta(minutes=10)
