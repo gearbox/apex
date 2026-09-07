@@ -993,7 +993,7 @@ class TestAdvanceResuming:
         with capture_logs() as logs:
             await worker._advance_resuming(session)
 
-        assert not any(log["log_level"] == "error" for log in logs)
+        assert all(log["log_level"] != "error" for log in logs)
         assert any(
             log["event"] == "gpu_session.resume.primary_deployment_removed"
             and log["session_id"] == str(session.id)
