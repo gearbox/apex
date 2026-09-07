@@ -414,6 +414,25 @@ class Settings(BaseSettings):
         description="How often GpuSessionCommandSweepWorker scans for overdue claimed commands.",
     )
 
+    # --- GPU Deployment Orchestration (P4) ---
+    gpu_deployment_orchestration_interval_seconds: int = Field(
+        default=15,
+        ge=5,
+        le=300,
+        description="How often DeploymentOrchestrationWorker scans for finished commands to advance.",
+    )
+    gpu_deployment_restart_drain_timeout_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description=(
+            "Max seconds a finished provision batch waits for in-flight jobs on the "
+            "session to drain before enqueuing the ComfyUI restart anyway (D35). The "
+            "common case drains in seconds; this bounds the worst case so a deployment "
+            "doesn't sit in pending_restart forever."
+        ),
+    )
+
     # --- Billing Finalization Reconciler ---
     billing_reconciler_interval_minutes: int = Field(
         default=10,

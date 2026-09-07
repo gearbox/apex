@@ -6,13 +6,14 @@ from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import structlog
-from litestar import Controller, Response, get, post
+from litestar import Controller, Response, delete, get, post
 from litestar.di import Provide
 from litestar.exceptions import NotFoundException, PermissionDeniedException
 from litestar.params import Body, Parameter
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_201_CREATED,
+    HTTP_202_ACCEPTED,
     HTTP_402_PAYMENT_REQUIRED,
     HTTP_404_NOT_FOUND,
     HTTP_409_CONFLICT,
@@ -23,6 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.gpu_session import (
+    AttachDeploymentRequest,
+    AttachDeploymentResponse,
+    DeploymentResponse,
     GpuSessionResponse,
     ListSessionsResponse,
     StartSessionRequest,
@@ -32,9 +36,16 @@ from src.api.schemas.gpu_session import (
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import InsufficientBalanceError
+from src.api.services.bundle_index import BundleNotFoundError
+from src.api.services.gpu_session.deployment_service import GpuSessionDeploymentService
 from src.api.services.gpu_session.exceptions import (
+    DeploymentAlreadyLiveError,
+    DeploymentHasInFlightJobsError,
+    DeploymentNotLiveError,
     GpuSessionError,
     InvalidSessionStateError,
+    LastDeploymentRequiresForceError,
+    RetainBundlesUnresolvableError,
     SessionAlreadyExistsError,
     SessionHasInFlightJobsError,
 )
@@ -45,7 +56,7 @@ from src.api.services.gpu_session.service import (
 )
 from src.api.services.vastai.exceptions import NoCapacityError, VastAIError
 from src.core.config import Settings
-from src.core.enums import GpuSessionStatus, UserRole
+from src.core.enums import GpuSessionStatus, ModelType, UserRole
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
@@ -339,6 +350,94 @@ class GpuSessionController(Controller):
             content=GpuSessionResponse.from_model(
                 result, bootstrap_operation=operation, deployments=deployments
             ),
+            status_code=HTTP_200_OK,
+        )
+
+    @post("/{session_id:uuid}/deployments", status_code=HTTP_202_ACCEPTED)
+    async def attach_deployment(
+        self,
+        current_user_id: UUID,
+        session_id: UUID,
+        data: Annotated[AttachDeploymentRequest, Body()],
+        gpu_session_deployment_service: GpuSessionDeploymentService,
+        product_id: str,
+    ) -> Response[AttachDeploymentResponse | ErrorEnvelope]:
+        """Attach a new model to a running session, provisioned additively (P4)."""
+        try:
+            deployment, operation_id = await gpu_session_deployment_service.attach(
+                session_id=session_id,
+                user_id=current_user_id,
+                product_id=product_id,
+                model_type=data.model,
+            )
+        except DeploymentAlreadyLiveError as exc:
+            return _error(HTTP_409_CONFLICT, "deployment_already_live", str(exc))
+        except InvalidSessionStateError as exc:
+            return _error(HTTP_409_CONFLICT, "invalid_state", str(exc))
+        except BundleNotFoundError as exc:
+            return _error(HTTP_404_NOT_FOUND, "model_not_available", str(exc))
+        except GpuSessionError as exc:
+            return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
+
+        return Response(
+            content=AttachDeploymentResponse(
+                deployment=DeploymentResponse.from_model(deployment),
+                operation_id=operation_id,
+            ),
+            status_code=HTTP_202_ACCEPTED,
+        )
+
+    @delete("/{session_id:uuid}/deployments/{model_type:str}", status_code=HTTP_200_OK)
+    async def remove_deployment(
+        self,
+        current_user_id: UUID,
+        session_id: UUID,
+        model_type: str,
+        gpu_session_deployment_service: GpuSessionDeploymentService,
+        product_id: str,
+        force: Annotated[bool, Parameter(query="force")] = False,
+    ) -> Response[DeploymentResponse | ErrorEnvelope]:
+        """Remove a model from a running session. Does not restart ComfyUI (P4)."""
+        try:
+            parsed_model = ModelType(model_type)
+        except ValueError:
+            return _error(
+                HTTP_404_NOT_FOUND,
+                "model_not_available",
+                f"Unknown model_type {model_type!r}",
+            )
+
+        try:
+            deployment = await gpu_session_deployment_service.remove(
+                session_id=session_id,
+                user_id=current_user_id,
+                product_id=product_id,
+                model_type=parsed_model,
+                force=force,
+            )
+        except DeploymentNotLiveError as exc:
+            return _error(HTTP_409_CONFLICT, "deployment_not_live", str(exc))
+        except LastDeploymentRequiresForceError as exc:
+            return _error(HTTP_409_CONFLICT, "last_deployment_requires_force", str(exc))
+        except DeploymentHasInFlightJobsError as exc:
+            return Response(
+                content=ErrorEnvelope(
+                    error="jobs_in_flight",
+                    message=str(exc),
+                    status_code=HTTP_409_CONFLICT,
+                    detail={"in_flight_count": exc.in_flight_count},
+                ),
+                status_code=HTTP_409_CONFLICT,
+            )
+        except RetainBundlesUnresolvableError as exc:
+            return _error(HTTP_409_CONFLICT, "retain_bundles_unresolvable", str(exc))
+        except InvalidSessionStateError as exc:
+            return _error(HTTP_409_CONFLICT, "invalid_state", str(exc))
+        except GpuSessionError as exc:
+            return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
+
+        return Response(
+            content=DeploymentResponse.from_model(deployment),
             status_code=HTTP_200_OK,
         )
 

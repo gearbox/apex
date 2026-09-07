@@ -1,10 +1,12 @@
 """GPU session deployment model — model identity and routing uniqueness for one session.
 
 Since P2, a deployment (not the parent GpuSession) is the source of truth for which
-model is routable on a session. Every session has exactly one deployment today,
-created with the session and torn down with it (see GpuSessionService._set_status
-and GpuProvisioningWorker._transition for the lifecycle cascade). P4 will let a
-session carry more than one.
+model is routable on a session. A session's PRIMARY deployment is created with the
+session and torn down with it (see GpuSessionService._set_status and
+GpuProvisioningWorker._transition for the lifecycle cascade). Since P4, a session can
+also carry additional (non-primary) sibling deployments attached after the fact —
+see DeploymentOrchestrationWorker, which owns their 'deploying' -> 'active'/'failed'
+transitions via ``restart_operation_id``/``batch_id`` below.
 """
 
 from __future__ import annotations
@@ -25,6 +27,9 @@ class GpuSessionDeployment(Base):
     Key columns for routing:
     - status: only 'active' deployments under an 'active' session are routable
       (see GpuSessionDeploymentRepository.get_routable)
+    - routing_suspended: also required false for routing — set session-wide
+      while a restart cohort is draining/running, since a restart takes the
+      whole node down, not only the deployment(s) being restarted
     - user_id / product_id / model_type: denormalized from the session so the
       uniqueness index below can be local to this table
 
@@ -79,6 +84,14 @@ class GpuSessionDeployment(Base):
         server_default=text("false"),
         comment="Forward slot for P4's restart flow; no writer in P2.",
     )
+    pending_restart_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "Apex server time when provision succeeded and this deployment began waiting "
+            "to restart. Never derived from node-reported command timestamps."
+        ),
+    )
     provision_operation_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         nullable=True,
@@ -93,6 +106,30 @@ class GpuSessionDeployment(Base):
         nullable=False,
         server_default=text("false"),
         comment="The deployment created with the session. A record, not a rule — see module docstring.",
+    )
+    restart_operation_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=True,
+        comment=(
+            "P4: the comfyui_restart operation that will make this deployment routable "
+            "once it succeeds — set once per pending_restart batch, so the UI can follow it."
+        ),
+    )
+    batch_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="P4: the enqueued batch that created this deployment (matches gpu_session_commands.batch_id).",
+    )
+    routing_suspended: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+        comment=(
+            "P4 round-4: set session-wide on every 'active' deployment the moment a "
+            "restart cohort becomes ready, so get_routable stays closed for the whole "
+            "node until the restart cycle resolves — a restart takes ComfyUI down for "
+            "every deployment on the session, not only the ones being restarted."
+        ),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -126,5 +163,10 @@ class GpuSessionDeployment(Base):
             "product_id",
             "model_type",
             postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_gpu_session_deployments_pending_restart",
+            "session_id",
+            postgresql_where=text("pending_restart"),
         ),
     )

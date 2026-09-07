@@ -304,9 +304,18 @@ class GpuSessionReconciler:
         — if nodes come back, they don't stay stuck in 'stale'.
 
         This is the third session-status write site outside the two D15
-        lifecycle chokepoints. It is safe in P2 because any steady-state stale
-        session already has an active deployment; P4 must revisit this when one
-        session can contain deployments in mixed states.
+        lifecycle chokepoints. CO3 (P4): re-examined now that a session can hold
+        an 'active' deployment and a 'deploying' sibling at once (mid-attach).
+        Still safe, and unchanged, because this method only ever writes
+        GpuSession columns — it never reads or cascades to deployment rows. The
+        D15 chokepoints only cascade a deployment status change on a session's
+        bootstrap/resume-driven arrival at 'active' (GpuProvisioningWorker._transition
+        -> mark_primary_active) or on a terminal stop/fail; a stale<->active toggle
+        driven purely by node-reachability is neither, and never needed a cascade
+        in the first place — deployment progress is orthogonal to it, in P2/P3 and
+        still in P4. A sibling mid-attach during a stale window keeps advancing
+        normally: the agent's outbound telemetry path (which drives DeploymentOrchestrationWorker)
+        is independent of this reconciler's inbound reachability probe.
         """
         if not session_ids:
             return

@@ -828,6 +828,85 @@ class TestAdvanceResuming:
         call_kwargs = mock_repo.update_status.call_args[1]
         assert "started_at" not in call_kwargs
 
+    async def test_resume_fails_only_sibling_with_missing_marker(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """A primary-ready resume must not re-expose an unverified sibling."""
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.resuming,
+            resumed_at=datetime.now(UTC),
+        )
+
+        def deployment(
+            *, is_primary: bool, marker: str | None, status: DeploymentStatus
+        ) -> MagicMock:
+            row = MagicMock()
+            row.id = uuid4()
+            row.is_primary = is_primary
+            row.readiness_marker_node_class = marker
+            row.status = status
+            row.model_type = "aisha-image"
+            row.user_id = session.user_id
+            row.session_id = session.id
+            row.pending_restart = False
+            row.routing_suspended = False
+            row.provision_operation_id = None
+            row.restart_operation_id = None
+            return row
+
+        primary = deployment(
+            is_primary=True, marker="PrimaryMarker", status=DeploymentStatus.active
+        )
+        verified_sibling = deployment(
+            is_primary=False, marker="VerifiedSibling", status=DeploymentStatus.active
+        )
+        missing_sibling = deployment(
+            is_primary=False, marker="MissingSibling", status=DeploymentStatus.active
+        )
+        null_marker_sibling = deployment(
+            is_primary=False, marker=None, status=DeploymentStatus.active
+        )
+        mock_deployment_repo.list_for_session.return_value = [
+            primary,
+            verified_sibling,
+            missing_sibling,
+            null_marker_sibling,
+        ]
+
+        async def fail_missing_sibling(*args: Any, **kwargs: Any) -> list[MagicMock]:
+            _ = args, kwargs
+            missing_sibling.status = DeploymentStatus.failed
+            return [missing_sibling]
+
+        mock_deployment_repo.fail_active_siblings_with_missing_readiness_markers.side_effect = (
+            fail_missing_sibling
+        )
+        mocks["bundle_index"].get_model_filenames.return_value = []
+        mocks["http_client"].get.return_value = _make_object_info_response(
+            ["PrimaryMarker", "VerifiedSibling"]
+        )
+
+        async def mark_active(resuming_session: GpuSession) -> None:
+            resuming_session.status = GpuSessionStatus.active
+
+        worker._mark_active = AsyncMock(side_effect=mark_active)  # type: ignore[method-assign]
+
+        await worker._advance_resuming(session)
+
+        mocks["http_client"].get.assert_awaited_once()
+        mock_deployment_repo.fail_active_siblings_with_missing_readiness_markers.assert_awaited_once_with(
+            session.id,
+            markers={"MissingSibling"},
+            at=ANY,
+        )
+        assert primary.status == DeploymentStatus.active
+        assert verified_sibling.status == DeploymentStatus.active
+        assert missing_sibling.status == DeploymentStatus.failed
+        assert null_marker_sibling.status == DeploymentStatus.active
+        worker._mark_active.assert_awaited_once_with(session)
+        assert session.status == GpuSessionStatus.active
+
     async def test_timeout_marks_failed_without_retry(self) -> None:
         worker, _mocks = _make_worker()
         old_resumed = datetime.now(UTC) - timedelta(minutes=10)
@@ -871,8 +950,11 @@ class TestDeploymentCascade:
     async def test_mark_active_flips_deploying_deployment_to_active(
         self, mock_deployment_repo: AsyncMock
     ) -> None:
-        """Invariant 7: activation cascades — _mark_active flips the primary
-        deployment to 'active' and stamps activated_at."""
+        """Invariant 7 (P4-revised): activation cascades — _mark_active flips only
+        the PRIMARY deployment to 'active' and stamps activated_at. Scoped to
+        is_primary (mirroring update_provision_operation_id/CO6) so a P4 sibling
+        mid-attach is never marked routable by an unrelated session-level resume —
+        see mark_primary_active's docstring."""
         worker, _mocks = _make_worker()
         session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
 
@@ -883,12 +965,7 @@ class TestDeploymentCascade:
 
             await worker._mark_active(session)
 
-        mock_deployment_repo.mark_status.assert_awaited_once_with(
-            session.id,
-            from_statuses=(DeploymentStatus.deploying,),
-            to_status=DeploymentStatus.active,
-            at=ANY,
-        )
+        mock_deployment_repo.mark_primary_active.assert_awaited_once_with(session.id, at=ANY)
 
     async def test_mark_failed_flips_live_deployments_to_failed(
         self, mock_deployment_repo: AsyncMock

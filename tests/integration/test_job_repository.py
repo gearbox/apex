@@ -580,3 +580,54 @@ async def test_list_pending_video_jobs_excludes_soft_deleted(
 
     jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
     assert not list(jobs)
+
+
+async def test_count_in_flight_for_session_and_model_filters_by_model(
+    job_repo: JobRepository, make_user, make_job, make_gpu_session
+) -> None:
+    """D37: only jobs on the requested model_type count, not every in-flight job
+    on the session."""
+    user = await make_user(email=f"inflight-model-{uuid4().hex[:6]}@example.com")
+    session_id = (await make_gpu_session(user=user)).id
+    await make_job(
+        user=user,
+        status="running",
+        provider="aisha",
+        model="aisha-image",
+        gpu_session_id=session_id,
+    )
+    await make_job(
+        user=user,
+        status="queued",
+        provider="aisha",
+        model="aisha-video",
+        gpu_session_id=session_id,
+    )
+
+    assert await job_repo.count_in_flight_for_session_and_model(session_id, "aisha-image") == 1
+    assert await job_repo.count_in_flight_for_session_and_model(session_id, "aisha-video") == 1
+    assert await job_repo.count_in_flight_for_session_and_model(session_id, "aisha-image-lite") == 0
+
+
+async def test_count_in_flight_for_session_and_model_excludes_terminal_and_deleted(
+    job_repo: JobRepository, make_user, make_job, make_gpu_session
+) -> None:
+    user = await make_user(email=f"inflight-term-{uuid4().hex[:6]}@example.com")
+    session_id = (await make_gpu_session(user=user)).id
+    await make_job(
+        user=user,
+        status="completed",
+        provider="aisha",
+        model="aisha-image",
+        gpu_session_id=session_id,
+    )
+    await make_job(
+        user=user,
+        status="running",
+        provider="aisha",
+        model="aisha-image",
+        gpu_session_id=session_id,
+        is_deleted=True,
+    )
+
+    assert await job_repo.count_in_flight_for_session_and_model(session_id, "aisha-image") == 0

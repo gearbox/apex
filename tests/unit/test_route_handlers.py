@@ -2752,6 +2752,254 @@ class TestGpuSessionRouteHandlers:
         fields = {f.name for f in msgspec.structs.fields(StopConfirmationResponse)}
         assert "bundle_name" not in fields
 
+    # -----------------------------------------------------------------
+    # attach_deployment / remove_deployment (P4)
+    # -----------------------------------------------------------------
+
+    async def test_attach_deployment_success(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+
+        deployment = MagicMock()
+        operation_id = uuid4()
+        service = AsyncMock()
+        service.attach = AsyncMock(return_value=(deployment, operation_id))
+        data = MagicMock()
+        data.model = MagicMock()
+
+        with patch(
+            "src.api.routes.gpu_session.DeploymentResponse.from_model",
+            return_value=MagicMock(),
+        ):
+            response = await GpuSessionController.attach_deployment.fn(  # type: ignore[attr-defined]
+                MagicMock(),
+                current_user_id=uuid4(),
+                session_id=uuid4(),
+                data=data,
+                gpu_session_deployment_service=service,
+                product_id="vex",
+            )
+        assert response.status_code == 202
+
+    async def test_attach_deployment_already_live_is_409(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import DeploymentAlreadyLiveError
+
+        service = AsyncMock()
+        service.attach = AsyncMock(side_effect=DeploymentAlreadyLiveError("already live"))
+        data = MagicMock()
+        data.model = MagicMock()
+
+        response = await GpuSessionController.attach_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            data=data,
+            gpu_session_deployment_service=service,
+            product_id="vex",
+        )
+        assert response.status_code == 409
+
+    async def test_attach_deployment_invalid_state_is_409(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import InvalidSessionStateError
+
+        service = AsyncMock()
+        service.attach = AsyncMock(
+            side_effect=InvalidSessionStateError(
+                "not active", current_status="paused", operation="attach"
+            )
+        )
+        data = MagicMock()
+        data.model = MagicMock()
+
+        response = await GpuSessionController.attach_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            data=data,
+            gpu_session_deployment_service=service,
+            product_id="vex",
+        )
+        assert response.status_code == 409
+
+    async def test_attach_deployment_bundle_not_found_is_404(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.bundle_index import BundleNotFoundError
+
+        service = AsyncMock()
+        service.attach = AsyncMock(side_effect=BundleNotFoundError("no bundle"))
+        data = MagicMock()
+        data.model = MagicMock()
+
+        response = await GpuSessionController.attach_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            data=data,
+            gpu_session_deployment_service=service,
+            product_id="vex",
+        )
+        assert response.status_code == 404
+
+    async def test_attach_deployment_session_not_found_is_404(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import GpuSessionError
+
+        service = AsyncMock()
+        service.attach = AsyncMock(side_effect=GpuSessionError("not found"))
+        data = MagicMock()
+        data.model = MagicMock()
+
+        response = await GpuSessionController.attach_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            data=data,
+            gpu_session_deployment_service=service,
+            product_id="vex",
+        )
+        assert response.status_code == 404
+
+    async def test_remove_deployment_success(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+
+        deployment = MagicMock()
+        service = AsyncMock()
+        service.remove = AsyncMock(return_value=deployment)
+
+        with patch(
+            "src.api.routes.gpu_session.DeploymentResponse.from_model",
+            return_value=MagicMock(),
+        ):
+            response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+                MagicMock(),
+                current_user_id=uuid4(),
+                session_id=uuid4(),
+                model_type="aisha-video",
+                gpu_session_deployment_service=service,
+                product_id="vex",
+                force=False,
+            )
+        assert response.status_code == 200
+        service.remove.assert_awaited_once()
+        assert service.remove.await_args.kwargs["force"] is False
+
+    async def test_remove_deployment_unknown_model_type_is_404(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+
+        service = AsyncMock()
+
+        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            model_type="not-a-real-model",
+            gpu_session_deployment_service=service,
+            product_id="vex",
+            force=False,
+        )
+        assert response.status_code == 404
+        service.remove.assert_not_awaited()
+
+    async def test_remove_deployment_not_live_is_409(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import DeploymentNotLiveError
+
+        service = AsyncMock()
+        service.remove = AsyncMock(side_effect=DeploymentNotLiveError("not live"))
+
+        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            model_type="aisha-video",
+            gpu_session_deployment_service=service,
+            product_id="vex",
+            force=False,
+        )
+        assert response.status_code == 409
+
+    async def test_remove_deployment_last_deployment_requires_force_is_409(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import LastDeploymentRequiresForceError
+
+        service = AsyncMock()
+        service.remove = AsyncMock(side_effect=LastDeploymentRequiresForceError("needs force"))
+
+        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            model_type="aisha-video",
+            gpu_session_deployment_service=service,
+            product_id="vex",
+            force=False,
+        )
+        assert response.status_code == 409
+
+    async def test_remove_deployment_in_flight_jobs_is_409_with_count(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import DeploymentHasInFlightJobsError
+
+        service = AsyncMock()
+        service.remove = AsyncMock(
+            side_effect=DeploymentHasInFlightJobsError(deployment_id=uuid4(), in_flight_count=2)
+        )
+
+        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            model_type="aisha-video",
+            gpu_session_deployment_service=service,
+            product_id="vex",
+            force=False,
+        )
+        assert response.status_code == 409
+        assert response.content.detail == {"in_flight_count": 2}
+
+    async def test_remove_deployment_invalid_state_is_409(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import InvalidSessionStateError
+
+        service = AsyncMock()
+        service.remove = AsyncMock(
+            side_effect=InvalidSessionStateError(
+                "session became terminal", current_status="unknown", operation="remove"
+            )
+        )
+
+        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            model_type="aisha-video",
+            gpu_session_deployment_service=service,
+            product_id="vex",
+            force=False,
+        )
+
+        assert response.status_code == 409
+        assert response.content.error == "invalid_state"
+
+    async def test_remove_deployment_session_not_found_is_404(self) -> None:
+        from src.api.routes.gpu_session import GpuSessionController
+        from src.api.services.gpu_session.exceptions import GpuSessionError
+
+        service = AsyncMock()
+        service.remove = AsyncMock(side_effect=GpuSessionError("not found"))
+
+        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            session_id=uuid4(),
+            model_type="aisha-video",
+            gpu_session_deployment_service=service,
+            product_id="vex",
+            force=False,
+        )
+        assert response.status_code == 404
+
 
 # ---------------------------------------------------------------------------
 # SSEController (sse.py)

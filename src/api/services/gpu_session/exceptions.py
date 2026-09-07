@@ -74,3 +74,45 @@ class SessionHasInFlightJobsError(InvalidSessionStateError):
             operation="pause",
         )
         self.in_flight_count = in_flight_count
+
+
+class DeploymentAlreadyLiveError(GpuSessionError):
+    """Attach (D36): a live deployment for this model_type already exists.
+
+    Wraps both the pre-check path and the race-condition IntegrityError path,
+    mirroring SessionAlreadyExistsError's role for the session-level slot.
+    """
+
+
+class DeploymentNotLiveError(GpuSessionError):
+    """Remove: no live deployment exists for the requested model_type."""
+
+
+class LastDeploymentRequiresForceError(GpuSessionError):
+    """Remove: this is the session's last live deployment and force=true was not passed.
+
+    The session keeps running and billing with nothing deployed on it — legal,
+    but intentional enough that the API requires the caller to say so explicitly.
+    """
+
+
+class DeploymentHasInFlightJobsError(GpuSessionError):
+    """Remove (D37): a job of the model_type being removed is in flight.
+
+    Jobs on other models sharing the same session do not block this removal.
+    """
+
+    def __init__(self, *, deployment_id: UUID, in_flight_count: int) -> None:
+        super().__init__(
+            f"Cannot remove deployment {deployment_id}: {in_flight_count} job(s) in flight "
+            "for this model."
+        )
+        self.in_flight_count = in_flight_count
+
+
+class RetainBundlesUnresolvableError(GpuSessionError):
+    """Remove (D11): a sibling live deployment has no resolvable bundle spec.
+
+    Fail loud rather than ship a short retain list — that would delete weights
+    another resident bundle is using.
+    """

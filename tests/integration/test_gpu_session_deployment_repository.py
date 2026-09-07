@@ -18,15 +18,22 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind
+from src.core.enums import (
+    LIVE_DEPLOYMENT_STATUSES,
+    CommandStatus,
+    DeploymentStatus,
+    GpuSessionStatus,
+    OperationKind,
+)
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_deployment import GpuSessionDeployment
 from src.db.models.user import User
 from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 
@@ -97,6 +104,7 @@ async def make_deployment(
         bundle_version: str | None = None,
         readiness_marker_node_class: str | None = None,
         provision_operation_id: UUID | None = None,
+        pending_restart: bool = False,
     ) -> GpuSessionDeployment:
         repo = GpuSessionDeploymentRepository(db_session)
         return await repo.create(
@@ -111,9 +119,51 @@ async def make_deployment(
             status=status,
             is_primary=is_primary,
             provision_operation_id=provision_operation_id,
+            pending_restart=pending_restart,
         )
 
     return _factory
+
+
+async def _make_command(
+    db_session: AsyncSession,
+    *,
+    session: GpuSession,
+    deployment: GpuSessionDeployment,
+    kind: OperationKind,
+    batch_id: str | None = None,
+    terminal: bool = False,
+) -> None:
+    """Create one command row for a deployment, optionally already terminal.
+
+    Mirrors _create_raw_batch_command in test_gpu_session_deployment_orchestration.py,
+    adapted to this file's SAVEPOINT-scoped db_session instead of a committing
+    session factory.
+    """
+    operation_id = new_id()
+    command_id = new_id()
+    await GpuSessionOperationRepository(db_session).create(
+        id=operation_id,
+        session_id=session.id,
+        product_id=session.product_id,
+        kind=kind,
+        command_id=command_id,
+        batch_id=batch_id,
+    )
+    await GpuSessionCommandRepository(db_session).create(
+        id=command_id,
+        session_id=session.id,
+        product_id=session.product_id,
+        operation_id=operation_id,
+        deployment_id=deployment.id,
+        kind=kind,
+        payload={"bundle": "video-bundle", "mode": "additive", "verify": True},
+        batch_id=batch_id,
+    )
+    if terminal:
+        await GpuSessionCommandRepository(db_session).mark_terminal(
+            command_id, status=CommandStatus.succeeded, at=datetime.now(UTC)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +486,30 @@ async def test_get_routable_none_when_deployment_not_active(
     assert result is None
 
 
+async def test_get_routable_none_when_routing_suspended(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """S5: a restart cohort becoming ready suspends routing for every active
+    deployment on the session — get_routable must honor that even though
+    status alone still says 'active', since a restart takes the whole node
+    down and status is set by a separate step."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(session=session, status=DeploymentStatus.active)
+    await db_session.execute(
+        update(GpuSessionDeployment)
+        .where(GpuSessionDeployment.id == deployment.id)
+        .values(routing_suspended=True)
+    )
+
+    result = await deployment_repo.get_routable(
+        session.user_id, session.product_id, session.model_type
+    )
+    assert result is None
+
+
 async def test_get_routable_returns_pair_when_both_active(
     deployment_repo: GpuSessionDeploymentRepository,
     make_gpu_session: GpuSessionFactory,
@@ -679,3 +753,642 @@ async def test_session_operation_deployment_insert_is_atomic(
         select(GpuSessionDeployment).where(GpuSessionDeployment.id == deployment_id)
     )
     assert deployment_row.scalar_one_or_none() is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: P4 orchestration primitives
+# ---------------------------------------------------------------------------
+
+
+async def test_get_live_for_session_and_model_is_session_scoped(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    session1 = await make_gpu_session(status=GpuSessionStatus.active)
+    d1 = await make_deployment(session=session1, status=DeploymentStatus.active)
+    session2 = await make_gpu_session(status=GpuSessionStatus.active)
+    await make_deployment(session=session2, status=DeploymentStatus.active)
+
+    found = await deployment_repo.get_live_for_session_and_model(session1.id, session1.model_type)
+
+    assert found is not None
+    assert found.id == d1.id
+
+
+async def test_get_live_for_session_and_model_excludes_terminal(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    await make_deployment(session=session, status=DeploymentStatus.removed)
+
+    found = await deployment_repo.get_live_for_session_and_model(session.id, session.model_type)
+
+    assert found is None
+
+
+async def test_list_live_for_session_excludes_terminal_and_other_sessions(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    live1 = await make_deployment(session=session, status=DeploymentStatus.active)
+    live2 = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+    )
+    await make_deployment(
+        session=session,
+        status=DeploymentStatus.removed,
+        is_primary=False,
+        model_type="aisha-image-lite",
+    )
+    other_session = await make_gpu_session(status=GpuSessionStatus.active)
+    await make_deployment(session=other_session, status=DeploymentStatus.active)
+
+    found = await deployment_repo.list_live_for_session(session.id)
+
+    assert {d.id for d in found} == {live1.id, live2.id}
+
+
+async def test_set_provision_pointer_stamps_operation_and_batch(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=False
+    )
+    operation_id = new_id()
+
+    await deployment_repo.set_provision_pointer(
+        deployment.id, operation_id=operation_id, batch_id="batch-123"
+    )
+
+    await db_session.refresh(deployment)
+    assert deployment.provision_operation_id == operation_id
+    assert deployment.batch_id == "batch-123"
+
+
+async def test_mark_removing_guarded_by_active_status(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    active = await make_deployment(session=session, status=DeploymentStatus.active)
+    deploying = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+    )
+
+    assert await deployment_repo.mark_removing(active.id) is True
+    await db_session.refresh(active)
+    assert active.status == DeploymentStatus.removing
+
+    # Guarded: a deployment not currently 'active' cannot be marked removing.
+    assert await deployment_repo.mark_removing(deploying.id) is False
+    await db_session.refresh(deploying)
+    assert deploying.status == DeploymentStatus.deploying
+
+    # Idempotency: re-marking an already-removing deployment is a no-op miss.
+    assert await deployment_repo.mark_removing(active.id) is False
+
+
+async def test_list_deploying_awaiting_provision_result_excludes_primary_and_pending_restart(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    # The primary's 'deploying' -> 'active' path is owned by GpuProvisioningWorker,
+    # never by this worker's candidate query.
+    await make_deployment(session=session, status=DeploymentStatus.deploying, is_primary=True)
+    sibling = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+    )
+    # N2: a candidate must have a terminal provision command to be picked up.
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=sibling,
+        kind=OperationKind.bundle_provision,
+        terminal=True,
+    )
+    already_flagged = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-image-lite",
+    )
+    # Simulate an already-processed provision success (pending_restart=true).
+    await deployment_repo.resolve_provision_outcome(
+        already_flagged.id, succeeded=True, at=datetime.now(UTC)
+    )
+
+    candidates = await deployment_repo.list_deploying_awaiting_provision_result()
+
+    assert [c.id for c in candidates] == [sibling.id]
+
+
+async def test_resolve_provision_outcome_success_sets_pending_restart(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=False
+    )
+
+    at = datetime.now(UTC)
+    applied = await deployment_repo.resolve_provision_outcome(deployment.id, succeeded=True, at=at)
+
+    assert applied is True
+    await db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.deploying  # D33: stays 'deploying'
+    assert deployment.pending_restart is True
+    assert deployment.pending_restart_since == at
+
+
+async def test_resolve_provision_outcome_failure_fails_deployment(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=False
+    )
+    at = datetime.now(UTC)
+
+    applied = await deployment_repo.resolve_provision_outcome(deployment.id, succeeded=False, at=at)
+
+    assert applied is True
+    await db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.failed
+    assert deployment.removed_at is not None
+    # Frees the uniqueness slot, same as any other terminal write.
+    assert (
+        await deployment_repo.get_live_for_model(
+            session.user_id, session.product_id, deployment.model_type
+        )
+        is None
+    )
+
+
+async def test_resolve_provision_outcome_is_guarded(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    """A second call after the first already applied is a no-op miss, not a double-apply."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=False
+    )
+    now = datetime.now(UTC)
+    assert await deployment_repo.resolve_provision_outcome(deployment.id, succeeded=True, at=now)
+
+    assert not await deployment_repo.resolve_provision_outcome(
+        deployment.id, succeeded=True, at=now
+    )
+    assert not await deployment_repo.resolve_provision_outcome(
+        deployment.id, succeeded=False, at=now
+    )
+
+
+async def test_set_restart_pointer_is_guarded_against_duplicate_enqueue(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """D34: a second restart-enqueue attempt for an already-stamped batch orphans
+    the new operation id rather than corrupting the first one."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=False, pending_restart=True
+    )
+    first_operation_id = new_id()
+    second_operation_id = new_id()
+
+    updated = await deployment_repo.set_restart_pointer(
+        [deployment.id], operation_id=first_operation_id
+    )
+    assert updated == 1
+
+    updated_again = await deployment_repo.set_restart_pointer(
+        [deployment.id], operation_id=second_operation_id
+    )
+    assert updated_again == 0
+
+    await db_session.refresh(deployment)
+    assert deployment.restart_operation_id == first_operation_id
+
+
+async def test_resolve_restart_outcome_success_activates_every_member(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """Invariant #8: restart success activates every pending-restart deployment
+    in the batch, even a multi-member one."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    d1 = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=False, pending_restart=True
+    )
+    d2 = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+        pending_restart=True,
+    )
+    await db_session.execute(
+        update(GpuSessionDeployment)
+        .where(GpuSessionDeployment.id.in_((d1.id, d2.id)))
+        .values(routing_suspended=True)
+    )
+    at = datetime.now(UTC)
+
+    updated = await deployment_repo.resolve_restart_outcome([d1.id, d2.id], succeeded=True, at=at)
+
+    assert updated == 2
+    for d in (d1, d2):
+        await db_session.refresh(d)
+        assert d.status == DeploymentStatus.active
+        assert d.pending_restart is False
+        assert d.activated_at == at
+        assert d.routing_suspended is False
+
+
+async def test_resolve_restart_outcome_failure_fails_every_member_no_retry(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """Invariant #9: restart failure fails the deployments; no retry is a repo concern
+    (the worker simply never re-enqueues once pending_restart is cleared)."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=False, pending_restart=True
+    )
+    await db_session.execute(
+        update(GpuSessionDeployment)
+        .where(GpuSessionDeployment.id == deployment.id)
+        .values(routing_suspended=True)
+    )
+    at = datetime.now(UTC)
+
+    updated = await deployment_repo.resolve_restart_outcome([deployment.id], succeeded=False, at=at)
+
+    assert updated == 1
+    await db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.failed
+    assert deployment.pending_restart is False
+    assert deployment.removed_at == at
+    assert deployment.routing_suspended is False
+
+
+async def test_list_removing_and_resolve_removal_outcome_success(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(session=session, status=DeploymentStatus.removing)
+    # N2: a candidate must have a terminal removal command to be picked up.
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=deployment,
+        kind=OperationKind.bundle_removal,
+        terminal=True,
+    )
+
+    removing = await deployment_repo.list_removing()
+    assert deployment.id in {d.id for d in removing}
+
+    at = datetime.now(UTC)
+    applied = await deployment_repo.resolve_removal_outcome(deployment.id, succeeded=True, at=at)
+
+    assert applied is True
+    await db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.removed
+    assert deployment.removed_at == at
+
+
+async def test_resolve_removal_outcome_failure_returns_to_active(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """Invariant #13: removal failure returns the deployment to 'active' — the
+    bundle is still resident."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(session=session, status=DeploymentStatus.removing)
+
+    applied = await deployment_repo.resolve_removal_outcome(
+        deployment.id, succeeded=False, at=datetime.now(UTC)
+    )
+
+    assert applied is True
+    await db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.active
+    # Still occupies the slot — it never left.
+    found = await deployment_repo.get_live_for_model(
+        session.user_id, session.product_id, deployment.model_type
+    )
+    assert found is not None and found.id == deployment.id
+
+
+# ---------------------------------------------------------------------------
+# N2: bounded candidate pages exclude stalled rows, so they can't starve newer
+# ones. The candidate limit is patched down so the test doesn't need to create
+# 100+ rows to exceed it.
+# ---------------------------------------------------------------------------
+
+
+async def test_list_deploying_awaiting_provision_result_excludes_stalled_rows(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment whose provision command never went terminal (D31 only cancels
+    commands on a terminal *session* transition, so a session paused mid-attach
+    leaves it queued indefinitely) must not occupy a page slot — otherwise enough
+    stalled rows permanently starve every newer, genuinely ready deployment."""
+    monkeypatch.setattr(
+        "src.db.repositories.gpu_session_deployment._ORCHESTRATION_CANDIDATE_LIMIT", 2
+    )
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    for i in range(3):
+        stalled = await make_deployment(
+            session=session,
+            status=DeploymentStatus.deploying,
+            is_primary=False,
+            model_type=f"aisha-stalled-{i}",
+        )
+        await _make_command(
+            db_session, session=session, deployment=stalled, kind=OperationKind.bundle_provision
+        )
+    ready = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-ready",
+    )
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=ready,
+        kind=OperationKind.bundle_provision,
+        terminal=True,
+    )
+
+    candidates = await deployment_repo.list_deploying_awaiting_provision_result()
+
+    assert [c.id for c in candidates] == [ready.id]
+
+
+async def test_list_pending_restart_awaiting_operation_excludes_stalled_batches(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch still mid-provision-retry (its provision command never went
+    terminal) must not occupy a page slot on this bounded scan — the same
+    starvation risk as list_deploying_awaiting_provision_result, one step later."""
+    monkeypatch.setattr(
+        "src.db.repositories.gpu_session_deployment._ORCHESTRATION_CANDIDATE_LIMIT", 2
+    )
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    for i in range(3):
+        stalled_batch_id = f"batch-stalled-{i}"
+        stalled = await make_deployment(
+            session=session,
+            status=DeploymentStatus.deploying,
+            is_primary=False,
+            model_type=f"aisha-stalled-{i}",
+            pending_restart=True,
+        )
+        await deployment_repo.set_provision_pointer(
+            stalled.id, operation_id=new_id(), batch_id=stalled_batch_id
+        )
+        await _make_command(
+            db_session,
+            session=session,
+            deployment=stalled,
+            kind=OperationKind.bundle_provision,
+            batch_id=stalled_batch_id,
+        )
+    ready_batch_id = "batch-ready"
+    ready = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-ready",
+        pending_restart=True,
+    )
+    await deployment_repo.set_provision_pointer(
+        ready.id, operation_id=new_id(), batch_id=ready_batch_id
+    )
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=ready,
+        kind=OperationKind.bundle_provision,
+        batch_id=ready_batch_id,
+        terminal=True,
+    )
+
+    candidates = await deployment_repo.list_pending_restart_awaiting_operation()
+
+    assert [c.id for c in candidates] == [ready.id]
+
+
+async def test_list_pending_restart_awaiting_operation_excludes_null_batch_id(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    """S3: a row with no batch_id can never match the batch-readiness
+    correlation (SQL NULL = NULL is unknown), so without this exclusion it
+    would pin the bounded page forever — the N2 starvation shape, reborn for
+    an invariant-violating row. It's surfaced instead by
+    list_pending_restart_missing_batch_id, which the orchestration worker
+    fails outright rather than leaving on this page."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    no_batch_id = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-no-batch-id",
+        pending_restart=True,
+    )
+    assert no_batch_id.batch_id is None
+
+    candidates = await deployment_repo.list_pending_restart_awaiting_operation()
+    assert no_batch_id.id not in {c.id for c in candidates}
+
+    missing_batch_id = await deployment_repo.list_pending_restart_missing_batch_id()
+    assert [c.id for c in missing_batch_id] == [no_batch_id.id]
+
+
+async def test_list_removing_excludes_stalled_rows(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A removal command stranded queued by a mid-removal session pause must not
+    occupy a page slot on this bounded scan."""
+    monkeypatch.setattr(
+        "src.db.repositories.gpu_session_deployment._ORCHESTRATION_CANDIDATE_LIMIT", 2
+    )
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    for i in range(3):
+        stalled = await make_deployment(
+            session=session,
+            status=DeploymentStatus.removing,
+            is_primary=False,
+            model_type=f"aisha-stalled-{i}",
+        )
+        await _make_command(
+            db_session, session=session, deployment=stalled, kind=OperationKind.bundle_removal
+        )
+    ready = await make_deployment(
+        session=session,
+        status=DeploymentStatus.removing,
+        is_primary=False,
+        model_type="aisha-ready",
+    )
+    await _make_command(
+        db_session,
+        session=session,
+        deployment=ready,
+        kind=OperationKind.bundle_removal,
+        terminal=True,
+    )
+
+    candidates = await deployment_repo.list_removing()
+
+    assert [c.id for c in candidates] == [ready.id]
+
+
+async def test_mark_primary_active_ignores_sibling_deployments(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """Invariant #5 (D33) hardening: a session-level active transition (bootstrap
+    or resume) must never mark a still-provisioning P4 sibling routable — only
+    the primary is flipped by this cascade."""
+    session = await make_gpu_session(status=GpuSessionStatus.provisioning)
+    primary = await make_deployment(
+        session=session, status=DeploymentStatus.deploying, is_primary=True
+    )
+    sibling = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+    )
+
+    updated = await deployment_repo.mark_primary_active(session.id, at=datetime.now(UTC))
+
+    assert updated == 1
+    await db_session.refresh(primary)
+    await db_session.refresh(sibling)
+    assert primary.status == DeploymentStatus.active
+    assert primary.activated_at is not None
+    assert sibling.status == DeploymentStatus.deploying
+    assert sibling.activated_at is None
+
+
+async def test_teardown_cascade_covers_a_deploying_sibling_mid_attach(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """Invariant #15: stopping a session mid-attach must leave no deployment in
+    'deploying' and must cancel that deployment's queued command — exercised
+    directly against the D15 chokepoint primitives (mark_status + cancel_for_session
+    + close_failed), the same calls GpuSessionService._set_status /
+    GpuProvisioningWorker._transition make in one transaction. P4's new wrinkle is
+    that the session now has BOTH an 'active' primary AND a 'deploying' sibling at
+    once — the cascade must still catch both, unconditionally on LIVE_DEPLOYMENT_STATUSES."""
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    primary = await make_deployment(session=session, status=DeploymentStatus.active)
+    sibling = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+    )
+    command_repo = GpuSessionCommandRepository(db_session)
+    operation_id = new_id()
+    command_id = new_id()
+    await GpuSessionOperationRepository(db_session).create(
+        id=operation_id,
+        session_id=session.id,
+        product_id=session.product_id,
+        kind=OperationKind.bundle_provision,
+        command_id=command_id,
+    )
+    queued_command = await command_repo.create(
+        id=command_id,
+        session_id=session.id,
+        product_id=session.product_id,
+        operation_id=operation_id,
+        deployment_id=sibling.id,
+        kind=OperationKind.bundle_provision,
+        payload={"bundle": "video-bundle", "mode": "additive", "verify": True},
+    )
+    at = datetime.now(UTC)
+
+    # The D15 cascade: session -> 'stopped' flips every live deployment, cancels
+    # every queued/claimed command, and fails each cancelled command's operation.
+    await deployment_repo.mark_status(
+        session.id,
+        from_statuses=LIVE_DEPLOYMENT_STATUSES,
+        to_status=DeploymentStatus.removed,
+        at=at,
+    )
+    cancelled = await command_repo.cancel_for_session(session.id, at=at, reason="session stopped")
+
+    await db_session.refresh(primary)
+    await db_session.refresh(sibling)
+    await db_session.refresh(queued_command)
+    assert primary.status == DeploymentStatus.removed
+    assert sibling.status == DeploymentStatus.removed  # no deployment left 'deploying'
+    assert {c.id for c in cancelled} == {queued_command.id}
+    assert queued_command.status == "cancelled"

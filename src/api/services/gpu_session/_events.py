@@ -9,18 +9,22 @@ contract lives in one place.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from src.api.schemas.events import EventType, GpuSessionStatusPayload
+from src.api.schemas.events import EventType, GpuDeploymentStatusPayload, GpuSessionStatusPayload
 from src.api.schemas.ops_events import GpuNodeStartedOpsPayload, OpsEventType
 from src.core.enums import GpuSessionStatus
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from src.api.services.event_bus import EventBus
     from src.api.services.ops_event_bus import OpsEventBus
     from src.db.models.gpu_session import GpuSession
+    from src.db.models.gpu_session_deployment import GpuSessionDeployment
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
 
@@ -91,4 +95,74 @@ async def publish_status_event(
                 user_id=session.user_id,
                 model_type=session.model_type,
             ),
+        )
+
+
+_OPERATION_ID_NOT_GIVEN: Any = object()
+
+
+async def publish_deployment_event(
+    event_bus: EventBus | None,
+    deployment: GpuSessionDeployment,
+    *,
+    operation: GpuSessionOperation | None = None,
+    operation_id: UUID | None = _OPERATION_ID_NOT_GIVEN,
+    error_message: str | None = None,
+) -> None:
+    """Fire-and-forget SSE publish for a P4 deployment state change (Part 4).
+
+    ``operation`` is whichever operation currently governs the deployment's progress
+    (its provision or restart operation) — pass it when already loaded in the same
+    tick as the state write, so ``operation_phase``/``operation_progress`` reflect
+    the node's own telemetry. ``operation_id`` lets a caller name the governing
+    operation explicitly when it hasn't loaded the row, *including as None* when
+    there deliberately is none to report — e.g. a stranded removal reaper, whose
+    governing operation must never fall back to the deployment's stale
+    ``restart_operation_id`` from some earlier, already-terminal restart (S1). A
+    caller that passes neither keyword gets the historical N4 behavior: falls
+    back to ``deployment.restart_operation_id or deployment.provision_operation_id``,
+    so every such event still carries an id the client can poll — restart_operation_id
+    takes precedence there because, once it's set, the restart (not the original
+    provision) is what currently governs the deployment's progress. The default
+    is a private sentinel rather than ``None`` precisely so "explicitly None" and
+    "not given at all" can be told apart.
+    """
+    if event_bus is None:
+        return
+    resolved_operation_id: UUID | None
+    if operation is not None:
+        resolved_operation_id = operation.id
+    elif operation_id is not _OPERATION_ID_NOT_GIVEN:
+        resolved_operation_id = operation_id
+    else:
+        resolved_operation_id = deployment.restart_operation_id or deployment.provision_operation_id
+    try:
+        await asyncio.wait_for(
+            event_bus.publish(
+                user_id=deployment.user_id,
+                event_type=EventType.GPU_DEPLOYMENT_STATUS_CHANGED,
+                payload=GpuDeploymentStatusPayload(
+                    deployment_id=deployment.id,
+                    session_id=deployment.session_id,
+                    model_type=deployment.model_type,
+                    status=str(deployment.status),
+                    pending_restart=deployment.pending_restart,
+                    routing_suspended=deployment.routing_suspended,
+                    operation_id=resolved_operation_id,
+                    operation_phase=operation.phase if operation is not None else None,
+                    operation_progress=operation.progress if operation is not None else None,
+                    error_message=error_message,
+                ),
+            ),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "gpu_session.deployment.event_publish_timeout",
+            deployment_id=str(deployment.id),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except Exception:
+        logger.exception(
+            "gpu_session.deployment.event_publish_failed", deployment_id=str(deployment.id)
         )
