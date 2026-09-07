@@ -86,6 +86,7 @@ class DeploymentResponse(msgspec.Struct, kw_only=True):
     bundle_version: str | None
     status: str
     pending_restart: bool
+    routing_suspended: bool
     is_primary: bool
     created_at: datetime
     activated_at: datetime | None
@@ -101,6 +102,7 @@ class DeploymentResponse(msgspec.Struct, kw_only=True):
             bundle_version=m.bundle_version,
             status=m.status,
             pending_restart=m.pending_restart,
+            routing_suspended=m.routing_suspended,
             is_primary=m.is_primary,
             created_at=m.created_at,
             activated_at=m.activated_at,

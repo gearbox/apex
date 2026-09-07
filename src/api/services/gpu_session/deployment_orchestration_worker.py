@@ -64,6 +64,16 @@ _ALREADY_REMOVED_ERROR_MARKER = "is not recorded in residency"
 _ORPHANED_DEPLOYMENT_GRACE = timedelta(minutes=1)
 
 
+class _RestartCohortChangedError(RuntimeError):
+    """The candidate cohort changed before its restart pointer was stamped."""
+
+
+def _require_restart_pointer_update(updated: int, expected: int) -> None:
+    """Abort the transaction unless every cohort member received the pointer."""
+    if updated != expected:
+        raise _RestartCohortChangedError
+
+
 def _is_already_removed_error(error: str | None) -> bool:
     return error is not None and _ALREADY_REMOVED_ERROR_MARKER in error
 
@@ -359,8 +369,11 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionDeploymentRepository(db)
             await repo.acquire_removal_lock(session_id)
-            await repo.suspend_routing_for_session(session_id)
+            routing_suspended = await repo.suspend_routing_for_session(session_id)
             in_flight = await JobRepository(db).count_in_flight_for_session(session_id)
+
+        for deployment in routing_suspended:
+            await publish_deployment_event(self._event_bus, deployment)
 
         cohorts: dict[str | None, list[GpuSessionDeployment]] = {}
         for member in ready_members:
@@ -413,11 +426,21 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             )
 
         try:
-            command = await self._command_service.enqueue(
-                session_id=session_id,
-                product_id=members[0].product_id,
-                command=RestartCommand(node_class=readiness_marker_node_class),
-            )
+            # The restart command and every member's pointer form one invariant:
+            # a pending deployment must never see a committed restart command
+            # without pointing at it. Keeping both writes in this transaction
+            # eliminates the duplicate-enqueue crash window outright.
+            async with self._session_factory() as db, db.begin():
+                command = await self._command_service.enqueue(
+                    session_id=session_id,
+                    product_id=members[0].product_id,
+                    command=RestartCommand(node_class=readiness_marker_node_class),
+                    db=db,
+                )
+                updated = await GpuSessionDeploymentRepository(db).set_restart_pointer(
+                    [member.id for member in members], operation_id=command.operation_id
+                )
+                _require_restart_pointer_update(updated, len(members))
         except CommandEnqueueSessionError:
             # Session went terminal — the D15 chokepoint cascade already flipped these
             # deployments away from 'deploying'/pending_restart, so they'll drop out of
@@ -428,11 +451,16 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 batch_ids=sorted({member.batch_id for member in members if member.batch_id}),
             )
             return
-
-        async with self._session_factory() as db, db.begin():
-            updated = await GpuSessionDeploymentRepository(db).set_restart_pointer(
-                [member.id for member in members], operation_id=command.operation_id
+        except _RestartCohortChangedError:
+            # The exception rolls the enclosing transaction back, including the
+            # freshly-created command and operation. A later tick re-reads the
+            # cohort instead of leaving an orphaned command behind.
+            logger.info(
+                "gpu_session.deployment.restart_enqueue_skipped_cohort_changed",
+                session_id=str(session_id),
+                batch_ids=sorted({member.batch_id for member in members if member.batch_id}),
             )
+            return
         logger.info(
             "gpu_session.deployment.restart_enqueued",
             session_id=str(session_id),
@@ -537,18 +565,17 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
 
         succeeded = not failed_commands
         ids = [member.id for member in members]
+        routing_released: Sequence[GpuSessionDeployment] = ()
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionDeploymentRepository(db)
             updated = await repo.resolve_restart_outcome(ids, succeeded=succeeded, at=now)
             if succeeded:
                 # Per-row hygiene above clears the cycle members' flags.  This
                 # session-wide release handles non-members such as the primary.
-                await repo.clear_routing_suspended_for_session(session_id)
+                routing_released = await repo.clear_routing_suspended_for_session(session_id)
             else:
                 cancellation_reason = "restart cycle failed before command could be claimed"
-                cancelled = await GpuSessionCommandRepository(
-                    db
-                ).cancel_non_terminal_by_session_and_kind(
+                cancelled = await GpuSessionCommandRepository(db).cancel_queued_by_session_and_kind(
                     session_id,
                     OperationKind.comfyui_restart,
                     at=now,
@@ -572,10 +599,14 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                     # resolve_restart_outcome is per-row hygiene for the cycle
                     # members. This session-wide release is what reopens active
                     # non-members such as the primary.
-                    await repo.clear_routing_suspended_for_session(session_id)
+                    routing_released = await repo.clear_routing_suspended_for_session(session_id)
+        for deployment in routing_released:
+            await publish_deployment_event(self._event_bus, deployment)
+
         # A terminal session cascade can win after the candidate query.  Its
         # guarded UPDATE intentionally returns zero; do not publish a stale
-        # active/failed deployment event in that case.
+        # active/failed deployment event in that case. The routing-release
+        # events above remain current and are deliberately still published.
         if updated == 0:
             return
 
@@ -613,28 +644,6 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 member.removed_at = now
                 await publish_deployment_event(
                     self._event_bus, member, operation=operation, error_message=error_message
-                )
-
-    # ------------------------------------------------------------------
-    # Step 6 — release a suspension that no longer has a restart owner
-    # ------------------------------------------------------------------
-
-    async def _reconcile_orphaned_routing_suspensions(self) -> None:
-        """Repair a session-wide suspension stranded outside the normal cycle path."""
-        async with self._session_factory() as db:
-            session_ids = await GpuSessionDeploymentRepository(
-                db
-            ).list_orphaned_routing_suspension_session_ids()
-        for session_id in session_ids:
-            async with self._session_factory() as db, db.begin():
-                released = await GpuSessionDeploymentRepository(
-                    db
-                ).clear_orphaned_routing_suspension(session_id)
-            if released:
-                logger.warning(
-                    "gpu_session.deployment.routing_suspension_released",
-                    session_id=str(session_id),
-                    deployment_count=released,
                 )
 
     # ------------------------------------------------------------------
@@ -694,6 +703,30 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
             await publish_deployment_event(
                 self._event_bus, deployment, operation=operation, error_message=command.error
             )
+
+    # ------------------------------------------------------------------
+    # Step 6 — release a suspension that no longer has a restart owner
+    # ------------------------------------------------------------------
+
+    async def _reconcile_orphaned_routing_suspensions(self) -> None:
+        """Repair a session-wide suspension stranded outside the normal cycle path."""
+        async with self._session_factory() as db:
+            session_ids = await GpuSessionDeploymentRepository(
+                db
+            ).list_orphaned_routing_suspension_session_ids()
+        for session_id in session_ids:
+            async with self._session_factory() as db, db.begin():
+                released = await GpuSessionDeploymentRepository(
+                    db
+                ).clear_orphaned_routing_suspension(session_id)
+            if released:
+                logger.warning(
+                    "gpu_session.deployment.routing_suspension_released",
+                    session_id=str(session_id),
+                    deployment_count=len(released),
+                )
+                for deployment in released:
+                    await publish_deployment_event(self._event_bus, deployment)
 
     @staticmethod
     def _removal_succeeded(command: GpuSessionCommand) -> bool:

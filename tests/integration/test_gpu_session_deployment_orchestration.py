@@ -31,10 +31,11 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.api.schemas.gpu_session import OperationEventBody
+from src.api.schemas.events import EventType
+from src.api.schemas.gpu_session import DeploymentResponse, OperationEventBody
 from src.api.services.gpu_session.command_payload import ProvisionCommand
 from src.api.services.gpu_session.command_service import (
     CommandEnqueueSessionError,
@@ -55,6 +56,7 @@ from src.api.services.gpu_session.exceptions import (
 )
 from src.api.services.gpu_session.operation_event_service import OperationEventService
 from src.core.enums import (
+    TERMINAL_COMMAND_STATUSES,
     CommandStatus,
     DeploymentStatus,
     GpuSessionStatus,
@@ -651,6 +653,51 @@ async def test_attach_rejects_non_active_session(
     async with orchestration_session_factory() as session:
         deployments = await GpuSessionDeploymentRepository(session).list_for_session(gpu_session.id)
     assert deployments == []
+
+
+async def test_remove_rejects_paused_session_without_enqueuing_a_command(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A stopped node cannot consume a removal command; resume must come first."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    deployment_service = _deployment_service(orchestration_session_factory, command_service)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(
+        orchestration_session_factory, user=user, status=GpuSessionStatus.paused
+    )
+    target = await _create_deployment(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        is_primary=False,
+        model_type=ModelType.AISHA_VIDEO.value,
+    )
+
+    with pytest.raises(InvalidSessionStateError, match="resume the session first"):
+        await deployment_service.remove(
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type=ModelType.AISHA_VIDEO,
+            force=True,
+        )
+
+    target = await _get_deployment(orchestration_session_factory, target.id)
+    assert target.status == DeploymentStatus.active
+    async with orchestration_session_factory() as session:
+        commands = (
+            (
+                await session.execute(
+                    select(GpuSessionCommand).where(
+                        GpuSessionCommand.deployment_id == target.id,
+                        GpuSessionCommand.kind == OperationKind.bundle_removal,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert commands == []
 
 
 # ---------------------------------------------------------------------------
@@ -1356,6 +1403,152 @@ async def test_restart_suspends_routing_before_the_drain_count_and_it_persists(
     assert observed_suspended == [True, True]
     primary = await _get_deployment(orchestration_session_factory, primary.id)
     assert primary.routing_suspended is True
+
+
+async def test_routing_suspension_is_projected_and_published(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """U1: API and SSE expose the temporary whole-session routing closure."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    event_bus = AsyncMock()
+    deployment_service = GpuSessionDeploymentService(
+        session_factory=orchestration_session_factory,
+        bundle_index=_FakeBundleIndex(),  # type: ignore[arg-type]
+        command_service=command_service,
+        event_bus=event_bus,
+    )
+    worker = _worker(orchestration_session_factory, command_service, settings, event_bus=event_bus)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    primary = await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
+    deployment, provision_operation_id = await deployment_service.attach(
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type=ModelType.AISHA_VIDEO,
+    )
+    provision_command = await _get_command_by_operation(
+        orchestration_session_factory, provision_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory, provision_command.id, status=CommandStatus.succeeded
+    )
+
+    event_bus.reset_mock()
+    await worker.run_once()
+
+    primary = await _get_deployment(orchestration_session_factory, primary.id)
+    assert DeploymentResponse.from_model(primary).routing_suspended is True
+    suspended_events = [
+        call.kwargs["payload"]
+        for call in event_bus.publish.call_args_list
+        if call.kwargs["event_type"] == EventType.GPU_DEPLOYMENT_STATUS_CHANGED
+        and call.kwargs["payload"].deployment_id == primary.id
+        and call.kwargs["payload"].routing_suspended is True
+    ]
+    assert suspended_events
+
+    deployment = await _get_deployment(orchestration_session_factory, deployment.id)
+    assert deployment.restart_operation_id is not None
+    restart_command = await _get_command_by_operation(
+        orchestration_session_factory, deployment.restart_operation_id
+    )
+    await _mark_terminal(
+        orchestration_session_factory, restart_command.id, status=CommandStatus.succeeded
+    )
+    event_bus.reset_mock()
+    await worker.run_once()
+
+    primary = await _get_deployment(orchestration_session_factory, primary.id)
+    assert DeploymentResponse.from_model(primary).routing_suspended is False
+    released_events = [
+        call.kwargs["payload"]
+        for call in event_bus.publish.call_args_list
+        if call.kwargs["event_type"] == EventType.GPU_DEPLOYMENT_STATUS_CHANGED
+        and call.kwargs["payload"].deployment_id == primary.id
+        and call.kwargs["payload"].routing_suspended is False
+    ]
+    assert released_events
+
+
+async def test_restart_enqueue_and_pointer_stamp_roll_back_together(
+    orchestration_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V2: a pointer failure cannot commit an orphaned restart command."""
+    settings = _StubSettings()
+    command_service = _command_service(orchestration_session_factory, settings)
+    worker = _worker(orchestration_session_factory, command_service, settings)
+    user = await _create_user(orchestration_session_factory)
+    gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
+    deployment = await _create_deployment(
+        orchestration_session_factory,
+        gpu_session=gpu_session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type=ModelType.AISHA_VIDEO.value,
+        pending_restart=True,
+        batch_id=f"batch-{uuid4().hex}",
+        readiness_marker_node_class="VideoMarker",
+    )
+    original_set_restart_pointer = GpuSessionDeploymentRepository.set_restart_pointer
+
+    async def fail_pointer_stamp(
+        self: GpuSessionDeploymentRepository, deployment_ids: Any, *, operation_id: Any
+    ) -> int:
+        _ = self, deployment_ids, operation_id
+        raise RuntimeError("pointer write failed")
+
+    monkeypatch.setattr(GpuSessionDeploymentRepository, "set_restart_pointer", fail_pointer_stamp)
+    with pytest.raises(RuntimeError, match="pointer write failed"):
+        await worker._enqueue_restart_cohort(
+            session_id=gpu_session.id,
+            members=[deployment],
+            in_flight=0,
+            readiness_marker_node_class="VideoMarker",
+        )
+
+    async with orchestration_session_factory() as session:
+        commands = (
+            (
+                await session.execute(
+                    select(GpuSessionCommand).where(
+                        GpuSessionCommand.session_id == gpu_session.id,
+                        GpuSessionCommand.kind == OperationKind.comfyui_restart,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert commands == []
+
+    monkeypatch.setattr(
+        GpuSessionDeploymentRepository, "set_restart_pointer", original_set_restart_pointer
+    )
+    await worker._enqueue_restart_cohort(
+        session_id=gpu_session.id,
+        members=[deployment],
+        in_flight=0,
+        readiness_marker_node_class="VideoMarker",
+    )
+
+    async with orchestration_session_factory() as session:
+        commands = (
+            (
+                await session.execute(
+                    select(GpuSessionCommand).where(
+                        GpuSessionCommand.session_id == gpu_session.id,
+                        GpuSessionCommand.kind == OperationKind.comfyui_restart,
+                        GpuSessionCommand.status.notin_(tuple(TERMINAL_COMMAND_STATUSES)),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(commands) == 1
 
 
 async def test_restart_fires_anyway_after_drain_timeout(

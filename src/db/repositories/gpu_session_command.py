@@ -298,7 +298,7 @@ class GpuSessionCommandRepository:
         await self._session.flush()
         return result.scalars().all()
 
-    async def cancel_non_terminal_by_session_and_kind(
+    async def cancel_queued_by_session_and_kind(
         self,
         session_id: UUID,
         kind: OperationKind | str,

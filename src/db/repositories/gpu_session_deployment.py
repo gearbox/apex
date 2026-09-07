@@ -25,7 +25,7 @@ from src.db.models.gpu_session_command import GpuSessionCommand
 from src.db.models.gpu_session_deployment import GpuSessionDeployment
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Collection, Iterable, Sequence
     from datetime import datetime
     from uuid import UUID
 
@@ -182,6 +182,36 @@ class GpuSessionDeploymentRepository:
         )
         row = result.first()
         return None if row is None else (row[0], row[1])
+
+    async def has_routing_suspension_for_model(
+        self,
+        user_id: UUID,
+        product_id: str,
+        model_type: str,
+    ) -> bool:
+        """Whether an otherwise-active deployment is temporarily restart-suspended.
+
+        This is intentionally narrower than "not routable": paused, stale, and
+        failed sessions are not restart-in-progress states. Generation uses it
+        only to give the caller an actionable wait-and-retry message after the
+        normal routable lookup returns no row.
+        """
+        result = await self._session.execute(
+            select(
+                select(GpuSessionDeployment.id)
+                .join(GpuSession, GpuSessionDeployment.session_id == GpuSession.id)
+                .where(
+                    GpuSessionDeployment.user_id == user_id,
+                    GpuSessionDeployment.product_id == product_id,
+                    GpuSessionDeployment.model_type == model_type,
+                    GpuSessionDeployment.status == DeploymentStatus.active,
+                    GpuSessionDeployment.routing_suspended.is_(True),
+                    GpuSession.status == GpuSessionStatus.active,
+                )
+                .exists()
+            )
+        )
+        return bool(result.scalar())
 
     async def list_for_session(self, session_id: UUID) -> Sequence[GpuSessionDeployment]:
         """List all deployments for one session.
@@ -373,29 +403,33 @@ class GpuSessionDeploymentRepository:
             )
         )
 
-    async def suspend_routing_for_session(self, session_id: UUID) -> int:
+    async def suspend_routing_for_session(self, session_id: UUID) -> Sequence[GpuSessionDeployment]:
         """S5: close routing for every 'active' deployment on a session before
         the restart drain check runs, so the in-flight count read right after
         this is monotonically non-increasing — the property that makes D35's
         timeout an actual bound instead of a hope. Caller must hold
         ``acquire_removal_lock`` in the same transaction first. Idempotent: a
         cohort that is still draining on a later tick re-suspends a no-op set.
+        Returns only rows whose flag changed, so callers can publish an exact
+        deployment SSE update after their transaction commits.
         """
-        result = cast(
-            "CursorResult[Any]",
-            await self._session.execute(
-                update(GpuSessionDeployment)
-                .where(
-                    GpuSessionDeployment.session_id == session_id,
-                    GpuSessionDeployment.status == DeploymentStatus.active,
-                )
-                .values(routing_suspended=True)
-            ),
+        result = await self._session.execute(
+            update(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.status == DeploymentStatus.active,
+                GpuSessionDeployment.routing_suspended.is_(False),
+            )
+            .values(routing_suspended=True)
+            .returning(GpuSessionDeployment)
+            .execution_options(populate_existing=True)
         )
         await self._session.flush()
-        return result.rowcount
+        return result.scalars().all()
 
-    async def clear_routing_suspended_for_session(self, session_id: UUID) -> int:
+    async def clear_routing_suspended_for_session(
+        self, session_id: UUID
+    ) -> Sequence[GpuSessionDeployment]:
         """S5/S6: release a whole-session routing suspension once its restart
         cycle resolves and no claimed sibling can still restart the node.
         Session-scoped rather than limited to the cycle's own deployment ids:
@@ -404,19 +438,54 @@ class GpuSessionDeploymentRepository:
         being resolved (e.g. the primary), so releasing it must cover the same
         set.
         """
-        result = cast(
-            "CursorResult[Any]",
-            await self._session.execute(
-                update(GpuSessionDeployment)
-                .where(
-                    GpuSessionDeployment.session_id == session_id,
-                    GpuSessionDeployment.routing_suspended.is_(True),
-                )
-                .values(routing_suspended=False)
-            ),
+        result = await self._session.execute(
+            update(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.routing_suspended.is_(True),
+            )
+            .values(routing_suspended=False)
+            .returning(GpuSessionDeployment)
+            .execution_options(populate_existing=True)
         )
         await self._session.flush()
-        return result.rowcount
+        return result.scalars().all()
+
+    async def fail_active_siblings_with_missing_readiness_markers(
+        self,
+        session_id: UUID,
+        *,
+        markers: Collection[str],
+        at: datetime,
+    ) -> Sequence[GpuSessionDeployment]:
+        """Fail active non-primary deployments whose resume marker is absent.
+
+        A paused session keeps deployments active (D17), so resume must not put
+        a sibling back into the routing set merely because the primary's marker
+        came back. The status predicate keeps a concurrent terminal transition
+        or removal authoritative; returned rows are exactly the failures that
+        should be published after the caller commits.
+        """
+        if not markers:
+            return ()
+        result = await self._session.execute(
+            update(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.is_primary.is_(False),
+                GpuSessionDeployment.status == DeploymentStatus.active,
+                GpuSessionDeployment.readiness_marker_node_class.in_(tuple(markers)),
+            )
+            .values(
+                status=DeploymentStatus.failed,
+                removed_at=at,
+                routing_suspended=False,
+            )
+            .returning(GpuSessionDeployment)
+            .execution_options(populate_existing=True)
+        )
+        await self._session.flush()
+        return result.scalars().all()
 
     async def mark_removing(
         self, deployment_id: UUID, *, require_another_active: bool = False
@@ -751,10 +820,13 @@ class GpuSessionDeploymentRepository:
                 ~non_terminal_restart_exists,
             )
             .distinct()
+            .limit(_ORCHESTRATION_CANDIDATE_LIMIT)
         )
         return result.scalars().all()
 
-    async def clear_orphaned_routing_suspension(self, session_id: UUID) -> int:
+    async def clear_orphaned_routing_suspension(
+        self, session_id: UUID
+    ) -> Sequence[GpuSessionDeployment]:
         """Release an orphaned suspension if it still has no restart owner.
 
         The predicates are repeated on the UPDATE rather than trusting the prior
@@ -781,21 +853,20 @@ class GpuSessionDeploymentRepository:
             .correlate(GpuSessionDeployment)
             .exists()
         )
-        result = cast(
-            "CursorResult[Any]",
-            await self._session.execute(
-                update(GpuSessionDeployment)
-                .where(
-                    GpuSessionDeployment.session_id == session_id,
-                    GpuSessionDeployment.routing_suspended.is_(True),
-                    ~pending_restart_exists,
-                    ~non_terminal_restart_exists,
-                )
-                .values(routing_suspended=False)
-            ),
+        result = await self._session.execute(
+            update(GpuSessionDeployment)
+            .where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.routing_suspended.is_(True),
+                ~pending_restart_exists,
+                ~non_terminal_restart_exists,
+            )
+            .values(routing_suspended=False)
+            .returning(GpuSessionDeployment)
+            .execution_options(populate_existing=True)
         )
         await self._session.flush()
-        return result.rowcount
+        return result.scalars().all()
 
     async def list_removing(self) -> Sequence[GpuSessionDeployment]:
         """P4 orchestration worker step 4 candidates: removal in flight with a

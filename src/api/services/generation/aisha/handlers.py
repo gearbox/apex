@@ -310,6 +310,15 @@ class AishaImageGenerationHandler:
             model_type=request.model,
         )
         if routing is None:
+            if await self._gpu_session_service.is_generation_routing_suspended(
+                user_id=user_id,
+                product_id=product_id,
+                model_type=request.model,
+            ):
+                raise NoActiveSessionError(
+                    f"Generation for model {request.model.value} is temporarily paused while "
+                    "its GPU session restarts. Wait for the deployment update and try again."
+                )
             raise NoActiveSessionError(
                 f"No active GPU session for model {request.model.value}. "
                 "Start a session first via POST /v1/sessions."

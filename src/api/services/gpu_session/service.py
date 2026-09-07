@@ -775,6 +775,20 @@ class GpuSessionService:
             deployment_repo = GpuSessionDeploymentRepository(db)
             return await deployment_repo.get_routable(user_id, product_id, model_type.value)
 
+    async def is_generation_routing_suspended(
+        self,
+        *,
+        user_id: UUID,
+        product_id: str,
+        model_type: ModelType,
+    ) -> bool:
+        """Whether generation is temporarily unavailable for a restart cycle."""
+        async with self._session_factory() as db:
+            deployment_repo = GpuSessionDeploymentRepository(db)
+            return await deployment_repo.has_routing_suspension_for_model(
+                user_id, product_id, model_type.value
+            )
+
     async def list_user_sessions(
         self,
         *,

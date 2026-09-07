@@ -153,6 +153,7 @@ def _make_provider_with_mocks() -> tuple[AishaGenerationProvider, dict]:
     gpu_session_service.get_active_session_for_model = AsyncMock(
         return_value=_routing(_make_active_gpu_session())
     )
+    gpu_session_service.is_generation_routing_suspended = AsyncMock(return_value=False)
     bundle_index = _make_bundle_index_mock()
 
     # tunnel_domain matches the mocked hostname suffix so the SSRF allowlist
@@ -280,6 +281,24 @@ class TestAishaProviderRouting:
                 token_cost=50,
                 product_id="vex",
             )
+
+    async def test_explains_restart_suspension_when_routing_is_temporarily_closed(self) -> None:
+        provider, mocks = _make_provider_with_mocks()
+        mocks["gpu_session_service"].get_active_session_for_model = AsyncMock(return_value=None)
+        mocks["gpu_session_service"].is_generation_routing_suspended = AsyncMock(return_value=True)
+
+        with pytest.raises(NoActiveSessionError, match="temporarily paused while"):
+            await provider.submit(
+                _make_request(),
+                user_id=uuid4(),
+                session=AsyncMock(),
+                billing_service=AsyncMock(),
+                account_id=uuid4(),
+                token_cost=50,
+                product_id="vex",
+            )
+
+        mocks["gpu_session_service"].is_generation_routing_suspended.assert_awaited_once()
 
     async def test_routing_uses_deployment_bundle_identity_not_session(self) -> None:
         """Invariant 6: with the session's bundle_name deliberately set to a

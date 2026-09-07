@@ -73,7 +73,8 @@ class GpuDeploymentStatusPayload(msgspec.Struct, kw_only=True):
     """Emitted on every P4 deployment state change: attach, provision progress,
     pending_restart, restart, activation, removal. The frontend's four-step story
     (downloading, waiting to restart, restarting, ready) is built entirely from
-    ``status`` + ``pending_restart`` + the current operation's phase/progress —
+    ``status`` + ``pending_restart`` + ``routing_suspended`` + the current
+    operation's phase/progress —
     the second step is the one that looks like a hang if the client can't see it."""
 
     deployment_id: UUID
@@ -81,6 +82,7 @@ class GpuDeploymentStatusPayload(msgspec.Struct, kw_only=True):
     model_type: str
     status: str
     pending_restart: bool
+    routing_suspended: bool
     operation_id: UUID | None = None
     """The operation currently governing this deployment's progress: its
     provision_operation_id while deploying, else its restart_operation_id

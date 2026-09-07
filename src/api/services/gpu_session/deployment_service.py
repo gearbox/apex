@@ -213,6 +213,13 @@ class GpuSessionDeploymentService:
             )
         if session_row is None:
             raise GpuSessionError(f"Session {session_id} not found or access denied")
+        if session_row.status != GpuSessionStatus.active:
+            raise InvalidSessionStateError(
+                f"Cannot remove a deployment from session in state '{session_row.status}'; "
+                "resume the session first",
+                current_status=session_row.status,
+                operation="remove",
+            )
 
         # P4 removal is one serialized state transition.  In particular, do not
         # split active -> removing from the in-flight count or command enqueue:

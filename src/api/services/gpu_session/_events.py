@@ -147,6 +147,7 @@ async def publish_deployment_event(
                     model_type=deployment.model_type,
                     status=str(deployment.status),
                     pending_restart=deployment.pending_restart,
+                    routing_suspended=deployment.routing_suspended,
                     operation_id=resolved_operation_id,
                     operation_phase=operation.phase if operation is not None else None,
                     operation_progress=operation.progress if operation is not None else None,

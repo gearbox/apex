@@ -71,6 +71,7 @@ def mock_deployment_repo():  # type: ignore[no-untyped-def]
         MockDeploymentRepo.return_value = mock
         mock.get_live_for_model.return_value = None
         mock.get_routable.return_value = None
+        mock.has_routing_suspension_for_model.return_value = False
         yield mock
 
 
@@ -103,6 +104,7 @@ def _make_gpu_session_deployment(**kwargs: Any) -> GpuSessionDeployment:
     deployment.readiness_marker_node_class = None
     deployment.status = DeploymentStatus.active
     deployment.pending_restart = False
+    deployment.routing_suspended = False
     deployment.provision_operation_id = uuid4()
     deployment.is_primary = True
     deployment.created_at = now
@@ -2814,6 +2816,24 @@ class TestReadMethods:
         )
 
         assert result is None
+
+    async def test_is_generation_routing_suspended_checks_active_deployment_flag(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        service, _ = _make_service()
+        user_id = uuid4()
+        mock_deployment_repo.has_routing_suspension_for_model.return_value = True
+
+        result = await service.is_generation_routing_suspended(
+            user_id=user_id,
+            product_id="vex",
+            model_type=ModelType.AISHA_IMAGE,
+        )
+
+        assert result is True
+        mock_deployment_repo.has_routing_suspension_for_model.assert_awaited_once_with(
+            user_id, "vex", ModelType.AISHA_IMAGE.value
+        )
 
     async def test_list_user_sessions_excludes_terminal_by_default(self) -> None:
         service, _ = _make_service()

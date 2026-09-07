@@ -44,7 +44,7 @@ from src.db.repositories.gpu_session_operation import GpuSessionOperationReposit
 from src.workers.base import PeriodicWorker
 
 from ._env_builder import build_acs_env
-from ._events import publish_status_event
+from ._events import publish_deployment_event, publish_status_event
 from ._provisioning import make_onstart_cmd, provision_vastai_instance
 
 if TYPE_CHECKING:
@@ -399,7 +399,13 @@ class GpuProvisioningWorker(PeriodicWorker):
             )
 
     async def _advance_resuming(self, session: GpuSession) -> None:
-        """Probe ComfyUI; on success → active; on timeout → fail (no retry for resume)."""
+        """Probe every live deployment marker; on primary success → active.
+
+        Resume starts ComfyUI from scratch. The primary deployment remains the
+        session-level gate, but a sibling with a missing marker must be failed
+        before the session becomes routable again; otherwise its active row
+        would send work to a workflow ComfyUI cannot load.
+        """
         if self._resuming_timeout_exceeded(session):
             logger.warning(
                 "gpu_session.resume.timeout",
@@ -408,12 +414,64 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._mark_failed(session, "resume_timeout")
             return
 
-        readiness_marker_node_class = await self._get_primary_readiness_marker(session.id)
-        reachable = await self._probe_comfyui(
-            session, readiness_marker_node_class=readiness_marker_node_class
+        async with self._session_factory() as db:
+            deployments = await GpuSessionDeploymentRepository(db).list_for_session(session.id)
+        live_deployments = [
+            deployment
+            for deployment in deployments
+            if deployment.status in LIVE_DEPLOYMENT_STATUSES
+        ]
+        primary = next(
+            (deployment for deployment in live_deployments if deployment.is_primary),
+            live_deployments[0] if live_deployments else None,
         )
-        if reachable:
-            await self._mark_active(session)
+        readiness_marker_node_class = (
+            primary.readiness_marker_node_class if primary is not None else None
+        )
+        markers = {
+            deployment.readiness_marker_node_class
+            for deployment in live_deployments
+            if deployment.readiness_marker_node_class is not None
+        }
+        registered_node_classes: set[str] | None = set() if markers else None
+        reachable = await self._probe_comfyui(
+            session,
+            readiness_marker_node_class=readiness_marker_node_class,
+            registered_node_classes=registered_node_classes,
+        )
+        if not reachable:
+            return
+
+        if registered_node_classes is not None:
+            missing_markers = markers - registered_node_classes
+            if missing_markers:
+                now = datetime.now(UTC)
+                async with self._session_factory() as db, db.begin():
+                    failed_siblings = await GpuSessionDeploymentRepository(
+                        db
+                    ).fail_active_siblings_with_missing_readiness_markers(
+                        session.id,
+                        markers=missing_markers,
+                        at=now,
+                    )
+                for deployment in failed_siblings:
+                    marker = deployment.readiness_marker_node_class
+                    error_message = f"readiness marker missing after resume: {marker or '<none>'}"
+                    logger.error(
+                        "gpu_session.resume.sibling_marker_missing",
+                        session_id=str(session.id),
+                        deployment_id=str(deployment.id),
+                        model_type=deployment.model_type,
+                        missing_marker=marker,
+                    )
+                    await publish_deployment_event(
+                        self._event_bus,
+                        deployment,
+                        operation_id=None,
+                        error_message=error_message,
+                    )
+
+        await self._mark_active(session)
 
     # ------------------------------------------------------------------
     # Terminal-state helper
@@ -482,7 +540,11 @@ class GpuProvisioningWorker(PeriodicWorker):
         return deployments[0].readiness_marker_node_class if deployments else None
 
     async def _probe_comfyui(
-        self, session: GpuSession, *, readiness_marker_node_class: str | None
+        self,
+        session: GpuSession,
+        *,
+        readiness_marker_node_class: str | None,
+        registered_node_classes: set[str] | None = None,
     ) -> bool:
         """Probe ComfyUI for readiness via the CF tunnel.
 
@@ -493,6 +555,11 @@ class GpuProvisioningWorker(PeriodicWorker):
         3. Node-class marker (when configured): the marker class must be registered.
         4. Degradation backstop: if neither check is applicable, log a WARNING
            and return True on the 200 (unverifiable bundle, gap made loud).
+
+        When ``registered_node_classes`` is supplied, also records every class
+        returned by /object_info without making another request. Resume uses
+        this to verify sibling deployment markers while preserving the primary
+        deployment's existing role as the only session-level readiness gate.
         """
         if session.tunnel_hostname is None:
             logger.warning(
@@ -539,6 +606,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         checkpoint_check_applicable = len(expected) == 1
         marker = readiness_marker_node_class
         marker_check_applicable = marker is not None
+        primary_check_applicable = checkpoint_check_applicable or marker_check_applicable
 
         if not checkpoint_check_applicable:
             logger.info(
@@ -549,7 +617,9 @@ class GpuProvisioningWorker(PeriodicWorker):
                 declared_count=len(expected),
             )
             # Degradation backstop: nothing concrete to verify → return on 200 alone.
-            if not marker_check_applicable:
+            # A resume may still need the response body to verify sibling markers,
+            # but that must not turn those siblings into a second session-level gate.
+            if not marker_check_applicable and registered_node_classes is None:
                 logger.warning(
                     "gpu_session.provision.probe_unverifiable",
                     session_id=str(session.id),
@@ -568,7 +638,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 session_id=str(session.id),
                 error=str(exc),
             )
-            return False
+            return not primary_check_applicable
 
         if not isinstance(parsed, dict):
             logger.warning(
@@ -576,7 +646,12 @@ class GpuProvisioningWorker(PeriodicWorker):
                 session_id=str(session.id),
                 response_type=type(parsed).__name__,
             )
-            return False
+            return not primary_check_applicable
+
+        if registered_node_classes is not None:
+            registered_node_classes.update(
+                class_name for class_name in parsed if isinstance(class_name, str)
+            )
 
         # Step 2: checkpoint presence (single-checkpoint bundles only).
         if checkpoint_check_applicable:
