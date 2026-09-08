@@ -171,6 +171,35 @@ async def _make_command(
 # ---------------------------------------------------------------------------
 
 
+async def test_list_live_runtime_excludes_forced_live_deployment_on_terminal_session(
+    db_session: AsyncSession,
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    """Providers must not expose ids for a terminal session with a broken D15 cascade."""
+    gpu_session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(session=gpu_session, status=DeploymentStatus.active)
+
+    # This state is deliberately invalid in production: terminal transitions
+    # cascade deployment state. Keep it force-written to prove the endpoint
+    # query owns its terminal-session guard rather than relying on that cascade.
+    await db_session.execute(
+        update(GpuSession)
+        .where(GpuSession.id == gpu_session.id)
+        .values(status=GpuSessionStatus.stopped)
+    )
+    await db_session.flush()
+    await db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.active
+
+    runtime_rows = await deployment_repo.list_live_runtime_for_user(
+        gpu_session.user_id, gpu_session.product_id
+    )
+
+    assert runtime_rows == []
+
+
 async def test_create_persists_all_fields(
     deployment_repo: GpuSessionDeploymentRepository,
     make_gpu_session: GpuSessionFactory,

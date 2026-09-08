@@ -574,6 +574,38 @@ class TestAdvanceProvisioning:
         update_kwargs = mock_repo.update_instance.call_args.kwargs
         assert update_kwargs["vastai_machine_id"] == 777888
 
+    async def test_retry_missing_primary_destroys_new_instance_and_fails_session(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """A D15 violation after create must not leave a billable retry node behind."""
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_instance_id=12345)
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 99999
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+        mock_deployment_repo.get_primary_for_session.return_value = None
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        # The original node is destroyed at retry start (and _mark_failed may
+        # retry that cleanup); this assertion pins the newly-created local id.
+        assert 99999 in [
+            call.args[0] for call in mocks["vastai_client"].destroy_instance.await_args_list
+        ]
+        mock_repo.update_instance.assert_not_awaited()
+        mock_repo.update_status.assert_awaited_with(
+            session.id,
+            GpuSessionStatus.failed,
+            error_message="retry_missing_primary: session has no primary deployment",
+        )
+
     async def test_retry_exhausted_marks_failed(self) -> None:
         # provisioning_recreation_attempts=2 → new_attempt=3 >= 2+1=3 → exhausted
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=2))

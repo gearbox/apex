@@ -118,19 +118,20 @@ def _progress_from_json(value: object, *, operation_id: UUID) -> OperationProgre
         _warn_unprojectable(operation_id, "progress")
         return None
 
+    raw_work = value.get("work")
     work = (
-        _work_from_json(value.get("work"), operation_id=operation_id, field="work")
-        if "work" in value
+        _work_from_json(raw_work, operation_id=operation_id, field="work")
+        if raw_work is not None
         else None
     )
+    raw_items = value.get("items")
     items = (
-        _work_from_json(value.get("items"), operation_id=operation_id, field="items")
-        if "items" in value
+        _work_from_json(raw_items, operation_id=operation_id, field="items")
+        if raw_items is not None
         else None
     )
-    rate = (
-        _rate_from_json(value.get("rate"), operation_id=operation_id) if "rate" in value else None
-    )
+    raw_rate = value.get("rate")
+    rate = _rate_from_json(raw_rate, operation_id=operation_id) if raw_rate is not None else None
     eta_seconds: float | None = None
     if "eta_seconds" in value:
         eta_seconds = _as_number(value.get("eta_seconds"))
@@ -174,7 +175,11 @@ class OperationResponse(msgspec.Struct, kw_only=True):
     @classmethod
     def from_model(cls, m: GpuSessionOperation) -> OperationResponse:
         """Project a durable row without exposing opaque Aisha diagnostics."""
-        phase = ProvisioningPhase(m.phase) if m.phase is not None else None
+        try:
+            phase = ProvisioningPhase(m.phase) if m.phase is not None else None
+        except ValueError:
+            _warn_unprojectable(m.id, "phase")
+            phase = None
         target = (
             OperationTargetResponse(
                 bundle=m.target_bundle,

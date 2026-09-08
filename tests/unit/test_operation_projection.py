@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import msgspec
+from structlog.testing import capture_logs
 
 from src.api.schemas.events import EventType
 from src.api.schemas.operation import OperationResponse
@@ -79,6 +80,41 @@ def test_operation_projection_tolerates_malformed_foreign_json() -> None:
         _operation(progress={"work": ["not", "an", "object"], "rate": "bad"})
     )
     assert response.progress is None
+
+
+def test_operation_projection_treats_null_telemetry_fields_as_absent_without_warning() -> None:
+    with capture_logs() as logs:
+        response = OperationResponse.from_model(
+            _operation(
+                progress={
+                    "work": {"completed": 2, "total": 3, "unit": "files"},
+                    "items": {"completed": 1, "total": 2, "unit": "items"},
+                    "rate": None,
+                    "eta_seconds": None,
+                }
+            )
+        )
+
+    assert response.progress is not None
+    assert response.progress.work is not None
+    assert response.progress.items is not None
+    assert response.progress.rate is None
+    assert response.progress.eta_seconds is None
+    assert not [entry for entry in logs if entry["event"] == "operation.progress.unprojectable"]
+
+
+def test_operation_projection_tolerates_unknown_foreign_phase_without_warning_crash() -> None:
+    operation = _operation()
+    operation.phase = "future_phase"
+
+    with capture_logs() as logs:
+        response = OperationResponse.from_model(operation)
+
+    assert response.phase is None
+    assert any(
+        entry["event"] == "operation.progress.unprojectable" and entry["field"] == "phase"
+        for entry in logs
+    )
 
 
 def test_operation_projection_requires_complete_target_and_wraps_errors() -> None:

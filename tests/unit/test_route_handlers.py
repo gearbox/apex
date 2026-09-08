@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -24,7 +25,9 @@ from litestar.response import Response, ServerSentEvent, Stream
 from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
+
+    from src.api.schemas.providers import ModelInfo, ProvidersResponse
 
 pytestmark = pytest.mark.unit
 
@@ -945,6 +948,178 @@ class TestHealthRouteHandlers:
 
 
 class TestProvidersRouteHandlers:
+    async def _list_providers_with_runtime(
+        self,
+        runtime_rows: list[tuple[object, object, object]],
+        records: Sequence[object],
+    ) -> ProvidersResponse:
+        """Exercise the controller with its deployment-led runtime query result."""
+        from src.api.routes.providers import ProvidersController
+
+        session = AsyncMock()
+        generation_service = MagicMock()
+        generation_service.configured_providers = frozenset()
+        user = SimpleNamespace(subscription_tier="free")
+
+        with (
+            patch("src.api.routes.providers.GenerationModelRepository") as model_repo_cls,
+            patch("src.api.routes.providers.GpuSessionDeploymentRepository") as deployment_repo_cls,
+            patch("src.api.routes.providers.UserRepository") as user_repo_cls,
+        ):
+            model_repo = MagicMock()
+            model_repo.list_enabled_for_product = AsyncMock(return_value=records)
+            model_repo_cls.return_value = model_repo
+
+            deployment_repo = MagicMock()
+            deployment_repo.list_live_runtime_for_user = AsyncMock(return_value=runtime_rows)
+            deployment_repo_cls.return_value = deployment_repo
+
+            user_repo = MagicMock()
+            user_repo.get_active_user = AsyncMock(return_value=user)
+            user_repo_cls.return_value = user_repo
+
+            product_config = MagicMock()
+            product_config.is_model_allowed.return_value = True
+            return await ProvidersController.list_providers.fn(
+                MagicMock(),
+                session=session,
+                generation_service=generation_service,
+                current_user_id=uuid4(),
+                product_config=product_config,
+                product_id="vex",
+            )
+
+    @staticmethod
+    def _aisha_record(model_key: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            model_key=model_key,
+            name=model_key,
+            description=f"{model_key} test model",
+            is_enabled=True,
+        )
+
+    @staticmethod
+    def _aisha_runtime(
+        *,
+        model_type: str,
+        deployment_status: str,
+        session_status: str,
+        routing_suspended: bool = False,
+        operation_id: object = None,
+    ) -> tuple[SimpleNamespace, SimpleNamespace, object]:
+        return (
+            SimpleNamespace(
+                id=uuid4(),
+                model_type=model_type,
+                status=deployment_status,
+                routing_suspended=routing_suspended,
+            ),
+            SimpleNamespace(id=uuid4(), status=session_status, model_type="aisha-image"),
+            operation_id,
+        )
+
+    @staticmethod
+    def _aisha_models(result: ProvidersResponse) -> dict[str, ModelInfo]:
+        aisha = next(provider for provider in result.providers if provider.provider == "aisha")
+        return {model.model_key: model for model in aisha.models}
+
+    async def test_deployment_runtime_overrides_legacy_session_model(self) -> None:
+        """Regression: an attached video deployment owns video runtime, not the session's image model."""
+        runtime = self._aisha_runtime(
+            model_type="aisha-video",
+            deployment_status="active",
+            session_status="active",
+        )
+        result = await self._list_providers_with_runtime(
+            [runtime], [self._aisha_record("aisha-image"), self._aisha_record("aisha-video")]
+        )
+
+        models = self._aisha_models(result)
+        video_runtime = models["aisha-video"].runtime
+        image_runtime = models["aisha-image"].runtime
+        assert video_runtime is not None
+        assert video_runtime.state.value == "active"
+        assert video_runtime.session_id == runtime[1].id
+        assert video_runtime.deployment_id == runtime[0].id
+        assert image_runtime is not None
+        assert image_runtime.state.value == "none"
+        assert image_runtime.session_id is None
+        assert image_runtime.deployment_id is None
+        assert image_runtime.operation_id is None
+
+    async def test_deployment_runtime_reports_suspension_and_removal(self) -> None:
+        suspended = self._aisha_runtime(
+            model_type="aisha-image",
+            deployment_status="active",
+            session_status="active",
+            routing_suspended=True,
+        )
+        removing = self._aisha_runtime(
+            model_type="aisha-video",
+            deployment_status="removing",
+            session_status="active",
+        )
+        result = await self._list_providers_with_runtime(
+            [suspended, removing],
+            [self._aisha_record("aisha-image"), self._aisha_record("aisha-video")],
+        )
+
+        models = self._aisha_models(result)
+        suspended_runtime = models["aisha-image"].runtime
+        removing_runtime = models["aisha-video"].runtime
+        assert suspended_runtime is not None
+        assert suspended_runtime.state.value == "suspended"
+        assert removing_runtime is not None
+        assert removing_runtime.state.value == "removing"
+
+    async def test_deployment_runtime_clears_operation_id_after_operation_succeeds(self) -> None:
+        running_operation_id = uuid4()
+        deploying = self._aisha_runtime(
+            model_type="aisha-image",
+            deployment_status="deploying",
+            session_status="active",
+            operation_id=running_operation_id,
+        )
+        records = [self._aisha_record("aisha-image")]
+        running_result = await self._list_providers_with_runtime([deploying], records)
+        succeeded_result = await self._list_providers_with_runtime(
+            [
+                (
+                    SimpleNamespace(
+                        id=deploying[0].id,
+                        model_type="aisha-image",
+                        status="active",
+                        routing_suspended=False,
+                    ),
+                    deploying[1],
+                    None,
+                )
+            ],
+            records,
+        )
+
+        running_runtime = self._aisha_models(running_result)["aisha-image"].runtime
+        succeeded_runtime = self._aisha_models(succeeded_result)["aisha-image"].runtime
+        assert running_runtime is not None
+        assert running_runtime.state.value == "provisioning"
+        assert running_runtime.operation_id == running_operation_id
+        assert succeeded_runtime is not None
+        assert succeeded_runtime.state.value == "active"
+        assert succeeded_runtime.operation_id is None
+
+    async def test_terminal_or_missing_deployment_runtime_is_none_with_null_ids(self) -> None:
+        """The repository excludes forced-live terminal rows; missing rows have the same public shape."""
+        result = await self._list_providers_with_runtime(
+            [], [self._aisha_record("aisha-image"), self._aisha_record("aisha-video")]
+        )
+
+        for model in self._aisha_models(result).values():
+            assert model.runtime is not None
+            assert model.runtime.state.value == "none"
+            assert model.runtime.session_id is None
+            assert model.runtime.deployment_id is None
+            assert model.runtime.operation_id is None
+
     async def test_list_providers_no_auth_no_grok(self) -> None:
         from src.api.routes.providers import ProvidersController
         from src.core.enums import Provider

@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.services.gpu_session.command_payload import ProvisionCommand, RemovalCommand
 from src.api.services.gpu_session.command_service import CommandEnqueueSessionError
-from src.core.enums import DeploymentStatus, GpuSessionStatus
+from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind
 from src.core.uid import new_id
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
@@ -244,7 +244,7 @@ class GpuSessionDeploymentService:
 
             if deployment.status == DeploymentStatus.removing:
                 operation = await GpuSessionOperationRepository(db).latest_for_deployment_and_kind(
-                    deployment.id, "bundle_removal"
+                    deployment.id, OperationKind.bundle_removal
                 )
                 if operation is None:
                     raise DeploymentNotLiveError(

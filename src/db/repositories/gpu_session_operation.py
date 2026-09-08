@@ -112,6 +112,7 @@ class GpuSessionOperationRepository:
             .order_by(
                 GpuSessionOperation.deployment_id,
                 GpuSessionOperation.created_at.desc(),
+                GpuSessionOperation.id.desc(),
             )
         )
         operations = result.scalars().all()
@@ -132,7 +133,7 @@ class GpuSessionOperationRepository:
                 GpuSessionOperation.deployment_id == deployment_id,
                 GpuSessionOperation.kind == kind_value,
             )
-            .order_by(GpuSessionOperation.created_at.desc())
+            .order_by(GpuSessionOperation.created_at.desc(), GpuSessionOperation.id.desc())
             .limit(1)
         )
         return result.scalar_one_or_none()

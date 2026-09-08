@@ -151,6 +151,13 @@ class GpuSessionDeploymentRepository:
         This is deliberately one statement for the providers endpoint.  Unlike
         the session list, the operation id here is only a "work is happening"
         handle, so terminal operations are intentionally excluded.
+
+        The terminal-session predicate deliberately duplicates the D15 lifecycle
+        cascade. This keeps the endpoint correct even if a force-written live
+        deployment temporarily violates that remote invariant. The
+        ix_gpu_session_deployments_live_user_model partial unique index ensures
+        there can be at most one result per (user, product, model_type), so no
+        active-preference ordering is needed.
         """
         latest_non_terminal_operation_id = (
             select(GpuSessionOperation.id)
@@ -173,6 +180,7 @@ class GpuSessionDeploymentRepository:
                 GpuSessionDeployment.user_id == user_id,
                 GpuSessionDeployment.product_id == product_id,
                 GpuSessionDeployment.status.in_(tuple(LIVE_DEPLOYMENT_STATUSES)),
+                GpuSession.status.not_in(tuple(TERMINAL_GPU_SESSION_STATUSES)),
             )
         )
         return [(row[0], row[1], row[2]) for row in result.all()]

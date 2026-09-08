@@ -10,13 +10,76 @@ from uuid import uuid4
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.enums import GpuSessionStatus, OperationKind, OperationStatus
+from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind, OperationStatus
+from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_deployment import GpuSessionDeployment
 from src.db.models.user import User
 from src.db.repositories.gpu_session_operation import EventOutcome, GpuSessionOperationRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
+
+
+async def test_latest_operation_queries_break_transaction_timestamp_ties_by_uuidv7(
+    db_session: AsyncSession,
+) -> None:
+    """CURRENT_TIMESTAMP is transaction-start time, so created_at alone is not total."""
+    user = User(
+        id=uuid4(),
+        email=f"operation-order-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=uuid4(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="qwen_rapid_aio",
+        model_type="aisha-image",
+    )
+    deployment = GpuSessionDeployment(
+        id=uuid4(),
+        session_id=gpu_session.id,
+        user_id=user.id,
+        product_id="vex",
+        model_type="aisha-image",
+        bundle_name="qwen_rapid_aio",
+        status=DeploymentStatus.deploying,
+        is_primary=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(gpu_session)
+    await db_session.flush()
+    db_session.add(deployment)
+    await db_session.flush()
+
+    repo = GpuSessionOperationRepository(db_session)
+    first = await repo.create(
+        id=new_id(),
+        session_id=gpu_session.id,
+        deployment_id=deployment.id,
+        product_id="vex",
+        kind=OperationKind.bundle_removal,
+    )
+    second = await repo.create(
+        id=new_id(),
+        session_id=gpu_session.id,
+        deployment_id=deployment.id,
+        product_id="vex",
+        kind=OperationKind.bundle_removal,
+    )
+
+    assert first.created_at == second.created_at
+    assert first.id < second.id
+    assert (await repo.latest_by_deployment(gpu_session.id))[deployment.id].id == second.id
+    latest_removal = await repo.latest_for_deployment_and_kind(
+        deployment.id, OperationKind.bundle_removal
+    )
+    assert latest_removal is not None
+    assert latest_removal.id == second.id
 
 
 async def test_apply_event_is_monotonic_and_terminal_once(db_session: AsyncSession) -> None:
