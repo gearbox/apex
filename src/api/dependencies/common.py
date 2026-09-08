@@ -666,10 +666,8 @@ async def init_services(settings: Settings) -> JWTService:
     )
     logger.info("db.pool_initialized")
 
-    # Initialize operation event service (only needs the DB session factory).
-    _services.operation_event_service = OperationEventService(
-        session_factory=_services.db_manager.session_factory
-    )
+    # The callback route supplies the request transaction to this pure writer.
+    _services.operation_event_service = OperationEventService()
     logger.info("operation_event_service.initialized")
 
     # Initialize the command queue service (DB + settings only, not GPU-stack-gated —

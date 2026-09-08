@@ -988,16 +988,16 @@ class TestProvidersRouteHandlers:
 
         with (
             patch("src.api.routes.providers.GenerationModelRepository") as repo_cls,
-            patch("src.api.routes.providers.GpuSessionRepository") as gpu_repo_cls,
+            patch("src.api.routes.providers.GpuSessionDeploymentRepository") as deployment_repo_cls,
             patch("src.api.routes.providers.UserRepository") as user_repo_cls,
         ):
             repo = MagicMock()
             repo.list_enabled_for_product = AsyncMock(return_value=[])
             repo_cls.return_value = repo
 
-            gpu_repo = MagicMock()
-            gpu_repo.list_by_user = AsyncMock(return_value=[])
-            gpu_repo_cls.return_value = gpu_repo
+            deployment_repo = MagicMock()
+            deployment_repo.list_live_runtime_for_user = AsyncMock(return_value=[])
+            deployment_repo_cls.return_value = deployment_repo
 
             user_repo = MagicMock()
             user_repo.get_active_user = AsyncMock(return_value=user)
@@ -1107,16 +1107,16 @@ class TestProvidersRouteHandlers:
 
         with (
             patch("src.api.routes.providers.GenerationModelRepository") as repo_cls,
-            patch("src.api.routes.providers.GpuSessionRepository") as gpu_repo_cls,
+            patch("src.api.routes.providers.GpuSessionDeploymentRepository") as deployment_repo_cls,
             patch("src.api.routes.providers.UserRepository") as user_repo_cls,
         ):
             repo = MagicMock()
             repo.list_enabled_for_product = AsyncMock(return_value=[])
             repo_cls.return_value = repo
 
-            gpu_repo = MagicMock()
-            gpu_repo.list_by_user = AsyncMock(return_value=[])
-            gpu_repo_cls.return_value = gpu_repo
+            deployment_repo = MagicMock()
+            deployment_repo.list_live_runtime_for_user = AsyncMock(return_value=[])
+            deployment_repo_cls.return_value = deployment_repo
 
             user_repo = MagicMock()
             user_repo.get_active_user = AsyncMock(return_value=None)
@@ -2315,11 +2315,18 @@ class TestGpuSessionRouteHandlers:
         avoids exercising that chain at all — same pattern as
         test_gpu_session_service.py's mock_deployment_repo fixture.
         """
-        with patch("src.api.routes.gpu_session.GpuSessionDeploymentRepository") as MockRepo:
+        with (
+            patch("src.api.routes.gpu_session.GpuSessionDeploymentRepository") as MockRepo,
+            patch("src.api.routes.gpu_session.GpuSessionOperationRepository") as MockOperationRepo,
+        ):
             mock = AsyncMock()
             MockRepo.return_value = mock
             mock.list_for_session.return_value = []
             mock.list_for_sessions.return_value = {}
+            operation_mock = AsyncMock()
+            MockOperationRepo.return_value = operation_mock
+            operation_mock.get.return_value = None
+            operation_mock.latest_by_deployment.return_value = {}
             yield mock
 
     async def test_start_session_success(self) -> None:
@@ -2448,7 +2455,7 @@ class TestGpuSessionRouteHandlers:
         gpu_session_service.list_user_sessions = AsyncMock(return_value=[session_row])
 
         with patch(
-            "src.api.routes.gpu_session.GpuSessionResponse.from_model",
+            "src.api.routes.gpu_session.GpuSessionListItemResponse.from_model",
             return_value=MagicMock(),
         ):
             result = await GpuSessionController.list_sessions.fn(  # type: ignore[attr-defined]
@@ -2760,15 +2767,21 @@ class TestGpuSessionRouteHandlers:
         from src.api.routes.gpu_session import GpuSessionController
 
         deployment = MagicMock()
-        operation_id = uuid4()
+        operation = MagicMock()
         service = AsyncMock()
-        service.attach = AsyncMock(return_value=(deployment, operation_id))
+        service.attach = AsyncMock(return_value=(deployment, operation))
         data = MagicMock()
         data.model = MagicMock()
 
-        with patch(
-            "src.api.routes.gpu_session.DeploymentResponse.from_model",
-            return_value=MagicMock(),
+        with (
+            patch(
+                "src.api.routes.gpu_session.DeploymentResponse.from_model",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "src.api.routes.gpu_session.OperationResponse.from_model",
+                return_value=MagicMock(),
+            ),
         ):
             response = await GpuSessionController.attach_deployment.fn(  # type: ignore[attr-defined]
                 MagicMock(),
@@ -2864,42 +2877,63 @@ class TestGpuSessionRouteHandlers:
         from src.api.routes.gpu_session import GpuSessionController
 
         deployment = MagicMock()
+        operation = MagicMock()
+        deployment_id = uuid4()
         service = AsyncMock()
-        service.remove = AsyncMock(return_value=deployment)
+        service.remove = AsyncMock(return_value=(deployment, operation))
 
-        with patch(
-            "src.api.routes.gpu_session.DeploymentResponse.from_model",
-            return_value=MagicMock(),
+        with (
+            patch(
+                "src.api.routes.gpu_session.DeploymentResponse.from_model",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "src.api.routes.gpu_session.OperationResponse.from_model",
+                return_value=MagicMock(),
+            ),
         ):
             response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
                 MagicMock(),
                 current_user_id=uuid4(),
                 session_id=uuid4(),
-                model_type="aisha-video",
+                deployment_id=deployment_id,
                 gpu_session_deployment_service=service,
                 product_id="vex",
                 force=False,
             )
-        assert response.status_code == 200
+        assert response.status_code == 202
         service.remove.assert_awaited_once()
+        assert service.remove.await_args.kwargs["deployment_id"] == deployment_id
         assert service.remove.await_args.kwargs["force"] is False
 
-    async def test_remove_deployment_unknown_model_type_is_404(self) -> None:
+    async def test_remove_deployment_uses_deployment_id(self) -> None:
         from src.api.routes.gpu_session import GpuSessionController
 
+        deployment = MagicMock()
+        operation = MagicMock()
+        deployment_id = uuid4()
         service = AsyncMock()
+        service.remove = AsyncMock(return_value=(deployment, operation))
 
-        response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
-            MagicMock(),
-            current_user_id=uuid4(),
-            session_id=uuid4(),
-            model_type="not-a-real-model",
-            gpu_session_deployment_service=service,
-            product_id="vex",
-            force=False,
-        )
-        assert response.status_code == 404
-        service.remove.assert_not_awaited()
+        with (
+            patch(
+                "src.api.routes.gpu_session.DeploymentResponse.from_model", return_value=MagicMock()
+            ),
+            patch(
+                "src.api.routes.gpu_session.OperationResponse.from_model", return_value=MagicMock()
+            ),
+        ):
+            response = await GpuSessionController.remove_deployment.fn(  # type: ignore[attr-defined]
+                MagicMock(),
+                current_user_id=uuid4(),
+                session_id=uuid4(),
+                deployment_id=deployment_id,
+                gpu_session_deployment_service=service,
+                product_id="vex",
+                force=False,
+            )
+        assert response.status_code == 202
+        assert service.remove.await_args.kwargs["deployment_id"] == deployment_id
 
     async def test_remove_deployment_not_live_is_409(self) -> None:
         from src.api.routes.gpu_session import GpuSessionController
@@ -2912,7 +2946,7 @@ class TestGpuSessionRouteHandlers:
             MagicMock(),
             current_user_id=uuid4(),
             session_id=uuid4(),
-            model_type="aisha-video",
+            deployment_id=uuid4(),
             gpu_session_deployment_service=service,
             product_id="vex",
             force=False,
@@ -2930,7 +2964,7 @@ class TestGpuSessionRouteHandlers:
             MagicMock(),
             current_user_id=uuid4(),
             session_id=uuid4(),
-            model_type="aisha-video",
+            deployment_id=uuid4(),
             gpu_session_deployment_service=service,
             product_id="vex",
             force=False,
@@ -2950,7 +2984,7 @@ class TestGpuSessionRouteHandlers:
             MagicMock(),
             current_user_id=uuid4(),
             session_id=uuid4(),
-            model_type="aisha-video",
+            deployment_id=uuid4(),
             gpu_session_deployment_service=service,
             product_id="vex",
             force=False,
@@ -2973,7 +3007,7 @@ class TestGpuSessionRouteHandlers:
             MagicMock(),
             current_user_id=uuid4(),
             session_id=uuid4(),
-            model_type="aisha-video",
+            deployment_id=uuid4(),
             gpu_session_deployment_service=service,
             product_id="vex",
             force=False,
@@ -2993,7 +3027,7 @@ class TestGpuSessionRouteHandlers:
             MagicMock(),
             current_user_id=uuid4(),
             session_id=uuid4(),
-            model_type="aisha-video",
+            deployment_id=uuid4(),
             gpu_session_deployment_service=service,
             product_id="vex",
             force=False,

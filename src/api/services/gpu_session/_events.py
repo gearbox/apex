@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from src.api.schemas.events import EventType, GpuDeploymentStatusPayload, GpuSessionStatusPayload
+from src.api.schemas.operation import OperationResponse
 from src.api.schemas.ops_events import GpuNodeStartedOpsPayload, OpsEventType
 from src.core.enums import GpuSessionStatus
 
@@ -165,4 +166,46 @@ async def publish_deployment_event(
     except Exception:
         logger.exception(
             "gpu_session.deployment.event_publish_failed", deployment_id=str(deployment.id)
+        )
+
+
+async def publish_operation_event(
+    event_bus: EventBus | None,
+    operation: GpuSessionOperation,
+    *,
+    user_id: UUID | None = None,
+) -> None:
+    """Publish the exact REST operation projection after its transaction commits.
+
+    Operations intentionally do not denormalize the owner. Production callers
+    pass ``user_id`` from the session that authenticated the callback. The
+    optional form still makes a no-bus call a legal two-argument no-op, matching
+    the other event helpers' failure-tolerant contract.
+    """
+    if event_bus is None:
+        return
+    if user_id is None:
+        logger.warning(
+            "gpu_session.operation.event_publish_missing_user",
+            operation_id=str(operation.id),
+        )
+        return
+    try:
+        await asyncio.wait_for(
+            event_bus.publish(
+                user_id=user_id,
+                event_type=EventType.GPU_SESSION_OPERATION_UPDATED,
+                payload=OperationResponse.from_model(operation),
+            ),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "gpu_session.operation.event_publish_timeout",
+            operation_id=str(operation.id),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except Exception:
+        logger.exception(
+            "gpu_session.operation.event_publish_failed", operation_id=str(operation.id)
         )

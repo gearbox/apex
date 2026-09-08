@@ -20,6 +20,7 @@ from src.core.enums import DeploymentStatus, GpuSessionStatus
 from src.core.uid import new_id
 from src.db.repositories.gpu_session import GpuSessionRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
+from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
 
 from ._events import publish_deployment_event
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from src.api.services.gpu_session.command_service import GpuSessionCommandService
     from src.core.enums import ModelType
     from src.db.models.gpu_session_deployment import GpuSessionDeployment
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
 
@@ -70,10 +72,10 @@ class GpuSessionDeploymentService:
         user_id: UUID,
         product_id: str,
         model_type: ModelType,
-    ) -> tuple[GpuSessionDeployment, UUID]:
+    ) -> tuple[GpuSessionDeployment, GpuSessionOperation]:
         """Attach a new model to a running session (P1).
 
-        Returns (deployment, provision_operation_id). Raises GpuSessionError (session
+        Returns (deployment, provision operation). Raises GpuSessionError (session
         not found/owned), InvalidSessionStateError (session not active), BundleNotFoundError
         (model not indexed), or DeploymentAlreadyLiveError (D36).
         """
@@ -184,6 +186,11 @@ class GpuSessionDeploymentService:
             await GpuSessionDeploymentRepository(db).set_provision_pointer(
                 deployment_id, operation_id=command.operation_id, batch_id=batch_id
             )
+            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
+            if operation is None:
+                raise RuntimeError(
+                    f"Operation {command.operation_id} disappeared while attaching deployment"
+                )
         deployment.provision_operation_id = command.operation_id
         deployment.batch_id = batch_id
 
@@ -195,7 +202,7 @@ class GpuSessionDeploymentService:
             operation_id=str(command.operation_id),
         )
         await publish_deployment_event(self._event_bus, deployment)
-        return deployment, command.operation_id
+        return deployment, operation
 
     async def remove(
         self,
@@ -203,9 +210,9 @@ class GpuSessionDeploymentService:
         session_id: UUID,
         user_id: UUID,
         product_id: str,
-        model_type: ModelType,
+        deployment_id: UUID,
         force: bool,
-    ) -> GpuSessionDeployment:
+    ) -> tuple[GpuSessionDeployment, GpuSessionOperation]:
         """Remove a model from a running session (P2). Does not restart ComfyUI (D37)."""
         async with self._session_factory() as db:
             session_row = await GpuSessionRepository(db).get_by_id_for_user(
@@ -229,10 +236,24 @@ class GpuSessionDeploymentService:
             repo = GpuSessionDeploymentRepository(db)
             await repo.acquire_removal_lock(session_id)
 
-            deployment = await repo.get_live_for_session_and_model(session_id, model_type.value)
+            deployment = await repo.get_for_session(deployment_id, session_id)
             if deployment is None:
+                raise GpuSessionError(
+                    f"Deployment {deployment_id} not found on session {session_id}"
+                )
+
+            if deployment.status == DeploymentStatus.removing:
+                operation = await GpuSessionOperationRepository(db).latest_for_deployment_and_kind(
+                    deployment.id, "bundle_removal"
+                )
+                if operation is None:
+                    raise DeploymentNotLiveError(
+                        f"Deployment {deployment.id} is removing without a removal operation"
+                    )
+                return deployment, operation
+            if deployment.status not in (DeploymentStatus.deploying, DeploymentStatus.active):
                 raise DeploymentNotLiveError(
-                    f"No live deployment for model_type={model_type.value} on session {session_id}"
+                    f"Deployment {deployment.id} is not live (status={deployment.status})"
                 )
 
             marked = await repo.mark_removing(deployment.id, require_another_active=not force)
@@ -257,7 +278,7 @@ class GpuSessionDeploymentService:
             # transition back to active with the surrounding transaction.
             job_repo = JobRepository(db)
             in_flight = await job_repo.count_in_flight_for_session_and_model(
-                session_id, model_type.value
+                session_id, deployment.model_type
             )
             if in_flight > 0:
                 raise DeploymentHasInFlightJobsError(
@@ -304,13 +325,18 @@ class GpuSessionDeploymentService:
                     current_status="unknown",
                     operation="remove",
                 ) from exc
+            operation = await GpuSessionOperationRepository(db).get(command.operation_id)
+            if operation is None:
+                raise RuntimeError(
+                    f"Operation {command.operation_id} disappeared while removing deployment"
+                )
 
         deployment.status = DeploymentStatus.removing
         logger.info(
             "gpu_session.deployment.remove_enqueued",
             session_id=str(session_id),
             deployment_id=str(deployment.id),
-            model_type=model_type.value,
+            model_type=deployment.model_type,
             operation_id=str(command.operation_id),
             retain_bundles=retain_bundles,
         )
@@ -321,4 +347,4 @@ class GpuSessionDeploymentService:
         await publish_deployment_event(
             self._event_bus, deployment, operation_id=command.operation_id
         )
-        return deployment
+        return deployment, operation

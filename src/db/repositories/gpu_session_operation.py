@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import func, select, update
 
 from src.core.enums import TERMINAL_OPERATION_STATUSES, OperationKind, OperationStatus
+from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_operation import GpuSessionOperation
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ class GpuSessionOperationRepository:
         session_id: UUID,
         product_id: str,
         kind: OperationKind | str,
+        deployment_id: UUID | None = None,
         target_bundle: str | None = None,
         target_bundle_version: str | None = None,
         target_mode: str | None = None,
@@ -51,6 +53,7 @@ class GpuSessionOperationRepository:
         operation = GpuSessionOperation(
             id=id,
             session_id=session_id,
+            deployment_id=deployment_id,
             product_id=product_id,
             command_id=command_id,
             kind=kind,
@@ -80,6 +83,59 @@ class GpuSessionOperationRepository:
         )
         operations = result.scalars().all()
         return {operation.id: operation for operation in operations}
+
+    async def get_for_user(
+        self, operation_id: UUID, session_id: UUID, user_id: UUID, product_id: str
+    ) -> GpuSessionOperation | None:
+        """Return an operation only when its session belongs to this user/product."""
+        result = await self._session.execute(
+            select(GpuSessionOperation)
+            .join(GpuSession, GpuSessionOperation.session_id == GpuSession.id)
+            .where(
+                GpuSessionOperation.id == operation_id,
+                GpuSessionOperation.session_id == session_id,
+                GpuSession.user_id == user_id,
+                GpuSession.product_id == product_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def latest_by_deployment(self, session_id: UUID) -> dict[UUID, GpuSessionOperation]:
+        """Fetch the newest operation for every deployment in a session in one query."""
+        result = await self._session.execute(
+            select(GpuSessionOperation)
+            .where(
+                GpuSessionOperation.session_id == session_id,
+                GpuSessionOperation.deployment_id.is_not(None),
+            )
+            .distinct(GpuSessionOperation.deployment_id)
+            .order_by(
+                GpuSessionOperation.deployment_id,
+                GpuSessionOperation.created_at.desc(),
+            )
+        )
+        operations = result.scalars().all()
+        return {
+            operation.deployment_id: operation
+            for operation in operations
+            if operation.deployment_id is not None
+        }
+
+    async def latest_for_deployment_and_kind(
+        self, deployment_id: UUID, kind: OperationKind | str
+    ) -> GpuSessionOperation | None:
+        """Return a deployment's newest operation of one kind."""
+        kind_value = kind.value if isinstance(kind, OperationKind) else kind
+        result = await self._session.execute(
+            select(GpuSessionOperation)
+            .where(
+                GpuSessionOperation.deployment_id == deployment_id,
+                GpuSessionOperation.kind == kind_value,
+            )
+            .order_by(GpuSessionOperation.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def apply_event(
         self,
@@ -113,6 +169,7 @@ class GpuSessionOperationRepository:
             "status": status,
             "phase": phase,
             "message": message,
+            "updated_at": func.now(),
         }
         if progress is not None:
             values["progress"] = progress

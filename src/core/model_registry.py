@@ -149,6 +149,12 @@ class ModelMeta:
     requires_age_verification: bool = False
     """Whether users must be age-verified before generating with this model."""
 
+    typical_bootstrap_seconds: int | None = None
+    """Configured display hint for initial node bootstrap; never a computed ETA."""
+
+    typical_attach_seconds: int | None = None
+    """Configured display hint for additive model attachment; never a computed ETA."""
+
 
 # -------------------------------------------------------------------
 # Registry — every ModelType member MUST have an entry here

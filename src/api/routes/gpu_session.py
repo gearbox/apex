@@ -25,14 +25,16 @@ from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.gpu_session import (
     AttachDeploymentRequest,
-    AttachDeploymentResponse,
+    DeploymentMutationResponse,
     DeploymentResponse,
+    GpuSessionListItemResponse,
     GpuSessionResponse,
     ListSessionsResponse,
     StartSessionRequest,
     StopConfirmationResponse,
     StopSessionRequest,
 )
+from src.api.schemas.operation import OperationResponse
 from src.api.security import auth_guard
 from src.api.services.billing import BillingService
 from src.api.services.billing_errors import InsufficientBalanceError
@@ -56,7 +58,7 @@ from src.api.services.gpu_session.service import (
 )
 from src.api.services.vastai.exceptions import NoCapacityError, VastAIError
 from src.core.config import Settings
-from src.core.enums import GpuSessionStatus, ModelType, UserRole
+from src.core.enums import GpuSessionStatus, UserRole
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.db.repositories.job import JobRepository
@@ -69,16 +71,6 @@ if TYPE_CHECKING:
     from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
-
-
-async def _bootstrap_operations(
-    session: AsyncSession, sessions: Sequence[GpuSession]
-) -> dict[UUID, GpuSessionOperation]:
-    """Fetch all bootstrap response projections in one query, avoiding list N+1s."""
-    operation_ids = {
-        s.bootstrap_operation_id for s in sessions if s.bootstrap_operation_id is not None
-    }
-    return await GpuSessionOperationRepository(session).get_many(operation_ids)
 
 
 async def _bootstrap_operation(
@@ -102,6 +94,13 @@ async def _deployments_for_session(
 ) -> list[GpuSessionDeployment]:
     """Fetch this session's deployments for one response."""
     return list(await GpuSessionDeploymentRepository(session).list_for_session(gpu_session.id))
+
+
+async def _current_operations_for_session(
+    session: AsyncSession, gpu_session: GpuSession
+) -> dict[UUID, GpuSessionOperation]:
+    """Load all deployment current-operation projections with one DISTINCT ON query."""
+    return await GpuSessionOperationRepository(session).latest_by_deployment(gpu_session.id)
 
 
 class GpuSessionController(Controller):
@@ -161,9 +160,13 @@ class GpuSessionController(Controller):
 
         operation = await _bootstrap_operation(session, gpu_session)
         deployments = await _deployments_for_session(session, gpu_session)
+        current_operations = await _current_operations_for_session(session, gpu_session)
         return Response(
             content=GpuSessionResponse.from_model(
-                gpu_session, bootstrap_operation=operation, deployments=deployments
+                gpu_session,
+                bootstrap_operation=operation,
+                deployments=deployments,
+                current_operations=current_operations,
             ),
             status_code=HTTP_201_CREATED,
         )
@@ -183,17 +186,11 @@ class GpuSessionController(Controller):
             product_id=product_id,
             include_terminal=include_terminal,
         )
-        operations = await _bootstrap_operations(session, sessions)
         deployments_by_session = await _deployments_for_sessions(session, sessions)
         return ListSessionsResponse(
             sessions=[
-                GpuSessionResponse.from_model(
+                GpuSessionListItemResponse.from_model(
                     gpu_session,
-                    bootstrap_operation=(
-                        operations.get(gpu_session.bootstrap_operation_id)
-                        if gpu_session.bootstrap_operation_id is not None
-                        else None
-                    ),
                     deployments=deployments_by_session.get(gpu_session.id, []),
                 )
                 for gpu_session in sessions
@@ -227,12 +224,31 @@ class GpuSessionController(Controller):
 
         operation = await _bootstrap_operation(session, session_row)
         deployments = await _deployments_for_session(session, session_row)
+        current_operations = await _current_operations_for_session(session, session_row)
         return GpuSessionResponse.from_model(
             session_row,
             bootstrap_operation=operation,
             in_flight_job_count=in_flight_count,
             deployments=deployments,
+            current_operations=current_operations,
         )
+
+    @get("/{session_id:uuid}/operations/{operation_id:uuid}")
+    async def get_operation(
+        self,
+        current_user_id: UUID,
+        session_id: UUID,
+        operation_id: UUID,
+        product_id: str,
+        session: AsyncSession,
+    ) -> OperationResponse:
+        """Read one operation without disclosing cross-user/session existence."""
+        operation = await GpuSessionOperationRepository(session).get_for_user(
+            operation_id, session_id, current_user_id, product_id
+        )
+        if operation is None:
+            raise NotFoundException(detail=f"Operation {operation_id} not found")
+        return OperationResponse.from_model(operation)
 
     @post("/{session_id:uuid}/pause")
     async def pause(
@@ -267,9 +283,13 @@ class GpuSessionController(Controller):
 
         operation = await _bootstrap_operation(session, session_row)
         deployments = await _deployments_for_session(session, session_row)
+        current_operations = await _current_operations_for_session(session, session_row)
         return Response(
             content=GpuSessionResponse.from_model(
-                session_row, bootstrap_operation=operation, deployments=deployments
+                session_row,
+                bootstrap_operation=operation,
+                deployments=deployments,
+                current_operations=current_operations,
             ),
             status_code=HTTP_200_OK,
         )
@@ -297,9 +317,13 @@ class GpuSessionController(Controller):
 
         operation = await _bootstrap_operation(session, session_row)
         deployments = await _deployments_for_session(session, session_row)
+        current_operations = await _current_operations_for_session(session, session_row)
         return Response(
             content=GpuSessionResponse.from_model(
-                session_row, bootstrap_operation=operation, deployments=deployments
+                session_row,
+                bootstrap_operation=operation,
+                deployments=deployments,
+                current_operations=current_operations,
             ),
             status_code=HTTP_200_OK,
         )
@@ -346,9 +370,13 @@ class GpuSessionController(Controller):
             )
         operation = await _bootstrap_operation(session, result)
         deployments = await _deployments_for_session(session, result)
+        current_operations = await _current_operations_for_session(session, result)
         return Response(
             content=GpuSessionResponse.from_model(
-                result, bootstrap_operation=operation, deployments=deployments
+                result,
+                bootstrap_operation=operation,
+                deployments=deployments,
+                current_operations=current_operations,
             ),
             status_code=HTTP_200_OK,
         )
@@ -361,10 +389,10 @@ class GpuSessionController(Controller):
         data: Annotated[AttachDeploymentRequest, Body()],
         gpu_session_deployment_service: GpuSessionDeploymentService,
         product_id: str,
-    ) -> Response[AttachDeploymentResponse | ErrorEnvelope]:
+    ) -> Response[DeploymentMutationResponse | ErrorEnvelope]:
         """Attach a new model to a running session, provisioned additively (P4)."""
         try:
-            deployment, operation_id = await gpu_session_deployment_service.attach(
+            deployment, operation = await gpu_session_deployment_service.attach(
                 session_id=session_id,
                 user_id=current_user_id,
                 product_id=product_id,
@@ -380,39 +408,30 @@ class GpuSessionController(Controller):
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 
         return Response(
-            content=AttachDeploymentResponse(
-                deployment=DeploymentResponse.from_model(deployment),
-                operation_id=operation_id,
+            content=DeploymentMutationResponse(
+                deployment=DeploymentResponse.from_model(deployment, current_operation=operation),
+                operation=OperationResponse.from_model(operation),
             ),
             status_code=HTTP_202_ACCEPTED,
         )
 
-    @delete("/{session_id:uuid}/deployments/{model_type:str}", status_code=HTTP_200_OK)
+    @delete("/{session_id:uuid}/deployments/{deployment_id:uuid}", status_code=HTTP_202_ACCEPTED)
     async def remove_deployment(
         self,
         current_user_id: UUID,
         session_id: UUID,
-        model_type: str,
+        deployment_id: UUID,
         gpu_session_deployment_service: GpuSessionDeploymentService,
         product_id: str,
         force: Annotated[bool, Parameter(query="force")] = False,
-    ) -> Response[DeploymentResponse | ErrorEnvelope]:
+    ) -> Response[DeploymentMutationResponse | ErrorEnvelope]:
         """Remove a model from a running session. Does not restart ComfyUI (P4)."""
         try:
-            parsed_model = ModelType(model_type)
-        except ValueError:
-            return _error(
-                HTTP_404_NOT_FOUND,
-                "model_not_available",
-                f"Unknown model_type {model_type!r}",
-            )
-
-        try:
-            deployment = await gpu_session_deployment_service.remove(
+            deployment, operation = await gpu_session_deployment_service.remove(
                 session_id=session_id,
                 user_id=current_user_id,
                 product_id=product_id,
-                model_type=parsed_model,
+                deployment_id=deployment_id,
                 force=force,
             )
         except DeploymentNotLiveError as exc:
@@ -437,8 +456,11 @@ class GpuSessionController(Controller):
             return _error(HTTP_404_NOT_FOUND, "session_not_found", str(exc))
 
         return Response(
-            content=DeploymentResponse.from_model(deployment),
-            status_code=HTTP_200_OK,
+            content=DeploymentMutationResponse(
+                deployment=DeploymentResponse.from_model(deployment, current_operation=operation),
+                operation=OperationResponse.from_model(operation),
+            ),
+            status_code=HTTP_202_ACCEPTED,
         )
 
 

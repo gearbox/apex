@@ -181,7 +181,7 @@ async def test_stopping_is_non_terminal_list_by_user(
 ) -> None:
     """A session in `stopping` must appear in list_by_user(include_terminal=False).
 
-    Guards the catalog path: the frontend must see `session_state="stopping"` so
+    Guards the catalog path: the frontend must see runtime `stopping` so
     it can show "Stopping…" and disable the Start CTA.
     """
     row = await make_gpu_session(status=GpuSessionStatus.stopping)

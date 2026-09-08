@@ -626,7 +626,7 @@ class TestTokenReuseDetectionRevokesAccessTokens:
 class TestOptionalAuthGuardRevocation:
     """R3 (issue #142) — GET /v1/providers uses optional_auth_guard, which
     previously never consulted TokenRevocationService: a revoked token kept
-    authenticating (and thus kept receiving user_context/session_state)
+    authenticating (and thus kept receiving user_context/runtime)
     instead of degrading to anonymous like auth_guard/content_auth_guard
     already did. /optional-ping stands in for that route."""
 

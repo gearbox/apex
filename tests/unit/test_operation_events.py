@@ -20,7 +20,9 @@ from litestar.testing import TestClient
 
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.schemas.gpu_session import GpuSessionResponse, OperationEventBody
+from src.api.services.event_bus import EventBus
 from src.api.services.gpu_session.operation_event_service import (
+    OperationEventResult,
     OperationEventService,
     _validate_token,
 )
@@ -76,10 +78,27 @@ def _event_body(
     }
 
 
-def _decode_event(**overrides: object) -> OperationEventBody:
-    session_id = overrides.pop("session_id", uuid4())
-    operation_id = overrides.pop("operation_id", uuid4())
-    raw = _event_body(session_id=session_id, operation_id=operation_id, **overrides)  # type: ignore[arg-type]
+def _decode_event(
+    *,
+    session_id: UUID | None = None,
+    operation_id: UUID | None = None,
+    sequence: int = 0,
+    event_id: str = "opaque-bash-event-id",
+    status: str = "running",
+    phase: str | None = "preflight",
+    progress: dict[str, object] | None = None,
+    target_bundle_version: str | None = None,
+) -> OperationEventBody:
+    raw = _event_body(
+        session_id=session_id or uuid4(),
+        operation_id=operation_id or uuid4(),
+        sequence=sequence,
+        event_id=event_id,
+        status=status,
+        phase=phase,
+        progress=progress,
+        target_bundle_version=target_bundle_version,
+    )
     return __import__("msgspec").convert(raw, type=OperationEventBody)
 
 
@@ -113,15 +132,21 @@ def _operation(
     )
 
 
-def _session_factory() -> MagicMock:
-    db = MagicMock()
-    db.__aenter__ = AsyncMock(return_value=db)
-    db.__aexit__ = AsyncMock(return_value=None)
-    begin = MagicMock()
-    begin.__aenter__ = AsyncMock(return_value=None)
-    begin.__aexit__ = AsyncMock(return_value=None)
-    db.begin.return_value = begin
-    return MagicMock(return_value=db)
+async def _write_event(
+    service: OperationEventService,
+    *,
+    session_id: UUID,
+    bearer_token: str,
+    event: OperationEventBody,
+) -> tuple[bool, int]:
+    """Keep legacy assertions compact while exercising the pure writer API."""
+    result = await service.handle_event(
+        session_id=session_id,
+        bearer_token=bearer_token,
+        event=event,
+        db=MagicMock(),
+    )
+    return result.authorized, result.status
 
 
 class TestTokenValidation:
@@ -146,7 +171,7 @@ class TestOperationEventService:
             target_bundle_version="260105-01",
             progress={"future_field": {"preserved": True}},
         )
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -159,8 +184,8 @@ class TestOperationEventService:
             )
             operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
 
-            authorized, status = await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            authorized, status = await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             )
 
         assert (authorized, status) == (True, HTTP_200_OK)
@@ -175,7 +200,7 @@ class TestOperationEventService:
         session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="succeeded")
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -195,8 +220,8 @@ class TestOperationEventService:
             CommandRepo.return_value = command_repo
             command_repo.mark_terminal.return_value = True
 
-            assert await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (True, 200)
 
         command_repo.mark_terminal.assert_awaited_once()
@@ -209,7 +234,7 @@ class TestOperationEventService:
         session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="running")
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -226,7 +251,7 @@ class TestOperationEventService:
             )
             operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
 
-            await service.handle_event(session_id=session_id, bearer_token=_TOKEN, event=event)
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
 
         CommandRepo.assert_not_called()
 
@@ -234,7 +259,7 @@ class TestOperationEventService:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="failed")
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -251,7 +276,7 @@ class TestOperationEventService:
             )
             operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
 
-            await service.handle_event(session_id=session_id, bearer_token=_TOKEN, event=event)
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
 
         CommandRepo.assert_not_called()
 
@@ -260,7 +285,7 @@ class TestOperationEventService:
         session = _gpu_session(session_id=session_id)
         session.bootstrap_operation_id = uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -273,8 +298,8 @@ class TestOperationEventService:
             )
             operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
 
-            assert await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (True, 200)
 
         session_repo.touch_last_progress.assert_not_awaited()
@@ -283,7 +308,7 @@ class TestOperationEventService:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -292,14 +317,14 @@ class TestOperationEventService:
             operation_repo = AsyncMock()
             OperationRepo.return_value = operation_repo
             operation_repo.get.return_value = None
-            assert await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (True, 404)
             operation_repo.get.return_value = _operation(
                 operation_id=operation_id, session_id=uuid4()
             )
-            assert await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (True, 404)
 
         operation_repo.apply_event.assert_not_awaited()
@@ -307,7 +332,7 @@ class TestOperationEventService:
     async def test_missing_session_does_not_write(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -315,8 +340,8 @@ class TestOperationEventService:
             operation_repo = AsyncMock()
             OperationRepo.return_value = operation_repo
             session_repo.get_by_id.return_value = None
-            assert await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (False, 401)
 
         operation_repo.get.assert_not_awaited()
@@ -324,7 +349,7 @@ class TestOperationEventService:
     async def test_existing_session_with_wrong_token_does_not_write(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -333,8 +358,8 @@ class TestOperationEventService:
             operation_repo = AsyncMock()
             OperationRepo.return_value = operation_repo
 
-            assert await service.handle_event(
-                session_id=session_id, bearer_token="wrong-token", event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token="wrong-token", event=event
             ) == (False, 401)
 
         operation_repo.get.assert_not_awaited()
@@ -355,7 +380,7 @@ class TestOperationEventService:
     async def test_non_terminal_sessions_accept_events(self, status: GpuSessionStatus) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -368,8 +393,8 @@ class TestOperationEventService:
             )
             operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
 
-            assert await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (True, 200)
 
         operation_repo.apply_event.assert_awaited_once()
@@ -378,7 +403,7 @@ class TestOperationEventService:
     async def test_terminal_sessions_do_not_write(self, status: GpuSessionStatus) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService(_session_factory())  # type: ignore[arg-type]
+        service = OperationEventService()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -387,24 +412,34 @@ class TestOperationEventService:
             operation_repo = AsyncMock()
             OperationRepo.return_value = operation_repo
 
-            assert await service.handle_event(
-                session_id=session_id, bearer_token=_TOKEN, event=event
+            assert await _write_event(
+                service, session_id=session_id, bearer_token=_TOKEN, event=event
             ) == (True, 200)
 
         operation_repo.get.assert_not_awaited()
         operation_repo.apply_event.assert_not_awaited()
 
 
-def _stub_service(result: tuple[bool, int] = (True, 200)) -> OperationEventService:
-    service = OperationEventService(MagicMock())
-    service.handle_event = AsyncMock(return_value=result)  # type: ignore[method-assign]
+def _stub_service(result: OperationEventResult | None = None) -> OperationEventService:
+    service = OperationEventService()
+    service.handle_event = AsyncMock(  # type: ignore[method-assign]
+        return_value=result or OperationEventResult(authorized=True, status=200)
+    )
     return service
 
 
 def _app(service: OperationEventService) -> Litestar:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    db = AsyncMock(spec=AsyncSession)
+    event_bus = AsyncMock(spec=EventBus)
     return Litestar(
         route_handlers=[InternalGpuSessionController],
-        dependencies={"operation_event_service": Provide(lambda: service, sync_to_thread=False)},
+        dependencies={
+            "operation_event_service": Provide(lambda: service, sync_to_thread=False),
+            "session": Provide(lambda: db, sync_to_thread=False),
+            "event_bus": Provide(lambda: event_bus, sync_to_thread=False),
+        },
     )
 
 
@@ -450,7 +485,9 @@ class TestOperationEventController:
     def test_unknown_operation_is_404_json(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         path = f"/v1/internal/gpu-sessions/{session_id}/operations/{operation_id}/events"
-        with TestClient(app=_app(_stub_service((True, 404)))) as client:
+        with TestClient(
+            app=_app(_stub_service(OperationEventResult(authorized=True, status=404)))
+        ) as client:
             response = client.post(
                 path,
                 json=_event_body(session_id=session_id, operation_id=operation_id),
@@ -496,9 +533,13 @@ def test_response_projects_bootstrap_operation(status: OperationStatus, phase: s
     operation.status = status
     operation.phase = phase
     operation.progress = {"work": {"completed": 2, "total": 3, "unit": "files"}}
+    operation.updated_at = now
 
     response = GpuSessionResponse.from_model(session, bootstrap_operation=operation)
 
-    assert response.provisioning_status == status
-    assert response.provisioning_phase == phase
-    assert response.provisioning_progress == operation.progress
+    assert response.bootstrap_operation is not None
+    assert response.bootstrap_operation.status == status
+    assert response.bootstrap_operation.phase == phase
+    assert response.bootstrap_operation.progress is not None
+    assert response.bootstrap_operation.progress.work is not None
+    assert response.bootstrap_operation.progress.work.completed == 2

@@ -25,9 +25,12 @@ from litestar.status_codes import (
     HTTP_401_UNAUTHORIZED,
     HTTP_404_NOT_FOUND,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.responses import error_response as _error
 from src.api.schemas.gpu_session import ClaimCommandRequest, OperationEventBody
+from src.api.services.event_bus import EventBus
+from src.api.services.gpu_session._events import publish_operation_event
 from src.api.services.gpu_session.command_service import GpuSessionCommandService
 from src.api.services.gpu_session.operation_event_service import OperationEventService
 
@@ -61,6 +64,8 @@ class InternalGpuSessionController(Controller):
         request: Request[Any, Any, Any],
         data: Annotated[OperationEventBody, Body()],
         operation_event_service: OperationEventService,
+        session: AsyncSession,
+        event_bus: EventBus,
     ) -> Response[dict[str, Any]]:
         """Receive one v2 operation event from a GPU node."""
         auth_header = request.headers.get("Authorization", "")
@@ -104,15 +109,23 @@ class InternalGpuSessionController(Controller):
                 HTTP_400_BAD_REQUEST,
             )
 
-        authorized, status = await operation_event_service.handle_event(
+        result = await operation_event_service.handle_event(
             session_id=session_id,
             bearer_token=bearer_token,
             event=data,
+            db=session,
         )
-        if not authorized:
+        if not result.authorized:
             return _error("unauthorized", "Invalid callback token", HTTP_401_UNAUTHORIZED)
-        if status == HTTP_404_NOT_FOUND:
+        if result.status == HTTP_404_NOT_FOUND:
             return _error("not_found", "Unknown operation", HTTP_404_NOT_FOUND)
+        # Publishing beforehand would make a rolled-back event visible. The
+        # writer intentionally owns neither this commit nor the EventBus.
+        await session.commit()
+        if result.outcome is not None and result.outcome.applied and result.operation is not None:
+            if result.user_id is None:
+                raise RuntimeError("Applied operation event has no user target")
+            await publish_operation_event(event_bus, result.operation, user_id=result.user_id)
         return Response(content={"ok": True}, status_code=HTTP_200_OK)
 
     @post("/{session_id:uuid}/commands/claim", status_code=HTTP_200_OK)

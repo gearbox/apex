@@ -124,7 +124,7 @@ class TestEnqueue:
         assert op_kwargs["target_mode"] == "additive"
         assert cmd_kwargs["payload"]["bundle"] == "wan_2.2_i2v:260105-01"
 
-    async def test_removal_and_restart_do_not_set_target_bundle(self) -> None:
+    async def test_removal_sets_its_subject_bundle_without_version_or_mode(self) -> None:
         service = _make_service()
 
         with patch(_OPERATION_REPO) as OperationRepo, patch(_COMMAND_REPO) as CommandRepo:
@@ -137,7 +137,8 @@ class TestEnqueue:
             )
 
         op_kwargs = operation_repo.create.await_args.kwargs
-        assert op_kwargs["target_bundle"] is None
+        assert op_kwargs["target_bundle"] == "old_bundle"
+        assert op_kwargs["target_bundle_version"] is None
         assert op_kwargs["target_mode"] is None
 
     async def test_missing_session_is_rejected_before_creating_an_operation(self) -> None:

@@ -8,11 +8,24 @@ from uuid import UUID
 
 import msgspec
 
+from src.api.schemas.operation import OperationResponse
 from src.core.enums import NotificationLevel
+
+# The operation-updated SSE payload is the REST projection verbatim. Keeping
+# this alias at the event boundary makes the one-payload contract explicit for
+# generated-schema consumers as well as the publisher.
+type OperationUpdatedPayload = OperationResponse
 
 
 class EventType(StrEnum):
-    """Server-sent event types."""
+    """Server-sent event types.
+
+    SSE delivery is lossy: Redis pub/sub does not replay frames sent while a
+    client is disconnected. Clients must refetch ``GET /v1/sessions/{id}`` on
+    every connect/reconnect, apply ``gpu_session.operation_updated`` only when
+    its sequence exceeds the cached sequence for that operation, and treat REST
+    as the complete fallback. Frames can arrive out of order after reconnect.
+    """
 
     JOB_STATUS_CHANGED = "job.status_changed"
     JOB_PROGRESS = "job.progress"
@@ -21,6 +34,7 @@ class EventType(StrEnum):
     GPU_SESSION_STATUS_CHANGED = "gpu_session.status_changed"
     GPU_SESSION_CREDIT_WARNING = "gpu_session.credit_warning"
     GPU_DEPLOYMENT_STATUS_CHANGED = "gpu_session.deployment_status_changed"
+    GPU_SESSION_OPERATION_UPDATED = "gpu_session.operation_updated"
 
 
 # --- Payloads ---

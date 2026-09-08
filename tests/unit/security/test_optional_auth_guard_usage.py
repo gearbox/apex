@@ -21,7 +21,7 @@ from src.api.security import optional_auth_guard
 # Discovered via: grep -rn "optional_auth_guard" src/api/routes/
 _ALLOWED_OPTIONAL_AUTH_GUARD_ROUTES: frozenset[str] = frozenset(
     {
-        "/v1/providers",  # public catalog; auth only adds user_context/session_state
+        "/v1/providers",  # public catalog; auth only adds user_context/runtime
     }
 )
 

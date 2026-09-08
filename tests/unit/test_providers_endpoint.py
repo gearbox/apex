@@ -12,6 +12,7 @@ from src.api.routes.providers import PROVIDER_DISPLAY_NAMES, _build_model_info
 from src.api.schemas.providers import (
     ImageConstraints,
     ModelInfo,
+    ModelRuntimeResponse,
     ProviderInfo,
     ProvidersResponse,
     UserContext,
@@ -32,11 +33,11 @@ from src.core.enums import (
     GenerationType,
     GpuSessionStatus,
     MediaKind,
-    ModelSessionState,
     ModelType,
     Provider,
     ProvisioningMode,
-    session_state_from_status,
+    RuntimeState,
+    runtime_state_from_session_status,
 )
 from src.core.model_registry import get_model_meta
 
@@ -142,7 +143,7 @@ class TestModelInfoSchema:
         assert decoded.video is not None
         assert decoded.video.resolutions == ["480p", "720p"]
 
-    def test_session_state_default_is_none(self) -> None:
+    def test_runtime_default_is_none(self) -> None:
         info = ModelInfo(
             model_key="aisha-image",
             name="Aisha",
@@ -154,9 +155,9 @@ class TestModelInfoSchema:
             supports_negative_prompt=True,
             aspect_ratios=["1:1"],
         )
-        assert info.session_state is None
+        assert info.runtime is None
 
-    def test_session_state_explicit_value(self) -> None:
+    def test_runtime_explicit_value(self) -> None:
         info = ModelInfo(
             model_key="aisha-image",
             name="Aisha",
@@ -167,11 +168,17 @@ class TestModelInfoSchema:
             max_prompt_length=4096,
             supports_negative_prompt=True,
             aspect_ratios=["1:1"],
-            session_state="active",
+            runtime=ModelRuntimeResponse(
+                state=RuntimeState.active,
+                session_id=None,
+                deployment_id=None,
+                operation_id=None,
+            ),
         )
-        assert info.session_state == "active"
+        assert info.runtime is not None
+        assert info.runtime.state is RuntimeState.active
 
-    def test_session_state_roundtrip(self) -> None:
+    def test_runtime_roundtrip(self) -> None:
         info = ModelInfo(
             model_key="aisha-image",
             name="Aisha",
@@ -182,10 +189,16 @@ class TestModelInfoSchema:
             max_prompt_length=4096,
             supports_negative_prompt=True,
             aspect_ratios=["1:1"],
-            session_state="provisioning",
+            runtime=ModelRuntimeResponse(
+                state=RuntimeState.provisioning,
+                session_id=None,
+                deployment_id=None,
+                operation_id=None,
+            ),
         )
         decoded = msgspec.json.decode(msgspec.json.encode(info), type=ModelInfo)
-        assert decoded.session_state == "provisioning"
+        assert decoded.runtime is not None
+        assert decoded.runtime.state is RuntimeState.provisioning
 
     @pytest.mark.parametrize("model_type", ModelType)
     def test_source_media_required_for_is_derived_from_capabilities(
@@ -194,7 +207,7 @@ class TestModelInfoSchema:
         info = _build_model_info(
             model_type,
             SimpleNamespace(name="Test", description="", is_enabled=True),
-            session_state=None,
+            runtime=None,
         )
         source_media = info.inputs.source_media
 
@@ -243,7 +256,7 @@ class TestModelInfoSchema:
         info = _build_model_info(
             ModelType.AISHA_IMAGE,
             SimpleNamespace(name="Test", description="", is_enabled=True),
-            session_state=None,
+            runtime=None,
             capabilities=capabilities,
             bound_workflow=bound_workflow,
         )
@@ -291,7 +304,7 @@ class TestModelInfoSchema:
         info = _build_model_info(
             ModelType.AISHA_IMAGE_LITE,
             SimpleNamespace(name="Aisha Lite", description="", is_enabled=True),
-            session_state=None,
+            runtime=None,
             capabilities=capabilities,
             bound_workflow=bound_workflow,
         )
@@ -444,31 +457,31 @@ class TestCapabilitiesDerivation:
             assert len(meta.aspect_ratios) > 0, f"{mt.value} has no aspect ratios"
 
 
-class TestSessionStateFromStatus:
-    """Exhaustive mapping of every GpuSessionStatus → ModelSessionState."""
+class TestRuntimeStateFromSessionStatus:
+    """Exhaustive mapping of every GpuSessionStatus → RuntimeState."""
 
     @pytest.mark.parametrize(
         ("status", "expected"),
         [
-            (GpuSessionStatus.active, ModelSessionState.ACTIVE),
-            (GpuSessionStatus.pending, ModelSessionState.PROVISIONING),
-            (GpuSessionStatus.provisioning, ModelSessionState.PROVISIONING),
-            (GpuSessionStatus.resuming, ModelSessionState.PROVISIONING),
-            (GpuSessionStatus.paused, ModelSessionState.PAUSED),
-            (GpuSessionStatus.stale, ModelSessionState.STALE),
-            (GpuSessionStatus.stopping, ModelSessionState.STOPPING),
-            (GpuSessionStatus.stopped, ModelSessionState.NONE),
-            (GpuSessionStatus.failed, ModelSessionState.NONE),
+            (GpuSessionStatus.active, RuntimeState.active),
+            (GpuSessionStatus.pending, RuntimeState.provisioning),
+            (GpuSessionStatus.provisioning, RuntimeState.provisioning),
+            (GpuSessionStatus.resuming, RuntimeState.provisioning),
+            (GpuSessionStatus.paused, RuntimeState.paused),
+            (GpuSessionStatus.stale, RuntimeState.stale),
+            (GpuSessionStatus.stopping, RuntimeState.stopping),
+            (GpuSessionStatus.stopped, RuntimeState.none),
+            (GpuSessionStatus.failed, RuntimeState.none),
         ],
     )
-    def test_mapping(self, status: GpuSessionStatus, expected: ModelSessionState) -> None:
-        assert session_state_from_status(status) is expected
+    def test_mapping(self, status: GpuSessionStatus, expected: RuntimeState) -> None:
+        assert runtime_state_from_session_status(status) is expected
 
     def test_all_statuses_covered(self) -> None:
         """Fails if a new GpuSessionStatus member is added without a mapping."""
         for status in GpuSessionStatus:
-            result = session_state_from_status(status)
-            assert isinstance(result, ModelSessionState)
+            result = runtime_state_from_session_status(status)
+            assert isinstance(result, RuntimeState)
 
 
 class TestGpuSessionStatusSets:

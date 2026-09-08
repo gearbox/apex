@@ -20,6 +20,7 @@ from src.api.services.gpu_session.command_payload import (
     CommandBuildError,
     CommandInput,
     ProvisionCommand,
+    RemovalCommand,
     build_envelope,
     build_payload,
 )
@@ -71,12 +72,13 @@ def _validate(command: CommandInput, *, batch: BatchPosition | None) -> dict[str
 
 
 def _provision_target(command: CommandInput) -> tuple[str | None, str | None, str | None]:
-    """(target_bundle, target_bundle_version, target_mode) for a provision command.
+    """Return operation target columns for provision/removal subject bundles.
 
-    None/None/None for removal and restart — those columns' established meaning
-    (apply_event's version-preservation coalesce) is specifically about the
-    provisioning target, not overloaded for other kinds.
+    Provision stores its requested bundle/version/mode; removal stores its bare
+    subject bundle; restart has no single target and yields all ``None``.
     """
+    if isinstance(command, RemovalCommand):
+        return command.bundle, None, None
     if not isinstance(command, ProvisionCommand):
         return None, None, None
     if ":" in command.bundle:
@@ -296,6 +298,7 @@ class GpuSessionCommandService:
             session_id=session_id,
             product_id=product_id,
             kind=command.kind,
+            deployment_id=deployment_id,
             target_bundle=target_bundle,
             target_bundle_version=target_bundle_version,
             target_mode=target_mode,

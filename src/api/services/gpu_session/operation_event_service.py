@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -29,11 +30,24 @@ from src.db.repositories.gpu_session_operation import GpuSessionOperationReposit
 if TYPE_CHECKING:
     from uuid import UUID
 
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.schemas.gpu_session import OperationEventBody
+    from src.db.models.gpu_session_operation import GpuSessionOperation
+    from src.db.repositories.gpu_session_operation import EventOutcome
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class OperationEventResult:
+    """Writer outcome consumed by the callback route after its transaction commits."""
+
+    authorized: bool
+    status: int
+    outcome: EventOutcome | None = None
+    operation: GpuSessionOperation | None = None
+    user_id: UUID | None = None
 
 
 def _validate_token(presented: str, stored_hash: str | None) -> bool:
@@ -45,10 +59,7 @@ def _validate_token(presented: str, stored_hash: str | None) -> bool:
 
 
 class OperationEventService:
-    """Validate and persist operation telemetry from GPU session nodes."""
-
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._session_factory = session_factory
+    """Validate and persist operation telemetry using a caller-owned transaction."""
 
     async def handle_event(
         self,
@@ -56,114 +67,139 @@ class OperationEventService:
         session_id: UUID,
         bearer_token: str,
         event: OperationEventBody,
-    ) -> tuple[bool, int]:
-        """Validate and apply one v2 envelope, returning (authorized, HTTP status)."""
-        async with self._session_factory() as db, db.begin():
-            session_repo = GpuSessionRepository(db)
-            session = await session_repo.get_by_id(session_id)
-            if session is None:
-                logger.warning(
-                    "gpu_session.operation.rejected",
-                    session_id=str(session_id),
-                    reason="session_not_found",
-                )
-                return False, 401
+        db: AsyncSession,
+    ) -> OperationEventResult:
+        """Apply one envelope without committing or publishing anything."""
+        return await self._handle_event(
+            session_id=session_id,
+            bearer_token=bearer_token,
+            event=event,
+            db=db,
+        )
 
-            if not _validate_token(bearer_token, session.callback_token_hash):
-                logger.warning(
-                    "gpu_session.operation.rejected",
-                    session_id=str(session_id),
-                    reason="invalid_token",
-                )
-                return False, 401
-
-            if session.status in TERMINAL_GPU_SESSION_STATUSES:
-                logger.info(
-                    "gpu_session.operation.ignored_terminal_session",
-                    session_id=str(session_id),
-                    session_status=str(session.status),
-                    operation_id=str(event.operation_id),
-                )
-                return True, 200
-
-            operation_repo = GpuSessionOperationRepository(db)
-            operation = await operation_repo.get(event.operation_id)
-            if operation is None or operation.session_id != session_id:
-                logger.error(
-                    "gpu_session.operation.unknown",
-                    session_id=str(session_id),
-                    operation_id=str(event.operation_id),
-                    reason="not_found" if operation is None else "cross_session",
-                )
-                return True, 404
-
-            outcome = await operation_repo.apply_event(
-                operation_id=event.operation_id,
-                session_id=session_id,
-                sequence=event.sequence,
-                event_id=event.event_id,
-                status=event.status,
-                phase=event.phase.value if event.phase is not None else None,
-                node_started_at=event.started_at,
-                event_at=event.ts,
-                message=event.message,
-                progress=event.progress,
-                plan=event.plan,
-                summary=event.summary,
-                error=event.error,
-                target_bundle_version=(
-                    event.target.bundle_version if event.target is not None else None
-                ),
+    async def _handle_event(
+        self,
+        *,
+        session_id: UUID,
+        bearer_token: str,
+        event: OperationEventBody,
+        db: AsyncSession,
+    ) -> OperationEventResult:
+        """Validate and apply one envelope without committing or publishing anything."""
+        session_repo = GpuSessionRepository(db)
+        session = await session_repo.get_by_id(session_id)
+        if session is None:
+            logger.warning(
+                "gpu_session.operation.rejected",
+                session_id=str(session_id),
+                reason="session_not_found",
             )
-            if not outcome.applied:
-                log = (
-                    logger.warning
-                    if outcome.reason
-                    in {
-                        "sequence_collision",
-                        "terminal_after_terminal",
-                    }
-                    else logger.debug
-                )
-                log(
-                    "gpu_session.operation.not_applied",
+            return OperationEventResult(authorized=False, status=401)
+
+        if not _validate_token(bearer_token, session.callback_token_hash):
+            logger.warning(
+                "gpu_session.operation.rejected", session_id=str(session_id), reason="invalid_token"
+            )
+            return OperationEventResult(authorized=False, status=401)
+
+        if session.status in TERMINAL_GPU_SESSION_STATUSES:
+            logger.info(
+                "gpu_session.operation.ignored_terminal_session",
+                session_id=str(session_id),
+                session_status=str(session.status),
+                operation_id=str(event.operation_id),
+            )
+            return OperationEventResult(authorized=True, status=200, user_id=session.user_id)
+
+        operation_repo = GpuSessionOperationRepository(db)
+        operation = await operation_repo.get(event.operation_id)
+        if operation is None or operation.session_id != session_id:
+            logger.error(
+                "gpu_session.operation.unknown",
+                session_id=str(session_id),
+                operation_id=str(event.operation_id),
+                reason="not_found" if operation is None else "cross_session",
+            )
+            return OperationEventResult(authorized=True, status=404, user_id=session.user_id)
+
+        outcome = await operation_repo.apply_event(
+            operation_id=event.operation_id,
+            session_id=session_id,
+            sequence=event.sequence,
+            event_id=event.event_id,
+            status=event.status,
+            phase=event.phase.value if event.phase is not None else None,
+            node_started_at=event.started_at,
+            event_at=event.ts,
+            message=event.message,
+            progress=event.progress,
+            plan=event.plan,
+            summary=event.summary,
+            error=event.error,
+            target_bundle_version=(
+                event.target.bundle_version if event.target is not None else None
+            ),
+        )
+        if not outcome.applied:
+            log = (
+                logger.warning
+                if outcome.reason in {"sequence_collision", "terminal_after_terminal"}
+                else logger.debug
+            )
+            log(
+                "gpu_session.operation.not_applied",
+                session_id=str(session_id),
+                operation_id=str(event.operation_id),
+                sequence=event.sequence,
+                reason=outcome.reason,
+            )
+            return OperationEventResult(
+                authorized=True,
+                status=200,
+                outcome=outcome,
+                operation=operation,
+                user_id=session.user_id,
+            )
+
+        if event.operation_id == session.bootstrap_operation_id:
+            await session_repo.touch_last_progress(session.id, datetime.now(UTC))
+
+        # P3/D27: terminal telemetry closes its command in the same transaction.
+        if event.status in TERMINAL_OPERATION_STATUSES and operation.command_id is not None:
+            closed = await GpuSessionCommandRepository(db).mark_terminal(
+                operation.command_id,
+                status=(
+                    CommandStatus.succeeded
+                    if event.status == OperationStatus.succeeded
+                    else CommandStatus.failed
+                ),
+                at=event.ts,
+                error=event.error,
+            )
+            if closed:
+                logger.info(
+                    "gpu_session.command.closed",
                     session_id=str(session_id),
+                    command_id=str(operation.command_id),
                     operation_id=str(event.operation_id),
-                    sequence=event.sequence,
-                    reason=outcome.reason,
+                    status=event.status.value,
                 )
-                return True, 200
 
-            if event.operation_id == session.bootstrap_operation_id:
-                await session_repo.touch_last_progress(session.id, datetime.now(UTC))
-
-            # P3/D27: a terminal event on a command-backed operation also closes the
-            # command, in the same transaction. mark_terminal's own terminal_at IS
-            # NULL guard makes a duplicate terminal event a no-op here too.
-            if event.status in TERMINAL_OPERATION_STATUSES and operation.command_id is not None:
-                closed = await GpuSessionCommandRepository(db).mark_terminal(
-                    operation.command_id,
-                    status=(
-                        CommandStatus.succeeded
-                        if event.status == OperationStatus.succeeded
-                        else CommandStatus.failed
-                    ),
-                    at=event.ts,
-                    error=event.error,
-                )
-                if closed:
-                    logger.info(
-                        "gpu_session.command.closed",
-                        session_id=str(session_id),
-                        command_id=str(operation.command_id),
-                        operation_id=str(event.operation_id),
-                        status=event.status.value,
-                    )
-
+        refreshed = await operation_repo.get(event.operation_id)
+        if refreshed is None:
+            raise RuntimeError(
+                f"Operation {event.operation_id} disappeared after its event was applied"
+            )
         logger.info(
             "gpu_session.operation.applied",
             session_id=str(session_id),
             operation_id=str(event.operation_id),
             sequence=event.sequence,
         )
-        return True, 200
+        return OperationEventResult(
+            authorized=True,
+            status=200,
+            outcome=outcome,
+            operation=refreshed,
+            user_id=session.user_id,
+        )

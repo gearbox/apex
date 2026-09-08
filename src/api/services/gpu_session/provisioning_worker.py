@@ -933,6 +933,12 @@ class GpuProvisioningWorker(PeriodicWorker):
                 with contextlib.suppress(Exception):
                     await self._vastai.destroy_instance(instance_id)
                 return
+            primary = await GpuSessionDeploymentRepository(db).get_primary_for_session(session.id)
+            if primary is None:
+                logger.error(
+                    "gpu_session.provision.retry_missing_primary", session_id=str(session.id)
+                )
+                return
             # Rotate the callback token so the old (destroyed) node's token is invalidated.
             await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
             await operation_repo.create(
@@ -940,6 +946,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 session_id=session.id,
                 product_id=current.product_id,
                 kind=OperationKind.session_bootstrap,
+                deployment_id=primary.id,
                 target_bundle=current.bundle_name,
                 target_bundle_version=current.bundle_version,
                 target_mode="full",
