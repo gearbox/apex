@@ -44,7 +44,7 @@ from src.db.repositories.gpu_session_operation import GpuSessionOperationReposit
 from src.workers.base import PeriodicWorker
 
 from ._env_builder import build_acs_env
-from ._events import publish_deployment_event, publish_status_event
+from ._events import publish_deployment_event, publish_operation_event, publish_status_event
 from ._provisioning import make_onstart_cmd, provision_vastai_instance
 
 if TYPE_CHECKING:
@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from src.api.services.vastai.schemas import VastAIInstance
     from src.core.config import Settings
     from src.db.models.gpu_session import GpuSession
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
 
@@ -950,6 +951,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                     id=bootstrap_operation_id,
                     session_id=session.id,
                     product_id=current.product_id,
+                    user_id=current.user_id,
                     kind=OperationKind.session_bootstrap,
                     deployment_id=primary.id,
                     target_bundle=current.bundle_name,
@@ -1018,6 +1020,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         the session status write.
         """
         previous_status = str(session.status)
+        closed_operations: list[GpuSessionOperation] = []
         # Pop error_message so it reaches the SSE event as well as the DB row.
         error_message = extra_fields.get("error_message")
         if error_message is not None and not isinstance(error_message, str):
@@ -1057,9 +1060,14 @@ class GpuProvisioningWorker(PeriodicWorker):
                 )
                 operation_repo = GpuSessionOperationRepository(db)
                 for command in cancelled:
-                    await operation_repo.close_failed(
-                        command.operation_id, at=cascade_at, error=reason
-                    )
+                    if (
+                        await operation_repo.close_failed(
+                            command.operation_id, at=cascade_at, error=reason
+                        )
+                    ) is True:
+                        operation = await operation_repo.get(command.operation_id)
+                        if operation is not None:
+                            closed_operations.append(operation)
                     logger.info(
                         "gpu_session.command.cancelled",
                         session_id=str(session.id),
@@ -1074,6 +1082,8 @@ class GpuProvisioningWorker(PeriodicWorker):
             previous_status=previous_status,
             error_message=error_message,
         )
+        for operation in closed_operations:
+            await publish_operation_event(self._event_bus, operation)
 
     async def _mark_active(self, session: GpuSession) -> None:
         """Transition to active; set started_at if not already set (preserve for resuming)."""

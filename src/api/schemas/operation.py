@@ -77,12 +77,12 @@ def _work_from_json(
         return None
     completed = _as_int(value.get("completed"))
     unit_value = value.get("unit")
-    if completed is None or not isinstance(unit_value, str):
+    if completed is None or completed < 0 or not isinstance(unit_value, str):
         _warn_unprojectable(operation_id, field)
         return None
     total_value = value.get("total")
     total = None if total_value is None else _as_int(total_value)
-    if total_value is not None and total is None:
+    if total_value is not None and (total is None or total < 0):
         _warn_unprojectable(operation_id, field)
         return None
     try:
@@ -99,7 +99,7 @@ def _rate_from_json(value: object, *, operation_id: UUID) -> OperationRateRespon
         return None
     raw_value = _as_number(value.get("value"))
     unit_value = value.get("unit")
-    if raw_value is None or not isinstance(unit_value, str):
+    if raw_value is None or raw_value < 0 or not isinstance(unit_value, str):
         _warn_unprojectable(operation_id, "rate")
         return None
     try:
@@ -134,11 +134,12 @@ def _progress_from_json(value: object, *, operation_id: UUID) -> OperationProgre
     rate = _rate_from_json(raw_rate, operation_id=operation_id) if raw_rate is not None else None
     raw_eta = value.get("eta_seconds")
     eta_seconds = _as_number(raw_eta) if raw_eta is not None else None
-    if raw_eta is not None and eta_seconds is None:
+    if raw_eta is not None and (eta_seconds is None or eta_seconds < 0):
+        eta_seconds = None
         _warn_unprojectable(operation_id, "eta_seconds")
 
     progress_pct = (
-        round(work.completed / work.total * 100, 1)
+        min(100.0, round(work.completed / work.total * 100, 1))
         if work is not None and work.total is not None and work.total > 0
         else None
     )
@@ -162,18 +163,19 @@ class OperationResponse(msgspec.Struct, kw_only=True):
         UUID | None,
         msgspec.Meta(
             description=(
-                "Informational target deployment for deployment-scoped operations. "
-                "Null for session-scoped operations including cohort restarts. Never "
-                "use this field to associate an operation-update frame with a "
-                "deployment; patch every cached deployment whose current_operation.id "
-                "matches this operation's id instead."
+                "Optional informational direct target. It may identify the primary deployment "
+                "for session_bootstrap and the target for deployment-scoped operations. It may "
+                "be null for operations governing multiple deployments or the whole session, "
+                "notably cohort restarts. It must never be used to route an operation update to "
+                "frontend deployment state; patch every cached deployment whose "
+                "current_operation.id matches this operation's id instead."
             )
         ),
     ]
     kind: OperationKind
     status: OperationStatus
     phase: ProvisioningPhase | None
-    sequence: int
+    revision: int
     target: OperationTargetResponse | None
     progress: OperationProgressResponse | None
     message: str | None
@@ -206,7 +208,7 @@ class OperationResponse(msgspec.Struct, kw_only=True):
             kind=OperationKind(m.kind),
             status=OperationStatus(m.status),
             phase=phase,
-            sequence=m.last_sequence,
+            revision=m.revision,
             target=target,
             progress=_progress_from_json(m.progress, operation_id=m.id),
             message=m.message,

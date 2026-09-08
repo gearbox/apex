@@ -126,10 +126,12 @@ def _operation(
         id=operation_id,
         session_id=session_id,
         product_id="vex",
+        user_id=uuid4(),
         command_id=command_id,
         kind="session_bootstrap",
         status=OperationStatus.queued,
         last_sequence=-1,
+        revision=0,
     )
 
 

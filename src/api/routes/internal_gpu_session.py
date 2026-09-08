@@ -123,9 +123,7 @@ class InternalGpuSessionController(Controller):
         # writer intentionally owns neither this commit nor the EventBus.
         await session.commit()
         if result.outcome is not None and result.outcome.applied and result.operation is not None:
-            if result.user_id is None:
-                raise RuntimeError("Applied operation event has no user target")
-            await publish_operation_event(event_bus, result.operation, user_id=result.user_id)
+            await publish_operation_event(event_bus, result.operation)
         return Response(content={"ok": True}, status_code=HTTP_200_OK)
 
     @post("/{session_id:uuid}/commands/claim", status_code=HTTP_200_OK)

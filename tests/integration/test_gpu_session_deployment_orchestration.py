@@ -1917,7 +1917,8 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
     settings = _StubSettings()
     command_service = _command_service(orchestration_session_factory, settings)
     deployment_service = _deployment_service(orchestration_session_factory, command_service)
-    worker = _worker(orchestration_session_factory, command_service, settings)
+    event_bus = AsyncMock()
+    worker = _worker(orchestration_session_factory, command_service, settings, event_bus=event_bus)
     user = await _create_user(orchestration_session_factory)
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
     primary = await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
@@ -1931,6 +1932,7 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
     lite_restart_command = await _get_command_by_operation(
         orchestration_session_factory, lite_deployment.restart_operation_id
     )
+    event_bus.reset_mock()
     # Only the video cohort's restart finishes this tick — with a failure — while
     # lite's restart command stays queued.
     await _mark_terminal(
@@ -1954,6 +1956,21 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
         orchestration_session_factory, lite_deployment.restart_operation_id
     )
     assert lite_restart_command.status == CommandStatus.cancelled
+    async with orchestration_session_factory() as session:
+        cancelled_operation = await GpuSessionOperationRepository(session).get(
+            lite_restart_command.operation_id
+        )
+    assert cancelled_operation is not None
+    assert cancelled_operation.revision == 1
+    operation_payloads = [
+        call.kwargs["payload"]
+        for call in event_bus.publish.call_args_list
+        if call.kwargs["event_type"] == EventType.GPU_SESSION_OPERATION_UPDATED
+    ]
+    assert len(operation_payloads) == 1
+    assert operation_payloads[0].id == lite_restart_command.operation_id
+    assert operation_payloads[0].status == OperationStatus.failed
+    assert operation_payloads[0].revision == 1
 
     # T1: cancelling the queued sibling means no restart remains that could
     # take ComfyUI down, so the session-wide primary suspension clears in the

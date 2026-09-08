@@ -1103,6 +1103,7 @@ async def init_services(settings: Settings) -> JWTService:
             _services.gpu_session_command_sweep_worker = GpuSessionCommandSweepWorker(
                 session_factory=_services.db_manager.session_factory,
                 settings=settings,
+                event_bus=_services.event_bus,
                 redis_enabled=redis_enabled,
                 redis_client_factory=get_operational_redis_client,
             )

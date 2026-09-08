@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.services.gpu_session._events import publish_operation_event
 from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 from src.workers.base import PeriodicWorker
@@ -23,7 +24,9 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from src.api.services.event_bus import EventBus
     from src.core.config import Settings
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
 
@@ -36,6 +39,7 @@ class GpuSessionCommandSweepWorker(PeriodicWorker):
         *,
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
+        event_bus: EventBus | None = None,
         redis_enabled: bool = False,
         redis_client_factory: Callable[[], Redis],
     ) -> None:
@@ -48,10 +52,12 @@ class GpuSessionCommandSweepWorker(PeriodicWorker):
             redis_client_factory=redis_client_factory,
         )
         self._session_factory = session_factory
+        self._event_bus = event_bus
 
     async def run_once(self) -> None:
         """Expire overdue claims and cancel queued commands orphaned by a terminal session."""
         now = datetime.now(UTC)
+        closed_operations: list[GpuSessionOperation] = []
         async with self._session_factory() as db, db.begin():
             command_repo = GpuSessionCommandRepository(db)
             operation_repo = GpuSessionOperationRepository(db)
@@ -67,7 +73,12 @@ class GpuSessionCommandSweepWorker(PeriodicWorker):
                     f"(kind={command.kind}, deadline_at="
                     f"{command.deadline_at.isoformat() if command.deadline_at else 'unknown'})"
                 )
-                await operation_repo.close_failed(command.operation_id, at=now, error=message)
+                if (
+                    await operation_repo.close_failed(command.operation_id, at=now, error=message)
+                ) is True:
+                    operation = await operation_repo.get(command.operation_id)
+                    if operation is not None:
+                        closed_operations.append(operation)
                 logger.warning(
                     "gpu_session.command.expired",
                     command_id=str(command.id),
@@ -80,7 +91,12 @@ class GpuSessionCommandSweepWorker(PeriodicWorker):
             orphaned = await command_repo.cancel_queued_for_terminal_sessions(at=now)
             for command in orphaned:
                 message = "session reached a terminal state before command could be claimed"
-                await operation_repo.close_failed(command.operation_id, at=now, error=message)
+                if (
+                    await operation_repo.close_failed(command.operation_id, at=now, error=message)
+                ) is True:
+                    operation = await operation_repo.get(command.operation_id)
+                    if operation is not None:
+                        closed_operations.append(operation)
                 logger.warning(
                     "gpu_session.command.orphaned",
                     command_id=str(command.id),
@@ -88,3 +104,6 @@ class GpuSessionCommandSweepWorker(PeriodicWorker):
                     session_id=str(command.session_id),
                     kind=command.kind,
                 )
+
+        for operation in closed_operations:
+            await publish_operation_event(self._event_bus, operation)

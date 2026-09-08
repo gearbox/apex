@@ -151,3 +151,30 @@ def test_revision_042_downgrade_upgrade_round_trip(
         assert "ON DELETE CASCADE" in fk_definition
     finally:
         command.upgrade(config, "head")
+
+
+def test_revision_043_downgrade_upgrade_round_trip(
+    test_database_url: str,
+    db_engine: AsyncEngine,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """The public operation revision and denormalized event owner reverse cleanly."""
+    assert db_engine is not None
+    monkeypatch.setenv("DATABASE_URL", test_database_url)
+    monkeypatch.setenv("DEBUG", "false")
+    config = Config("alembic.ini")
+
+    try:
+        command.downgrade(config, "042")
+        _sessions, operation_columns, _operation_indexes = asyncio.run(
+            _schema_snapshot(test_database_url)
+        )
+        assert not {"revision", "user_id"} & operation_columns
+
+        command.upgrade(config, "043")
+        _sessions, operation_columns, _operation_indexes = asyncio.run(
+            _schema_snapshot(test_database_url)
+        )
+        assert {"revision", "user_id"} <= operation_columns
+    finally:
+        command.upgrade(config, "head")

@@ -40,6 +40,7 @@ class GpuSessionOperationRepository:
         id: UUID,
         session_id: UUID,
         product_id: str,
+        user_id: UUID | None = None,
         kind: OperationKind | str,
         deployment_id: UUID | None = None,
         target_bundle: str | None = None,
@@ -51,11 +52,18 @@ class GpuSessionOperationRepository:
         command_id: UUID | None = None,
     ) -> GpuSessionOperation:
         """Insert an Apex-owned operation in its initial queued state."""
+        if user_id is None:
+            user_id = await self._session.scalar(
+                select(GpuSession.user_id).where(GpuSession.id == session_id)
+            )
+        if user_id is None:
+            raise ValueError(f"Cannot create operation for unknown GPU session {session_id}")
         operation = GpuSessionOperation(
             id=id,
             session_id=session_id,
             deployment_id=deployment_id,
             product_id=product_id,
+            user_id=user_id,
             command_id=command_id,
             kind=kind,
             status=OperationStatus.queued,
@@ -66,6 +74,7 @@ class GpuSessionOperationRepository:
             batch_index=batch_index,
             batch_total=batch_total,
             last_sequence=-1,
+            revision=0,
         )
         self._session.add(operation)
         await self._session.flush()
@@ -213,7 +222,7 @@ class GpuSessionOperationRepository:
                     # Once terminal, no late best-effort event may overwrite the durable result.
                     GpuSessionOperation.terminal_at.is_(None),
                 )
-                .values(**values)
+                .values(revision=GpuSessionOperation.revision + 1, **values)
             ),
         )
         await self._session.flush()
@@ -254,7 +263,13 @@ class GpuSessionOperationRepository:
                     GpuSessionOperation.id == operation_id,
                     GpuSessionOperation.terminal_at.is_(None),
                 )
-                .values(status=OperationStatus.failed, terminal_at=at, error=error, message=error)
+                .values(
+                    status=OperationStatus.failed,
+                    terminal_at=at,
+                    error=error,
+                    message=error,
+                    revision=GpuSessionOperation.revision + 1,
+                )
             ),
         )
         await self._session.flush()

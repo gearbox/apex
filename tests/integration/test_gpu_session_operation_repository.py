@@ -341,11 +341,34 @@ async def test_apply_event_is_monotonic_and_terminal_once(db_session: AsyncSessi
     assert later.reason == "terminal_after_terminal"
     assert after_terminal.reason == "after_terminal"
     assert operation.last_sequence == 1
+    assert operation.revision == 2
     assert operation.status == OperationStatus.succeeded
     assert operation.phase is None
     assert operation.terminal_at is not None
     assert operation.node_started_at == now
     assert operation.progress == {"work": {"completed": 1, "total": 2, "unit": "files"}}
+
+
+async def test_close_failed_bumps_revision_once(db_session: AsyncSession) -> None:
+    """A guarded out-of-band terminal transition changes the public token once."""
+    gpu_session, _deployments = await _make_session_with_deployments(
+        db_session, model_types=("aisha-image",)
+    )
+    repo = GpuSessionOperationRepository(db_session)
+    operation = await repo.create(
+        id=uuid4(),
+        session_id=gpu_session.id,
+        product_id=gpu_session.product_id,
+        kind=OperationKind.session_bootstrap,
+    )
+
+    assert operation.revision == 0
+    assert await repo.close_failed(operation.id, at=datetime.now(UTC), error="timed out") is True
+    await db_session.refresh(operation)
+    assert operation.revision == 1
+    assert await repo.close_failed(operation.id, at=datetime.now(UTC), error="late") is False
+    await db_session.refresh(operation)
+    assert operation.revision == 1
 
 
 async def test_apply_event_records_resolved_bundle_version_without_overwriting_pin(

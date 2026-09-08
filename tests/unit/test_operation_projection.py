@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import msgspec
+import pytest
 from structlog.testing import capture_logs
 
 from src.api.schemas.events import EventType
@@ -23,10 +24,12 @@ def _operation(*, progress: object = None) -> GpuSessionOperation:
         session_id=uuid4(),
         deployment_id=uuid4(),
         product_id="vex",
+        user_id=uuid4(),
         kind="bundle_provision",
         status="running",
         phase="models",
         last_sequence=7,
+        revision=7,
         target_bundle="wan",
         target_bundle_version="20260908-01",
         target_mode="additive",
@@ -53,7 +56,7 @@ def test_operation_projection_computes_progress_and_omits_private_telemetry() ->
     encoded = msgspec.json.encode(response)
     decoded = msgspec.json.decode(encoded)
 
-    assert response.sequence == 7
+    assert response.revision == 7
     assert response.progress is not None
     assert response.progress.progress_pct == 66.7
     assert response.progress.work is not None
@@ -64,6 +67,79 @@ def test_operation_projection_computes_progress_and_omits_private_telemetry() ->
     assert "future_key" not in decoded["progress"]
     assert "plan" not in decoded
     assert "summary" not in decoded
+    assert "sequence" not in decoded
+
+
+def test_operation_projection_clamps_progress_pct_without_editing_work() -> None:
+    with capture_logs() as logs:
+        response = OperationResponse.from_model(
+            _operation(progress={"work": {"completed": 1500, "total": 1000, "unit": "bytes"}})
+        )
+
+    assert response.progress is not None
+    assert response.progress.work is not None
+    assert response.progress.work.completed == 1500
+    assert response.progress.work.total == 1000
+    assert response.progress.progress_pct == 100.0
+    assert not [entry for entry in logs if entry["event"] == "operation.progress.unprojectable"]
+
+
+@pytest.mark.parametrize(
+    ("progress", "field"),
+    [
+        (
+            {
+                "work": {"completed": -1, "total": 10, "unit": "files"},
+                "rate": {"value": 1, "unit": "bytes_per_second"},
+            },
+            "work",
+        ),
+        (
+            {
+                "work": {"completed": 1, "total": -10, "unit": "files"},
+                "rate": {"value": 1, "unit": "bytes_per_second"},
+            },
+            "work",
+        ),
+        (
+            {
+                "items": {"completed": -1, "total": 10, "unit": "items"},
+                "rate": {"value": 1, "unit": "bytes_per_second"},
+            },
+            "items",
+        ),
+        (
+            {
+                "items": {"completed": 1, "total": -10, "unit": "items"},
+                "rate": {"value": 1, "unit": "bytes_per_second"},
+            },
+            "items",
+        ),
+        (
+            {
+                "work": {"completed": 1, "total": 10, "unit": "files"},
+                "rate": {"value": -1, "unit": "bytes_per_second"},
+            },
+            "rate",
+        ),
+        (
+            {"work": {"completed": 1, "total": 10, "unit": "files"}, "eta_seconds": -1},
+            "eta_seconds",
+        ),
+    ],
+)
+def test_operation_projection_rejects_negative_measurements(
+    progress: dict[str, object], field: str
+) -> None:
+    with capture_logs() as logs:
+        response = OperationResponse.from_model(_operation(progress=progress))
+
+    assert response.progress is not None
+    assert getattr(response.progress, field if field != "eta_seconds" else "eta_seconds") is None
+    assert any(
+        entry["event"] == "operation.progress.unprojectable" and entry["field"] == field
+        for entry in logs
+    )
 
 
 def test_operation_projection_keeps_progress_pct_none_without_positive_work_total() -> None:
@@ -153,7 +229,18 @@ def test_operation_response_deployment_id_is_described_in_openapi() -> None:
     description = deployment_id.get("description")
     assert isinstance(description, str)
     assert description
-    assert "Never use this field" in description
+    assert "must never" in description
+
+
+def test_operation_projection_keeps_bootstrap_target_but_not_cohort_target() -> None:
+    bootstrap = _operation()
+    bootstrap.kind = "session_bootstrap"
+    cohort_restart = _operation()
+    cohort_restart.kind = "comfyui_restart"
+    cohort_restart.deployment_id = None
+
+    assert OperationResponse.from_model(bootstrap).deployment_id is not None
+    assert OperationResponse.from_model(cohort_restart).deployment_id is None
 
 
 class _RecordingEventBus:
@@ -202,9 +289,9 @@ async def test_deployment_status_sse_payload_omits_raw_operation_telemetry() -> 
 async def test_operation_sse_payload_is_the_exact_rest_projection() -> None:
     operation = _operation(progress={"work": {"completed": 1, "total": 2, "unit": "files"}})
     bus = _RecordingEventBus()
-    user_id = uuid4()
+    user_id = operation.user_id
 
-    await publish_operation_event(bus, operation, user_id=user_id)  # type: ignore[arg-type]
+    await publish_operation_event(bus, operation)  # type: ignore[arg-type]
 
     assert bus.user_id == user_id
     assert bus.event_type is EventType.GPU_SESSION_OPERATION_UPDATED
