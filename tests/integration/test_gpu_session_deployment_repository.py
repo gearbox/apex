@@ -1003,6 +1003,37 @@ async def test_set_restart_pointer_is_guarded_against_duplicate_enqueue(
     assert deployment.restart_operation_id == first_operation_id
 
 
+async def test_suspend_routing_leaves_deploying_restart_member_unsuspended(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+) -> None:
+    """The drain closes active routing only; a cycle member stays unsuspended.
+
+    The worker projects restart-cycle members in memory after activating them
+    and the missing-batch reaper intentionally does not clear their flag, so
+    both paths rely on this active-only predicate.
+    """
+    session = await make_gpu_session(status=GpuSessionStatus.active)
+    primary = await make_deployment(session=session, status=DeploymentStatus.active)
+    pending_restart = await make_deployment(
+        session=session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        model_type="aisha-video",
+        pending_restart=True,
+    )
+
+    suspended = await deployment_repo.suspend_routing_for_session(session.id)
+
+    assert [deployment.id for deployment in suspended] == [primary.id]
+    await db_session.refresh(primary)
+    await db_session.refresh(pending_restart)
+    assert primary.routing_suspended is True
+    assert pending_restart.routing_suspended is False
+
+
 async def test_resolve_restart_outcome_success_activates_every_member(
     deployment_repo: GpuSessionDeploymentRepository,
     make_gpu_session: GpuSessionFactory,
@@ -1300,6 +1331,34 @@ async def test_list_removing_excludes_stalled_rows(
     candidates = await deployment_repo.list_removing()
 
     assert [c.id for c in candidates] == [ready.id]
+
+
+async def test_list_orphaned_routing_suspensions_is_bounded(
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exceptional repair scan still has the orchestration page ceiling."""
+    monkeypatch.setattr(
+        "src.db.repositories.gpu_session_deployment._ORCHESTRATION_CANDIDATE_LIMIT", 2
+    )
+    sessions = [await make_gpu_session(status=GpuSessionStatus.active) for _ in range(3)]
+    deployments = [
+        await make_deployment(session=session, status=DeploymentStatus.active)
+        for session in sessions
+    ]
+    await db_session.execute(
+        update(GpuSessionDeployment)
+        .where(GpuSessionDeployment.id.in_([deployment.id for deployment in deployments]))
+        .values(routing_suspended=True)
+    )
+
+    candidates = await deployment_repo.list_orphaned_routing_suspension_session_ids()
+
+    assert len(candidates) == 2
+    assert set(candidates) <= {session.id for session in sessions}
 
 
 async def test_mark_primary_active_ignores_sibling_deployments(

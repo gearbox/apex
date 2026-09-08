@@ -907,6 +907,99 @@ class TestAdvanceResuming:
         worker._mark_active.assert_awaited_once_with(session)
         assert session.status == GpuSessionStatus.active
 
+    async def test_missing_primary_is_logged_without_using_a_sibling_as_the_gate(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """A corrupted live set must not turn an arbitrary sibling into the primary."""
+        from structlog.testing import capture_logs
+
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.resuming,
+            resumed_at=datetime.now(UTC),
+        )
+        sibling = MagicMock()
+        sibling.id = uuid4()
+        sibling.is_primary = False
+        sibling.readiness_marker_node_class = "SiblingMarker"
+        sibling.status = DeploymentStatus.active
+        mock_deployment_repo.list_for_session.return_value = [sibling]
+        worker._probe_comfyui = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            await worker._advance_resuming(session)
+
+        worker._probe_comfyui.assert_awaited_once_with(
+            session,
+            readiness_marker_node_class=None,
+            registered_node_classes=set(),
+        )
+        assert any(
+            event["event"] == "gpu_session.resume.primary_deployment_missing"
+            and event["session_id"] == str(session.id)
+            for event in logs
+        )
+
+    async def test_removed_primary_resume_logs_warning_not_error(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        """Force-removing the primary then resuming is a supported user action.
+
+        DELETE /deployments/{model_type}?force=true can retire the primary
+        while a sibling stays active. Resuming that session must not log an
+        ERROR for a state the API allows — only a genuine no-primary-ever-
+        existed invariant violation should.
+        """
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.resuming,
+            resumed_at=datetime.now(UTC),
+        )
+
+        def deployment(
+            *, is_primary: bool, marker: str | None, status: DeploymentStatus
+        ) -> MagicMock:
+            row = MagicMock()
+            row.id = uuid4()
+            row.is_primary = is_primary
+            row.readiness_marker_node_class = marker
+            row.status = status
+            row.model_type = "aisha-image"
+            row.user_id = session.user_id
+            row.session_id = session.id
+            row.pending_restart = False
+            row.routing_suspended = False
+            row.provision_operation_id = None
+            row.restart_operation_id = None
+            return row
+
+        removed_primary = deployment(
+            is_primary=True, marker="PrimaryMarker", status=DeploymentStatus.removed
+        )
+        live_sibling = deployment(
+            is_primary=False, marker="SiblingMarker", status=DeploymentStatus.active
+        )
+        mock_deployment_repo.list_for_session.return_value = [removed_primary, live_sibling]
+        mocks["bundle_index"].get_model_filenames.return_value = []
+        mocks["http_client"].get.return_value = _make_object_info_response(["SiblingMarker"])
+
+        async def mark_active(resuming_session: GpuSession) -> None:
+            resuming_session.status = GpuSessionStatus.active
+
+        worker._mark_active = AsyncMock(side_effect=mark_active)  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            await worker._advance_resuming(session)
+
+        assert all(log["log_level"] != "error" for log in logs)
+        assert any(
+            log["event"] == "gpu_session.resume.primary_deployment_removed"
+            and log["session_id"] == str(session.id)
+            for log in logs
+        )
+
     async def test_timeout_marks_failed_without_retry(self) -> None:
         worker, _mocks = _make_worker()
         old_resumed = datetime.now(UTC) - timedelta(minutes=10)

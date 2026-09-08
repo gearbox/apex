@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
+import pytest
 from PIL import Image
 from sqlalchemy import select
 
@@ -89,17 +90,23 @@ def _expires() -> datetime:
     return datetime.now(UTC) + timedelta(days=7)
 
 
+@pytest.fixture
+def backfill_product_id() -> str:
+    """Use an isolated product so whole-table backfills cannot see other tests' rows."""
+    return f"bf-{uuid4().hex[:21]}"
+
+
 # ---------------------------------------------------------------------------
 # Fixtures: seed rows
 # ---------------------------------------------------------------------------
 
 
-async def _make_user(session: AsyncSession, *, suffix: str = "") -> User:
+async def _make_user(session: AsyncSession, *, product_id: str, suffix: str = "") -> User:
     user = User(
         id=uuid4(),
-        email=f"backfill{suffix}@test.com",
+        email=f"backfill{suffix}-{uuid4().hex}@test.com",
         password_hash="x",
-        product_id="vex",
+        product_id=product_id,
     )
     session.add(user)
     await session.flush()
@@ -116,7 +123,7 @@ async def _make_job(
     job = GenerationJob(
         id=uuid4(),
         user_id=user.id,
-        product_id="vex",
+        product_id=user.product_id,
         generation_type=generation_type,
         provider=provider,
         prompt="test",
@@ -145,7 +152,7 @@ async def _make_output(
         id=oid,
         user_id=user.id,
         job_id=job.id,
-        product_id="vex",
+        product_id=user.product_id,
         storage_key=key,
         content_type=content_type,
         size_bytes=1024,
@@ -178,7 +185,7 @@ async def _make_upload(
     upload = UserImage(
         id=uid,
         user_id=user.id,
-        product_id="vex",
+        product_id=user.product_id,
         storage_key=key,
         original_filename=original_filename,
         content_type=content_type,
@@ -224,16 +231,18 @@ async def _get_upload_derivatives(
 # ---------------------------------------------------------------------------
 
 
-async def test_upload_no_derivatives_gets_sm_and_md(db_session: AsyncSession) -> None:
+async def test_upload_no_derivatives_gets_sm_and_md(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """(a) An upload with no derivatives gains sm and md WEBP thumbnails."""
-    user = await _make_user(db_session, suffix="-a")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-a")
     upload = await _make_upload(db_session, user)
     r2 = _make_mock_r2()
 
     _output_stats, upload_stats = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.uploads,
         dry_run=False,
         batch_size=100,
@@ -253,7 +262,7 @@ async def test_upload_no_derivatives_gets_sm_and_md(db_session: AsyncSession) ->
         assert d.content_type == "image/webp"
         assert d.width is not None
         assert d.height is not None
-        assert d.product_id == "vex"
+        assert d.product_id == backfill_product_id
         assert d.user_id == user.id
         assert d.expires_at == upload.expires_at
 
@@ -262,9 +271,11 @@ async def test_upload_no_derivatives_gets_sm_and_md(db_session: AsyncSession) ->
     assert upload_stats.skipped_complete == 0
 
 
-async def test_image_output_with_md_webp_gains_sm_only(db_session: AsyncSession) -> None:
+async def test_image_output_with_md_webp_gains_sm_only(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """(b) An image output with only a md WEBP derivative gains only sm."""
-    user = await _make_user(db_session, suffix="-b")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-b")
     job = await _make_job(db_session, user)
     full = await _make_output(db_session, user, job)
     _existing_md = await _make_output(
@@ -282,7 +293,7 @@ async def test_image_output_with_md_webp_gains_sm_only(db_session: AsyncSession)
     output_stats, _ = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.outputs,
         dry_run=False,
         batch_size=100,
@@ -302,9 +313,11 @@ async def test_image_output_with_md_webp_gains_sm_only(db_session: AsyncSession)
     assert output_stats.variants_created == 1
 
 
-async def test_video_output_with_jpeg_poster_gains_sm_only(db_session: AsyncSession) -> None:
+async def test_video_output_with_jpeg_poster_gains_sm_only(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """(c) A video output with a JPEG md poster gains sm only; the JPEG md is untouched."""
-    user = await _make_user(db_session, suffix="-c")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-c")
     job = await _make_job(db_session, user, generation_type="t2v")
     video_full = await _make_output(
         db_session,
@@ -328,7 +341,7 @@ async def test_video_output_with_jpeg_poster_gains_sm_only(db_session: AsyncSess
     output_stats, _ = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.outputs,
         dry_run=False,
         batch_size=100,
@@ -351,9 +364,11 @@ async def test_video_output_with_jpeg_poster_gains_sm_only(db_session: AsyncSess
     assert output_stats.variants_created == 1
 
 
-async def test_complete_upload_is_skipped(db_session: AsyncSession) -> None:
+async def test_complete_upload_is_skipped(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """(d) An upload that already has sm + md WEBP is left unchanged."""
-    user = await _make_user(db_session, suffix="-d")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-d")
     upload = await _make_upload(db_session, user)
     for spec in THUMBNAIL_SPECS:
         await _make_upload(
@@ -370,7 +385,7 @@ async def test_complete_upload_is_skipped(db_session: AsyncSession) -> None:
     _output_stats, upload_stats = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.uploads,
         dry_run=False,
         batch_size=100,
@@ -390,9 +405,11 @@ async def test_complete_upload_is_skipped(db_session: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_no_duplicate_labels_after_backfill(db_session: AsyncSession) -> None:
+async def test_no_duplicate_labels_after_backfill(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """No parent ends up with two derivatives sharing the same thumbnail_max_edge."""
-    user = await _make_user(db_session, suffix="-nodup")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-nodup")
     job = await _make_job(db_session, user)
     full = await _make_output(db_session, user, job)
     r2 = _make_mock_r2()
@@ -400,7 +417,7 @@ async def test_no_duplicate_labels_after_backfill(db_session: AsyncSession) -> N
     await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.all,
         dry_run=False,
         batch_size=100,
@@ -418,16 +435,18 @@ async def test_no_duplicate_labels_after_backfill(db_session: AsyncSession) -> N
 # ---------------------------------------------------------------------------
 
 
-async def test_second_run_creates_zero_new_rows(db_session: AsyncSession) -> None:
+async def test_second_run_creates_zero_new_rows(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """A second run after a completed backfill creates no new rows."""
-    user = await _make_user(db_session, suffix="-idem")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-idem")
     upload = await _make_upload(db_session, user)
     r2 = _make_mock_r2()
 
     await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.uploads,
         dry_run=False,
         batch_size=100,
@@ -442,7 +461,7 @@ async def test_second_run_creates_zero_new_rows(db_session: AsyncSession) -> Non
     _, upload_stats2 = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.uploads,
         dry_run=False,
         batch_size=100,
@@ -461,16 +480,16 @@ async def test_second_run_creates_zero_new_rows(db_session: AsyncSession) -> Non
 # ---------------------------------------------------------------------------
 
 
-async def test_dry_run_creates_nothing(db_session: AsyncSession) -> None:
+async def test_dry_run_creates_nothing(db_session: AsyncSession, backfill_product_id: str) -> None:
     """--dry-run reports correct would-create counts but writes nothing."""
-    user = await _make_user(db_session, suffix="-dry")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-dry")
     upload = await _make_upload(db_session, user)
     r2 = _make_mock_r2()
 
     _, upload_stats = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.uploads,
         dry_run=True,
         batch_size=100,
@@ -495,9 +514,11 @@ async def test_dry_run_creates_nothing(db_session: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_r2_download_failure_isolates_one_row(db_session: AsyncSession) -> None:
+async def test_r2_download_failure_isolates_one_row(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """If r2.download raises for one upload, that row is FAILED and others succeed."""
-    user = await _make_user(db_session, suffix="-fail")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-fail")
     upload_ok = await _make_upload(db_session, user, storage_key=f"users/{user.id}/uploads/ok.png")
     upload_bad = await _make_upload(
         db_session, user, storage_key=f"users/{user.id}/uploads/bad.png"
@@ -507,7 +528,7 @@ async def test_r2_download_failure_isolates_one_row(db_session: AsyncSession) ->
     _, upload_stats = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.uploads,
         dry_run=False,
         batch_size=100,
@@ -529,9 +550,11 @@ async def test_r2_download_failure_isolates_one_row(db_session: AsyncSession) ->
 # ---------------------------------------------------------------------------
 
 
-async def test_video_without_poster_is_skipped_no_poster(db_session: AsyncSession) -> None:
+async def test_video_without_poster_is_skipped_no_poster(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """A video output with no poster derivative is SKIPPED_NO_POSTER (not FAILED)."""
-    user = await _make_user(db_session, suffix="-noposter")
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-noposter")
     job = await _make_job(db_session, user, generation_type="t2v")
     video_full = await _make_output(
         db_session,
@@ -545,7 +568,7 @@ async def test_video_without_poster_is_skipped_no_poster(db_session: AsyncSessio
     output_stats, _ = await run_backfill(
         db_session,
         r2,
-        product=None,
+        product=backfill_product_id,
         only=_Only.outputs,
         dry_run=False,
         batch_size=100,
@@ -564,23 +587,26 @@ async def test_video_without_poster_is_skipped_no_poster(db_session: AsyncSessio
 # ---------------------------------------------------------------------------
 
 
-async def test_product_filter_isolates_target_product(db_session: AsyncSession) -> None:
+async def test_product_filter_isolates_target_product(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
     """--product limits backfill to rows with that product_id."""
-    user = await _make_user(db_session, suffix="-prod")
-    upload_vex = await _make_upload(db_session, user)  # product_id = "vex"
-    # Create a synthara user + upload
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-prod")
+    upload_target = await _make_upload(db_session, user)
+    other_product_id = f"{backfill_product_id}-other"
+    # Create an unrelated-product user + upload.
     user_syn = User(
         id=uuid4(),
-        email="backfill-syn@test.com",
+        email=f"backfill-syn-{uuid4().hex}@test.com",
         password_hash="x",
-        product_id="synthara",
+        product_id=other_product_id,
     )
     db_session.add(user_syn)
     await db_session.flush()
     upload_syn = UserImage(
         id=uuid4(),
         user_id=user_syn.id,
-        product_id="synthara",
+        product_id=other_product_id,
         storage_key=f"users/{user_syn.id}/uploads/{uuid4()}.png",
         original_filename="syn.png",
         content_type="image/png",
@@ -596,7 +622,7 @@ async def test_product_filter_isolates_target_product(db_session: AsyncSession) 
     _, upload_stats = await run_backfill(
         db_session,
         r2,
-        product="vex",
+        product=backfill_product_id,
         only=_Only.uploads,
         dry_run=False,
         batch_size=100,
@@ -604,9 +630,9 @@ async def test_product_filter_isolates_target_product(db_session: AsyncSession) 
         include_video=False,
     )
 
-    vex_derivatives = await _get_upload_derivatives(db_session, upload_vex.id)
+    target_derivatives = await _get_upload_derivatives(db_session, upload_target.id)
     syn_derivatives = await _get_upload_derivatives(db_session, upload_syn.id)
 
-    assert len(vex_derivatives) == 2, "vex upload should be backfilled"
-    assert syn_derivatives == [], "synthara upload must not be touched"
+    assert len(target_derivatives) == 2, "target-product upload should be backfilled"
+    assert syn_derivatives == [], "other-product upload must not be touched"
     assert upload_stats.scanned == 1
