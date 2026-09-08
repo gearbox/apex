@@ -1596,10 +1596,10 @@ class TestMarkFailed:
         payload = kwargs["payload"]
         assert isinstance(payload, GpuSessionStatusPayload)
         assert payload.session_id == session.id
-        assert payload.status == GpuSessionStatus.failed.value
-        assert payload.previous_status == GpuSessionStatus.pending.value
+        assert payload.status is GpuSessionStatus.failed
+        assert payload.previous_status is GpuSessionStatus.pending
         assert payload.error_message == "boot timeout"
-        assert payload.model_type == session.model_type
+        assert not hasattr(payload, "model_type")
         assert not hasattr(payload, "bundle_name")
 
     async def test_mark_failed_truncates_error_message_in_status_event(self) -> None:

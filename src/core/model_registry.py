@@ -269,6 +269,9 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         ),
         rate_limit=None,
         requires_age_verification=True,
+        # Configured display hints only. They never feed an operation ETA.
+        typical_bootstrap_seconds=600,
+        typical_attach_seconds=360,
     ),
     ModelType.AISHA_IMAGE_LITE: ModelMeta(
         provider=Provider.AISHA,
@@ -292,6 +295,9 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         ),
         rate_limit=None,
         requires_age_verification=True,
+        # Configured display hints only. They never feed an operation ETA.
+        typical_bootstrap_seconds=480,
+        typical_attach_seconds=240,
     ),
     ModelType.AISHA_VIDEO: ModelMeta(
         provider=Provider.AISHA,
@@ -322,6 +328,9 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         ),
         rate_limit=None,
         requires_age_verification=True,
+        # Configured display hints only. They never feed an operation ETA.
+        typical_bootstrap_seconds=900,
+        typical_attach_seconds=420,
     ),
 }
 

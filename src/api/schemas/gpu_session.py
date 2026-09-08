@@ -171,7 +171,8 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
     sessions. Used by the frontend to gate the Pause button."""
     bootstrap_operation: OperationResponse | None = None
     deployments: list[DeploymentResponse] = msgspec.field(default_factory=list)
-    """This session's deployments — always exactly one in P2 (D19)."""
+    """The primary deployment is created with the session; sibling deployments
+    may be attached additively afterwards."""
 
     @classmethod
     def from_model(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 import msgspec
@@ -158,14 +158,18 @@ class OperationResponse(msgspec.Struct, kw_only=True):
 
     id: UUID
     session_id: UUID
-    deployment_id: UUID | None
-    """Informational target deployment for deployment-scoped operations.
-
-    Null for session-scoped operations, including cohort restarts. Never use
-    this field to associate an operation-update frame with a deployment; patch
-    every cached deployment whose ``current_operation.id`` matches this
-    operation's ``id`` instead.
-    """
+    deployment_id: Annotated[
+        UUID | None,
+        msgspec.Meta(
+            description=(
+                "Informational target deployment for deployment-scoped operations. "
+                "Null for session-scoped operations including cohort restarts. Never "
+                "use this field to associate an operation-update frame with a "
+                "deployment; patch every cached deployment whose current_operation.id "
+                "matches this operation's id instead."
+            )
+        ),
+    ]
     kind: OperationKind
     status: OperationStatus
     phase: ProvisioningPhase | None

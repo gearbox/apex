@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 import msgspec
 
 from src.api.schemas.operation import OperationResponse
-from src.core.enums import NotificationLevel
+from src.core.enums import DeploymentStatus, GpuSessionStatus, ModelType, NotificationLevel
 
 # The operation-updated SSE payload is the REST projection verbatim. Keeping
 # this alias at the event boundary makes the one-payload contract explicit for
@@ -79,9 +80,10 @@ class GpuSessionStatusPayload(msgspec.Struct, kw_only=True):
     """Emitted on every GPU session state transition."""
 
     session_id: UUID
-    status: str
-    previous_status: str
-    model_type: str
+    status: GpuSessionStatus
+    # ``none`` is the creation-only sentinel: there was no persisted prior
+    # session status before the initial ``pending`` transition.
+    previous_status: GpuSessionStatus | Literal["none"]
     tunnel_hostname: str | None = None
     error_message: str | None = None
     reason: str | None = None
@@ -92,21 +94,19 @@ class GpuDeploymentStatusPayload(msgspec.Struct, kw_only=True):
     pending_restart, restart, activation, removal. The frontend's four-step story
     (downloading, waiting to restart, restarting, ready) is built entirely from
     ``status`` + ``pending_restart`` + ``routing_suspended`` + the current
-    operation's phase/progress —
-    the second step is the one that looks like a hang if the client can't see it."""
+    operation's phase/progress from ``gpu_session.operation_updated``. The
+    second step is the one that looks like a hang if the client cannot see it."""
 
     deployment_id: UUID
     session_id: UUID
-    model_type: str
-    status: str
+    model_type: ModelType
+    status: DeploymentStatus
     pending_restart: bool
     routing_suspended: bool
     operation_id: UUID | None = None
     """The operation currently governing this deployment's progress: its
     provision_operation_id while deploying, else its restart_operation_id
     while pending_restart, else None."""
-    operation_phase: str | None = None
-    operation_progress: dict[str, object] | None = None
     error_message: str | None = None
 
 

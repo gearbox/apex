@@ -200,6 +200,31 @@ class TestModelInfoSchema:
         assert decoded.runtime is not None
         assert decoded.runtime.state is RuntimeState.provisioning
 
+    @pytest.mark.parametrize(
+        "model_type",
+        (ModelType.AISHA_IMAGE, ModelType.AISHA_IMAGE_LITE, ModelType.AISHA_VIDEO),
+    )
+    def test_aisha_model_exposes_configured_provisioning_hints(self, model_type: ModelType) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+        )
+        meta = get_model_meta(model_type)
+
+        assert info.provisioning is not None
+        assert info.provisioning.typical_bootstrap_seconds == meta.typical_bootstrap_seconds
+        assert info.provisioning.typical_attach_seconds == meta.typical_attach_seconds
+
+    def test_always_on_model_has_no_provisioning_hint(self) -> None:
+        info = _build_model_info(
+            ModelType.GROK_IMAGINE_IMAGE,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+        )
+
+        assert info.provisioning is None
+
     @pytest.mark.parametrize("model_type", ModelType)
     def test_source_media_required_for_is_derived_from_capabilities(
         self, model_type: ModelType

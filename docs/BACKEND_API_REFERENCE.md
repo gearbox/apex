@@ -2627,6 +2627,8 @@ data: <JSON-encoded inner payload>
 | `job.status_changed` | Job moved to a new status | `JobStatusPayload` |
 | `job.progress` | Job progress update | `JobProgressPayload` |
 | `gpu_session.status_changed` | GPU session moved to a new status (e.g. provisioning → active, active → paused, paused → resuming → active, → stopped) | `GpuSessionStatusPayload` |
+| `gpu_session.deployment_status_changed` | A model deployment's lifecycle or routing state changed | `GpuDeploymentStatusPayload` |
+| `gpu_session.operation_updated` | Typed public projection of a session/deployment operation | `OperationResponse` |
 | `gpu_session.credit_warning` | Session balance is low; emitted once per upward level transition (no warning → warning → critical). Cleared on balance recovery or termination. | `GpuSessionCreditWarningPayload` |
 | `balance.updated` | Token balance changed (debit, credit, refund) | `BalanceUpdatedPayload` |
 | `system.notification` | Broadcast system message (maintenance, outage) | `SystemNotificationPayload` |
@@ -2656,12 +2658,29 @@ interface JobProgressPayload {
 interface GpuSessionStatusPayload {
   session_id: string;            // UUID
   status: GpuSessionStatus;      // new status
-  previous_status: string;       // previous status
-  model_type: string;            // e.g. "aisha-image"
+  previous_status: GpuSessionStatus | "none"; // "none" on initial creation
   tunnel_hostname: string | null;
   error_message: string | null;  // populated when status == "failed"
   reason: string | null;         // machine-readable stop reason, e.g. "insufficient_credits"
 }
+
+// gpu_session.deployment_status_changed
+interface GpuDeploymentStatusPayload {
+  deployment_id: string;         // UUID
+  session_id: string;            // UUID
+  model_type: ModelType;
+  status: DeploymentStatus;
+  pending_restart: boolean;
+  routing_suspended: boolean;
+  operation_id: string | null;   // UUID; join key for operation_updated
+  error_message: string | null;
+}
+
+// gpu_session.operation_updated
+// Exactly the same safe OperationResponse projection returned by REST.
+// Patch cached deployments by current_operation.id === payload.id, never by
+// payload.deployment_id: cohort restart operations legitimately have null
+// deployment_id while governing multiple deployments.
 
 // gpu_session.credit_warning
 interface GpuSessionCreditWarningPayload {
@@ -2693,7 +2712,7 @@ interface SystemNotificationPayload {
 
 | Channel | Subscribers | Events |
 |---------|-------------|--------|
-| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `gpu_session.credit_warning`, `balance.updated` |
+| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `gpu_session.deployment_status_changed`, `gpu_session.operation_updated`, `gpu_session.credit_warning`, `balance.updated` |
 | `system:broadcast` | All connected clients | `system.notification` |
 
 Each SSE connection subscribes to both the per-user channel and `system:broadcast`.
@@ -2708,6 +2727,8 @@ Events are automatically published by the backend at:
 | `job.status_changed` | Grok video job completes, fails, or times out |
 | `job.progress` | Grok video job enters `running` state |
 | `gpu_session.status_changed` | GPU session transitions between any two states (start/provision/active/pause/resume/stop/fail) |
+| `gpu_session.deployment_status_changed` | A deployment is attached, provisioned, restarted, activated, removed, or has its routing state changed |
+| `gpu_session.operation_updated` | A durable GPU operation receives a new accepted telemetry state |
 | `gpu_session.credit_warning` | `SessionCreditGuard` cycle detects balance at warning or critical level (emitted once per upward transition) |
 | `balance.updated` | `check_and_reserve` (debit), `refund`, `credit`, `admin_adjustment`, `settle_session_usage` |
 | `system.notification` | Admin calls `POST /v1/admin/broadcast` |

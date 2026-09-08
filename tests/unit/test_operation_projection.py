@@ -10,8 +10,9 @@ from structlog.testing import capture_logs
 
 from src.api.schemas.events import EventType
 from src.api.schemas.operation import OperationResponse
-from src.api.services.gpu_session._events import publish_operation_event
-from src.core.enums import OperationStatus
+from src.api.services.gpu_session._events import publish_deployment_event, publish_operation_event
+from src.core.enums import DeploymentStatus, ModelType, OperationStatus
+from src.db.models.gpu_session_deployment import GpuSessionDeployment
 from src.db.models.gpu_session_operation import GpuSessionOperation
 
 
@@ -131,6 +132,30 @@ def test_operation_projection_requires_complete_target_and_wraps_errors() -> Non
     assert response.error.message == "node failed"
 
 
+def test_operation_response_deployment_id_is_described_in_openapi() -> None:
+    """Keep the SSE cache-patching rule visible to generated-client users."""
+    from litestar import Litestar, post
+    from litestar.openapi.config import OpenAPIConfig
+
+    async def handler(data):  # type: ignore[no-untyped-def]
+        return data
+
+    handler.__annotations__ = {"data": OperationResponse, "return": OperationResponse}
+    app = Litestar(
+        [post("/operation")(handler)],
+        openapi_config=OpenAPIConfig(title="Operation schema", version="1"),
+    )
+    schema = app.openapi_schema.to_schema()
+    deployment_id = schema["components"]["schemas"]["OperationResponse"]["properties"][
+        "deployment_id"
+    ]
+
+    description = deployment_id.get("description")
+    assert isinstance(description, str)
+    assert description
+    assert "Never use this field" in description
+
+
 class _RecordingEventBus:
     def __init__(self) -> None:
         self.user_id: UUID | None = None
@@ -141,6 +166,37 @@ class _RecordingEventBus:
         self.user_id = user_id
         self.event_type = event_type
         self.payload = payload
+
+
+async def test_deployment_status_sse_payload_omits_raw_operation_telemetry() -> None:
+    """Only the typed operation-update event may carry operation progress."""
+    deployment = GpuSessionDeployment(
+        id=uuid4(),
+        session_id=uuid4(),
+        user_id=uuid4(),
+        product_id="vex",
+        model_type=ModelType.AISHA_IMAGE,
+        bundle_name="qwen_rapid_aio",
+        status=DeploymentStatus.deploying,
+    )
+    operation = _operation(
+        progress={
+            "work": {"completed": 1, "total": 2, "unit": "files"},
+            "opaque_aisha_field": {"must_not_escape": True},
+        }
+    )
+    operation.session_id = deployment.session_id
+    operation.deployment_id = deployment.id
+    bus = _RecordingEventBus()
+
+    await publish_deployment_event(bus, deployment, operation=operation)  # type: ignore[arg-type]
+
+    assert bus.event_type is EventType.GPU_DEPLOYMENT_STATUS_CHANGED
+    encoded = msgspec.json.encode(bus.payload)
+    payload = msgspec.json.decode(encoded)
+    assert payload["operation_id"] == str(operation.id)
+    assert "operation_phase" not in payload
+    assert "operation_progress" not in payload
 
 
 async def test_operation_sse_payload_is_the_exact_rest_projection() -> None:

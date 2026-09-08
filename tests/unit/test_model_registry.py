@@ -32,7 +32,7 @@ class TestModelRegistryCompleteness:
         """Registry input limits must accommodate every declared generation type."""
         for model, meta in MODEL_METADATA.items():
             assert meta.inputs is not None, f"{model.value} has no input capabilities"
-            supported_types = set()
+            supported_types: set[GenerationType] = set()
             if meta.image is not None:
                 supported_types.update(meta.image.supported_types)
             if meta.video is not None:
@@ -40,6 +40,26 @@ class TestModelRegistryCompleteness:
             if GenerationType.FLF2V in supported_types:
                 assert meta.inputs.source_media is not None
                 assert meta.inputs.source_media.max >= 2
+
+
+class TestProvisioningDisplayHints:
+    @pytest.mark.parametrize(
+        "model_type",
+        (ModelType.AISHA_IMAGE, ModelType.AISHA_IMAGE_LITE, ModelType.AISHA_VIDEO),
+    )
+    def test_aisha_models_have_configured_display_hints(self, model_type: ModelType) -> None:
+        meta = get_model_meta(model_type)
+
+        assert meta.typical_bootstrap_seconds is not None
+        assert meta.typical_bootstrap_seconds > 0
+        assert meta.typical_attach_seconds is not None
+        assert meta.typical_attach_seconds > 0
+
+    def test_models_without_on_demand_provisioning_keep_null_hints(self) -> None:
+        meta = get_model_meta(ModelType.GROK_IMAGINE_IMAGE)
+
+        assert meta.typical_bootstrap_seconds is None
+        assert meta.typical_attach_seconds is None
 
 
 class TestGetModelMeta:
