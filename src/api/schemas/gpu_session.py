@@ -8,10 +8,18 @@ from uuid import UUID
 
 import msgspec
 
-from src.core.enums import ModelType, OperationKind, OperationStatus, ProvisioningPhase
+from src.api.schemas.operation import OperationResponse
+from src.core.enums import (
+    DeploymentStatus,
+    GpuSessionStatus,
+    ModelType,
+    OperationKind,
+    OperationStatus,
+    ProvisioningPhase,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from src.db.models.gpu_session import GpuSession
     from src.db.models.gpu_session_deployment import GpuSessionDeployment
@@ -81,32 +89,56 @@ class DeploymentResponse(msgspec.Struct, kw_only=True):
     """
 
     id: UUID
-    model_type: str
+    model_type: ModelType
     bundle_name: str
     bundle_version: str | None
-    status: str
+    status: DeploymentStatus
     pending_restart: bool
     routing_suspended: bool
     is_primary: bool
     created_at: datetime
     activated_at: datetime | None
-    restart_operation_id: UUID | None = None
-    """The restart operation that will make this deployment routable, once pending_restart (D33)."""
+    current_operation: OperationResponse | None = None
+    """Newest operation for this deployment, including terminal operations."""
 
     @classmethod
-    def from_model(cls, m: GpuSessionDeployment) -> DeploymentResponse:
+    def from_model(
+        cls, m: GpuSessionDeployment, *, current_operation: GpuSessionOperation | None = None
+    ) -> DeploymentResponse:
         return cls(
             id=m.id,
-            model_type=m.model_type,
+            model_type=ModelType(m.model_type),
             bundle_name=m.bundle_name,
             bundle_version=m.bundle_version,
-            status=m.status,
+            status=DeploymentStatus(m.status),
             pending_restart=m.pending_restart,
             routing_suspended=m.routing_suspended,
             is_primary=m.is_primary,
             created_at=m.created_at,
             activated_at=m.activated_at,
-            restart_operation_id=m.restart_operation_id,
+            current_operation=(
+                OperationResponse.from_model(current_operation)
+                if current_operation is not None
+                else None
+            ),
+        )
+
+
+class DeploymentSummaryResponse(msgspec.Struct, kw_only=True):
+    """Deployment fields needed on the lightweight session list endpoint."""
+
+    id: UUID
+    model_type: ModelType
+    status: DeploymentStatus
+    is_primary: bool
+
+    @classmethod
+    def from_model(cls, m: GpuSessionDeployment) -> DeploymentSummaryResponse:
+        return cls(
+            id=m.id,
+            model_type=ModelType(m.model_type),
+            status=DeploymentStatus(m.status),
+            is_primary=m.is_primary,
         )
 
 
@@ -115,18 +147,16 @@ class AttachDeploymentRequest(msgspec.Struct, forbid_unknown_fields=True, kw_onl
     """The model to attach to this already-running session."""
 
 
-class AttachDeploymentResponse(msgspec.Struct, kw_only=True):
+class DeploymentMutationResponse(msgspec.Struct, kw_only=True):
     deployment: DeploymentResponse
-    operation_id: UUID
-    """The provision operation the client can poll/subscribe to for progress."""
+    operation: OperationResponse
 
 
 class GpuSessionResponse(msgspec.Struct, kw_only=True):
     id: UUID
     user_id: UUID
     product_id: str
-    status: str
-    model_type: str
+    status: GpuSessionStatus
     tunnel_hostname: str | None
     vastai_gpu_name: str | None
     vastai_cost_per_hour_micros: int | None
@@ -139,14 +169,10 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
     in_flight_job_count: int = 0
     """Number of QUEUED/RUNNING Aisha jobs on this session. Non-zero only for active
     sessions. Used by the frontend to gate the Pause button."""
-    provisioning_status: str | None = None
-    """Latest status of this session's current bootstrap operation."""
-    provisioning_phase: str | None = None
-    """Latest phase of this session's current bootstrap operation."""
-    provisioning_progress: dict[str, Any] | None = None
-    """Latest generic progress object from this session's bootstrap operation."""
-    deployments: list[DeploymentResponse] = []
-    """This session's deployments — always exactly one in P2 (D19)."""
+    bootstrap_operation: OperationResponse | None = None
+    deployments: list[DeploymentResponse] = msgspec.field(default_factory=list)
+    """The primary deployment is created with the session; sibling deployments
+    may be attached additively afterwards."""
 
     @classmethod
     def from_model(
@@ -156,13 +182,13 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
         bootstrap_operation: GpuSessionOperation | None = None,
         in_flight_job_count: int = 0,
         deployments: Sequence[GpuSessionDeployment] = (),
+        current_operations: Mapping[UUID, GpuSessionOperation] | None = None,
     ) -> GpuSessionResponse:
         return cls(
             id=m.id,
             user_id=m.user_id,
             product_id=m.product_id,
-            status=str(m.status),
-            model_type=m.model_type,
+            status=GpuSessionStatus(m.status),
             tunnel_hostname=m.tunnel_hostname,
             vastai_gpu_name=m.vastai_gpu_name,
             vastai_cost_per_hour_micros=m.vastai_cost_per_hour_micros,
@@ -173,10 +199,48 @@ class GpuSessionResponse(msgspec.Struct, kw_only=True):
             stopped_at=m.stopped_at,
             error_message=m.error_message,
             in_flight_job_count=in_flight_job_count,
-            provisioning_status=(bootstrap_operation.status if bootstrap_operation else None),
-            provisioning_phase=(bootstrap_operation.phase if bootstrap_operation else None),
-            provisioning_progress=bootstrap_operation.progress if bootstrap_operation else None,
-            deployments=[DeploymentResponse.from_model(d) for d in deployments],
+            bootstrap_operation=(
+                OperationResponse.from_model(bootstrap_operation)
+                if bootstrap_operation is not None
+                else None
+            ),
+            deployments=[
+                DeploymentResponse.from_model(
+                    deployment,
+                    current_operation=(
+                        current_operations.get(deployment.id)
+                        if current_operations is not None
+                        else None
+                    ),
+                )
+                for deployment in deployments
+            ],
+        )
+
+
+class GpuSessionListItemResponse(msgspec.Struct, kw_only=True):
+    """Compact session list projection intentionally free of operation bodies."""
+
+    id: UUID
+    status: GpuSessionStatus
+    product_id: str
+    created_at: datetime
+    started_at: datetime | None
+    deployments: list[DeploymentSummaryResponse]
+
+    @classmethod
+    def from_model(
+        cls, m: GpuSession, *, deployments: Sequence[GpuSessionDeployment] = ()
+    ) -> GpuSessionListItemResponse:
+        return cls(
+            id=m.id,
+            status=GpuSessionStatus(m.status),
+            product_id=m.product_id,
+            created_at=m.created_at,
+            started_at=m.started_at,
+            deployments=[
+                DeploymentSummaryResponse.from_model(deployment) for deployment in deployments
+            ],
         )
 
 
@@ -199,4 +263,4 @@ class StopSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=Tru
 
 
 class ListSessionsResponse(msgspec.Struct, kw_only=True):
-    sessions: list[GpuSessionResponse]
+    sessions: list[GpuSessionListItemResponse]

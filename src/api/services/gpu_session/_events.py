@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from src.api.schemas.events import EventType, GpuDeploymentStatusPayload, GpuSessionStatusPayload
+from src.api.schemas.operation import OperationResponse
 from src.api.schemas.ops_events import GpuNodeStartedOpsPayload, OpsEventType
-from src.core.enums import GpuSessionStatus
+from src.core.enums import DeploymentStatus, GpuSessionStatus, ModelType
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -59,13 +60,12 @@ async def publish_status_event(
                     event_type=EventType.GPU_SESSION_STATUS_CHANGED,
                     payload=GpuSessionStatusPayload(
                         session_id=session.id,
-                        # session.status is already a string (Mapped[str] on the model);
-                        # this str() is defensive against enum-typed test mocks.
-                        status=str(session.status),
-                        previous_status=previous_status,
-                        # session.model_type is stored as the enum `.value` already;
-                        # use it directly for consistency across all call sites.
-                        model_type=session.model_type,
+                        status=GpuSessionStatus(session.status),
+                        previous_status=(
+                            "none"
+                            if previous_status == "none"
+                            else GpuSessionStatus(previous_status)
+                        ),
                         tunnel_hostname=session.tunnel_hostname,
                         error_message=error_message,
                         reason=reason,
@@ -84,7 +84,7 @@ async def publish_status_event(
 
     if (
         ops_event_bus is not None
-        and str(session.status) == GpuSessionStatus.active
+        and session.status == GpuSessionStatus.active
         and previous_status == GpuSessionStatus.provisioning
     ):
         await ops_event_bus.publish(
@@ -111,13 +111,13 @@ async def publish_deployment_event(
 ) -> None:
     """Fire-and-forget SSE publish for a P4 deployment state change (Part 4).
 
-    ``operation`` is whichever operation currently governs the deployment's progress
-    (its provision or restart operation) — pass it when already loaded in the same
-    tick as the state write, so ``operation_phase``/``operation_progress`` reflect
-    the node's own telemetry. ``operation_id`` lets a caller name the governing
-    operation explicitly when it hasn't loaded the row, *including as None* when
-    there deliberately is none to report — e.g. a stranded removal reaper, whose
-    governing operation must never fall back to the deployment's stale
+    ``operation`` is whichever operation currently governs the deployment (its
+    provision or restart operation). It supplies the join-key when it is already
+    loaded in the same tick as the state write; its typed public phase/progress
+    arrive separately on ``gpu_session.operation_updated``. ``operation_id`` lets a
+    caller name the governing operation explicitly when it hasn't loaded the row,
+    *including as None* when there deliberately is none to report — e.g. a stranded
+    removal reaper, whose governing operation must never fall back to the deployment's stale
     ``restart_operation_id`` from some earlier, already-terminal restart (S1). A
     caller that passes neither keyword gets the historical N4 behavior: falls
     back to ``deployment.restart_operation_id or deployment.provision_operation_id``,
@@ -144,13 +144,11 @@ async def publish_deployment_event(
                 payload=GpuDeploymentStatusPayload(
                     deployment_id=deployment.id,
                     session_id=deployment.session_id,
-                    model_type=deployment.model_type,
-                    status=str(deployment.status),
+                    model_type=ModelType(deployment.model_type),
+                    status=DeploymentStatus(deployment.status),
                     pending_restart=deployment.pending_restart,
                     routing_suspended=deployment.routing_suspended,
                     operation_id=resolved_operation_id,
-                    operation_phase=operation.phase if operation is not None else None,
-                    operation_progress=operation.progress if operation is not None else None,
                     error_message=error_message,
                 ),
             ),
@@ -165,4 +163,46 @@ async def publish_deployment_event(
     except Exception:
         logger.exception(
             "gpu_session.deployment.event_publish_failed", deployment_id=str(deployment.id)
+        )
+
+
+async def publish_operation_event(
+    event_bus: EventBus | None,
+    operation: GpuSessionOperation,
+    *,
+    user_id: UUID | None = None,
+) -> None:
+    """Publish the exact REST operation projection after its transaction commits.
+
+    Operations intentionally do not denormalize the owner. Production callers
+    pass ``user_id`` from the session that authenticated the callback. The
+    optional form still makes a no-bus call a legal two-argument no-op, matching
+    the other event helpers' failure-tolerant contract.
+    """
+    if event_bus is None:
+        return
+    if user_id is None:
+        logger.warning(
+            "gpu_session.operation.event_publish_missing_user",
+            operation_id=str(operation.id),
+        )
+        return
+    try:
+        await asyncio.wait_for(
+            event_bus.publish(
+                user_id=user_id,
+                event_type=EventType.GPU_SESSION_OPERATION_UPDATED,
+                payload=OperationResponse.from_model(operation),
+            ),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "gpu_session.operation.event_publish_timeout",
+            operation_id=str(operation.id),
+            timeout=FIRE_AND_FORGET_TIMEOUT_SECS,
+        )
+    except Exception:
+        logger.exception(
+            "gpu_session.operation.event_publish_failed", operation_id=str(operation.id)
         )

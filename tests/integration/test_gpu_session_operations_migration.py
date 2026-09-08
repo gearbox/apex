@@ -54,6 +54,27 @@ async def _schema_snapshot(database_url: str) -> tuple[set[str], set[str], set[s
         await engine.dispose()
 
 
+async def _operation_deployment_fk_definition(database_url: str) -> str | None:
+    """Return the P5 operation/deployment FK definition, if present."""
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return (
+                await connection.execute(
+                    text(
+                        "SELECT pg_get_constraintdef(c.oid) "
+                        "FROM pg_constraint c "
+                        "JOIN pg_class t ON t.oid = c.conrelid "
+                        "WHERE t.relname = 'gpu_session_operations' "
+                        "AND c.conname = "
+                        "'fk_gpu_session_operations_deployment_id_gpu_session_deployments'"
+                    )
+                )
+            ).scalar_one_or_none()
+    finally:
+        await engine.dispose()
+
+
 def test_revision_038_downgrade_upgrade_round_trip(
     test_database_url: str,
     db_engine: AsyncEngine,
@@ -95,4 +116,38 @@ def test_revision_038_downgrade_upgrade_round_trip(
         assert "ix_gpu_session_operations_session_id" not in operation_indexes
     finally:
         # Integration tests share the migrated schema, so always restore head.
+        command.upgrade(config, "head")
+
+
+def test_revision_042_downgrade_upgrade_round_trip(
+    test_database_url: str,
+    db_engine: AsyncEngine,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """P5's public-operation columns, FK, and index reverse cleanly."""
+    assert db_engine is not None
+    monkeypatch.setenv("DATABASE_URL", test_database_url)
+    monkeypatch.setenv("DEBUG", "false")
+    config = Config("alembic.ini")
+
+    try:
+        command.downgrade(config, "041")
+        _sessions, operation_columns, operation_indexes = asyncio.run(
+            _schema_snapshot(test_database_url)
+        )
+        assert "deployment_id" not in operation_columns
+        assert "updated_at" not in operation_columns
+        assert "ix_gpu_session_operations_deployment_created" not in operation_indexes
+        assert asyncio.run(_operation_deployment_fk_definition(test_database_url)) is None
+
+        command.upgrade(config, "042")
+        _sessions, operation_columns, operation_indexes = asyncio.run(
+            _schema_snapshot(test_database_url)
+        )
+        assert {"deployment_id", "updated_at"} <= operation_columns
+        assert "ix_gpu_session_operations_deployment_created" in operation_indexes
+        fk_definition = asyncio.run(_operation_deployment_fk_definition(test_database_url))
+        assert fk_definition is not None
+        assert "ON DELETE CASCADE" in fk_definition
+    finally:
         command.upgrade(config, "head")

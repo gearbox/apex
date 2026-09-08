@@ -171,6 +171,68 @@ async def _make_command(
 # ---------------------------------------------------------------------------
 
 
+async def test_list_live_runtime_excludes_forced_live_deployment_on_terminal_session(
+    db_session: AsyncSession,
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    """Providers must not expose ids for a terminal session with a broken D15 cascade."""
+    gpu_session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(session=gpu_session, status=DeploymentStatus.active)
+
+    # This state is deliberately invalid in production: terminal transitions
+    # cascade deployment state. Keep it force-written to prove the endpoint
+    # query owns its terminal-session guard rather than relying on that cascade.
+    await db_session.execute(
+        update(GpuSession)
+        .where(GpuSession.id == gpu_session.id)
+        .values(status=GpuSessionStatus.stopped)
+    )
+    await db_session.flush()
+    await db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.active
+
+    runtime_rows = await deployment_repo.list_live_runtime_for_user(
+        gpu_session.user_id, gpu_session.product_id
+    )
+
+    assert runtime_rows == []
+
+
+async def test_list_live_runtime_returns_in_flight_cohort_restart(
+    db_session: AsyncSession,
+    deployment_repo: GpuSessionDeploymentRepository,
+    make_gpu_session: GpuSessionFactory,
+    make_deployment: DeploymentFactory,
+) -> None:
+    """A session-scoped restart is still runtime work for every cohort member."""
+    gpu_session = await make_gpu_session(status=GpuSessionStatus.active)
+    deployment = await make_deployment(
+        session=gpu_session,
+        status=DeploymentStatus.deploying,
+        is_primary=False,
+        pending_restart=True,
+    )
+    restart = await GpuSessionOperationRepository(db_session).create(
+        id=new_id(),
+        session_id=gpu_session.id,
+        product_id=gpu_session.product_id,
+        kind=OperationKind.comfyui_restart,
+    )
+    updated = await deployment_repo.set_restart_pointer([deployment.id], operation_id=restart.id)
+
+    runtime_rows = await deployment_repo.list_live_runtime_for_user(
+        gpu_session.user_id, gpu_session.product_id
+    )
+
+    assert updated == 1
+    assert [
+        (row_deployment.id, row_session.id, operation_id)
+        for row_deployment, row_session, operation_id in runtime_rows
+    ] == [(deployment.id, gpu_session.id, restart.id)]
+
+
 async def test_create_persists_all_fields(
     deployment_repo: GpuSessionDeploymentRepository,
     make_gpu_session: GpuSessionFactory,

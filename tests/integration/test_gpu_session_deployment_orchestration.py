@@ -27,7 +27,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -146,6 +146,30 @@ def _deployment_service(
         bundle_index=_FakeBundleIndex(),  # type: ignore[arg-type]
         command_service=command_service,
     )
+
+
+async def _attach(
+    service: GpuSessionDeploymentService, **kwargs: Any
+) -> tuple[GpuSessionDeployment, UUID]:
+    """Adapt P4 assertions to P5's returned operation resource."""
+    deployment, operation = await service.attach(**kwargs)
+    return deployment, operation.id
+
+
+async def _remove(service: GpuSessionDeploymentService, **kwargs: Any) -> GpuSessionDeployment:
+    """Adapt P4 model-based fixtures to P5's deployment-id removal API."""
+    model_type = kwargs.pop("model_type")
+    session_id = kwargs["session_id"]
+    assert isinstance(session_id, UUID)
+    assert isinstance(model_type, ModelType)
+    async with service._session_factory() as session:
+        deployment = await GpuSessionDeploymentRepository(session).get_live_for_session_and_model(
+            session_id, model_type.value
+        )
+    if deployment is None:
+        raise DeploymentNotLiveError(f"No live deployment for model_type={model_type.value}")
+    removed, _operation = await service.remove(deployment_id=deployment.id, **kwargs)
+    return removed
 
 
 def _worker(
@@ -370,7 +394,8 @@ async def test_end_to_end_attach_to_routable(
         )
 
     # P1: attach — always additive, always a batch of one (D8, invariant #1/#2).
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -445,7 +470,8 @@ async def test_provision_failure_frees_the_slot(
     user = await _create_user(orchestration_session_factory)
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -463,7 +489,8 @@ async def test_provision_failure_frees_the_slot(
     assert deployment.removed_at is not None
 
     # The slot is free — attaching the same model again now succeeds.
-    second, _ = await deployment_service.attach(
+    second, _ = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -494,7 +521,8 @@ async def test_attach_compensates_for_any_enqueue_failure(
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
 
     with pytest.raises(ConnectionError, match="Redis temporarily unavailable"):
-        await deployment_service.attach(
+        await _attach(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -609,7 +637,8 @@ async def test_attach_rejects_duplicate_live_model(
 
     user = await _create_user(orchestration_session_factory)
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
-    await deployment_service.attach(
+    await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -617,7 +646,8 @@ async def test_attach_rejects_duplicate_live_model(
     )
 
     with pytest.raises(DeploymentAlreadyLiveError):
-        await deployment_service.attach(
+        await _attach(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -643,7 +673,8 @@ async def test_attach_rejects_non_active_session(
     )
 
     with pytest.raises(InvalidSessionStateError):
-        await deployment_service.attach(
+        await _attach(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -674,7 +705,8 @@ async def test_remove_rejects_paused_session_without_enqueuing_a_command(
     )
 
     with pytest.raises(InvalidSessionStateError, match="resume the session first"):
-        await deployment_service.remove(
+        await _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -738,7 +770,8 @@ async def test_remove_marks_not_routable_before_the_in_flight_count(
         JobRepository, "count_in_flight_for_session_and_model", count_after_transition
     )
 
-    await deployment_service.remove(
+    await _remove(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -780,7 +813,8 @@ async def test_remove_enqueue_failure_rolls_the_deployment_back_to_active(
     )
 
     with pytest.raises(ConnectionError, match="queue unavailable"):
-        await deployment_service.remove(
+        await _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -821,7 +855,8 @@ async def test_remove_converts_terminal_session_enqueue_race_to_invalid_state(
     )
 
     with pytest.raises(InvalidSessionStateError, match="became unavailable") as exc_info:
-        await deployment_service.remove(
+        await _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -852,14 +887,16 @@ async def test_two_concurrent_non_forced_removals_leave_one_active(
     )
 
     results = await asyncio.gather(
-        deployment_service.remove(
+        _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
             model_type=ModelType.AISHA_IMAGE,
             force=False,
         ),
-        deployment_service.remove(
+        _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -901,7 +938,8 @@ async def test_remove_blocked_by_in_flight_job_of_same_model_only(
     )
 
     with pytest.raises(DeploymentHasInFlightJobsError):
-        await deployment_service.remove(
+        await _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -910,7 +948,8 @@ async def test_remove_blocked_by_in_flight_job_of_same_model_only(
         )
 
     # A job on the OTHER (primary) model does not block removing this one.
-    removed = await deployment_service.remove(
+    removed = await _remove(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -962,7 +1001,8 @@ async def test_remove_last_deployment_requires_force(
     await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
 
     with pytest.raises(LastDeploymentRequiresForceError):
-        await deployment_service.remove(
+        await _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -970,7 +1010,8 @@ async def test_remove_last_deployment_requires_force(
             force=False,
         )
 
-    removed = await deployment_service.remove(
+    removed = await _remove(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -997,7 +1038,8 @@ async def test_remove_not_live_returns_409_equivalent(
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
 
     with pytest.raises(DeploymentNotLiveError):
-        await deployment_service.remove(
+        await _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -1030,7 +1072,8 @@ async def test_remove_derives_retain_bundles_from_other_live_deployments(
         bundle_name="video-bundle",
     )
 
-    await deployment_service.remove(
+    await _remove(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -1075,7 +1118,8 @@ async def test_remove_refuses_when_a_sibling_bundle_name_is_unresolvable(
     )
 
     with pytest.raises(RetainBundlesUnresolvableError):
-        await deployment_service.remove(
+        await _remove(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -1323,7 +1367,8 @@ async def test_restart_waits_for_in_flight_jobs_to_drain(
         status="running",
     )
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -1375,7 +1420,8 @@ async def test_restart_suspends_routing_before_the_drain_count_and_it_persists(
 
     monkeypatch.setattr(JobRepository, "count_in_flight_for_session", count_after_suspend)
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -1422,7 +1468,8 @@ async def test_routing_suspension_is_projected_and_published(
     user = await _create_user(orchestration_session_factory)
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
     primary = await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)
-    deployment, provision_operation_id = await deployment_service.attach(
+    deployment, provision_operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -1570,7 +1617,8 @@ async def test_restart_fires_anyway_after_drain_timeout(
         status="queued",
     )
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -1605,7 +1653,8 @@ async def test_node_clock_behind_does_not_shorten_restart_drain_window(
         model=ModelType.AISHA_IMAGE.value,
     )
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -1644,7 +1693,8 @@ async def test_node_clock_ahead_does_not_extend_restart_drain_window(
         model=ModelType.AISHA_IMAGE.value,
     )
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -1685,13 +1735,15 @@ async def test_different_readiness_markers_get_independent_restart_commands(
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
 
     video, lite = await asyncio.gather(
-        deployment_service.attach(
+        _attach(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
             model_type=ModelType.AISHA_VIDEO,
         ),
-        deployment_service.attach(
+        _attach(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -1757,13 +1809,15 @@ async def _attach_two_marker_cohorts_and_enqueue_restarts(
     both provisioned and both with a restart already enqueued (but not yet
     terminal) — the point at which the two cohorts' restart outcomes can race."""
     video, lite = await asyncio.gather(
-        deployment_service.attach(
+        _attach(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
             model_type=ModelType.AISHA_VIDEO,
         ),
-        deployment_service.attach(
+        _attach(
+            deployment_service,
             session_id=gpu_session.id,
             user_id=user.id,
             product_id="vex",
@@ -2106,7 +2160,8 @@ async def test_restart_enqueued_event_carries_operation_id(
     user = await _create_user(orchestration_session_factory)
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -2159,7 +2214,8 @@ async def test_remove_event_reports_the_removal_operation_not_a_stale_restart(
     gpu_session = await _create_gpu_session(orchestration_session_factory, user=user)
     await _create_deployment(orchestration_session_factory, gpu_session=gpu_session)  # primary
 
-    deployment, operation_id = await deployment_service.attach(
+    deployment, operation_id = await _attach(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -2184,7 +2240,8 @@ async def test_remove_event_reports_the_removal_operation_not_a_stale_restart(
     assert stale_restart_operation_id is not None  # never cleared on activation — the bug's cause
 
     event_bus.reset_mock()
-    removed = await deployment_service.remove(
+    removed = await _remove(
+        deployment_service,
         session_id=gpu_session.id,
         user_id=user.id,
         product_id="vex",
@@ -2481,36 +2538,38 @@ async def test_operation_event_service_never_transitions_a_deployment(
     )
     operation_id = commands[0].operation_id
 
-    receiver = OperationEventService(session_factory=orchestration_session_factory)
+    receiver = OperationEventService()
     now = datetime.now(UTC)
-    authorized, status_code = await receiver.handle_event(
-        session_id=gpu_session.id,
-        bearer_token=token,
-        event=OperationEventBody(
-            schema_version=2,
-            event_id="evt-1",
+    async with orchestration_session_factory() as session, session.begin():
+        result = await receiver.handle_event(
             session_id=gpu_session.id,
-            operation_id=operation_id,
-            operation_kind=OperationKind.bundle_provision,
-            batch=None,
-            sequence=1,
-            target=None,
-            status=OperationStatus.succeeded,
-            phase=None,
-            started_at=now,
-            ts=now,
-            elapsed_seconds=1.0,
-            phase_elapsed_seconds=None,
-            progress=None,
-            plan=None,
-            summary=None,
-            message="done",
-            error=None,
-        ),
-    )
+            bearer_token=token,
+            event=OperationEventBody(
+                schema_version=2,
+                event_id="evt-1",
+                session_id=gpu_session.id,
+                operation_id=operation_id,
+                operation_kind=OperationKind.bundle_provision,
+                batch=None,
+                sequence=1,
+                target=None,
+                status=OperationStatus.succeeded,
+                phase=None,
+                started_at=now,
+                ts=now,
+                elapsed_seconds=1.0,
+                phase_elapsed_seconds=None,
+                progress=None,
+                plan=None,
+                summary=None,
+                message="done",
+                error=None,
+            ),
+            db=session,
+        )
 
-    assert authorized is True
-    assert status_code == 200
+    assert result.authorized is True
+    assert result.status == 200
 
     # The command DID close (P3/D27's cross-write) — proving the event was really applied.
     async with orchestration_session_factory() as session:

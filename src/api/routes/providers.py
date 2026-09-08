@@ -2,7 +2,7 @@
 
 Returns provider-grouped, capability-rich model catalog.
 Auth-optional: unauthenticated callers get the full catalog;
-authenticated callers additionally receive user_context and per-model session_state.
+authenticated callers additionally receive user_context and per-model runtime.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from src.api.schemas.providers import (
     ImageConstraints,
     ModelInfo,
     ModelInputs,
+    ModelProvisioningHintResponse,
+    ModelRuntimeResponse,
     ProviderInfo,
     ProvidersResponse,
     SourceMediaConstraints,
@@ -37,19 +39,20 @@ from src.api.services.workflow.contract import (
     BundleCapabilities,
 )
 from src.core.enums import (
+    DeploymentStatus,
     GenerationType,
     GpuSessionStatus,
-    ModelSessionState,
     ModelType,
     Provider,
     ProvisioningMode,
-    session_state_from_status,
+    RuntimeState,
+    runtime_state_from_session_status,
 )
 from src.core.model_registry import get_model_meta
 from src.core.product import ProductConfig
 from src.core.resolution import TIER_MEGAPIXELS
 from src.db.repositories.generation_model import GenerationModelRepository
-from src.db.repositories.gpu_session import GpuSessionRepository
+from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
@@ -68,7 +71,7 @@ def _build_model_info(
     mt: ModelType,
     record: object,
     *,
-    session_state: ModelSessionState | None,
+    runtime: ModelRuntimeResponse | None,
     capabilities: BundleCapabilities | None = None,
     bound_workflow: BoundWorkflow | None = None,
 ) -> ModelInfo:
@@ -77,7 +80,7 @@ def _build_model_info(
     Args:
         mt: The ModelType enum member.
         record: The GenerationModel DB record (has .name, .description, .is_enabled).
-        session_state: Per-user readiness; None for always-on providers or unauthenticated.
+        runtime: Per-user runtime; None for always-on providers or unauthenticated.
     """
     meta = get_model_meta(mt)
     requires_indexed_workflow = mt.provider.provisioning_mode is ProvisioningMode.ON_DEMAND
@@ -189,7 +192,15 @@ def _build_model_info(
             if meta.video is not None
             else None
         ),
-        session_state=session_state.value if session_state is not None else None,
+        runtime=runtime,
+        provisioning=(
+            ModelProvisioningHintResponse(
+                typical_bootstrap_seconds=meta.typical_bootstrap_seconds,
+                typical_attach_seconds=meta.typical_attach_seconds,
+            )
+            if requires_indexed_workflow
+            else None
+        ),
     )
 
 
@@ -214,24 +225,37 @@ class ProvidersController(Controller):
 
         Returns provider-grouped model catalog with capability metadata.
         When authenticated, includes user_context with subscription tier and
-        per-model session_state for on-demand providers.
+        per-model runtime for on-demand providers.
         Models are filtered by the current product's allowlist/blocklist.
         """
         repo = GenerationModelRepository(session)
         db_models = await repo.list_enabled_for_product(product_config)
 
-        # Build per-user session state map in a single bulk query (authenticated only)
-        session_state_by_model: dict[str, ModelSessionState] = {}
+        # One deployment-led query across all models. A GpuSession's legacy
+        # model_type is deliberately ignored: sibling deployments own runtime.
+        runtime_by_model: dict[str, ModelRuntimeResponse] = {}
         if current_user_id is not None:
-            sessions = await GpuSessionRepository(session).list_by_user(
-                current_user_id, product_id, include_terminal=False
+            runtime_rows = await GpuSessionDeploymentRepository(session).list_live_runtime_for_user(
+                current_user_id, product_id
             )
-            # list is created_at DESC; prefer an active session, else keep the newest seen
-            for s in sessions:
-                s_state = session_state_from_status(GpuSessionStatus(s.status))
-                existing = session_state_by_model.get(s.model_type)
-                if existing is None or s_state is ModelSessionState.ACTIVE:
-                    session_state_by_model[s.model_type] = s_state
+            for deployment, gpu_session, operation_id in runtime_rows:
+                state = runtime_state_from_session_status(GpuSessionStatus(gpu_session.status))
+                if state == RuntimeState.active:
+                    if deployment.status == DeploymentStatus.deploying:
+                        state = RuntimeState.provisioning
+                    elif deployment.status == DeploymentStatus.removing:
+                        state = RuntimeState.removing
+                    elif (
+                        deployment.status == DeploymentStatus.active
+                        and deployment.routing_suspended
+                    ):
+                        state = RuntimeState.suspended
+                runtime_by_model[deployment.model_type] = ModelRuntimeResponse(
+                    state=state,
+                    session_id=gpu_session.id,
+                    deployment_id=deployment.id,
+                    operation_id=operation_id,
+                )
 
         # Group models by provider
         configured = generation_service.configured_providers
@@ -247,8 +271,16 @@ class ProvidersController(Controller):
                 continue
 
             mode = mt.provider.provisioning_mode
-            state: ModelSessionState | None = (
-                session_state_by_model.get(mt.value, ModelSessionState.NONE)
+            runtime: ModelRuntimeResponse | None = (
+                runtime_by_model.get(
+                    mt.value,
+                    ModelRuntimeResponse(
+                        state=RuntimeState.none,
+                        session_id=None,
+                        deployment_id=None,
+                        operation_id=None,
+                    ),
+                )
                 if mode is ProvisioningMode.ON_DEMAND and current_user_id is not None
                 else None
             )
@@ -257,7 +289,7 @@ class ProvidersController(Controller):
             info = _build_model_info(
                 mt,
                 record,
-                session_state=state,
+                runtime=runtime,
                 capabilities=capabilities,
                 bound_workflow=bound_workflow,
             )

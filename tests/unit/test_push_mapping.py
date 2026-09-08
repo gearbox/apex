@@ -19,7 +19,7 @@ from src.api.schemas.events import (
     SystemNotificationPayload,
 )
 from src.api.services.push_mapping import map_event_to_notification
-from src.core.enums import NotificationLevel
+from src.core.enums import GpuSessionStatus, NotificationLevel
 
 _encoder = msgspec.json.Encoder()
 
@@ -125,9 +125,8 @@ class TestIgnoredEvents:
             EventType.GPU_SESSION_STATUS_CHANGED,
             GpuSessionStatusPayload(
                 session_id=uuid4(),
-                status="active",
-                previous_status="provisioning",
-                model_type="aisha-image",
+                status=GpuSessionStatus.active,
+                previous_status=GpuSessionStatus.provisioning,
             ),
         )
         assert map_event_to_notification(envelope) is None

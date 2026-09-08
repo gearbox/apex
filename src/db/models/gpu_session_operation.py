@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,6 +26,12 @@ class GpuSessionOperation(Base):
         ForeignKey("gpu_sessions.id", ondelete="CASCADE"),
         nullable=False,
         comment="GPU session that owns this operation.",
+    )
+    deployment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("gpu_session_deployments.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="Deployment this operation acts on; NULL for legacy rows only.",
     )
     product_id: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="Denormalized product scope from the owning session."
@@ -94,6 +100,14 @@ class GpuSessionOperation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
+    # Apex's write clock.  This is deliberately distinct from last_event_at,
+    # which is reported by the node and remains NULL until its first event.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=func.now(),
+    )
 
     __table_args__ = (
         Index("ix_gpu_session_operations_session_created", "session_id", created_at.desc()),
@@ -101,5 +115,11 @@ class GpuSessionOperation(Base):
             "ix_gpu_session_operations_batch",
             "batch_id",
             postgresql_where=text("batch_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_gpu_session_operations_deployment_created",
+            "deployment_id",
+            created_at.desc(),
+            postgresql_where=text("deployment_id IS NOT NULL"),
         ),
     )

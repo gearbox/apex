@@ -555,7 +555,8 @@ class GpuSessionStatus(StrEnum):
 
 # These values mirror gearbox/aisha
 # src/ai_content_service/telemetry_contract.py at a7a65d864231c31709124dfe3c6c74a99ea5a0a9.
-# Change them only in lockstep with that contract.
+# Change these operation, phase, and work-unit vocabularies only in lockstep
+# with that contract.
 class OperationKind(StrEnum):
     """The provisioning-like activity represented by an operation stream."""
 
@@ -586,6 +587,20 @@ class ProvisioningPhase(StrEnum):
     workflow = "workflow"
     verifying = "verifying"
     restart = "restart"
+
+
+class WorkUnit(StrEnum):
+    """Units used by Aisha operation telemetry work counters."""
+
+    bytes = "bytes"
+    files = "files"
+    items = "items"
+
+
+class RateUnit(StrEnum):
+    """Units used by Aisha operation telemetry rates."""
+
+    bytes_per_second = "bytes_per_second"
 
 
 TERMINAL_OPERATION_STATUSES: frozenset[OperationStatus] = frozenset(
@@ -664,32 +679,34 @@ TERMINAL_COMMAND_STATUSES: frozenset[CommandStatus] = frozenset(
 )
 
 
-class ModelSessionState(StrEnum):
-    """Per-user readiness of an on-demand model, derived from GpuSessionStatus."""
+class RuntimeState(StrEnum):
+    """Per-user runtime state of an on-demand model deployment."""
 
-    NONE = "none"  # no session occupying this model's slot
-    PROVISIONING = "provisioning"  # pending / provisioning / resuming
-    ACTIVE = "active"  # session active — ready to generate
-    PAUSED = "paused"  # paused — needs resume
-    STALE = "stale"  # was active, now unreachable
-    STOPPING = "stopping"  # teardown in progress — not usable, cannot start a new one yet
+    none = "none"  # no live deployment occupying this model's slot
+    provisioning = "provisioning"  # pending / provisioning / resuming
+    active = "active"  # deployment ready to generate
+    suspended = "suspended"  # active deployment held while a restart drains
+    removing = "removing"  # deployment is being torn down
+    paused = "paused"  # session paused — needs resume
+    stale = "stale"  # session was active, now unreachable
+    stopping = "stopping"  # teardown in progress
 
 
-def session_state_from_status(status: GpuSessionStatus) -> ModelSessionState:
-    """Map a GpuSessionStatus to the UI-facing ModelSessionState."""
+def runtime_state_from_session_status(status: GpuSessionStatus) -> RuntimeState:
+    """Map a GpuSessionStatus to its deployment-independent RuntimeState."""
     match status:
         case GpuSessionStatus.active:
-            return ModelSessionState.ACTIVE
+            return RuntimeState.active
         case GpuSessionStatus.pending | GpuSessionStatus.provisioning | GpuSessionStatus.resuming:
-            return ModelSessionState.PROVISIONING
+            return RuntimeState.provisioning
         case GpuSessionStatus.paused:
-            return ModelSessionState.PAUSED
+            return RuntimeState.paused
         case GpuSessionStatus.stale:
-            return ModelSessionState.STALE
+            return RuntimeState.stale
         case GpuSessionStatus.stopping:
-            return ModelSessionState.STOPPING
+            return RuntimeState.stopping
         case GpuSessionStatus.stopped | GpuSessionStatus.failed:
-            return ModelSessionState.NONE
+            return RuntimeState.none
 
 
 class SupportedLocale(StrEnum):

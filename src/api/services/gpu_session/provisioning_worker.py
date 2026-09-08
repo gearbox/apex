@@ -922,6 +922,7 @@ class GpuProvisioningWorker(PeriodicWorker):
             return
 
         now = datetime.now(UTC)
+        retry_missing_primary = False
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionRepository(db)
             operation_repo = GpuSessionOperationRepository(db)
@@ -933,34 +934,55 @@ class GpuProvisioningWorker(PeriodicWorker):
                 with contextlib.suppress(Exception):
                     await self._vastai.destroy_instance(instance_id)
                 return
-            # Rotate the callback token so the old (destroyed) node's token is invalidated.
-            await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
-            await operation_repo.create(
-                id=bootstrap_operation_id,
-                session_id=session.id,
-                product_id=current.product_id,
-                kind=OperationKind.session_bootstrap,
-                target_bundle=current.bundle_name,
-                target_bundle_version=current.bundle_version,
-                target_mode="full",
+            primary = await GpuSessionDeploymentRepository(db).get_primary_for_session(session.id)
+            if primary is None:
+                logger.error(
+                    "gpu_session.provision.retry_missing_primary", session_id=str(session.id)
+                )
+                # This violates D15.  Do not call _mark_failed while this
+                # transaction holds the session row's FOR UPDATE lock: it opens
+                # another transaction that needs that same lock.
+                retry_missing_primary = True
+            else:
+                # Rotate the callback token so the old (destroyed) node's token is invalidated.
+                await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
+                await operation_repo.create(
+                    id=bootstrap_operation_id,
+                    session_id=session.id,
+                    product_id=current.product_id,
+                    kind=OperationKind.session_bootstrap,
+                    deployment_id=primary.id,
+                    target_bundle=current.bundle_name,
+                    target_bundle_version=current.bundle_version,
+                    target_mode="full",
+                )
+                await repo.update_bootstrap_operation_id(session.id, bootstrap_operation_id)
+                # Repoint the existing deployment at the new bootstrap operation — a
+                # retry re-provisions the same model onto a new node; it must not
+                # fork the deployment row (invariant: retry does not fork).
+                await GpuSessionDeploymentRepository(db).update_provision_operation_id(
+                    session.id, bootstrap_operation_id
+                )
+                await repo.update_instance(
+                    session.id,
+                    vastai_instance_id=instance_id,
+                    vastai_offer_id=selected_offer.id,
+                    vastai_cost_per_hour_micros=selected_offer.dph_total_micros,
+                    vastai_gpu_name=selected_offer.gpu_name,
+                    vastai_machine_id=selected_offer.machine_id,
+                    provisioning_started_at=now,
+                )
+                await repo.update_status(session.id, GpuSessionStatus.pending)
+
+        if retry_missing_primary:
+            # instance_id is intentionally local: it has not been written to
+            # the session row, so _mark_failed would only see the old dead node.
+            with contextlib.suppress(Exception):
+                await self._vastai.destroy_instance(instance_id)
+            await self._mark_failed(
+                session, "retry_missing_primary: session has no primary deployment"
             )
-            await repo.update_bootstrap_operation_id(session.id, bootstrap_operation_id)
-            # Repoint the existing deployment at the new bootstrap operation — a
-            # retry re-provisions the same model onto a new node; it must not
-            # fork the deployment row (invariant: retry does not fork).
-            await GpuSessionDeploymentRepository(db).update_provision_operation_id(
-                session.id, bootstrap_operation_id
-            )
-            await repo.update_instance(
-                session.id,
-                vastai_instance_id=instance_id,
-                vastai_offer_id=selected_offer.id,
-                vastai_cost_per_hour_micros=selected_offer.dph_total_micros,
-                vastai_gpu_name=selected_offer.gpu_name,
-                vastai_machine_id=selected_offer.machine_id,
-                provisioning_started_at=now,
-            )
-            await repo.update_status(session.id, GpuSessionStatus.pending)
+            return
 
         logger.info(
             "gpu_session.provision.retry_instance_created",

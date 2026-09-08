@@ -1073,11 +1073,11 @@ class TestStartSession:
         payload = kwargs["payload"]
         assert isinstance(payload, GpuSessionStatusPayload)
         assert payload.session_id == expected_session.id
-        assert payload.status == GpuSessionStatus.pending.value
+        assert payload.status is GpuSessionStatus.pending
         assert payload.previous_status == "none"
-        assert payload.model_type == expected_session.model_type
         assert not hasattr(payload, "bundle_name")
         assert "bundle_name" not in {f.name for f in msgspec.structs.fields(type(payload))}
+        assert "model_type" not in {f.name for f in msgspec.structs.fields(type(payload))}
         assert payload.error_message is None
 
     async def test_start_session_event_publish_failure_does_not_break(self) -> None:

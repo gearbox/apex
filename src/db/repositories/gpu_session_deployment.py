@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import BigInteger, Exists, Text, func, select, update
+from sqlalchemy import BigInteger, Exists, Text, func, or_, select, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.orm import aliased
 
@@ -16,6 +16,7 @@ from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
     TERMINAL_COMMAND_STATUSES,
     TERMINAL_GPU_SESSION_STATUSES,
+    TERMINAL_OPERATION_STATUSES,
     DeploymentStatus,
     GpuSessionStatus,
     OperationKind,
@@ -23,6 +24,7 @@ from src.core.enums import (
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
 from src.db.models.gpu_session_deployment import GpuSessionDeployment
+from src.db.models.gpu_session_operation import GpuSessionOperation
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Sequence
@@ -140,6 +142,51 @@ class GpuSessionDeploymentRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_live_runtime_for_user(
+        self, user_id: UUID, product_id: str
+    ) -> Sequence[tuple[GpuSessionDeployment, GpuSession, UUID | None]]:
+        """Return every live deployment plus its latest non-terminal operation id.
+
+        This is deliberately one statement for the providers endpoint.  Unlike
+        the session list, the operation id here is only a "work is happening"
+        handle, so terminal operations are intentionally excluded.
+
+        The terminal-session predicate deliberately duplicates the D15 lifecycle
+        cascade. This keeps the endpoint correct even if a force-written live
+        deployment temporarily violates that remote invariant. The
+        ix_gpu_session_deployments_live_user_model partial unique index ensures
+        there can be at most one result per (user, product, model_type), so no
+        active-preference ordering is needed.
+        """
+        latest_non_terminal_operation_id = (
+            select(GpuSessionOperation.id)
+            .where(
+                or_(
+                    GpuSessionOperation.deployment_id == GpuSessionDeployment.id,
+                    GpuSessionOperation.id == GpuSessionDeployment.restart_operation_id,
+                ),
+                GpuSessionOperation.status.not_in(tuple(TERMINAL_OPERATION_STATUSES)),
+            )
+            .order_by(GpuSessionOperation.created_at.desc(), GpuSessionOperation.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        result = await self._session.execute(
+            select(
+                GpuSessionDeployment,
+                GpuSession,
+                latest_non_terminal_operation_id.label("operation_id"),
+            )
+            .join(GpuSession, GpuSessionDeployment.session_id == GpuSession.id)
+            .where(
+                GpuSessionDeployment.user_id == user_id,
+                GpuSessionDeployment.product_id == product_id,
+                GpuSessionDeployment.status.in_(tuple(LIVE_DEPLOYMENT_STATUSES)),
+                GpuSession.status.not_in(tuple(TERMINAL_GPU_SESSION_STATUSES)),
+            )
+        )
+        return [(row[0], row[1], row[2]) for row in result.all()]
 
     async def get_routable(
         self,
@@ -350,6 +397,28 @@ class GpuSessionDeploymentRepository:
                 GpuSessionDeployment.session_id == session_id,
                 GpuSessionDeployment.model_type == model_type,
                 GpuSessionDeployment.status.in_(tuple(LIVE_DEPLOYMENT_STATUSES)),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_for_session(
+        self, deployment_id: UUID, session_id: UUID
+    ) -> GpuSessionDeployment | None:
+        """Return one deployment only when it belongs to the requested session."""
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.id == deployment_id,
+                GpuSessionDeployment.session_id == session_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_primary_for_session(self, session_id: UUID) -> GpuSessionDeployment | None:
+        """Return the primary deployment used by a bootstrap operation."""
+        result = await self._session.execute(
+            select(GpuSessionDeployment).where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionDeployment.is_primary.is_(True),
             )
         )
         return result.scalar_one_or_none()

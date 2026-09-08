@@ -5,9 +5,11 @@ Provider-grouped, capability-rich response for GET /v1/providers.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import msgspec
 
-from src.core.enums import MediaKind
+from src.core.enums import MediaKind, RuntimeState
 
 
 class SourceMediaConstraints(msgspec.Struct, kw_only=True):
@@ -79,6 +81,27 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     """Supported video resolutions, e.g. ["480p", "720p"]."""
 
 
+class ModelRuntimeResponse(msgspec.Struct, kw_only=True):
+    """Authenticated runtime for an on-demand model.
+
+    ``operation_id`` names only a non-terminal operation. This differs from a
+    deployment's ``current_operation``, which deliberately keeps its latest
+    terminal operation so the client can show the completed result after reload.
+    """
+
+    state: RuntimeState
+    session_id: UUID | None
+    deployment_id: UUID | None
+    operation_id: UUID | None
+
+
+class ModelProvisioningHintResponse(msgspec.Struct, kw_only=True):
+    """Configured display hints, never an ETA estimate."""
+
+    typical_bootstrap_seconds: int | None
+    typical_attach_seconds: int | None
+
+
 class ModelInfo(msgspec.Struct, kw_only=True):
     """A single model's capabilities and constraints."""
 
@@ -124,9 +147,11 @@ class ModelInfo(msgspec.Struct, kw_only=True):
     video: VideoConstraints | None = None
     """Video constraints. None for image-only models."""
 
-    session_state: str | None = None
-    """Per-user readiness for on-demand models (none/provisioning/active/paused/stale).
-    Populated only for authenticated requests on on_demand provider models; null otherwise."""
+    runtime: ModelRuntimeResponse | None = None
+    """Per-user state, populated only for authenticated on-demand models."""
+
+    provisioning: ModelProvisioningHintResponse | None = None
+    """Configured provisioning display hints for on-demand models."""
 
 
 class ProviderInfo(msgspec.Struct, kw_only=True):

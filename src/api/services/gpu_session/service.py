@@ -430,15 +430,6 @@ class GpuSessionService:
                     account_id=account_id,
                     bootstrap_operation_id=bootstrap_operation_id,
                 )
-                await operation_repo.create(
-                    id=bootstrap_operation_id,
-                    session_id=session_id,
-                    product_id=product_id,
-                    kind=OperationKind.session_bootstrap,
-                    target_bundle=bundle.bundle_name,
-                    target_bundle_version=bundle.bundle_version,
-                    target_mode="full",
-                )
                 # The primary deployment is created with the session — see D6/D21.
                 # This insert is what the new partial unique index actually guards;
                 # a race that slips past the step-2 pre-check lands here as an
@@ -459,6 +450,16 @@ class GpuSessionService:
                     status=DeploymentStatus.deploying,
                     provision_operation_id=bootstrap_operation_id,
                     is_primary=True,
+                )
+                await operation_repo.create(
+                    id=bootstrap_operation_id,
+                    session_id=session_id,
+                    product_id=product_id,
+                    kind=OperationKind.session_bootstrap,
+                    deployment_id=deployment_id,
+                    target_bundle=bundle.bundle_name,
+                    target_bundle_version=bundle.bundle_version,
+                    target_mode="full",
                 )
             except IntegrityError:
                 # Race with a concurrent start_session call that slipped past our pre-check.
