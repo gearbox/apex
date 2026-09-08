@@ -25,6 +25,10 @@ class EventType(StrEnum):
     every connect/reconnect, apply ``gpu_session.operation_updated`` only when
     its sequence exceeds the cached sequence for that operation, and treat REST
     as the complete fallback. Frames can arrive out of order after reconnect.
+    Patch operation frames by matching their ``id`` to cached deployments'
+    ``current_operation.id``, never by ``deployment_id``: session-scoped
+    operations such as cohort restarts legitimately have ``deployment_id``
+    set to null while governing multiple deployments.
     """
 
     JOB_STATUS_CHANGED = "job.status_changed"

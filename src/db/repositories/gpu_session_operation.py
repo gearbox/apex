@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from src.core.enums import TERMINAL_OPERATION_STATUSES, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_deployment import GpuSessionDeployment
 from src.db.models.gpu_session_operation import GpuSessionOperation
 
 if TYPE_CHECKING:
@@ -101,26 +102,38 @@ class GpuSessionOperationRepository:
         return result.scalar_one_or_none()
 
     async def latest_by_deployment(self, session_id: UUID) -> dict[UUID, GpuSessionOperation]:
-        """Fetch the newest operation for every deployment in a session in one query."""
+        """Fetch the newest operation for every deployment in a session in one query.
+
+        Cohort restarts are session-scoped operations, so their fan-out lives on
+        the deployment restart pointer rather than the operation's singular
+        ``deployment_id``. Resolve both relationships and pick the newest
+        operation per deployment; a stale, terminal pointer must not hide a
+        later deployment-scoped removal or provision operation.
+        """
         result = await self._session.execute(
-            select(GpuSessionOperation)
-            .where(
-                GpuSessionOperation.session_id == session_id,
-                GpuSessionOperation.deployment_id.is_not(None),
+            select(GpuSessionDeployment.id, GpuSessionOperation)
+            .join(
+                GpuSessionOperation,
+                or_(
+                    GpuSessionOperation.deployment_id == GpuSessionDeployment.id,
+                    GpuSessionOperation.id == GpuSessionDeployment.restart_operation_id,
+                ),
             )
-            .distinct(GpuSessionOperation.deployment_id)
+            .where(
+                GpuSessionDeployment.session_id == session_id,
+                GpuSessionOperation.session_id == session_id,
+            )
+            .distinct(GpuSessionDeployment.id)
             .order_by(
-                GpuSessionOperation.deployment_id,
+                GpuSessionDeployment.id,
                 GpuSessionOperation.created_at.desc(),
                 GpuSessionOperation.id.desc(),
             )
         )
-        operations = result.scalars().all()
-        return {
-            operation.deployment_id: operation
-            for operation in operations
-            if operation.deployment_id is not None
-        }
+        operations_by_deployment: dict[UUID, GpuSessionOperation] = {}
+        for deployment_id, operation in result.all():
+            operations_by_deployment[deployment_id] = operation
+        return operations_by_deployment
 
     async def latest_for_deployment_and_kind(
         self, deployment_id: UUID, kind: OperationKind | str

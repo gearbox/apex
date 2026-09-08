@@ -132,11 +132,10 @@ def _progress_from_json(value: object, *, operation_id: UUID) -> OperationProgre
     )
     raw_rate = value.get("rate")
     rate = _rate_from_json(raw_rate, operation_id=operation_id) if raw_rate is not None else None
-    eta_seconds: float | None = None
-    if "eta_seconds" in value:
-        eta_seconds = _as_number(value.get("eta_seconds"))
-        if value.get("eta_seconds") is not None and eta_seconds is None:
-            _warn_unprojectable(operation_id, "eta_seconds")
+    raw_eta = value.get("eta_seconds")
+    eta_seconds = _as_number(raw_eta) if raw_eta is not None else None
+    if raw_eta is not None and eta_seconds is None:
+        _warn_unprojectable(operation_id, "eta_seconds")
 
     progress_pct = (
         round(work.completed / work.total * 100, 1)
@@ -160,6 +159,13 @@ class OperationResponse(msgspec.Struct, kw_only=True):
     id: UUID
     session_id: UUID
     deployment_id: UUID | None
+    """Informational target deployment for deployment-scoped operations.
+
+    Null for session-scoped operations, including cohort restarts. Never use
+    this field to associate an operation-update frame with a deployment; patch
+    every cached deployment whose ``current_operation.id`` matches this
+    operation's ``id`` instead.
+    """
     kind: OperationKind
     status: OperationStatus
     phase: ProvisioningPhase | None

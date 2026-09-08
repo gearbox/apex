@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import BigInteger, Exists, Text, func, select, update
+from sqlalchemy import BigInteger, Exists, Text, func, or_, select, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.orm import aliased
 
@@ -162,10 +162,13 @@ class GpuSessionDeploymentRepository:
         latest_non_terminal_operation_id = (
             select(GpuSessionOperation.id)
             .where(
-                GpuSessionOperation.deployment_id == GpuSessionDeployment.id,
+                or_(
+                    GpuSessionOperation.deployment_id == GpuSessionDeployment.id,
+                    GpuSessionOperation.id == GpuSessionDeployment.restart_operation_id,
+                ),
                 GpuSessionOperation.status.not_in(tuple(TERMINAL_OPERATION_STATUSES)),
             )
-            .order_by(GpuSessionOperation.created_at.desc())
+            .order_by(GpuSessionOperation.created_at.desc(), GpuSessionOperation.id.desc())
             .limit(1)
             .scalar_subquery()
         )

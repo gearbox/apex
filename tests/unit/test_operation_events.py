@@ -26,8 +26,9 @@ from src.api.services.gpu_session.operation_event_service import (
     OperationEventService,
     _validate_token,
 )
-from src.core.enums import GpuSessionStatus, OperationStatus
+from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
+from src.db.models.gpu_session_deployment import GpuSessionDeployment
 from src.db.models.gpu_session_operation import GpuSessionOperation
 from src.db.repositories.gpu_session_operation import EventOutcome
 
@@ -543,3 +544,43 @@ def test_response_projects_bootstrap_operation(status: OperationStatus, phase: s
     assert response.bootstrap_operation.progress is not None
     assert response.bootstrap_operation.progress.work is not None
     assert response.bootstrap_operation.progress.work.completed == 2
+
+
+def test_cohort_restart_with_null_deployment_id_projects_for_every_member() -> None:
+    """SSE clients must associate a cohort restart through its operation id."""
+    now = datetime.now(UTC)
+    session = _gpu_session(session_id=uuid4(), status=GpuSessionStatus.active)
+    session.created_at = now
+    deployments = [
+        GpuSessionDeployment(
+            id=uuid4(),
+            session_id=session.id,
+            user_id=session.user_id,
+            product_id=session.product_id,
+            model_type=model_type,
+            bundle_name="qwen_rapid_aio",
+            status=DeploymentStatus.deploying,
+            pending_restart=True,
+            routing_suspended=False,
+            is_primary=index == 0,
+            created_at=now,
+        )
+        for index, model_type in enumerate(("aisha-image", "aisha-video"))
+    ]
+    restart = _operation(operation_id=uuid4(), session_id=session.id)
+    restart.kind = OperationKind.comfyui_restart
+    restart.deployment_id = None
+    restart.status = OperationStatus.running
+    restart.updated_at = now
+
+    response = GpuSessionResponse.from_model(
+        session,
+        deployments=deployments,
+        current_operations={deployment.id: restart for deployment in deployments},
+    )
+
+    for deployment in response.deployments:
+        current_operation = deployment.current_operation
+        assert current_operation is not None
+        assert current_operation.id == restart.id
+        assert current_operation.deployment_id is None
