@@ -30,12 +30,18 @@ class EventType(StrEnum):
     — node telemetry, command timeout, cancellation, or lifecycle cascade —
     produces a newer ``gpu_session.operation_updated`` frame.
 
-    Patch operation frames by matching their ``id`` to cached deployments'
-    ``current_operation.id``, never by ``deployment_id``. ``deployment_id`` is
-    an optional informational direct target: it may identify the primary
-    deployment for ``session_bootstrap``, and may be null for operations that
-    govern multiple deployments or the whole session. It must never be used
-    for routing.
+    Upsert every ``operation_updated`` frame into an operation cache keyed by
+    operation id whenever its ``revision`` is strictly greater than the cached
+    revision, before resolving any deployment association. Never discard a
+    newer operation because no cached deployment references it yet. Deployment
+    cards and ``session.bootstrap_operation`` then render from that cache by
+    id, never by ``deployment_id``. ``operation_updated`` is authoritative
+    incremental state; ``status_changed`` and ``deployment_status_changed`` are
+    invalidation signals that trigger a session-detail and provider refetch.
+    ``deployment_id`` is an optional informational direct target: it may
+    identify the primary deployment for ``session_bootstrap``, and may be null
+    for operations that govern multiple deployments or the whole session. It
+    must never be used for routing.
     """
 
     JOB_STATUS_CHANGED = "job.status_changed"

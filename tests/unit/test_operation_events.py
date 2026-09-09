@@ -453,6 +453,8 @@ class TestOperationEventController:
         event_type_doc = EventType.__doc__
         assert event_type_doc is not None
         assert "sequence" not in event_type_doc.lower()
+        assert "revision" in event_type_doc.lower()
+        assert "current_operation.id" not in event_type_doc.lower()
 
     def test_success_and_all_errors_are_json(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
