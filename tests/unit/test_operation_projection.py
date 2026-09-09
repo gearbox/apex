@@ -48,11 +48,13 @@ def test_operation_projection_computes_progress_and_omits_private_telemetry() ->
             "items": {"completed": 4, "total": None, "unit": "items"},
             "rate": {"value": 128.5, "unit": "bytes_per_second"},
             "eta_seconds": 12.25,
+            "eta_basis": "live_throughput",
             "future_key": {"kept_in_db": True},
         }
     )
 
-    response = OperationResponse.from_model(operation)
+    with capture_logs() as logs:
+        response = OperationResponse.from_model(operation)
     encoded = msgspec.json.encode(response)
     decoded = msgspec.json.decode(encoded)
 
@@ -68,6 +70,37 @@ def test_operation_projection_computes_progress_and_omits_private_telemetry() ->
     assert "plan" not in decoded
     assert "summary" not in decoded
     assert "sequence" not in decoded
+    assert not [entry for entry in logs if entry["event"] == "operation.progress.unprojectable"]
+
+
+@pytest.mark.parametrize(
+    ("eta_basis", "expected_eta", "warning_field"),
+    [
+        ("live_throughput", 12.3, None),
+        (None, None, "eta_basis"),
+        ("rough", None, "eta_basis"),
+    ],
+)
+def test_operation_projection_exposes_eta_only_with_live_throughput_basis(
+    eta_basis: object, expected_eta: float | None, warning_field: str | None
+) -> None:
+    progress: dict[str, object] = {
+        "work": {"completed": 1, "total": 10, "unit": "files"},
+        "eta_seconds": 12.3,
+    }
+    if eta_basis is not None:
+        progress["eta_basis"] = eta_basis
+
+    with capture_logs() as logs:
+        response = OperationResponse.from_model(_operation(progress=progress))
+
+    assert response.progress is not None
+    assert response.progress.eta_seconds == expected_eta
+    warnings = [entry for entry in logs if entry["event"] == "operation.progress.unprojectable"]
+    if warning_field is None:
+        assert not warnings
+    else:
+        assert [entry["field"] for entry in warnings] == [warning_field]
 
 
 def test_operation_projection_clamps_progress_pct_without_editing_work() -> None:
@@ -123,7 +156,11 @@ def test_operation_projection_clamps_progress_pct_without_editing_work() -> None
             "rate",
         ),
         (
-            {"work": {"completed": 1, "total": 10, "unit": "files"}, "eta_seconds": -1},
+            {
+                "work": {"completed": 1, "total": 10, "unit": "files"},
+                "eta_seconds": -1,
+                "eta_basis": "live_throughput",
+            },
             "eta_seconds",
         ),
     ],
@@ -168,6 +205,7 @@ def test_operation_projection_treats_null_telemetry_fields_as_absent_without_war
                     "items": {"completed": 1, "total": 2, "unit": "items"},
                     "rate": None,
                     "eta_seconds": None,
+                    "eta_basis": None,
                 }
             )
         )
@@ -230,6 +268,13 @@ def test_operation_response_deployment_id_is_described_in_openapi() -> None:
     assert isinstance(description, str)
     assert description
     assert "must never" in description
+
+    eta_seconds = schema["components"]["schemas"]["OperationProgressResponse"]["properties"][
+        "eta_seconds"
+    ]
+    eta_description = eta_seconds.get("description")
+    assert isinstance(eta_description, str)
+    assert "live throughput" in eta_description
 
 
 def test_operation_projection_keeps_bootstrap_target_but_not_cohort_target() -> None:

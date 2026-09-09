@@ -64,12 +64,6 @@ an available always-on model). Do not offer Start while a state other than
 coarse display hints and must never be combined with elapsed time to form an
 ETA, replace operation telemetry, or drive a timeout.
 
-| Model | Typical bootstrap | Typical additive attach |
-|---|---:|---:|
-| `aisha-image` | 600 s | 180 s |
-| `aisha-image-lite` | 480 s | 120 s |
-| `aisha-video` | 900 s | 300 s |
-
 The API permits `null` for either value. Treat it as “no hint configured” and
 show elapsed-only once an operation exists.
 
@@ -78,6 +72,10 @@ show elapsed-only once an operation exists.
 `GET /v1/sessions/{id}` returns a primary deployment plus any sibling
 deployments attached additively. Each `DeploymentResponse.current_operation`
 is the current or latest durable `OperationResponse` for that deployment.
+Every embedded `OperationResponse` — `session.bootstrap_operation`, a
+deployment's `current_operation`, a `202` mutation body, or an
+`operation_updated` frame — is a view onto one canonical operation cache keyed
+by operation id and merged by `revision`.
 
 `OperationResponse.deployment_id` is an optional informational direct target.
 It may identify the primary deployment for `session_bootstrap` and the target
@@ -85,10 +83,23 @@ for deployment-scoped operations. It may be `null` for operations governing
 multiple deployments or the whole session, notably cohort restarts. It must
 never be used to route an operation update to frontend deployment state.
 
-When an operation update arrives, patch **every** cached deployment whose
-`current_operation.id` equals the operation's `id`; never route it by
-`deployment_id`. This includes cohort restarts, which resolve through each
-deployment's restart pointer rather than the operation's direct target.
+Upsert every `operation_updated` frame into the operation cache keyed by
+operation id whenever its `revision` is strictly greater than the cached
+revision, **before** resolving any deployment association. Never discard a
+newer operation solely because no cached deployment currently references it.
+Deployment cards and `session.bootstrap_operation` then render from that cache
+by id. Never route an operation by `deployment_id`; this includes cohort
+restarts, which resolve through each deployment's restart pointer rather than
+the operation's direct target.
+
+When applying a session snapshot, replace deployment scalars wholesale — REST
+is authoritative for them — but merge each embedded operation into the
+operation cache under the same strictly-greater-`revision` rule. A snapshot
+never lowers a cached operation's revision.
+
+A re-provision creates a new `session.bootstrap_operation` with a new id. The
+client learns of it through the `status_changed` invalidation and the refetch
+that follows, not through a frame for the old id.
 
 ## Operation lifecycle and progress guarantees
 
@@ -107,15 +118,29 @@ must never synthesize it from `work`, elapsed time, or `typical_*_seconds`.
 
 ## SSE synchronization
 
-SSE is lossy: after every connect or reconnect, re-fetch the session detail
-and treat REST as the complete source of truth. Frames can arrive out of order;
-for operation frames, retain only a `revision` strictly greater than the cached
-`revision` for that operation id.
+SSE is lossy: after every connect or reconnect, re-fetch the session detail.
+Frames can arrive out of order; operation frames are retained in the canonical
+operation cache by the strictly-greater-`revision` rule above.
 
 Any durable change to `OperationResponse`, whatever its source (node telemetry,
 command timeout, cancellation, or lifecycle cascade), produces a newer
 `operation_updated` frame. This is what permits zero polling while SSE is
 healthy.
+
+### Event roles
+
+| Event | Role |
+|---|---|
+| `gpu_session.operation_updated` | Authoritative incremental state; apply directly by `revision`. |
+| `gpu_session.deployment_status_changed` | REST invalidation; refetch session detail. |
+| `gpu_session.status_changed` | REST invalidation; refetch session detail. |
+
+An event-triggered `GET` is not polling. The zero-polling guarantee is
+unchanged.
+
+Coalesce invalidations per session: at most one session refetch may be in
+flight, use a trailing-edge debounce of roughly 250 ms, and discard the
+response of any refetch superseded by a later one.
 
 ### `gpu_session.status_changed`
 
@@ -131,8 +156,10 @@ interface GpuSessionStatusPayload {
 ```
 
 This parent-session event intentionally has no `model_type`: a session may
-contain several deployments. Re-fetch `GET /v1/providers` or the affected
-session after it, then re-derive all cards for that session from REST.
+contain several deployments. Treat this event as an invalidation signal.
+Re-fetch `GET /v1/sessions/{session_id}` and re-derive all cards for that
+session from REST. The payload may drive transient optimistic UI, but must not
+overwrite a newer REST snapshot.
 
 ### `gpu_session.deployment_status_changed`
 
@@ -149,17 +176,21 @@ interface GpuDeploymentStatusPayload {
 }
 ```
 
-Use this frame to fast-forward the affected deployment/card. It contains no
-operation phase or progress and never exposes raw Aisha telemetry. `operation_id`
-is only the join key for the typed operation stream below.
+Treat this event as an invalidation signal. Re-fetch
+`GET /v1/sessions/{session_id}` and reconcile the deployment and its current
+operation from REST. The payload may drive transient optimistic UI, but must
+not overwrite a newer REST snapshot. Multiple events for the same session may
+be coalesced into one refresh. It contains no operation phase or progress and
+never exposes raw Aisha telemetry. `operation_id` is only the join key for the
+typed operation stream below.
 
 ### `gpu_session.operation_updated`
 
 The payload is exactly `OperationResponse`, the same safe projection returned
 by REST. Its `phase` and `progress` are the only live operation telemetry the
-frontend may interpret. Apply it by matching its `id` against cached
-`current_operation.id` values as described above, including every member of a
-cohort restart.
+frontend may interpret. Upsert it into the operation cache before resolving
+cached `current_operation.id` values as described above, including every
+member of a cohort restart.
 
 ## Async deployment mutations
 
@@ -184,6 +215,13 @@ runtime or invent a client-side failed runtime state.
 
 - A cohort restart updates all matching deployment cards even though the
   operation's `deployment_id` is null.
+- A `deployment_status_changed` frame arriving after a newer REST snapshot does
+  not regress the card.
+- An `operation_updated` frame whose id matches no cached deployment is
+  retained and appears once the following refetch associates it.
+- A burst of frames for one session produces a single refetch.
+- An `operation_updated` frame replaces `session.bootstrap_operation` when the
+  ids match, under the same revision rule.
 - A deployment-status frame never causes the client to parse raw progress;
   phase/progress come only from `gpu_session.operation_updated`.
 - A parent session-status frame triggers a REST refresh because it has no

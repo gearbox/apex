@@ -10,6 +10,7 @@ import msgspec
 import structlog
 
 from src.core.enums import (
+    EtaBasis,
     OperationKind,
     OperationStatus,
     ProvisioningPhase,
@@ -45,7 +46,15 @@ class OperationProgressResponse(msgspec.Struct, kw_only=True):
     work: OperationWorkResponse | None
     items: OperationWorkResponse | None
     rate: OperationRateResponse | None
-    eta_seconds: float | None
+    eta_seconds: Annotated[
+        float | None,
+        msgspec.Meta(
+            description=(
+                "Estimated remaining seconds, only when derived from live throughput. "
+                "The API nulls estimates with any other or missing derivation."
+            )
+        ),
+    ]
 
 
 class OperationErrorResponse(msgspec.Struct, kw_only=True):
@@ -133,10 +142,15 @@ def _progress_from_json(value: object, *, operation_id: UUID) -> OperationProgre
     raw_rate = value.get("rate")
     rate = _rate_from_json(raw_rate, operation_id=operation_id) if raw_rate is not None else None
     raw_eta = value.get("eta_seconds")
+    raw_basis = value.get("eta_basis")
     eta_seconds = _as_number(raw_eta) if raw_eta is not None else None
-    if raw_eta is not None and (eta_seconds is None or eta_seconds < 0):
+    if eta_seconds is not None and eta_seconds < 0:
         eta_seconds = None
+    if raw_eta is not None and eta_seconds is None:
         _warn_unprojectable(operation_id, "eta_seconds")
+    if eta_seconds is not None and raw_basis != EtaBasis.live_throughput:
+        eta_seconds = None
+        _warn_unprojectable(operation_id, "eta_basis")
 
     progress_pct = (
         min(100.0, round(work.completed / work.total * 100, 1))
