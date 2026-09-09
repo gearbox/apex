@@ -555,8 +555,8 @@ class GpuSessionStatus(StrEnum):
 
 # These values mirror gearbox/aisha
 # src/ai_content_service/telemetry_contract.py at a7a65d864231c31709124dfe3c6c74a99ea5a0a9.
-# Change these operation, phase, and work-unit vocabularies only in lockstep
-# with that contract.
+# Change these operation, phase, work-unit, and ETA-basis vocabularies only in
+# lockstep with that contract.
 class OperationKind(StrEnum):
     """The provisioning-like activity represented by an operation stream."""
 
@@ -601,6 +601,12 @@ class RateUnit(StrEnum):
     """Units used by Aisha operation telemetry rates."""
 
     bytes_per_second = "bytes_per_second"
+
+
+class EtaBasis(StrEnum):
+    """Permitted ETA derivations. Mirrors Aisha's telemetry_contract.EtaBasis."""
+
+    live_throughput = "live_throughput"
 
 
 TERMINAL_OPERATION_STATUSES: frozenset[OperationStatus] = frozenset(
