@@ -31,10 +31,21 @@ class GpuSessionOperation(Base):
         PG_UUID(as_uuid=True),
         ForeignKey("gpu_session_deployments.id", ondelete="CASCADE"),
         nullable=True,
-        comment="Deployment this operation acts on; NULL for legacy rows only.",
+        comment=(
+            "Optional informational direct target. It may identify the primary deployment for "
+            "session_bootstrap and the target for deployment-scoped operations. It may be NULL "
+            "for operations governing multiple deployments or the whole session, notably cohort "
+            "restarts. It must never be used to route an operation update to frontend deployment "
+            "state."
+        ),
     )
     product_id: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="Denormalized product scope from the owning session."
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        comment="Denormalized owner from the owning session for total SSE publication.",
     )
     command_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -63,6 +74,15 @@ class GpuSessionOperation(Base):
         nullable=False,
         server_default=text("-1"),
         comment="Highest applied event sequence; -1 means no event has been applied yet.",
+    )
+    revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        comment=(
+            "Apex-owned read-model revision; increments on every durable change to the public "
+            "projection. Distinct from last_sequence, which is the node's producer sequence."
+        ),
     )
     last_event_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="Opaque producer event id; not necessarily a UUID."

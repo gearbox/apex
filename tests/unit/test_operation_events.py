@@ -19,6 +19,7 @@ from litestar.status_codes import (
 from litestar.testing import TestClient
 
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
+from src.api.schemas.events import EventType
 from src.api.schemas.gpu_session import GpuSessionResponse, OperationEventBody
 from src.api.services.event_bus import EventBus
 from src.api.services.gpu_session.operation_event_service import (
@@ -126,10 +127,12 @@ def _operation(
         id=operation_id,
         session_id=session_id,
         product_id="vex",
+        user_id=uuid4(),
         command_id=command_id,
         kind="session_bootstrap",
         status=OperationStatus.queued,
         last_sequence=-1,
+        revision=0,
     )
 
 
@@ -445,6 +448,12 @@ def _app(service: OperationEventService) -> Litestar:
 
 
 class TestOperationEventController:
+    def test_event_delivery_contract_uses_revision_not_sequence(self) -> None:
+        """The enum-side delivery contract cannot drift back to an absent field."""
+        event_type_doc = EventType.__doc__
+        assert event_type_doc is not None
+        assert "sequence" not in event_type_doc.lower()
+
     def test_success_and_all_errors_are_json(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         path = f"/v1/internal/gpu-sessions/{session_id}/operations/{operation_id}/events"

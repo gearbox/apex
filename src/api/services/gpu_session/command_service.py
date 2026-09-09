@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.core.config import Settings
+    from src.db.models.gpu_session import GpuSession
     from src.db.models.gpu_session_command import GpuSessionCommand
 
 logger = structlog.get_logger(__name__)
@@ -117,10 +118,11 @@ class GpuSessionCommandService:
         """
         payload = _validate(command, batch=None)
         if db is not None:
-            await self._ensure_session_is_enqueueable(db, session_id)
+            session = await self._ensure_session_is_enqueueable(db, session_id)
             return await self._create_one(
                 db,
                 session_id=session_id,
+                user_id=session.user_id,
                 product_id=product_id,
                 deployment_id=deployment_id,
                 command=command,
@@ -131,10 +133,11 @@ class GpuSessionCommandService:
             )
 
         async with self._session_factory() as db, db.begin():
-            await self._ensure_session_is_enqueueable(db, session_id)
+            session = await self._ensure_session_is_enqueueable(db, session_id)
             return await self._create_one(
                 db,
                 session_id=session_id,
+                user_id=session.user_id,
                 product_id=product_id,
                 deployment_id=deployment_id,
                 command=command,
@@ -184,13 +187,14 @@ class GpuSessionCommandService:
             validated.append((resolved, _validate(resolved, batch=batch)))
 
         async with self._session_factory() as db, db.begin():
-            await self._ensure_session_is_enqueueable(db, session_id)
+            session = await self._ensure_session_is_enqueueable(db, session_id)
             created: list[GpuSessionCommand] = []
             for index, (command, payload) in enumerate(validated):
                 created.append(
                     await self._create_one(
                         db,
                         session_id=session_id,
+                        user_id=session.user_id,
                         product_id=product_id,
                         deployment_id=deployment_id,
                         command=command,
@@ -269,19 +273,23 @@ class GpuSessionCommandService:
         )
         return 200, envelope
 
-    async def _ensure_session_is_enqueueable(self, db: AsyncSession, session_id: UUID) -> None:
-        """Reject a command that would otherwise remain queued forever."""
+    async def _ensure_session_is_enqueueable(
+        self, db: AsyncSession, session_id: UUID
+    ) -> GpuSession:
+        """Return an enqueueable session or reject a command that would never run."""
         session = await GpuSessionRepository(db).get_by_id(session_id)
         if session is None:
             raise CommandEnqueueSessionError(f"GPU session {session_id} does not exist")
         if session.status in TERMINAL_GPU_SESSION_STATUSES:
             raise CommandEnqueueSessionError(f"GPU session {session_id} is terminal")
+        return session
 
     async def _create_one(
         self,
         db: AsyncSession,
         *,
         session_id: UUID,
+        user_id: UUID,
         product_id: str,
         deployment_id: UUID | None,
         command: CommandInput,
@@ -296,6 +304,7 @@ class GpuSessionCommandService:
         await GpuSessionOperationRepository(db).create(
             id=operation_id,
             session_id=session_id,
+            user_id=user_id,
             product_id=product_id,
             kind=command.kind,
             deployment_id=deployment_id,

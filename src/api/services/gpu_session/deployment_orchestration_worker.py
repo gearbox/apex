@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.api.services.gpu_session._events import publish_deployment_event
+from src.api.services.gpu_session._events import publish_deployment_event, publish_operation_event
 from src.api.services.gpu_session.command_payload import RestartCommand
 from src.api.services.gpu_session.command_service import CommandEnqueueSessionError
 from src.core.enums import TERMINAL_COMMAND_STATUSES, CommandStatus, DeploymentStatus, OperationKind
@@ -566,6 +566,7 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
         succeeded = not failed_commands
         ids = [member.id for member in members]
         routing_released: Sequence[GpuSessionDeployment] = ()
+        closed_operations: list[GpuSessionOperation] = []
         async with self._session_factory() as db, db.begin():
             repo = GpuSessionDeploymentRepository(db)
             updated = await repo.resolve_restart_outcome(ids, succeeded=succeeded, at=now)
@@ -583,11 +584,16 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                 )
                 operation_repo = GpuSessionOperationRepository(db)
                 for command in cancelled:
-                    await operation_repo.close_failed(
-                        command.operation_id,
-                        at=now,
-                        error=cancellation_reason,
-                    )
+                    if (
+                        await operation_repo.close_failed(
+                            command.operation_id,
+                            at=now,
+                            error=cancellation_reason,
+                        )
+                    ) is True:
+                        operation = await operation_repo.get(command.operation_id)
+                        if operation is not None:
+                            closed_operations.append(operation)
 
                 # A claimed sibling may already be restarting ComfyUI.  It must
                 # keep the session-wide suspension until it reaches a terminal
@@ -602,6 +608,8 @@ class DeploymentOrchestrationWorker(PeriodicWorker):
                     routing_released = await repo.clear_routing_suspended_for_session(session_id)
         for deployment in routing_released:
             await publish_deployment_event(self._event_bus, deployment)
+        for operation in closed_operations:
+            await publish_operation_event(self._event_bus, operation)
 
         # A terminal session cascade can win after the candidate query.  Its
         # guarded UPDATE intentionally returns zero; do not publish a stale

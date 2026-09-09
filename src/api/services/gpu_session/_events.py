@@ -169,28 +169,20 @@ async def publish_deployment_event(
 async def publish_operation_event(
     event_bus: EventBus | None,
     operation: GpuSessionOperation,
-    *,
-    user_id: UUID | None = None,
 ) -> None:
     """Publish the exact REST operation projection after its transaction commits.
 
-    Operations intentionally do not denormalize the owner. Production callers
-    pass ``user_id`` from the session that authenticated the callback. The
-    optional form still makes a no-bus call a legal two-argument no-op, matching
-    the other event helpers' failure-tolerant contract.
+    The operation denormalizes its owner, so every durable public-projection
+    change has an unambiguous user target even when its caller has no session row.
+    A no-bus call remains a legal two-argument no-op, matching the other event
+    helpers' failure-tolerant contract.
     """
     if event_bus is None:
-        return
-    if user_id is None:
-        logger.warning(
-            "gpu_session.operation.event_publish_missing_user",
-            operation_id=str(operation.id),
-        )
         return
     try:
         await asyncio.wait_for(
             event_bus.publish(
-                user_id=user_id,
+                user_id=operation.user_id,
                 event_type=EventType.GPU_SESSION_OPERATION_UPDATED,
                 payload=OperationResponse.from_model(operation),
             ),

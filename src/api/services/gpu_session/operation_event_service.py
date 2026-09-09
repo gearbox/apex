@@ -47,7 +47,6 @@ class OperationEventResult:
     status: int
     outcome: EventOutcome | None = None
     operation: GpuSessionOperation | None = None
-    user_id: UUID | None = None
 
 
 def _validate_token(presented: str, stored_hash: str | None) -> bool:
@@ -109,7 +108,7 @@ class OperationEventService:
                 session_status=str(session.status),
                 operation_id=str(event.operation_id),
             )
-            return OperationEventResult(authorized=True, status=200, user_id=session.user_id)
+            return OperationEventResult(authorized=True, status=200)
 
         operation_repo = GpuSessionOperationRepository(db)
         operation = await operation_repo.get(event.operation_id)
@@ -120,7 +119,7 @@ class OperationEventService:
                 operation_id=str(event.operation_id),
                 reason="not_found" if operation is None else "cross_session",
             )
-            return OperationEventResult(authorized=True, status=404, user_id=session.user_id)
+            return OperationEventResult(authorized=True, status=404)
 
         outcome = await operation_repo.apply_event(
             operation_id=event.operation_id,
@@ -158,7 +157,6 @@ class OperationEventService:
                 status=200,
                 outcome=outcome,
                 operation=operation,
-                user_id=session.user_id,
             )
 
         if event.operation_id == session.bootstrap_operation_id:
@@ -201,5 +199,4 @@ class OperationEventService:
             status=200,
             outcome=outcome,
             operation=refreshed,
-            user_id=session.user_id,
         )

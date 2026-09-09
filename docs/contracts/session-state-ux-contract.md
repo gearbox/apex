@@ -79,18 +79,43 @@ show elapsed-only once an operation exists.
 deployments attached additively. Each `DeploymentResponse.current_operation`
 is the current or latest durable `OperationResponse` for that deployment.
 
-`OperationResponse.deployment_id` is informational only. A cohort
-`comfyui_restart` legitimately governs multiple deployments, so its
-`deployment_id` is `null`. When an operation update arrives, patch **every**
-cached deployment whose `current_operation.id` equals the operation's `id`;
-never route it by `deployment_id`.
+`OperationResponse.deployment_id` is an optional informational direct target.
+It may identify the primary deployment for `session_bootstrap` and the target
+for deployment-scoped operations. It may be `null` for operations governing
+multiple deployments or the whole session, notably cohort restarts. It must
+never be used to route an operation update to frontend deployment state.
+
+When an operation update arrives, patch **every** cached deployment whose
+`current_operation.id` equals the operation's `id`; never route it by
+`deployment_id`. This includes cohort restarts, which resolve through each
+deployment's restart pointer rather than the operation's direct target.
+
+## Operation lifecycle and progress guarantees
+
+A freshly created operation is a valid first state, not a loading failure:
+`status` is `queued`, `revision` is `0`, and `phase`, `progress`, and
+`started_at` are all `null`.
+
+The `progress`, `work`, `items`, and `rate` objects are each fully populated or
+`null`, never partial. `progress_pct` is `null` or within `[0, 100]`; a node may
+truthfully report `work.completed > work.total` when some file sizes were
+unknown, and the API retains that work measurement while rendering the derived
+percentage as `100.0`.
+
+`eta_seconds` is `null` unless it is derived from live throughput. The client
+must never synthesize it from `work`, elapsed time, or `typical_*_seconds`.
 
 ## SSE synchronization
 
 SSE is lossy: after every connect or reconnect, re-fetch the session detail
 and treat REST as the complete source of truth. Frames can arrive out of order;
-for operation frames, retain only a sequence greater than the cached sequence
-for that operation.
+for operation frames, retain only a `revision` strictly greater than the cached
+`revision` for that operation id.
+
+Any durable change to `OperationResponse`, whatever its source (node telemetry,
+command timeout, cancellation, or lifecycle cascade), produces a newer
+`operation_updated` frame. This is what permits zero polling while SSE is
+healthy.
 
 ### `gpu_session.status_changed`
 
@@ -136,6 +161,13 @@ frontend may interpret. Apply it by matching its `id` against cached
 `current_operation.id` values as described above, including every member of a
 cohort restart.
 
+## Async deployment mutations
+
+`POST` and `DELETE` deployment mutations return `202` with
+`{deployment, operation}`. `DELETE` addresses a deployment UUID, is idempotent
+while the deployment is `removing`, and requires `?force=true` to remove the
+last live deployment.
+
 ## Failed additive attaches
 
 `RuntimeState` intentionally has no `failed` member. A failed deployment is
@@ -158,3 +190,7 @@ runtime or invent a client-side failed runtime state.
   model type and may affect sibling deployments.
 - A failed attach renders as `none` in the provider catalog; session detail is
   used to surface the persisted operation error when that context is needed.
+- A command-sweep timeout updates the operation card through SSE without a
+  refetch.
+- A `completed > total` telemetry payload renders at 100% rather than blanking
+  progress.

@@ -11,6 +11,7 @@ import pytest_asyncio
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.api.schemas.events import EventType
 from src.api.services.gpu_session.node_cooldown import NullNodeCooldownStore
 from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PENDING_TIMEOUT,
@@ -18,11 +19,13 @@ from src.api.services.gpu_session.provisioning_worker import (
 )
 from src.api.services.vastai.schemas import VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
-from src.core.enums import DeploymentStatus, GpuSessionStatus
+from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind, OperationStatus
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
+from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
+from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -155,3 +158,84 @@ async def test_retry_missing_primary_destroys_new_instance_fails_and_stops_futur
 
     await worker.run_once()
     assert vastai.create_instance.await_count == 1
+
+
+async def test_provisioning_failure_cascade_bumps_revision_and_emits_operation_update(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A provisioning failure publishes every command operation it cascade-closes.
+
+    ``publish_operation_event`` runs after the provisioning-failure transaction commits.
+    """
+    user = User(
+        id=new_id(),
+        email=f"retry-remediation-operation-event-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="retry-bundle",
+        model_type="aisha-image",
+    )
+    operation_id = new_id()
+    command_id = new_id()
+    async with provisioning_session_factory() as db, db.begin():
+        db.add(user)
+        await db.flush()
+        db.add(gpu_session)
+        await db.flush()
+        operation = await GpuSessionOperationRepository(db).create(
+            id=operation_id,
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id=gpu_session.product_id,
+            kind=OperationKind.bundle_provision,
+            command_id=command_id,
+        )
+        await GpuSessionCommandRepository(db).create(
+            id=command_id,
+            session_id=gpu_session.id,
+            product_id=gpu_session.product_id,
+            operation_id=operation.id,
+            kind=OperationKind.bundle_provision,
+            payload={},
+        )
+
+    event_bus = AsyncMock()
+    worker = GpuProvisioningWorker(
+        session_factory=provisioning_session_factory,
+        vastai_client=AsyncMock(),
+        cf_client=AsyncMock(),
+        bundle_index=MagicMock(),
+        http_client=AsyncMock(),
+        settings=_RetrySettings(),  # type: ignore[arg-type]
+        cooldown_store=NullNodeCooldownStore(),
+        event_bus=event_bus,
+        redis_enabled=False,
+        redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
+    )
+
+    await worker._transition(
+        gpu_session,
+        new_status=GpuSessionStatus.failed,
+        log_event="gpu_session.provision.test_failed",
+        error_message="provisioning failed",
+    )
+
+    async with provisioning_session_factory() as db:
+        operation = await GpuSessionOperationRepository(db).get(operation_id)
+    assert operation is not None
+    assert operation.status == OperationStatus.failed
+    assert operation.revision == 1
+    operation_frames = [
+        call.kwargs["payload"]
+        for call in event_bus.publish.call_args_list
+        if call.kwargs["event_type"] == EventType.GPU_SESSION_OPERATION_UPDATED
+    ]
+    assert len(operation_frames) == 1
+    assert operation_frames[0].id == operation_id
+    assert operation_frames[0].revision == 1

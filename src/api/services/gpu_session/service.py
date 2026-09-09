@@ -31,7 +31,7 @@ from src.db.repositories.gpu_session_operation import GpuSessionOperationReposit
 from src.db.repositories.job import JobRepository
 
 from ._env_builder import build_acs_env
-from ._events import publish_status_event
+from ._events import publish_operation_event, publish_status_event
 from ._provisioning import make_onstart_cmd, provision_vastai_instance
 from .exceptions import (
     GpuSessionError,
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from src.core.config import Settings
     from src.db.models.gpu_session import GpuSession
     from src.db.models.gpu_session_deployment import GpuSessionDeployment
+    from src.db.models.gpu_session_operation import GpuSessionOperation
 
 logger = structlog.get_logger(__name__)
 
@@ -455,6 +456,7 @@ class GpuSessionService:
                     id=bootstrap_operation_id,
                     session_id=session_id,
                     product_id=product_id,
+                    user_id=user_id,
                     kind=OperationKind.session_bootstrap,
                     deployment_id=deployment_id,
                     target_bundle=bundle.bundle_name,
@@ -883,7 +885,7 @@ class GpuSessionService:
         paused_at: datetime | None = None,
         resumed_at: datetime | None = None,
         stopped_at: datetime | None = None,
-    ) -> None:
+    ) -> list[GpuSessionOperation]:
         """Persist new_status + optional timestamp, and mirror onto the in-memory row.
 
         Extra timestamp fields are only forwarded to the repo when non-None so
@@ -896,7 +898,9 @@ class GpuSessionService:
         in the same transaction. Pause/resume (paused/resuming) deliberately do
         not cascade either cascade — D17, a paused Vast.ai instance keeps its
         disk, so the deployment stays 'active' and any in-flight command keeps
-        running.
+        running. Terminal transitions cascade-close command-backed operations
+        and return their rows for the caller to publish after commit; non-terminal
+        transitions always return an empty list.
         """
         extra: dict[str, datetime] = {}
         if paused_at is not None:
@@ -915,6 +919,7 @@ class GpuSessionService:
         if stopped_at is not None:
             session_row.stopped_at = stopped_at
 
+        closed_operations: list[GpuSessionOperation] = []
         if new_status in (GpuSessionStatus.stopped, GpuSessionStatus.failed):
             to_status = (
                 DeploymentStatus.removed
@@ -936,7 +941,12 @@ class GpuSessionService:
             )
             operation_repo = GpuSessionOperationRepository(db)
             for command in cancelled:
-                await operation_repo.close_failed(command.operation_id, at=at, error=reason)
+                if (
+                    await operation_repo.close_failed(command.operation_id, at=at, error=reason)
+                ) is True:
+                    operation = await operation_repo.get(command.operation_id)
+                    if operation is not None:
+                        closed_operations.append(operation)
                 logger.info(
                     "gpu_session.command.cancelled",
                     session_id=str(session_row.id),
@@ -944,6 +954,7 @@ class GpuSessionService:
                     operation_id=str(command.operation_id),
                     reason=reason,
                 )
+        return closed_operations
 
     async def _teardown_external_resources(
         self, session_row: GpuSession, *, log_prefix: str
@@ -1168,13 +1179,15 @@ class GpuSessionService:
             if reloaded is None:  # pragma: no cover
                 raise GpuSessionError(f"Session {session_id} disappeared during pre-active stop")
             session_row = reloaded
-            await self._set_status(
+            closed_operations = await self._set_status(
                 db, repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now
             )
             await repo.mark_billing_finalized(session_id, stop_now)
 
         logger.info("gpu_session.stop_pre_active.success", session_id=str(session_id))
         await self._publish_status_event(session_row, previous_status="stopping", reason=reason)
+        for operation in closed_operations:
+            await publish_operation_event(self._event_bus, operation)
         return session_row
 
     async def _stop_confirmed(
@@ -1295,7 +1308,7 @@ class GpuSessionService:
             if reloaded is None:  # pragma: no cover — race with DB deletion
                 raise GpuSessionError(f"Session {session_id} disappeared during stop teardown")
             session_row = reloaded
-            await self._set_status(
+            closed_operations = await self._set_status(
                 db, repo, session_row, GpuSessionStatus.stopped, stopped_at=stop_now
             )
 
@@ -1305,6 +1318,8 @@ class GpuSessionService:
             teardown_had_errors=teardown_had_errors,
         )
         await self._publish_status_event(session_row, previous_status="stopping", reason=reason)
+        for operation in closed_operations:
+            await publish_operation_event(self._event_bus, operation)
 
         # Billing finalization — runs AFTER TX2 commits, outside any transaction.
         # If this fails the session is already stopped; billing drift is reconciled separately.
