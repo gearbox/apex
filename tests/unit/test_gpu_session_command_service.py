@@ -124,6 +124,35 @@ class TestEnqueue:
         assert op_kwargs["target_mode"] == "additive"
         assert cmd_kwargs["payload"]["bundle"] == "wan_2.2_i2v:260105-01"
 
+    async def test_enqueue_reuses_the_loaded_session_owner_for_its_operation(self) -> None:
+        """Command creation must not query the session a second time for its owner."""
+        session_id = uuid4()
+        gpu_session = _gpu_session(session_id=session_id)
+        service = _make_service()
+
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_OPERATION_REPO) as OperationRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = gpu_session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            command_repo = AsyncMock()
+            CommandRepo.return_value = command_repo
+            command_repo.create.return_value = MagicMock(spec=GpuSessionCommand)
+
+            await service.enqueue(
+                session_id=session_id,
+                product_id="vex",
+                command=ProvisionCommand(bundle="wan_2.2_i2v", mode="full"),
+            )
+
+        session_repo.get_by_id.assert_awaited_once_with(session_id)
+        assert operation_repo.create.await_args.kwargs["user_id"] == gpu_session.user_id
+
     async def test_removal_sets_its_subject_bundle_without_version_or_mode(self) -> None:
         service = _make_service()
 

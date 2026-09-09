@@ -24,12 +24,18 @@ class EventType(StrEnum):
     SSE delivery is lossy: Redis pub/sub does not replay frames sent while a
     client is disconnected. Clients must refetch ``GET /v1/sessions/{id}`` on
     every connect/reconnect, apply ``gpu_session.operation_updated`` only when
-    its sequence exceeds the cached sequence for that operation, and treat REST
-    as the complete fallback. Frames can arrive out of order after reconnect.
+    its ``revision`` is strictly greater than the cached revision for that
+    operation id, and treat REST as the complete fallback. Frames can arrive
+    out of order after reconnect. Every durable change to ``OperationResponse``
+    — node telemetry, command timeout, cancellation, or lifecycle cascade —
+    produces a newer ``gpu_session.operation_updated`` frame.
+
     Patch operation frames by matching their ``id`` to cached deployments'
-    ``current_operation.id``, never by ``deployment_id``: session-scoped
-    operations such as cohort restarts legitimately have ``deployment_id``
-    set to null while governing multiple deployments.
+    ``current_operation.id``, never by ``deployment_id``. ``deployment_id`` is
+    an optional informational direct target: it may identify the primary
+    deployment for ``session_bootstrap``, and may be null for operations that
+    govern multiple deployments or the whole session. It must never be used
+    for routing.
     """
 
     JOB_STATUS_CHANGED = "job.status_changed"

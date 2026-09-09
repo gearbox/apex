@@ -898,7 +898,9 @@ class GpuSessionService:
         in the same transaction. Pause/resume (paused/resuming) deliberately do
         not cascade either cascade — D17, a paused Vast.ai instance keeps its
         disk, so the deployment stays 'active' and any in-flight command keeps
-        running.
+        running. Terminal transitions cascade-close command-backed operations
+        and return their rows for the caller to publish after commit; non-terminal
+        transitions always return an empty list.
         """
         extra: dict[str, datetime] = {}
         if paused_at is not None:

@@ -1913,7 +1913,8 @@ async def test_restart_failure_fails_its_cohort_immediately_despite_pending_sibl
     a retry, so there is nothing to gain by waiting on a still-pending sibling's
     own outcome before failing — the failure cascades to the whole cycle
     immediately, including a sibling whose own restart command hasn't even
-    resolved yet."""
+    resolved yet. ``publish_operation_event`` runs after the cancellation
+    transaction commits."""
     settings = _StubSettings()
     command_service = _command_service(orchestration_session_factory, settings)
     deployment_service = _deployment_service(orchestration_session_factory, command_service)
