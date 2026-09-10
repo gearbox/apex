@@ -186,7 +186,16 @@ class GrokGenerationProvider:
     ) -> ProviderSubmitResult:
         """Delegate to GrokJobService.start_video_job."""
         urls = await self._resolve_source_urls(source_media)
-        by_kind = dict(zip((source.media_kind for source in source_media), urls, strict=True))
+
+        def _first_url(kind: MediaKind) -> str | None:
+            return next(
+                (
+                    url
+                    for url, source in zip(urls, source_media, strict=True)
+                    if source.media_kind is kind
+                ),
+                None,
+            )
 
         return await self._grok.start_video_job(
             session=session,
@@ -198,8 +207,8 @@ class GrokGenerationProvider:
             aspect_ratio=request.aspect_ratio,
             resolution=request.resolution,
             name=request.name,
-            input_image_url=by_kind.get(MediaKind.IMAGE),
-            input_video_url=by_kind.get(MediaKind.VIDEO),
+            input_image_url=_first_url(MediaKind.IMAGE),
+            input_video_url=_first_url(MediaKind.VIDEO),
             billing_service=billing_service,
             account_id=account_id,
             token_cost=token_cost,

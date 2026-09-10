@@ -283,6 +283,8 @@ class GenerationService:
             )
 
         modes = resolve_generation_modes(request.model, capabilities=bundle_capabilities)
+        # This lookup is total: step 1 ensures static registry membership, and
+        # bundle validation above rejects any bundle-narrowed type first.
         contract = modes[request.generation_type].source_media
 
         # 1.7 Aspect-ratio capability validation (registry-driven)

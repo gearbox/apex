@@ -755,7 +755,17 @@ ModelInfo: {
   model_key: string,                 // matches ModelType value
   name: string,
   description: string,
-  capabilities: string[],            // e.g. ["t2i", "i2i"]
+  generation_modes: { [generation_type: string]: { // authoritative input contract per mode
+    source_media: {
+      min: int,
+      max: int,
+      media_types: string[],          // "image" | "video"
+      roles: string[] | null          // null => positions interchangeable; otherwise
+    } | null                          // roles[i] names position i: "reference",
+  } },                                // "first_frame", "last_frame", "source"
+  capabilities: string[],            // DEPRECATED — generation_modes keys, stable order
+  inputs: ModelInputs,                // DEPRECATED — union of every non-null mode contract
+  unsupported_parameters: string[],  // controls the resolved bundle cannot apply
   is_enabled: bool,
   max_images: int,                   // max outputs per request
   max_prompt_length: int,
@@ -801,6 +811,10 @@ UserContext: {
   subscription_tier: string          // e.g. "free", "pro"
 }
 ```
+
+`generation_modes` is the authoritative contract. See
+[`fe-api-contract-workflow-media-arc.md` §1.1](contracts/fe-api-contract-workflow-media-arc.md#11-new-generation_modes-authoritative)
+for its semantics and resolution rules.
 
 > **Deprecated flat format** (`providers` + `models` as a flat list) was removed in v2.
 

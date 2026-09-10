@@ -29,7 +29,6 @@ from src.core.enums import (
     GenerationType,
     GpuSessionStatus,
     MediaKind,
-    MediaSlot,
     ModelType,
     Provider,
     ProvisioningMode,
@@ -38,6 +37,7 @@ from src.core.enums import (
 )
 from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
 from src.core.model_registry import get_model_meta
+from tests.unit.conftest import aisha_video_capabilities
 
 
 class TestProvidersResponseSchema:
@@ -266,34 +266,7 @@ class TestModelInfoSchema:
         ("model_type", "capabilities"),
         [
             (ModelType.GROK_IMAGINE_VIDEO, None),
-            (
-                ModelType.AISHA_VIDEO,
-                BundleCapabilities(
-                    media=MediaKind.VIDEO,
-                    generation_modes={
-                        GenerationType.T2V: GenerationModeMeta(),
-                        GenerationType.I2V: GenerationModeMeta(
-                            SourceMediaConstraints(
-                                min=1,
-                                max=1,
-                                media_types=frozenset({MediaKind.IMAGE}),
-                                roles=(MediaSlot.FIRST_FRAME,),
-                            )
-                        ),
-                        GenerationType.FLF2V: GenerationModeMeta(
-                            SourceMediaConstraints(
-                                min=2,
-                                max=2,
-                                media_types=frozenset({MediaKind.IMAGE}),
-                                roles=(MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME),
-                            )
-                        ),
-                    },
-                    supports_negative_prompt=False,
-                    writable=frozenset(),
-                    max_batch_size=1,
-                ),
-            ),
+            (ModelType.AISHA_VIDEO, aisha_video_capabilities()),
         ],
     )
     def test_discovery_matches_the_resolved_mode_contracts(

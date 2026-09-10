@@ -589,6 +589,17 @@ class TestGenerationServiceValidation:
 
         assert GenerationService._source_media_count(request) == 1
 
+    def test_v2v_reports_one_priced_input(self) -> None:
+        """The v2v cutover moved this from 0 to 1; pricing rules depend on it."""
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.V2V,
+            model=ModelType.GROK_IMAGINE_VIDEO,
+            source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
+        )
+
+        assert GenerationService._source_media_count(request) == 1
+
     def test_source_media_count_multiple_sources(self) -> None:
         request = UnifiedGenerationRequest(
             prompt="Edit",

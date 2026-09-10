@@ -33,7 +33,7 @@ class TestModelRegistryCompleteness:
         for model, meta in MODEL_METADATA.items():
             assert meta.generation_modes, f"{model.value} has no generation modes"
             for generation_type, mode in meta.generation_modes.items():
-                assert getattr(meta, generation_type.output_kind.value) is not None
+                assert generation_type.output_kind in model.output_media
                 contract = mode.source_media
                 assert (contract is None) is (not generation_type.input_kinds)
                 if contract is not None:

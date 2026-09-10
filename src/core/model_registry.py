@@ -218,7 +218,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         generation_modes={
             GenerationType.T2I: GenerationModeMeta(),
             GenerationType.I2I: GenerationModeMeta(
-                SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.IMAGE}))
+                SourceMediaConstraints(min=1, max=2, media_types=frozenset({MediaKind.IMAGE}))
             ),
         },
         image=ImageMeta(

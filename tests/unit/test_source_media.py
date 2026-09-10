@@ -19,28 +19,15 @@ from src.api.services.generation.source_media import (
     SourceMediaValidationError,
     normalize_source_media,
 )
-from src.api.services.workflow.capabilities import derive_capabilities
-from src.api.services.workflow.contract import (
-    BoundWorkflow,
-    WorkflowMap,
-    WorkflowMediaInput,
-    WorkflowRole,
-)
 from src.core.enums import (
     GenerationType,
     MediaKind,
     MediaSlot,
     ModelType,
-    Resolution,
-    Sampler,
-    Scheduler,
 )
-from src.core.generation_config import (
-    BundleGenerationConfig,
-    GenerationConstraints,
-    GenerationDefaults,
-)
+from src.core.generation_mode import SourceMediaConstraints
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
+from tests.unit.conftest import aisha_video_capabilities
 
 
 def _i2i_request(
@@ -96,112 +83,85 @@ def _resolved_sources(media_kinds: tuple[MediaKind, ...]) -> list[ResolvedSource
     return sources
 
 
-def _aisha_video_capabilities():
-    """Derive the bundle contract used by the bundle-backed matrix rows."""
-    media_inputs = tuple(
-        WorkflowMediaInput(
-            id=slot.value,
-            class_name="LoadImage",
-            input="image",
-            kind=MediaKind.IMAGE,
-            slot=slot,
-            target_role=WorkflowRole.POSITIVE_PROMPT,
-            target_input=slot.value,
-        )
-        for slot in (MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME)
-    )
-    bound = BoundWorkflow(
-        map=WorkflowMap(
-            contract_version=2,
-            media=MediaKind.VIDEO,
-            nodes={},
-            media_inputs=media_inputs,
-            model_inputs=(),
-        ),
-        api_graph={},
-    )
-    return derive_capabilities(
-        bound,
-        BundleGenerationConfig(
-            defaults=GenerationDefaults(
-                resolution=Resolution.STANDARD,
-                steps=12,
-                cfg=1.1,
-                sampler=Sampler.EULER,
-                scheduler=Scheduler.BETA,
-                denoise=1.0,
-            ),
-            constraints=GenerationConstraints(
-                max_megapixels=1.0,
-                latent_multiple=16,
-                max_edge=1536,
-                min_steps=1,
-                max_steps=20,
-                min_cfg=0.0,
-                max_cfg=30.0,
-                allowed_samplers=frozenset(),
-                allowed_schedulers=frozenset(),
-                max_batch_size=1,
-            ),
-        ),
-    )
-
-
 @pytest.mark.parametrize(
-    ("declaration", "model", "generation_type", "media_kinds", "valid"),
+    ("declaration", "model", "generation_type", "media_kinds", "reject_stage"),
     [
-        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2V, (), True),
-        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2V, (MediaKind.IMAGE,), False),
-        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.I2V, (MediaKind.IMAGE,), True),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2V, (), None),
+        (
+            "registry",
+            ModelType.GROK_IMAGINE_VIDEO,
+            GenerationType.T2V,
+            (MediaKind.IMAGE,),
+            "cardinality",
+        ),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.I2V, (MediaKind.IMAGE,), None),
         (
             "registry",
             ModelType.GROK_IMAGINE_VIDEO,
             GenerationType.I2V,
             (MediaKind.IMAGE, MediaKind.IMAGE),
-            False,
+            "cardinality",
         ),
-        ("registry", ModelType.GROK_IMAGINE_IMAGE, GenerationType.I2I, (MediaKind.IMAGE,), True),
+        ("registry", ModelType.GROK_IMAGINE_IMAGE, GenerationType.I2I, (MediaKind.IMAGE,), None),
         (
             "registry",
             ModelType.GROK_IMAGINE_IMAGE,
             GenerationType.I2I,
             (MediaKind.IMAGE,) * 4,
-            True,
+            None,
         ),
         (
             "registry",
             ModelType.GROK_IMAGINE_IMAGE,
             GenerationType.I2I,
             (MediaKind.IMAGE,) * 5,
-            False,
+            "cardinality",
         ),
-        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (MediaKind.VIDEO,), True),
-        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (MediaKind.IMAGE,), False),
-        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (), False),
-        ("bundle", ModelType.AISHA_VIDEO, GenerationType.T2V, (), True),
-        ("bundle", ModelType.AISHA_VIDEO, GenerationType.T2V, (MediaKind.IMAGE,), False),
-        ("bundle", ModelType.AISHA_VIDEO, GenerationType.I2V, (MediaKind.IMAGE,), True),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (MediaKind.VIDEO,), None),
+        (
+            "registry",
+            ModelType.GROK_IMAGINE_VIDEO,
+            GenerationType.V2V,
+            (MediaKind.IMAGE,),
+            "kind",
+        ),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (), "cardinality"),
+        ("bundle", ModelType.AISHA_VIDEO, GenerationType.T2V, (), None),
+        (
+            "bundle",
+            ModelType.AISHA_VIDEO,
+            GenerationType.T2V,
+            (MediaKind.IMAGE,),
+            "cardinality",
+        ),
+        ("bundle", ModelType.AISHA_VIDEO, GenerationType.I2V, (MediaKind.IMAGE,), None),
         (
             "bundle",
             ModelType.AISHA_VIDEO,
             GenerationType.I2V,
             (MediaKind.IMAGE, MediaKind.IMAGE),
-            False,
+            "cardinality",
         ),
         (
             "bundle",
             ModelType.AISHA_VIDEO,
             GenerationType.FLF2V,
             (MediaKind.IMAGE, MediaKind.IMAGE),
-            True,
+            None,
         ),
-        ("bundle", ModelType.AISHA_VIDEO, GenerationType.FLF2V, (MediaKind.IMAGE,), False),
+        (
+            "bundle",
+            ModelType.AISHA_VIDEO,
+            GenerationType.FLF2V,
+            (MediaKind.IMAGE,),
+            "cardinality",
+        ),
         (
             "bundle",
             ModelType.AISHA_VIDEO,
             GenerationType.FLF2V,
             (MediaKind.VIDEO, MediaKind.IMAGE),
-            False,
+            "kind",
         ),
     ],
 )
@@ -210,22 +170,62 @@ def test_per_mode_source_media_validation_matrix(
     model: ModelType,
     generation_type: GenerationType,
     media_kinds: tuple[MediaKind, ...],
-    valid: bool,
+    reject_stage: str | None,
 ) -> None:
     """Registry and bundle contracts drive the identical validator path."""
-    capabilities = _aisha_video_capabilities() if declaration == "bundle" else None
+    capabilities = aisha_video_capabilities() if declaration == "bundle" else None
     contract = resolve_generation_modes(model, capabilities=capabilities)[
         generation_type
     ].source_media
     request = _mode_request(model, generation_type, media_kinds)
 
-    if valid:
+    if reject_stage is None:
         GenerationService._validate_source_cardinality(request, contract)
         GenerationService._validate_resolved_sources(_resolved_sources(media_kinds), contract)
-    else:
+        return
+
+    if reject_stage == "cardinality":
         with pytest.raises(SourceMediaValidationError):
             GenerationService._validate_source_cardinality(request, contract)
-            GenerationService._validate_resolved_sources(_resolved_sources(media_kinds), contract)
+        return
+
+    assert reject_stage == "kind"
+    GenerationService._validate_source_cardinality(request, contract)
+    with pytest.raises(SourceMediaValidationError):
+        GenerationService._validate_resolved_sources(_resolved_sources(media_kinds), contract)
+
+
+# Registered modes are homogeneous; this synthetic contract exercises the
+# dataclass's intentional seam for future mixed-kind positional modes.
+_MIXED = SourceMediaConstraints(
+    min=2,
+    max=2,
+    media_types=frozenset({MediaKind.VIDEO, MediaKind.IMAGE}),
+    roles=(MediaSlot.SOURCE, MediaSlot.REFERENCE),
+)
+
+
+def test_kind_at_narrows_per_role() -> None:
+    assert _MIXED.kind_at(0) == frozenset({MediaKind.VIDEO})
+    assert _MIXED.kind_at(1) == frozenset({MediaKind.IMAGE})
+
+
+def test_roleless_contract_accepts_any_declared_kind_at_any_position() -> None:
+    roleless = SourceMediaConstraints(
+        min=2,
+        max=2,
+        media_types=frozenset({MediaKind.VIDEO, MediaKind.IMAGE}),
+    )
+
+    assert roleless.kind_at(0) == roleless.media_types
+
+
+def test_validator_rejects_the_wrong_kind_in_a_named_role() -> None:
+    with pytest.raises(SourceMediaValidationError, match="position 0 \\(role 'source'\\)"):
+        GenerationService._validate_resolved_sources(
+            _resolved_sources((MediaKind.IMAGE, MediaKind.IMAGE)),
+            _MIXED,
+        )
 
 
 def test_legacy_source_images_normalize_in_order() -> None:
