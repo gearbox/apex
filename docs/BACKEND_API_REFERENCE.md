@@ -764,7 +764,14 @@ ModelInfo: {
     } | null                          // roles[i] names position i: "reference",
   } },                                // "first_frame", "last_frame", "source"
   capabilities: string[],            // DEPRECATED — generation_modes keys, stable order
-  inputs: ModelInputs,                // DEPRECATED — union of every non-null mode contract
+  inputs: {                          // DEPRECATED — union of every non-null mode contract;
+    source_media: {                  //   shape per contracts/fe-api-contract-workflow-media-arc.md `ModelInputs`
+      min: int,
+      max: int,
+      media_types: string[],
+      required_for: string[],
+    } | null,
+  },
   unsupported_parameters: string[],  // controls the resolved bundle cannot apply
   is_enabled: bool,
   max_images: int,                   // max outputs per request

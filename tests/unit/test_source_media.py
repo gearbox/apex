@@ -27,7 +27,7 @@ from src.core.enums import (
 )
 from src.core.generation_mode import SourceMediaConstraints
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
-from tests.unit.conftest import aisha_video_capabilities
+from tests.unit.helpers import aisha_video_capabilities
 
 
 def _i2i_request(

@@ -37,7 +37,7 @@ from src.core.enums import (
 )
 from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
 from src.core.model_registry import get_model_meta
-from tests.unit.conftest import aisha_video_capabilities
+from tests.unit.helpers import aisha_video_capabilities
 
 
 class TestProvidersResponseSchema:

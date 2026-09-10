@@ -5,13 +5,24 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+from typing import TYPE_CHECKING
 
 import pytest
 
 import src.db.models as models
-from src.core.enums import MEDIA_SLOT_KINDS, AspectRatio, GenerationType, MediaKind, ModelType
+from src.core.enums import (
+    MEDIA_SLOT_KINDS,
+    AspectRatio,
+    GenerationType,
+    MediaKind,
+    MediaSlot,
+    ModelType,
+)
 from src.core.model_registry import MODEL_METADATA, get_model_meta
 from src.db.models.base import Base
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class TestModelRegistryCompleteness:
@@ -42,6 +53,57 @@ class TestModelRegistryCompleteness:
                         len(contract.roles) == contract.min == contract.max
                         and len({MEDIA_SLOT_KINDS[role] for role in contract.roles}) == 1
                     )
+
+
+_EXPECTED_MODE_CONTRACTS: Mapping[
+    ModelType,
+    Mapping[GenerationType, tuple[int, int, frozenset[MediaKind], tuple[MediaSlot, ...]] | None],
+] = {
+    ModelType.GROK_IMAGINE_IMAGE: {
+        GenerationType.T2I: None,
+        GenerationType.I2I: (1, 4, frozenset({MediaKind.IMAGE}), ()),
+    },
+    ModelType.GROK_2_IMAGE: {
+        GenerationType.T2I: None,
+    },
+    ModelType.GROK_IMAGINE_VIDEO: {
+        GenerationType.T2V: None,
+        GenerationType.I2V: (1, 1, frozenset({MediaKind.IMAGE}), ()),
+        GenerationType.V2V: (1, 1, frozenset({MediaKind.VIDEO}), ()),
+    },
+    ModelType.AISHA_IMAGE: {
+        GenerationType.T2I: None,
+        GenerationType.I2I: (1, 1, frozenset({MediaKind.IMAGE}), ()),
+    },
+    ModelType.AISHA_IMAGE_LITE: {
+        GenerationType.T2I: None,
+    },
+    ModelType.AISHA_VIDEO: {
+        GenerationType.T2V: None,
+        GenerationType.I2V: (1, 1, frozenset({MediaKind.IMAGE}), (MediaSlot.FIRST_FRAME,)),
+        GenerationType.FLF2V: (
+            2,
+            2,
+            frozenset({MediaKind.IMAGE}),
+            (MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME),
+        ),
+    },
+}
+
+
+@pytest.mark.parametrize("model", ModelType)
+def test_declared_mode_contracts_are_pinned(model: ModelType) -> None:
+    """A registry cardinality change must be a deliberate test edit."""
+    expected = _EXPECTED_MODE_CONTRACTS[model]
+    actual = get_model_meta(model).generation_modes
+    assert set(actual) == set(expected)
+    for generation_type, want in expected.items():
+        contract = actual[generation_type].source_media
+        if want is None:
+            assert contract is None
+            continue
+        assert contract is not None
+        assert (contract.min, contract.max, contract.media_types, contract.roles) == want
 
 
 class TestProvisioningDisplayHints:
