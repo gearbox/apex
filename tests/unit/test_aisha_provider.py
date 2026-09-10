@@ -27,12 +27,12 @@ from src.api.services.generation.service import FeatureNotSupportedError, Provid
 from src.api.services.generation.source_media import ResolvedSourceMedia
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.image_normalization import ImageTooLargeError
-from src.api.services.workflow.contract import MediaSlot
 from src.core.enums import (
     AspectRatio,
     GenerationType,
     JobStatus,
     MediaKind,
+    MediaSlot,
     ModelType,
     Resolution,
     Sampler,

@@ -19,50 +19,49 @@ enable, disable or bound a control now comes from `GET /v1/providers`.
 
 ## 1. `GET /v1/providers`
 
-### 1.1 New: `inputs`
+### 1.1 New: `generation_modes` (authoritative)
 
 ```jsonc
 {
   "model_key": "grok-imagine-image",
-  "capabilities": ["t2i", "i2i"],
-  "inputs": {
-    "source_media": {
-      "min": 1, "max": 4, "media_types": ["image"],
-      "required_for": ["i2i"]
+  "generation_modes": {
+    "t2i": { "source_media": null },
+    "i2i": {
+      "source_media": {
+        "min": 1, "max": 4, "media_types": ["image"], "roles": null
+      }
     }
   },
   "image": { /* unchanged: output + edit constraints */ }
 }
 ```
 
-`inputs` describes what a model **accepts**. `image` / `video` continue to describe what it
+`generation_modes` describes what each mode **accepts**. `image` / `video` continue to describe what it
 **produces**. They are no longer the same question.
 
 | Field | Meaning |
 |---|---|
-| `inputs.source_media` | `null` ⇒ the model accepts no media input at all. Hide the picker. |
-| `min` / `max` | Bound the **total** number of source assets, across all kinds. |
+| `generation_modes[type].source_media` | `null` ⇒ this mode accepts no media input. |
+| `min` / `max` | Bound the total number of source assets for this mode. |
 | `media_types` | Allowed asset media kinds. Values: `"image"`, `"video"`. |
-| `required_for` | The `generation_type` values, among this model's `capabilities`, that require source media. Always a subset of `capabilities`. |
+| `roles` | `null` ⇒ positions are interchangeable. Otherwise `roles[i]` names the slot filled by source `i` (`reference`, `first_frame`, `last_frame`, or `source`). |
 
-**`min` does not mean "required".** A model with `capabilities: ["t2i", "i2i"]` and `min: 1` needs
-no input for `t2i` and at least one for `i2i`. Requiredness comes from `required_for`:
+Resolution is deterministic: select a model and generation type, read that mode's contract, then
+apply its requiredness (`min`), cardinality bounds, media types, and positional roles. Do not infer
+a type from selected media and do not hardcode a model/type matrix.
 
-```
-required  = inputs.source_media?.required_for.includes(generation_type)
-bounds    = inputs.source_media.{min,max}            // when required
-accepted  = inputs.source_media.media_types
-```
+### 1.2 Deprecated compatibility fields: `capabilities`, `inputs`, and `required_for`
 
-**Do not hardcode which generation types consume media.** `required_for` exists so that a new
-media-consuming type is a backend change only. It is derived server-side from the same source of
-truth the validator uses, so it cannot disagree with `capabilities`.
+These fields remain while apex-frontend migrates, but are derived from `generation_modes` and will
+be removed afterwards:
 
-Note `v2v` never appears in `required_for`, even on a model whose `capabilities` include it: v2v
-consumes `input_video_url` rather than an owned library asset (§2.4). That is correct, not an
-omission.
+- `capabilities` is the stable-order list of `generation_modes` keys.
+- `inputs.source_media` unions every non-null mode contract (minimum of minima, maximum of maxima,
+  and union of media kinds).
+- `inputs.source_media.required_for` contains every mode whose per-mode `min >= 1`, including
+  `v2v` when it is offered.
 
-### 1.2 New: `unsupported_parameters`
+### 1.3 New: `unsupported_parameters`
 
 ```jsonc
 "unsupported_parameters": ["cfg", "denoise", "negative_prompt"]
@@ -87,7 +86,7 @@ Notes:
   consistent; use either, but prefer `unsupported_parameters` so one code path drives every
   control.
 
-### 1.3 Changed semantics: `capabilities`
+### 1.4 Changed semantics: `capabilities`
 
 For on-demand (Aisha) models this is now the **intersection** of the static registry and the
 resolved bundle's workflow map. A bundle whose graph has no image loader advertises `["t2i"]`
@@ -97,14 +96,14 @@ Concretely, `zit.cyberrealistic` reports `capabilities: ["t2i"]`,
 `supports_negative_prompt: false` and `inputs.source_media: null`. If the UI offers i2i for that
 model, every such request 422s.
 
-### 1.4 Changed semantics: `is_enabled`
+### 1.5 Changed semantics: `is_enabled`
 
 For on-demand models, `is_enabled` is now `false` when the bundle index has not yet synced or the
 bundle is unresolvable — even if the model is enabled in the database. The model still appears in
 the list with its static constraints so a card can render, but it must be presented as
 unavailable. Treat `is_enabled: false` as "render disabled", never as "hide".
 
-### 1.5 Unchanged
+### 1.6 Unchanged
 
 `model_key`, `name`, `description`, `max_images`, `max_prompt_length`, `aspect_ratios`,
 `requires_age_verification`, `session_state`, `image`, `video`. Grok models are unaffected by all
@@ -132,8 +131,9 @@ of the above except that they now also carry `inputs`.
 - `asset_ref` format is `"upload:<uuid>"` or `"output:<uuid>"` — the same wire format already used
   by `GET /v1/library/assets/{asset_ref}/lineage`. Build it by prefixing, and never parse a raw
   UUID out of it for display.
-- Schema bound is 1–8 items; the **real** bound is `inputs.source_media.max` (§1.1). Enforce the
-  model's bound client-side so the user gets feedback before a round trip.
+- Schema bound is 1–8 items; the **real** bound is the selected
+  `generation_modes[generation_type].source_media` contract (§1.1). Enforce the mode's bound
+  client-side so the user gets feedback before a round trip.
 - The backend resolves each reference, verifies ownership and product scope, and rejects
   thumbnails and duplicates.
 
@@ -161,12 +161,11 @@ migrating promptly is what sets the removal date.
 Their **acceptance** changed: any of them may now be rejected per-model via
 `unsupported_parameters`.
 
-### 2.4 `input_video_url` — unchanged, still v2v-only
+### 2.4 V2V uses `source_media`
 
-`v2v` continues to take a public URL rather than an owned asset. It is **not** part of
-`source_media`, is not covered by `inputs.source_media`, and its generation type deliberately
-requires no owned media. This is scheduled to move to `source_media` in a later arc; until then,
-keep the v2v path as it is.
+`v2v` takes exactly one owned video library asset in `source_media`. `input_video_url` has been
+removed and is rejected as an unknown request field. This gives v2v the same ownership checks,
+ordered provenance, and source expiry re-arming as every other source-media mode.
 
 ---
 
@@ -200,7 +199,7 @@ Two things worth knowing:
   the bundle default and is not writable is rejected. So leaving controls at their defaults is
   always safe.
 - `generation_type` can appear as the offending parameter when the resolved bundle does not
-  support the requested type — which is the §1.3 case reaching the server.
+  support the requested type — which is the §1.4 case reaching the server.
 
 ### 3.3 `not_implemented` — 400
 
@@ -276,16 +275,26 @@ no client change is required.
 ```ts
 type MediaKind = 'image' | 'video';   // 'audio' is reserved; do not switch exhaustively
 
-interface SourceMediaConstraints {
+interface SourceMediaModeConstraints {
   min: number;
   max: number;
   media_types: MediaKind[];
-  /** generation_type values that require source media; subset of ModelInfo.capabilities */
-  required_for: string[];
+  /** null means positions are interchangeable */
+  roles: ('reference' | 'first_frame' | 'last_frame' | 'source')[] | null;
+}
+
+interface GenerationModeInfo {
+  source_media: SourceMediaModeConstraints | null;
 }
 
 interface ModelInputs {
-  source_media: SourceMediaConstraints | null;
+  /** @deprecated derived from generation_modes */
+  source_media: {
+    min: number;
+    max: number;
+    media_types: MediaKind[];
+    required_for: string[];
+  } | null;
 }
 
 type UnsupportedParameter =
@@ -295,9 +304,10 @@ type UnsupportedParameter =
 
 interface ModelInfo {
   // …existing fields…
-  capabilities: string[];               // now bundle-derived for on-demand models
+  generation_modes: Record<string, GenerationModeInfo>; // authoritative
+  /** @deprecated derived from generation_modes */ capabilities: string[];
   is_enabled: boolean;                  // false when the bundle index has not synced
-  inputs: ModelInputs;                  // new
+  /** @deprecated derived from generation_modes */ inputs: ModelInputs;
   unsupported_parameters: UnsupportedParameter[];   // new
 }
 
@@ -339,10 +349,10 @@ breaking change.
    field for field.
 2. Replace every `input_image_id` / `source_output_id` / `source_images` write with `source_media`.
    Never send both shapes.
-3. Drive the media picker from `inputs.source_media` — visibility from `!== null`, cardinality
-   from `min`/`max`, accepted kinds from `media_types`, requiredness from
-   `required_for.includes(generation_type)`. No hardcoded list of media-consuming types anywhere
-   in the client.
+3. Drive the media picker from `generation_modes[generation_type].source_media` — visibility from
+   `!== null`, requiredness and cardinality from `min`/`max`, accepted kinds from `media_types`,
+   and positional labels from `roles`. No hardcoded list of media-consuming types anywhere in the
+   client.
 4. Disable controls listed in `unsupported_parameters`. One mapping from parameter name to control,
    not per-model conditionals.
 5. Render `is_enabled: false` on-demand models as unavailable rather than hiding them.
@@ -354,8 +364,8 @@ breaking change.
 ## 7. What has not changed
 
 - Authentication, idempotency headers, SSE job events, and job/output polling.
-- Grok request and response shapes, beyond gaining `inputs` on discovery.
-- `input_video_url` and the v2v flow.
+- Grok request and response shapes, beyond gaining `generation_modes` on discovery and moving v2v
+  to owned `source_media`.
 - Upload endpoints and the `MediaObject` shape.
 - Pricing responses. Input count still drives price where applicable; it is now
   `source_media.length`.
@@ -364,8 +374,8 @@ breaking change.
 
 Raise these before building against them rather than assuming:
 
-- Whether `capabilities` can change mid-session for a model the user already has open — and if so,
+- Whether `generation_modes` can change mid-session for a model the user already has open — and if so,
   whether the client should re-fetch `/v1/providers` on a session-state transition.
-- Whether `inputs.source_media.max` for `aisha-image` will track a bundle that declares two
-  reference slots. It does under B1's derivation, but a bundle update changes it without a deploy,
-  so the picker must read it per request rather than caching it for the session.
+- Whether `generation_modes.i2i.source_media.max` for `aisha-image` will track a bundle that
+  declares two reference slots. It does under B1's derivation, but a bundle update changes it
+  without a deploy, so the picker must read it per request rather than caching it for the session.

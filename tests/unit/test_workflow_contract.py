@@ -22,16 +22,16 @@ from src.api.services.workflow.capabilities import (
     derive_capabilities,
 )
 from src.api.services.workflow.contract import (
-    MEDIA_SLOT_KINDS,
     MODEL_TYPE_MEDIA,
     BoundWorkflow,
-    MediaSlot,
     WorkflowRole,
 )
 from src.api.services.workflow.parser import WorkflowContractError, parse_workflow_map
 from src.core.enums import (
+    MEDIA_SLOT_KINDS,
     GenerationType,
     MediaKind,
+    MediaSlot,
     ModelType,
     ProvisioningMode,
     Resolution,
@@ -249,7 +249,9 @@ def test_capabilities_are_mechanical_from_the_bound_map() -> None:
 
     assert capabilities.generation_types == frozenset({GenerationType.T2I, GenerationType.I2I})
     assert capabilities.max_batch_size == 1
-    assert capabilities.max_reference_images == 1
+    source_media = capabilities.generation_modes[GenerationType.I2I].source_media
+    assert source_media is not None
+    assert source_media.max == 1
     assert capabilities.supports_negative_prompt is False
 
 
@@ -301,6 +303,12 @@ def test_wan_shaped_fixture_parses_binds_and_advertises_frame_to_video(
     assert capabilities.generation_types == frozenset(
         {GenerationType.T2V, GenerationType.I2V, GenerationType.FLF2V}
     )
+    i2v = capabilities.generation_modes[GenerationType.I2V].source_media
+    flf2v = capabilities.generation_modes[GenerationType.FLF2V].source_media
+    assert i2v is not None
+    assert i2v.roles == (MediaSlot.FIRST_FRAME,)
+    assert flf2v is not None
+    assert flf2v.roles == (MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME)
 
 
 @pytest.mark.parametrize(
@@ -346,7 +354,7 @@ def test_image_bundle_ignores_video_reference_slot_for_i2i_capability() -> None:
     capabilities = derive_capabilities(malformed_bound, _generation())
 
     assert capabilities.generation_types == frozenset({GenerationType.T2I})
-    assert capabilities.max_reference_images == 0
+    assert GenerationType.I2I not in capabilities.generation_modes
 
 
 def test_video_bundle_ignores_image_source_slot_for_v2v_capability(
@@ -881,7 +889,7 @@ def test_zit_shaped_fixture_derives_expected_capabilities(zit_workflow_bundle: P
 
     assert capabilities.generation_types == frozenset({GenerationType.T2I})
     assert capabilities.supports_negative_prompt is False
-    assert capabilities.max_reference_images == 0
+    assert GenerationType.I2I not in capabilities.generation_modes
     assert "model_sampling.shift" not in capabilities.writable
     assert len(capabilities.writable) == 11
 

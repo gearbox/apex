@@ -7,12 +7,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from src.api.services.workflow.contract import (
-    MEDIA_SLOT_KINDS,
     REQUIRED_ROLES,
     ROLE_PARAMETERS,
     SUPPORTED_CONTRACT_VERSION,
     VIDEO_ONLY_PARAMETERS,
-    MediaSlot,
     WorkflowMap,
     WorkflowMediaInput,
     WorkflowModelInput,
@@ -20,7 +18,7 @@ from src.api.services.workflow.contract import (
     WorkflowRole,
 )
 from src.core.bundle_config import BundleDefinitionError
-from src.core.enums import MediaKind
+from src.core.enums import MEDIA_SLOT_KINDS, MediaKind, MediaSlot
 
 if TYPE_CHECKING:
     from pathlib import Path

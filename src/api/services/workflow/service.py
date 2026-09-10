@@ -11,7 +11,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from src.api.services.bundle_index import BundleIndexService
-    from src.api.services.workflow.contract import BoundWorkflow, MediaSlot
+    from src.api.services.workflow.contract import BoundWorkflow
+    from src.core.enums import MediaSlot
 
 
 class WorkflowNotFoundError(Exception):

@@ -1257,7 +1257,7 @@ class LibraryService:
 
     @staticmethod
     def _resolve_group_badge(gt: GenerationType) -> LibraryBadge:
-        if gt.requires_image_input or gt.requires_video_input:
+        if gt.input_kinds:
             return LibraryBadge.IMAGE
         return LibraryBadge.PROMPT
 

@@ -9,7 +9,7 @@ import pkgutil
 import pytest
 
 import src.db.models as models
-from src.core.enums import AspectRatio, GenerationType, ModelType
+from src.core.enums import MEDIA_SLOT_KINDS, AspectRatio, GenerationType, MediaKind, ModelType
 from src.core.model_registry import MODEL_METADATA, get_model_meta
 from src.db.models.base import Base
 
@@ -28,18 +28,20 @@ class TestModelRegistryCompleteness:
         for key in MODEL_METADATA:
             assert key in ModelType, f"MODEL_METADATA key {key!r} is not a ModelType member"
 
-    def test_inputs_are_present_and_first_last_frame_models_accept_two_sources(self) -> None:
-        """Registry input limits must accommodate every declared generation type."""
+    def test_generation_modes_match_output_sections_and_input_kinds(self) -> None:
+        """Every registered mode has a matching output section and input contract."""
         for model, meta in MODEL_METADATA.items():
-            assert meta.inputs is not None, f"{model.value} has no input capabilities"
-            supported_types: set[GenerationType] = set()
-            if meta.image is not None:
-                supported_types.update(meta.image.supported_types)
-            if meta.video is not None:
-                supported_types.update(meta.video.supported_types)
-            if GenerationType.FLF2V in supported_types:
-                assert meta.inputs.source_media is not None
-                assert meta.inputs.source_media.max >= 2
+            assert meta.generation_modes, f"{model.value} has no generation modes"
+            for generation_type, mode in meta.generation_modes.items():
+                assert getattr(meta, generation_type.output_kind.value) is not None
+                contract = mode.source_media
+                assert (contract is None) is (not generation_type.input_kinds)
+                if contract is not None:
+                    assert contract.media_types <= generation_type.input_kinds
+                    assert not contract.roles or (
+                        len(contract.roles) == contract.min == contract.max
+                        and len({MEDIA_SLOT_KINDS[role] for role in contract.roles}) == 1
+                    )
 
 
 class TestProvisioningDisplayHints:
@@ -146,26 +148,24 @@ class TestRateLimitConfig:
         assert meta.rate_limit.window_seconds == 60
 
 
-class TestGenerationTypeInputRequirements:
+class TestGenerationTypeInputKinds:
     @pytest.mark.parametrize(
-        ("generation_type", "requires_image", "requires_video"),
+        ("generation_type", "input_kinds"),
         [
-            (GenerationType.T2I, False, False),
-            (GenerationType.I2I, True, False),
-            (GenerationType.T2V, False, False),
-            (GenerationType.I2V, True, False),
-            (GenerationType.V2V, False, True),
-            (GenerationType.FLF2V, True, False),
+            (GenerationType.T2I, frozenset()),
+            (GenerationType.I2I, frozenset({MediaKind.IMAGE})),
+            (GenerationType.T2V, frozenset()),
+            (GenerationType.I2V, frozenset({MediaKind.IMAGE})),
+            (GenerationType.V2V, frozenset({MediaKind.VIDEO})),
+            (GenerationType.FLF2V, frozenset({MediaKind.IMAGE})),
         ],
     )
     def test_input_requirement_baseline(
         self,
         generation_type: GenerationType,
-        requires_image: bool,
-        requires_video: bool,
+        input_kinds: frozenset[MediaKind],
     ) -> None:
-        assert generation_type.requires_image_input is requires_image
-        assert generation_type.requires_video_input is requires_video
+        assert generation_type.input_kinds == input_kinds
 
 
 def test_every_declarative_model_is_exported_from_models_registry() -> None:

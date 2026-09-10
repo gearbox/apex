@@ -11,12 +11,36 @@ from src.api.schemas.unified_generation import (
     SourceMediaReference,
     UnifiedGenerationRequest,
 )
+from src.api.services.generation.generation_modes import resolve_generation_modes
+from src.api.services.generation.service import GenerationService
 from src.api.services.generation.source_media import (
+    ResolvedSourceMedia,
     SourceMediaResolver,
     SourceMediaValidationError,
     normalize_source_media,
 )
-from src.core.enums import GenerationType, ModelType
+from src.api.services.workflow.capabilities import derive_capabilities
+from src.api.services.workflow.contract import (
+    BoundWorkflow,
+    WorkflowMap,
+    WorkflowMediaInput,
+    WorkflowRole,
+)
+from src.core.enums import (
+    GenerationType,
+    MediaKind,
+    MediaSlot,
+    ModelType,
+    Resolution,
+    Sampler,
+    Scheduler,
+)
+from src.core.generation_config import (
+    BundleGenerationConfig,
+    GenerationConstraints,
+    GenerationDefaults,
+)
+from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 
 
 def _i2i_request(
@@ -33,6 +57,175 @@ def _i2i_request(
         source_media=source_media,
         source_images=source_images,
     )
+
+
+def _mode_request(
+    model: ModelType,
+    generation_type: GenerationType,
+    media_kinds: tuple[MediaKind, ...],
+) -> UnifiedGenerationRequest:
+    return UnifiedGenerationRequest(
+        prompt="Validate per-mode input",
+        model=model,
+        generation_type=generation_type,
+        source_media=(
+            [SourceMediaReference(asset_ref=f"upload:{uuid4()}") for _ in media_kinds]
+            if media_kinds
+            else None
+        ),
+    )
+
+
+def _resolved_sources(media_kinds: tuple[MediaKind, ...]) -> list[ResolvedSourceMedia]:
+    sources: list[ResolvedSourceMedia] = []
+    for position, media_kind in enumerate(media_kinds):
+        asset_id = uuid4()
+        ref = AssetRef(source=LibraryAssetSource.UPLOAD, asset_id=asset_id)
+        sources.append(
+            ResolvedSourceMedia(
+                position=position,
+                ref=ref,
+                asset_ref=format_asset_ref(ref.source, ref.asset_id),
+                media_kind=media_kind,
+                content_type="image/png" if media_kind is MediaKind.IMAGE else "video/mp4",
+                storage_key=f"uploads/source-{position}",
+                size_bytes=1,
+                job_id=None,
+            )
+        )
+    return sources
+
+
+def _aisha_video_capabilities():
+    """Derive the bundle contract used by the bundle-backed matrix rows."""
+    media_inputs = tuple(
+        WorkflowMediaInput(
+            id=slot.value,
+            class_name="LoadImage",
+            input="image",
+            kind=MediaKind.IMAGE,
+            slot=slot,
+            target_role=WorkflowRole.POSITIVE_PROMPT,
+            target_input=slot.value,
+        )
+        for slot in (MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME)
+    )
+    bound = BoundWorkflow(
+        map=WorkflowMap(
+            contract_version=2,
+            media=MediaKind.VIDEO,
+            nodes={},
+            media_inputs=media_inputs,
+            model_inputs=(),
+        ),
+        api_graph={},
+    )
+    return derive_capabilities(
+        bound,
+        BundleGenerationConfig(
+            defaults=GenerationDefaults(
+                resolution=Resolution.STANDARD,
+                steps=12,
+                cfg=1.1,
+                sampler=Sampler.EULER,
+                scheduler=Scheduler.BETA,
+                denoise=1.0,
+            ),
+            constraints=GenerationConstraints(
+                max_megapixels=1.0,
+                latent_multiple=16,
+                max_edge=1536,
+                min_steps=1,
+                max_steps=20,
+                min_cfg=0.0,
+                max_cfg=30.0,
+                allowed_samplers=frozenset(),
+                allowed_schedulers=frozenset(),
+                max_batch_size=1,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("declaration", "model", "generation_type", "media_kinds", "valid"),
+    [
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2V, (), True),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.T2V, (MediaKind.IMAGE,), False),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.I2V, (MediaKind.IMAGE,), True),
+        (
+            "registry",
+            ModelType.GROK_IMAGINE_VIDEO,
+            GenerationType.I2V,
+            (MediaKind.IMAGE, MediaKind.IMAGE),
+            False,
+        ),
+        ("registry", ModelType.GROK_IMAGINE_IMAGE, GenerationType.I2I, (MediaKind.IMAGE,), True),
+        (
+            "registry",
+            ModelType.GROK_IMAGINE_IMAGE,
+            GenerationType.I2I,
+            (MediaKind.IMAGE,) * 4,
+            True,
+        ),
+        (
+            "registry",
+            ModelType.GROK_IMAGINE_IMAGE,
+            GenerationType.I2I,
+            (MediaKind.IMAGE,) * 5,
+            False,
+        ),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (MediaKind.VIDEO,), True),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (MediaKind.IMAGE,), False),
+        ("registry", ModelType.GROK_IMAGINE_VIDEO, GenerationType.V2V, (), False),
+        ("bundle", ModelType.AISHA_VIDEO, GenerationType.T2V, (), True),
+        ("bundle", ModelType.AISHA_VIDEO, GenerationType.T2V, (MediaKind.IMAGE,), False),
+        ("bundle", ModelType.AISHA_VIDEO, GenerationType.I2V, (MediaKind.IMAGE,), True),
+        (
+            "bundle",
+            ModelType.AISHA_VIDEO,
+            GenerationType.I2V,
+            (MediaKind.IMAGE, MediaKind.IMAGE),
+            False,
+        ),
+        (
+            "bundle",
+            ModelType.AISHA_VIDEO,
+            GenerationType.FLF2V,
+            (MediaKind.IMAGE, MediaKind.IMAGE),
+            True,
+        ),
+        ("bundle", ModelType.AISHA_VIDEO, GenerationType.FLF2V, (MediaKind.IMAGE,), False),
+        (
+            "bundle",
+            ModelType.AISHA_VIDEO,
+            GenerationType.FLF2V,
+            (MediaKind.VIDEO, MediaKind.IMAGE),
+            False,
+        ),
+    ],
+)
+def test_per_mode_source_media_validation_matrix(
+    declaration: str,
+    model: ModelType,
+    generation_type: GenerationType,
+    media_kinds: tuple[MediaKind, ...],
+    valid: bool,
+) -> None:
+    """Registry and bundle contracts drive the identical validator path."""
+    capabilities = _aisha_video_capabilities() if declaration == "bundle" else None
+    contract = resolve_generation_modes(model, capabilities=capabilities)[
+        generation_type
+    ].source_media
+    request = _mode_request(model, generation_type, media_kinds)
+
+    if valid:
+        GenerationService._validate_source_cardinality(request, contract)
+        GenerationService._validate_resolved_sources(_resolved_sources(media_kinds), contract)
+    else:
+        with pytest.raises(SourceMediaValidationError):
+            GenerationService._validate_source_cardinality(request, contract)
+            GenerationService._validate_resolved_sources(_resolved_sources(media_kinds), contract)
 
 
 def test_legacy_source_images_normalize_in_order() -> None:

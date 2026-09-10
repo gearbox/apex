@@ -27,13 +27,14 @@ def _make_resolved_source(
     *,
     source: LibraryAssetSource,
     storage_key: str,
+    media_kind: MediaKind = MediaKind.IMAGE,
 ) -> ResolvedSourceMedia:
     return ResolvedSourceMedia(
         position=0,
         ref=AssetRef(source=source, asset_id=asset_id),
         asset_ref=format_asset_ref(source, asset_id),
-        media_kind=MediaKind.IMAGE,
-        content_type="image/png",
+        media_kind=media_kind,
+        content_type="video/mp4" if media_kind is MediaKind.VIDEO else "image/png",
         storage_key=storage_key,
         size_bytes=1,
         job_id=uuid4() if source is LibraryAssetSource.OUTPUT else None,
@@ -192,3 +193,50 @@ async def test_grok_i2i_resolved_upload_is_presigned_for_provider() -> None:
     create_kwargs = grok_job_service.create_image_job.await_args.kwargs
     assert create_kwargs["input_image_url"] == "https://r2.test/uploads/source.png"
     assert create_kwargs["input_image_urls"] is None
+
+
+async def test_grok_video_routes_resolved_assets_by_media_kind() -> None:
+    user_id = uuid4()
+    asset_id = uuid4()
+    request = UnifiedGenerationRequest(
+        prompt="edit video",
+        generation_type=GenerationType.V2V,
+        model=ModelType.GROK_IMAGINE_VIDEO,
+        source_media=[SourceMediaReference(asset_ref=f"upload:{asset_id}")],
+    )
+    source_media = [
+        _make_resolved_source(
+            asset_id,
+            source=LibraryAssetSource.UPLOAD,
+            storage_key="uploads/source.mp4",
+            media_kind=MediaKind.VIDEO,
+        )
+    ]
+    r2_storage = SimpleNamespace(
+        get_presigned_url=AsyncMock(
+            return_value=SimpleNamespace(presigned_url="https://r2.test/uploads/source.mp4")
+        )
+    )
+    job = MagicMock(status=JobStatus.QUEUED.value)
+    grok_job_service = SimpleNamespace(
+        start_video_job=AsyncMock(return_value=ProviderSubmitResult(job=job, balance_after=77))
+    )
+    provider = GrokGenerationProvider(
+        cast("GrokJobService", grok_job_service),
+        cast("R2StorageService", r2_storage),
+    )
+
+    await provider.submit(
+        request,
+        user_id=user_id,
+        session=cast("AsyncSession", AsyncMock()),
+        billing_service=cast("BillingService", AsyncMock()),
+        account_id=uuid4(),
+        token_cost=25,
+        product_id="vex",
+        source_media=source_media,
+    )
+
+    kwargs = grok_job_service.start_video_job.await_args.kwargs
+    assert kwargs["input_image_url"] is None
+    assert kwargs["input_video_url"] == "https://r2.test/uploads/source.mp4"

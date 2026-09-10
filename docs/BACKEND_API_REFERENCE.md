@@ -599,7 +599,7 @@ Request: {
     input_image_id?: UUID,        // exactly one of input_image_id or source_output_id per item
     source_output_id?: UUID
   }>,                             // mutually exclusive with top-level input_image_id/source_output_id
-  input_video_url?: string,       // required for v2v (public URL)
+  source_media?: Array<{ asset_ref: string }>, // ordered owned inputs; v2v requires one video asset
   negative_prompt?: string (≤2048 chars),  // applied by Aisha; stored but ignored by Grok
   aspect_ratio?: AspectRatio | null,  // omit/null ⇒ provider default for t2i (1:1 image, 16:9 video);
                                       //   for i2i, omit/null ⇒ output follows the source image's aspect.
@@ -3140,7 +3140,7 @@ Values: `"sfw"`, `"permissive"`
 | `i2i` | Image → Image | Yes | No | No |
 | `t2v` | Text → Video | No | No | Yes |
 | `i2v` | Image → Video | Yes | No | Yes |
-| `v2v` | Video → Video | No | Yes | Yes |
+| `v2v` | Video → Video | No | Yes (via `source_media`) | Yes |
 | `flf2v` | First-Last Frame → Video | Yes | No | Yes |
 
 ### JobStatus

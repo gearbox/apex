@@ -47,6 +47,7 @@ from src.core.enums import (
     VideoResolution,
 )
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
+from src.core.model_registry import get_model_meta
 from src.core.product_registry import VEX_CONFIG
 
 # ---------------------------------------------------------------------------
@@ -200,6 +201,14 @@ class TestUnifiedGenerationRequestSchema:
         with pytest.raises(msgspec.ValidationError):
             msgspec.json.decode(
                 b'{"prompt":"x","generation_type":"t2i","model":"aisha-image","bogus":true}',
+                type=UnifiedGenerationRequest,
+            )
+
+    def test_input_video_url_is_rejected_as_an_unknown_field(self) -> None:
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                b'{"prompt":"x","generation_type":"v2v","model":"grok-imagine-video",'
+                b'"input_video_url":"https://example.test/source.mp4"}',
                 type=UnifiedGenerationRequest,
             )
 
@@ -440,18 +449,24 @@ class TestGenerationServiceValidation:
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
-        with pytest.raises(ValueError, match="requires source_media"):
-            service._validate_source_cardinality(request)
+        contract = (
+            get_model_meta(request.model).generation_modes[request.generation_type].source_media
+        )
+        with pytest.raises(SourceMediaValidationError, match="requires between"):
+            service._validate_source_cardinality(request, contract)
 
-    def test_validate_v2v_requires_video_url(self) -> None:
+    def test_validate_v2v_requires_source_media(self) -> None:
         service = _make_service()
         request = UnifiedGenerationRequest(
             prompt="Edit video",
             generation_type=GenerationType.V2V,
             model=ModelType.GROK_IMAGINE_VIDEO,
         )
-        with pytest.raises(ValueError, match="requires input_video_url"):
-            service._validate_source_cardinality(request)
+        contract = (
+            get_model_meta(request.model).generation_modes[request.generation_type].source_media
+        )
+        with pytest.raises(SourceMediaValidationError, match="requires between"):
+            service._validate_source_cardinality(request, contract)
 
     def test_validate_t2i_passes(self) -> None:
         service = _make_service()
@@ -460,8 +475,11 @@ class TestGenerationServiceValidation:
             generation_type=GenerationType.T2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
-        service._validate_source_cardinality(request)
-        service._validate_resolved_sources(request, [])
+        contract = (
+            get_model_meta(request.model).generation_modes[request.generation_type].source_media
+        )
+        service._validate_source_cardinality(request, contract)
+        service._validate_resolved_sources([], contract)
 
     def test_validate_i2i_accepts_resolved_source_media(self) -> None:
         service = _make_service()
@@ -474,8 +492,11 @@ class TestGenerationServiceValidation:
         )
 
         resolved_source_media = [_make_resolved_source(source_id, source=LibraryAssetSource.UPLOAD)]
-        service._validate_source_cardinality(request)
-        service._validate_resolved_sources(request, resolved_source_media)
+        contract = (
+            get_model_meta(request.model).generation_modes[request.generation_type].source_media
+        )
+        service._validate_source_cardinality(request, contract)
+        service._validate_resolved_sources(resolved_source_media, contract)
 
     def test_validate_i2i_rejects_video_source_media(self) -> None:
         service = _make_service()
@@ -489,7 +510,6 @@ class TestGenerationServiceValidation:
 
         with pytest.raises(SourceMediaValidationError, match="position 0 has media kind 'video'"):
             service._validate_resolved_sources(
-                request,
                 [
                     _make_resolved_source(
                         source_id,
@@ -497,6 +517,9 @@ class TestGenerationServiceValidation:
                         media_kind=MediaKind.VIDEO,
                     )
                 ],
+                get_model_meta(request.model)
+                .generation_modes[request.generation_type]
+                .source_media,
             )
 
     @pytest.mark.parametrize("source_count", [0, 5])
@@ -514,7 +537,7 @@ class TestGenerationServiceValidation:
 
         with (
             patch.object(SourceMediaResolver, "resolve", new=resolve),
-            pytest.raises(SourceMediaValidationError, match="source_media count must be between"),
+            pytest.raises(SourceMediaValidationError, match="requires between"),
         ):
             await service.generate(
                 request,
@@ -746,6 +769,7 @@ class TestGenerationServiceGenerate:
         bundle_index = MagicMock()
         capabilities = MagicMock(
             generation_types=frozenset({GenerationType.T2I}),
+            generation_modes={GenerationType.T2I: MagicMock(source_media=None)},
             supports_negative_prompt=True,
             writable=frozenset({"latent.batch_size"}),
             max_batch_size=4,

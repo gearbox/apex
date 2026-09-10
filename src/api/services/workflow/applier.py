@@ -10,7 +10,8 @@ from src.api.services.workflow.contract import PARAMETER_ACCESSORS, PARAMETER_HA
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from src.api.services.workflow.contract import BoundWorkflow, MediaSlot
+    from src.api.services.workflow.contract import BoundWorkflow
+    from src.core.enums import MediaSlot
 
 
 class ModelInputResolutionError(ValueError):

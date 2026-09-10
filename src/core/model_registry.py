@@ -9,32 +9,22 @@ The /v1/providers endpoint and GenerationService validation both read from here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from src.core.enums import (
     AspectRatio,
     GenerationType,
     MediaKind,
+    MediaSlot,
     ModelType,
     Provider,
     Resolution,
     VideoResolution,
 )
+from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
 
-
-@dataclass(frozen=True, slots=True)
-class SourceMediaConstraints:
-    """Static owned-library input limits for one model."""
-
-    min: int
-    max: int
-    media_types: frozenset[MediaKind]
-
-
-@dataclass(frozen=True, slots=True)
-class ModelInputs:
-    """Model inputs distinct from image/video output constraints."""
-
-    source_media: SourceMediaConstraints | None = None
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,9 +36,6 @@ class ImageMeta:
     the *effective* output resolutions so the frontend can display them.
     For Aisha, the user controls height directly (256-2048).
     """
-
-    supported_types: frozenset[GenerationType]
-    """Supported video generation types, e.g. frozenset({GenerationType.T2V, GenerationType.I2V})"""
 
     edit_aspect_ratios: tuple[AspectRatio, ...]
     """Aspect ratios this model can genuinely RESHAPE TO during image editing (i2i).
@@ -88,15 +75,11 @@ class VideoMeta:
     resolutions: tuple[VideoResolution, ...]
     """Supported video resolutions."""
 
-    supported_types: frozenset[GenerationType]
-    """Supported video generation types, e.g. frozenset({GenerationType.T2V, GenerationType.I2V})"""
-
 
 @dataclass(frozen=True, slots=True)
 class AudioMeta:
     """Future audio constraints; no current ``GenerationType`` emits audio."""
 
-    supported_types: frozenset[GenerationType]
     max_duration_seconds: int
     sample_rates: tuple[int, ...]
 
@@ -131,8 +114,8 @@ class ModelMeta:
     max_concurrent_outputs: int
     """Maximum number of outputs this model can produce per request."""
 
-    inputs: ModelInputs
-    """Owned-library input capabilities. Present for every registry entry."""
+    generation_modes: Mapping[GenerationType, GenerationModeMeta]
+    """Per-generation-mode owned-library input contracts."""
 
     image: ImageMeta | None = None
     """Image constraints. None for video-only models."""
@@ -173,18 +156,13 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=False,
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=10,
-        inputs=ModelInputs(
-            source_media=SourceMediaConstraints(
-                min=1, max=4, media_types=frozenset({MediaKind.IMAGE})
-            )
-        ),
-        image=ImageMeta(
-            supported_types=frozenset(
-                {
-                    GenerationType.T2I,
-                    GenerationType.I2I,
-                }
+        generation_modes={
+            GenerationType.T2I: GenerationModeMeta(),
+            GenerationType.I2I: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=4, media_types=frozenset({MediaKind.IMAGE}))
             ),
+        },
+        image=ImageMeta(
             # Verified via direct curl against xAI's edit endpoint: the model
             # accepts aspect_ratio on edits but stretches the source to fit
             # rather than recomposing. xAI's own console hides the aspect
@@ -202,13 +180,8 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=False,
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=10,
-        inputs=ModelInputs(),
+        generation_modes={GenerationType.T2I: GenerationModeMeta()},
         image=ImageMeta(
-            supported_types=frozenset(
-                {
-                    GenerationType.T2I,
-                }
-            ),
             # t2i-only model — trivially no edit reshape capability.
             edit_aspect_ratios=(),
             output_resolutions=("1024x1024",),
@@ -221,22 +194,18 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=False,
         aspect_ratios=GROK_ASPECT_RATIOS,
         max_concurrent_outputs=1,
-        inputs=ModelInputs(
-            source_media=SourceMediaConstraints(
-                min=1, max=1, media_types=frozenset({MediaKind.IMAGE})
-            )
-        ),
+        generation_modes={
+            GenerationType.T2V: GenerationModeMeta(),
+            GenerationType.I2V: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.IMAGE}))
+            ),
+            GenerationType.V2V: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.VIDEO}))
+            ),
+        },
         video=VideoMeta(
             max_duration=15,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
-            supported_types=frozenset(
-                {
-                    GenerationType.T2V,
-                    GenerationType.I2V,
-                    GenerationType.V2V,
-                    # no FLF2V — Grok doesn't support it
-                }
-            ),
         ),
         rate_limit=RateLimitMeta(max_requests=10, window_seconds=60),
     ),
@@ -246,18 +215,13 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         supports_negative_prompt=True,
         aspect_ratios=ALL_ASPECT_RATIOS,
         max_concurrent_outputs=4,
-        inputs=ModelInputs(
-            source_media=SourceMediaConstraints(
-                min=1, max=1, media_types=frozenset({MediaKind.IMAGE})
-            )
-        ),
-        image=ImageMeta(
-            supported_types=frozenset(
-                {
-                    GenerationType.T2I,
-                    GenerationType.I2I,
-                }
+        generation_modes={
+            GenerationType.T2I: GenerationModeMeta(),
+            GenerationType.I2I: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.IMAGE}))
             ),
+        },
+        image=ImageMeta(
             # Qwen-Image-Edit recomposes natively onto the target latent —
             # the source is conditioning, not the output canvas.
             edit_aspect_ratios=ALL_ASPECT_RATIOS,
@@ -282,10 +246,8 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         aspect_ratios=ALL_ASPECT_RATIOS,
         max_concurrent_outputs=4,
         # Bundle declares no media_inputs — no owned-library source media.
-        inputs=ModelInputs(),
+        generation_modes={GenerationType.T2I: GenerationModeMeta()},
         image=ImageMeta(
-            # t2i-only by graph shape: the bundle declares no reference slot.
-            supported_types=frozenset({GenerationType.T2I}),
             edit_aspect_ratios=(),
             min_height=256,
             max_height=2048,
@@ -309,22 +271,28 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             AspectRatio.RATIO_9_16,
         ),
         max_concurrent_outputs=1,
-        inputs=ModelInputs(
-            source_media=SourceMediaConstraints(
-                min=1, max=2, media_types=frozenset({MediaKind.IMAGE})
-            )
-        ),
+        generation_modes={
+            GenerationType.T2V: GenerationModeMeta(),
+            GenerationType.I2V: GenerationModeMeta(
+                SourceMediaConstraints(
+                    min=1,
+                    max=1,
+                    media_types=frozenset({MediaKind.IMAGE}),
+                    roles=(MediaSlot.FIRST_FRAME,),
+                )
+            ),
+            GenerationType.FLF2V: GenerationModeMeta(
+                SourceMediaConstraints(
+                    min=2,
+                    max=2,
+                    media_types=frozenset({MediaKind.IMAGE}),
+                    roles=(MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME),
+                )
+            ),
+        },
         video=VideoMeta(
             max_duration=10,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
-            supported_types=frozenset(
-                {
-                    GenerationType.T2V,
-                    GenerationType.I2V,
-                    GenerationType.FLF2V,
-                    # no V2V for aisha yet
-                }
-            ),
         ),
         rate_limit=None,
         requires_age_verification=True,

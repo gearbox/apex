@@ -26,8 +26,15 @@ from src.api.services.image_normalization import (
     read_image_dimensions,
     sniff_format,
 )
-from src.api.services.workflow.contract import MediaSlot
-from src.core.enums import AspectRatio, JobStatus, MediaKind, Provider, Sampler, Scheduler
+from src.core.enums import (
+    AspectRatio,
+    JobStatus,
+    MediaKind,
+    MediaSlot,
+    Provider,
+    Sampler,
+    Scheduler,
+)
 from src.core.resolution import TIER_MEGAPIXELS, resolve_dimensions
 from src.core.uid import new_id
 from src.db.repositories.job import JobRepository

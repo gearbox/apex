@@ -98,9 +98,6 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     source_images: SourceImageReferences | None = None
     """Deprecated ordered image aliases, normalized at the service boundary."""
 
-    input_video_url: str | None = None
-    """Required for v2v. Publicly-accessible URL of the source video."""
-
     negative_prompt: NegativePromptStr | None = None
     """Negative prompt. Applied by Aisha provider; stored but ignored by Grok."""
 
