@@ -137,7 +137,6 @@ class TestAishaImageLiteBundleCapabilityValidation:
             prompt="edit this",
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE_LITE,
-            input_image_id=uuid4(),
         )
 
         patch_model, patch_user = _patched()

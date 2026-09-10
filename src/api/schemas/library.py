@@ -370,10 +370,6 @@ class LibraryGroupDetail(msgspec.Struct, kw_only=True):
     badge: LibraryBadge
     """'image' if input-driven, 'prompt' if text-only."""
 
-    input_media: MediaObject | None = None
-    """Media envelope for the source input (upload or remixed output).
-    Present when badge == 'image'."""
-
     source_media: list[LibrarySourceMediaItem] = msgspec.field(default_factory=list)
     """Ordered source assets used for this job, including unavailable positions."""
 

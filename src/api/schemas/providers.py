@@ -12,36 +12,6 @@ import msgspec
 from src.core.enums import MediaKind, MediaSlot, RuntimeState
 
 
-class SourceMediaConstraints(msgspec.Struct, kw_only=True):
-    """Deprecated — derived from generation_modes; will be removed once
-    apex-frontend consumes generation_modes.
-
-    ``source_media is None`` means the model accepts no owned media input.
-    ``min`` and ``max`` bound the total count across every listed media kind;
-    ``required_for`` identifies the generation types that require at least one
-    source asset. Input order is significant and preserved end to end.
-    """
-
-    min: int
-    max: int
-    media_types: list[MediaKind]
-    required_for: list[str]
-
-
-class ModelInputs(msgspec.Struct, kw_only=True):
-    """Deprecated — derived from generation_modes; will be removed once
-    apex-frontend consumes generation_modes.
-
-    ``inputs.source_media == null`` means the model accepts no media input.
-    ``min`` / ``max`` bound the total number of source assets across all
-    media types, and ``media_types`` lists the allowed asset media kinds.
-    ``required_for`` identifies generation types that require source media.
-    Order is significant and preserved end to end.
-    """
-
-    source_media: SourceMediaConstraints | None = None
-
-
 class SourceMediaModeConstraints(msgspec.Struct, kw_only=True):
     """Ordered source-media contract for one generation mode."""
 
@@ -132,11 +102,6 @@ class ModelInfo(msgspec.Struct, kw_only=True):
     description: str
     """Short description for UI tooltips."""
 
-    capabilities: list[str]
-    """Deprecated — derived from generation_modes; will be removed once
-    apex-frontend consumes generation_modes.
-    """
-
     generation_modes: dict[str, GenerationModeInfo]
     """Authoritative input contracts keyed by generation_type."""
 
@@ -160,11 +125,6 @@ class ModelInfo(msgspec.Struct, kw_only=True):
 
     requires_age_verification: bool = False
     """Whether users must be age-verified before generating with this model."""
-
-    inputs: ModelInputs = msgspec.field(default_factory=ModelInputs)
-    """Deprecated — derived from generation_modes; will be removed once
-    apex-frontend consumes generation_modes.
-    """
 
     image: ImageConstraints | None = None
     """Image constraints. None for video-only models."""

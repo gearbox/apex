@@ -592,13 +592,6 @@ Request: {
   prompt: string (1–4096 chars),
   generation_type: GenerationType,
   model: ModelType,
-  input_image_id?: UUID,          // required for i2i / i2v / flf2v if source_output_id not set
-  source_output_id?: UUID,        // alternative to input_image_id — use an existing generation output as input
-                                  // mutually exclusive with input_image_id
-  source_images?: Array<{         // Grok I2I multi-reference inputs (1–4 items); backend resolves refs to provider URLs
-    input_image_id?: UUID,        // exactly one of input_image_id or source_output_id per item
-    source_output_id?: UUID
-  }>,                             // mutually exclusive with top-level input_image_id/source_output_id
   source_media?: Array<{ asset_ref: string }>, // ordered owned inputs; v2v requires one video asset
   negative_prompt?: string (≤2048 chars),  // applied by Aisha; stored but ignored by Grok
   aspect_ratio?: AspectRatio | null,  // omit/null ⇒ provider default for t2i (1:1 image, 16:9 video);
@@ -633,14 +626,10 @@ Response: JobCreatedResponse
 Status:   201 Created
 Errors:   400 (model_disabled | validation_error | generation_failed | not_implemented | provider_invalid_request), 402 insufficient_balance, 403 (model_not_allowed | age_verification_required), 409 (idempotency_conflict | no_active_gpu_session), 422 provider_moderation_rejected, 429 (rate_limited | provider_rate_limited), 502 (provider_malformed_response | provider_output_not_delivered), 503 (service_unavailable | provider_timeout | provider_unavailable | provider_authentication_failed | provider_unknown)
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
-Note:     source_output_id enables "remix from Library" — the backend resolves lineage automatically
-          (source_job_id + source_output_id) and records it on the new job.
-          source_images is storage-reference based (1–4 items); clients send upload/output IDs, not public URLs.
-          If source_images contains output references and no top-level source_output_id is set,
-          lineage is recorded from the first output-typed item in list order.
+Note:     source_media is storage-reference based; clients send upload/output asset references,
+          not public URLs. Lineage is recorded from the first output-typed item in list order.
           Tokens charged scale as (token_cost + input_token_cost × k) × n, where k is the
-          input-image count: 0 for text-to-image, 1 for input_image_id/source_output_id, or
-          source_images.length for multi-reference image inputs.
+          source-media count: `source_media.length` (or 0 when it is omitted).
           Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
           Aisha (ComfyUI) models require an active GPU session — start one via
           POST /v1/sessions before submitting an Aisha generation, otherwise 409 no_active_gpu_session is returned.
@@ -763,15 +752,6 @@ ModelInfo: {
       roles: string[] | null          // null => positions interchangeable; otherwise
     } | null                          // roles[i] names position i: "reference",
   } },                                // "first_frame", "last_frame", "source"
-  capabilities: string[],            // DEPRECATED — generation_modes keys, stable order
-  inputs: {                          // DEPRECATED — union of every non-null mode contract;
-    source_media: {                  //   shape per contracts/fe-api-contract-workflow-media-arc.md `ModelInputs`
-      min: int,
-      max: int,
-      media_types: string[],
-      required_for: string[],
-    } | null,
-  },
   unsupported_parameters: string[],  // controls the resolved bundle cannot apply
   is_enabled: bool,
   max_images: int,                   // max outputs per request
@@ -1740,7 +1720,6 @@ interface LibraryAssetPatch {
 interface LibraryGroupDetail {
   job_id: string;
   badge: LibraryBadge;             // "prompt" (t2i/t2v) or "image" (i2i/i2v/flf2v/v2v)
-  input_media: MediaObject | null; // present when badge == "image"
   prompt: string;
   negative_prompt: string | null;
   outputs: LibraryOutputItem[];    // non-thumbnail outputs, ordered by output_index
@@ -1900,9 +1879,7 @@ PricingRuleResponse: {
 ```
 
 Total generation charge is `(token_cost + input_token_cost × k) × n`, where `n` is the
-requested output count and `k` is the input-image count: `0` for T2I, `1` when
-`input_image_id` or `source_output_id` is set, or `source_images.length` when
-`source_images` is set.
+requested output count and `k` is `source_media.length` (or `0` when it is omitted).
 
 #### `GET /v1/billing/topup/options`
 

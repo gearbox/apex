@@ -80,7 +80,7 @@ class TestGetPrice:
 
 class TestQuote:
     @pytest.mark.parametrize(
-        ("n", "input_image_count", "expected"),
+        ("n", "source_media_count", "expected"),
         [
             (1, 0, 20),
             (4, 0, 80),
@@ -90,7 +90,7 @@ class TestQuote:
         ],
     )
     async def test_applies_per_output_and_per_input_formula(
-        self, n: int, input_image_count: int, expected: int
+        self, n: int, source_media_count: int, expected: int
     ) -> None:
         rule = _make_rule(token_cost=20, input_token_cost=2)
         repo = _make_repo(price_rule=rule)
@@ -104,7 +104,7 @@ class TestQuote:
                 "i2i",
                 "grok-imagine-image",
                 n=n,
-                input_image_count=input_image_count,
+                source_media_count=source_media_count,
                 session=session,
             )
 
@@ -123,18 +123,18 @@ class TestQuote:
                     "i2i",
                     "grok-imagine-image",
                     n=1,
-                    input_image_count=0,
+                    source_media_count=0,
                     session=session,
                 )
 
     @pytest.mark.parametrize(
-        ("n", "input_image_count"),
+        ("n", "source_media_count"),
         [
             (0, 0),
             (1, -1),
         ],
     )
-    async def test_rejects_invalid_quote_inputs(self, n: int, input_image_count: int) -> None:
+    async def test_rejects_invalid_quote_inputs(self, n: int, source_media_count: int) -> None:
         repo = _make_repo(price_rule=_make_rule())
         session = AsyncMock()
 
@@ -147,7 +147,7 @@ class TestQuote:
                     "i2i",
                     "grok-imagine-image",
                     n=n,
-                    input_image_count=input_image_count,
+                    source_media_count=source_media_count,
                     session=session,
                 )
 
@@ -186,7 +186,7 @@ class TestQuote:
                 "i2i",
                 "grok-imagine-image",
                 n=2,
-                input_image_count=1,
+                source_media_count=1,
                 session=session,
             )
 

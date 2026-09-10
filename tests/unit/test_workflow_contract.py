@@ -508,6 +508,16 @@ def test_parser_rejects_video_slots_on_image_workflows(slot: MediaSlot, message:
     assert message in str(error.value)
 
 
+def test_parser_rejects_reference_slots_on_video_workflows() -> None:
+    raw = _map()
+    raw["media"] = "video"
+
+    with pytest.raises(WorkflowContractError) as error:
+        parse_workflow_map(raw, Path("bundle.yaml"))
+
+    assert "slot 'reference' is not supported for video workflows" in str(error.value)
+
+
 @pytest.mark.parametrize(
     ("kind", "slot", "message"),
     [

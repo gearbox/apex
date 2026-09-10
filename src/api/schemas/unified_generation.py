@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Annotated
-from uuid import UUID
 
 import msgspec
 
@@ -25,31 +24,6 @@ ImageDim = Annotated[int, msgspec.Meta(ge=256, le=4096)]
 Cfg = Annotated[float, msgspec.Meta(ge=0.0, le=30.0)]
 StepsOpt = Annotated[int, msgspec.Meta(ge=1, le=150)]  # raise from le=20; bundle clamps per-model
 Denoise = Annotated[float, msgspec.Meta(ge=0.0, le=1.0)]
-
-
-class SourceImageReference(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
-    """Backend-owned image input reference.
-
-    The API accepts storage IDs only. Providers resolve these IDs to the
-    concrete URLs/bytes they need internally.
-    """
-
-    input_image_id: UUID | None = None
-    """ID of a previously uploaded image."""
-
-    source_output_id: UUID | None = None
-    """ID of a generated output to use as input."""
-
-    def __post_init__(self) -> None:
-        if (self.input_image_id is None) == (self.source_output_id is None):
-            raise ValueError(
-                "Each source_images item must provide exactly one of input_image_id or source_output_id"
-            )
-
-
-SourceImageReferences = Annotated[
-    list[SourceImageReference], msgspec.Meta(min_length=1, max_length=4)
-]
 
 
 class SourceMediaReference(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
@@ -85,18 +59,10 @@ class UnifiedGenerationRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     source_media: SourceMediaReferences | None = None
     """Ordered owned-library media input references.
 
-    Order is significant.  The model capability's ``inputs.source_media``
-    declaration determines allowed kinds and cardinality.
+    Order is significant. ``generation_modes[generation_type].source_media``
+    on ``GET /v1/providers`` determines allowed kinds, cardinality and
+    positional roles.
     """
-
-    input_image_id: UUID | None = None
-    """Deprecated alias for ``source_media=[{asset_ref: "upload:<id>"}]``."""
-
-    source_output_id: UUID | None = None
-    """Deprecated alias for ``source_media=[{asset_ref: "output:<id>"}]``."""
-
-    source_images: SourceImageReferences | None = None
-    """Deprecated ordered image aliases, normalized at the service boundary."""
 
     negative_prompt: NegativePromptStr | None = None
     """Negative prompt. Applied by Aisha provider; stored but ignored by Grok."""

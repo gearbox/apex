@@ -2,22 +2,17 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
-from src.api.schemas.unified_generation import (
-    SourceImageReference,
-    SourceMediaReference,
-    UnifiedGenerationRequest,
-)
+from src.api.schemas.unified_generation import SourceMediaReference, UnifiedGenerationRequest
 from src.api.services.generation.generation_modes import resolve_generation_modes
 from src.api.services.generation.service import GenerationService
 from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
     SourceMediaResolver,
     SourceMediaValidationError,
-    normalize_source_media,
 )
 from src.core.enums import (
     GenerationType,
@@ -32,17 +27,13 @@ from tests.unit.helpers import aisha_video_capabilities
 
 def _i2i_request(
     *,
-    input_image_id: UUID | None = None,
     source_media: list[SourceMediaReference] | None = None,
-    source_images: list[SourceImageReference] | None = None,
 ) -> UnifiedGenerationRequest:
     return UnifiedGenerationRequest(
         prompt="Edit this image",
         generation_type=GenerationType.I2I,
         model=ModelType.GROK_IMAGINE_IMAGE,
-        input_image_id=input_image_id,
         source_media=source_media,
-        source_images=source_images,
     )
 
 
@@ -228,37 +219,32 @@ def test_validator_rejects_the_wrong_kind_in_a_named_role() -> None:
         )
 
 
-def test_legacy_source_images_normalize_in_order() -> None:
-    upload_id = uuid4()
-    output_id = uuid4()
-
-    normalized = normalize_source_media(
-        _i2i_request(
-            source_images=[
-                SourceImageReference(input_image_id=upload_id),
-                SourceImageReference(source_output_id=output_id),
-            ]
-        )
-    )
-
-    assert normalized.source_media is not None
-    assert [source.asset_ref for source in normalized.source_media] == [
-        f"upload:{upload_id}",
-        f"output:{output_id}",
-    ]
-    assert normalized.input_image_id is None
-    assert normalized.source_output_id is None
-    assert normalized.source_images is None
-
-
-def test_source_media_and_legacy_alias_are_rejected() -> None:
-    with pytest.raises(SourceMediaValidationError, match="cannot be combined"):
-        normalize_source_media(
-            _i2i_request(
-                input_image_id=uuid4(),
-                source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
-            )
-        )
+@pytest.mark.parametrize(
+    ("minimum", "maximum", "media_types", "roles", "message"),
+    [
+        (2, 1, frozenset({MediaKind.IMAGE}), (), "1 <= min <= max"),
+        (0, 1, frozenset({MediaKind.IMAGE}), (), "1 <= min <= max"),
+        (1, 1, frozenset(), (), "at least one media kind"),
+        (
+            1,
+            1,
+            frozenset({MediaKind.IMAGE}),
+            (MediaSlot.REFERENCE, MediaSlot.REFERENCE),
+            "fixed cardinality",
+        ),
+        (1, 2, frozenset({MediaKind.IMAGE}), (MediaSlot.REFERENCE,), "fixed cardinality"),
+        (1, 1, frozenset({MediaKind.VIDEO}), (MediaSlot.REFERENCE,), "not in media_types"),
+    ],
+)
+def test_source_media_constraints_reject_impossible_contracts(
+    minimum: int,
+    maximum: int,
+    media_types: frozenset[MediaKind],
+    roles: tuple[MediaSlot, ...],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        SourceMediaConstraints(minimum, maximum, media_types, roles)
 
 
 async def test_resolver_returns_interleaved_sources_in_request_order(monkeypatch) -> None:

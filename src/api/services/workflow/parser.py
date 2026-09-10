@@ -187,6 +187,11 @@ def parse_workflow_map(data: Mapping[str, object], source: Path) -> WorkflowMap:
                 MediaSlot.SOURCE,
             }:
                 errors.append(f"{prefix}.slot {slot.value!r} requires media video")
+            if media is MediaKind.VIDEO and slot is MediaSlot.REFERENCE:
+                errors.append(
+                    f"{prefix}.slot 'reference' is not supported for video workflows; "
+                    "use 'first_frame', 'last_frame' or 'source'"
+                )
         if target_role is not None:
             target_node = nodes.get(target_role)
             if target_node is None:

@@ -70,7 +70,6 @@ class TestModelInfoSchema:
             model_key="grok-imagine-image",
             name="Grok Imagine Image",
             description="Flagship image gen",
-            capabilities=["t2i", "i2i"],
             generation_modes={},
             is_enabled=True,
             max_images=10,
@@ -84,14 +83,13 @@ class TestModelInfoSchema:
         assert info.image is not None
         assert info.image.output_resolutions == ["1024x1024", "2048x2048"]
         assert info.image.min_height is None  # Grok: not user-controllable
-        assert "t2i" in info.capabilities
+        assert "capabilities" not in msgspec.json.decode(msgspec.json.encode(info))
 
     def test_aisha_model_with_height_control(self) -> None:
         info = ModelInfo(
             model_key="aisha-image",
             name="Aisha Image",
             description="ComfyUI-based generation",
-            capabilities=["t2i", "i2i"],
             generation_modes={},
             is_enabled=True,
             max_images=4,
@@ -114,7 +112,6 @@ class TestModelInfoSchema:
             model_key="grok-imagine-video",
             name="Grok Imagine Video",
             description="Video gen",
-            capabilities=["t2v", "i2v", "v2v", "flf2v"],
             generation_modes={},
             is_enabled=True,
             max_images=1,
@@ -131,7 +128,6 @@ class TestModelInfoSchema:
             model_key="test",
             name="Test",
             description="",
-            capabilities=["t2v"],
             generation_modes={},
             is_enabled=True,
             max_images=1,
@@ -150,7 +146,6 @@ class TestModelInfoSchema:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
             generation_modes={},
             is_enabled=True,
             max_images=4,
@@ -165,7 +160,6 @@ class TestModelInfoSchema:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
             generation_modes={},
             is_enabled=True,
             max_images=4,
@@ -187,7 +181,6 @@ class TestModelInfoSchema:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
             generation_modes={},
             is_enabled=True,
             max_images=4,
@@ -231,35 +224,22 @@ class TestModelInfoSchema:
         assert info.provisioning is None
 
     @pytest.mark.parametrize("model_type", ModelType)
-    def test_legacy_fields_are_derived_from_generation_modes(self, model_type: ModelType) -> None:
+    def test_generation_modes_are_the_only_discovery_input_contract(
+        self, model_type: ModelType
+    ) -> None:
         info = _build_model_info(
             model_type,
             SimpleNamespace(name="Test", description="", is_enabled=True),
             runtime=None,
         )
-        source_media = info.inputs.source_media
 
-        assert info.capabilities == list(info.generation_modes)
-        contracts = [
-            mode.source_media
-            for mode in info.generation_modes.values()
-            if mode.source_media is not None
-        ]
-        if not contracts:
-            assert source_media is None
-            return
-
-        assert source_media is not None
-        assert source_media.min == min(contract.min for contract in contracts)
-        assert source_media.max == max(contract.max for contract in contracts)
-        assert source_media.media_types == sorted(
-            {kind for contract in contracts for kind in contract.media_types},
-            key=lambda kind: kind.value,
-        )
-        assert source_media.required_for == [
-            generation_type
-            for generation_type, mode in info.generation_modes.items()
-            if mode.source_media is not None and mode.source_media.min >= 1
+        encoded = msgspec.json.decode(msgspec.json.encode(info))
+        assert "capabilities" not in encoded
+        assert "inputs" not in encoded
+        assert list(info.generation_modes) == [
+            generation_type.value
+            for generation_type in GenerationType
+            if generation_type in get_model_meta(model_type).generation_modes
         ]
 
     @pytest.mark.parametrize(
@@ -301,7 +281,7 @@ class TestModelInfoSchema:
                 )
                 assert advertised.roles == (list(contract.roles) if contract.roles else None)
 
-    def test_source_media_required_for_tracks_narrowed_indexed_capabilities(self) -> None:
+    def test_generation_modes_track_narrowed_indexed_capabilities(self) -> None:
         capabilities = BundleCapabilities(
             media=MediaKind.IMAGE,
             generation_modes={
@@ -321,9 +301,7 @@ class TestModelInfoSchema:
             capabilities=capabilities,
         )
 
-        assert info.capabilities == [GenerationType.I2I.value]
-        assert info.inputs.source_media is not None
-        assert info.inputs.source_media.required_for == [GenerationType.I2I.value]
+        assert list(info.generation_modes) == [GenerationType.I2I.value]
 
     def test_aisha_image_lite_reports_t2i_only_no_negative_no_source_media(self) -> None:
         """Z-C1: aisha-image-lite (zit.cyberrealistic) is t2i-only, has no
@@ -357,9 +335,9 @@ class TestModelInfoSchema:
             capabilities=capabilities,
         )
 
-        assert info.capabilities == [GenerationType.T2I.value]
+        assert list(info.generation_modes) == [GenerationType.T2I.value]
         assert info.supports_negative_prompt is False
-        assert info.inputs.source_media is None
+        assert info.generation_modes[GenerationType.T2I.value].source_media is None
         assert "negative_prompt" in info.unsupported_parameters
 
 
@@ -369,7 +347,6 @@ class TestProviderInfoSchema:
             model_key="aisha-image",
             name="Aisha Image",
             description="ComfyUI",
-            capabilities=["t2i", "i2i"],
             generation_modes={},
             is_enabled=True,
             max_images=4,
@@ -418,7 +395,6 @@ class TestRequiresAgeVerification:
             model_key="grok-imagine-image",
             name="Grok",
             description="",
-            capabilities=["t2i"],
             generation_modes={},
             is_enabled=True,
             max_images=10,
@@ -448,7 +424,6 @@ class TestRequiresAgeVerification:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
             generation_modes={},
             is_enabled=True,
             max_images=4,

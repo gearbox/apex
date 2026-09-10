@@ -652,7 +652,7 @@ async def test_input_token_cost_persists_and_drives_quote(
             "i2i",
             model,
             n=2,
-            input_image_count=4,
+            source_media_count=4,
             session=db_session,
         )
         == 64
@@ -667,7 +667,7 @@ async def test_input_token_cost_persists_and_drives_quote(
             "i2i",
             model,
             n=2,
-            input_image_count=4,
+            source_media_count=4,
             session=db_session,
         )
         == 80

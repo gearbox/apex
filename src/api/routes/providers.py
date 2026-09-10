@@ -20,12 +20,10 @@ from src.api.schemas.providers import (
     GenerationModeInfo,
     ImageConstraints,
     ModelInfo,
-    ModelInputs,
     ModelProvisioningHintResponse,
     ModelRuntimeResponse,
     ProviderInfo,
     ProvidersResponse,
-    SourceMediaConstraints,
     SourceMediaModeConstraints,
     UserContext,
     VideoConstraints,
@@ -60,8 +58,6 @@ from src.db.repositories.user import UserRepository
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from src.core.generation_mode import SourceMediaConstraints as ModeSourceMediaConstraints
-
 logger = structlog.get_logger(__name__)
 
 # Provider display names — single source of truth; a missing entry raises KeyError (completeness test guards this)
@@ -90,7 +86,6 @@ def _build_model_info(
     has_indexed_workflow = isinstance(capabilities, BundleCapabilities)
     modes = resolve_generation_modes(mt, capabilities=capabilities)
     ordered = [generation_type for generation_type in GenerationType if generation_type in modes]
-    generation_types = [generation_type.value for generation_type in ordered]
     if requires_indexed_workflow and isinstance(capabilities, BundleCapabilities):
         max_images = min(meta.max_concurrent_outputs, capabilities.max_batch_size)
         supports_negative = meta.supports_negative_prompt and capabilities.supports_negative_prompt
@@ -110,34 +105,10 @@ def _build_model_info(
         supports_negative = meta.supports_negative_prompt
         unsupported_parameters = []
 
-    contracts: list[ModeSourceMediaConstraints] = []
-    for generation_type in ordered:
-        contract = modes[generation_type].source_media
-        if contract is not None:
-            contracts.append(contract)
-    legacy_source_media = (
-        SourceMediaConstraints(
-            min=min(contract.min for contract in contracts),
-            max=max(contract.max for contract in contracts),
-            media_types=sorted(
-                {kind for contract in contracts for kind in contract.media_types},
-                key=lambda kind: kind.value,
-            ),
-            required_for=[
-                generation_type.value
-                for generation_type in ordered
-                if (contract := modes[generation_type].source_media) is not None
-                and contract.min >= 1
-            ],
-        )
-        if contracts
-        else None
-    )
     return ModelInfo(
         model_key=mt.value,
         name=record.name,  # type: ignore[attr-defined]
         description=record.description,  # type: ignore[attr-defined]
-        capabilities=generation_types,
         generation_modes={
             generation_type.value: GenerationModeInfo(
                 source_media=(
@@ -160,7 +131,6 @@ def _build_model_info(
         unsupported_parameters=unsupported_parameters,
         aspect_ratios=[ar.value for ar in meta.aspect_ratios],
         requires_age_verification=meta.requires_age_verification,
-        inputs=ModelInputs(source_media=legacy_source_media),
         image=(
             ImageConstraints(
                 min_height=meta.image.min_height,

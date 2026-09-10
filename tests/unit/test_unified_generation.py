@@ -10,11 +10,7 @@ from uuid import UUID, uuid4
 import msgspec
 import pytest
 
-from src.api.schemas.unified_generation import (
-    SourceImageReference,
-    SourceMediaReference,
-    UnifiedGenerationRequest,
-)
+from src.api.schemas.unified_generation import SourceMediaReference, UnifiedGenerationRequest
 from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.provider_failures import (
     ProviderFailure,
@@ -32,7 +28,6 @@ from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
     SourceMediaResolver,
     SourceMediaValidationError,
-    normalize_source_media,
 )
 from src.core.enums import (
     AspectRatio,
@@ -65,102 +60,15 @@ class TestUnifiedGenerationRequestSchema:
         assert req.prompt == "A cat"
         assert req.n == 1
         assert req.aspect_ratio is None
-        assert req.input_image_id is None
 
-    def test_i2i_without_image_id_is_valid_at_schema_level(self) -> None:
-        """Schema does not enforce input_image_id — the service does."""
+    def test_i2i_without_source_media_is_valid_at_schema_level(self) -> None:
+        """The service, rather than decoding, applies the mode contract."""
         req = UnifiedGenerationRequest(
             prompt="Edit this",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_IMAGINE_IMAGE,
         )
-        assert req.input_image_id is None
-
-    def test_source_images_accepts_storage_references(self) -> None:
-        input_image_id = uuid4()
-        source_output_id = uuid4()
-        req = UnifiedGenerationRequest(
-            prompt="Edit these",
-            generation_type=GenerationType.I2I,
-            model=ModelType.GROK_IMAGINE_IMAGE,
-            source_images=[
-                SourceImageReference(input_image_id=input_image_id),
-                SourceImageReference(source_output_id=source_output_id),
-            ],
-        )
-
-        assert req.source_images is not None
-        assert req.source_images[0].input_image_id == input_image_id
-        assert req.source_images[1].source_output_id == source_output_id
-
-    def test_source_images_allows_duplicate_references(self) -> None:
-        input_image_id = uuid4()
-        req = UnifiedGenerationRequest(
-            prompt="Edit duplicates",
-            generation_type=GenerationType.I2I,
-            model=ModelType.GROK_IMAGINE_IMAGE,
-            source_images=[
-                SourceImageReference(input_image_id=input_image_id),
-                SourceImageReference(input_image_id=input_image_id),
-            ],
-        )
-
-        assert req.source_images is not None
-        assert [item.input_image_id for item in req.source_images] == [
-            input_image_id,
-            input_image_id,
-        ]
-
-    def test_source_images_storage_references_decode_from_json(self) -> None:
-        input_image_id = uuid4()
-        source_output_id = uuid4()
-        payload = (
-            b'{"prompt":"Edit these","generation_type":"i2i",'
-            b'"model":"grok-imagine-image","source_images":['
-            + f'{{"input_image_id":"{input_image_id}"}}'.encode()
-            + b","
-            + f'{{"source_output_id":"{source_output_id}"}}'.encode()
-            + b"]}"
-        )
-
-        req = msgspec.json.decode(payload, type=UnifiedGenerationRequest)
-
-        assert req.source_images is not None
-        assert req.source_images[0].input_image_id == input_image_id
-        assert req.source_images[1].source_output_id == source_output_id
-
-    def test_source_images_rejects_more_than_four_references(self) -> None:
-        refs = ",".join(f'{{"input_image_id":"{uuid4()}"}}' for _ in range(5))
-        payload = (
-            b'{"prompt":"Edit these","generation_type":"i2i",'
-            b'"model":"grok-imagine-image","source_images":[' + refs.encode() + b"]}"
-        )
-
-        with pytest.raises(msgspec.ValidationError):
-            msgspec.json.decode(payload, type=UnifiedGenerationRequest)
-
-    def test_source_images_reference_rejects_both_sources_on_decode(self) -> None:
-        image_id = uuid4()
-        output_id = uuid4()
-        payload = (
-            b'{"prompt":"Edit these","generation_type":"i2i",'
-            b'"model":"grok-imagine-image","source_images":['
-            + (f'{{"input_image_id":"{image_id}","source_output_id":"{output_id}"}}').encode()
-            + b"]}"
-        )
-
-        with pytest.raises(msgspec.ValidationError):
-            msgspec.json.decode(payload, type=UnifiedGenerationRequest)
-
-    def test_source_images_reference_requires_exactly_one_source(self) -> None:
-        image_id = uuid4()
-        output_id = uuid4()
-
-        with pytest.raises(ValueError, match="exactly one"):
-            SourceImageReference(input_image_id=image_id, source_output_id=output_id)
-
-        with pytest.raises(ValueError, match="exactly one"):
-            SourceImageReference()
+        assert req.source_media is None
 
     def test_video_fields(self) -> None:
         req = UnifiedGenerationRequest(
@@ -209,6 +117,18 @@ class TestUnifiedGenerationRequestSchema:
             msgspec.json.decode(
                 b'{"prompt":"x","generation_type":"v2v","model":"grok-imagine-video",'
                 b'"input_video_url":"https://example.test/source.mp4"}',
+                type=UnifiedGenerationRequest,
+            )
+
+    @pytest.mark.parametrize("field", ("input_image_id", "source_output_id", "source_images"))
+    def test_legacy_source_fields_are_rejected_as_unknown(self, field: str) -> None:
+        with pytest.raises(msgspec.ValidationError):
+            msgspec.json.decode(
+                (
+                    '{"prompt":"x","generation_type":"i2i",'
+                    '"model":"grok-imagine-image",'
+                    f'"{field}":null}}'
+                ).encode(),
                 type=UnifiedGenerationRequest,
             )
 
@@ -548,18 +468,6 @@ class TestGenerationServiceValidation:
 
         resolve.assert_not_awaited()
 
-    def test_validate_legacy_source_aliases_are_mutually_exclusive(self) -> None:
-        request = UnifiedGenerationRequest(
-            prompt="Edit",
-            generation_type=GenerationType.I2I,
-            model=ModelType.GROK_IMAGINE_IMAGE,
-            input_image_id=uuid4(),
-            source_images=[SourceImageReference(source_output_id=uuid4())],
-        )
-
-        with pytest.raises(SourceMediaValidationError, match="mutually exclusive"):
-            normalize_source_media(request)
-
     def test_source_media_count_t2i(self) -> None:
         request = UnifiedGenerationRequest(
             prompt="A cat",
@@ -765,7 +673,6 @@ class TestGenerationServiceGenerate:
             prompt="Edit",
             generation_type=GenerationType.I2I,
             model=ModelType.GROK_2_IMAGE,
-            input_image_id=uuid4(),
         )
         with pytest.raises(ValueError, match="does not support"):
             await service.generate(
@@ -1226,7 +1133,7 @@ class TestGenerationServiceGenerate:
             )
 
         assert pricing.quote.await_args.kwargs["n"] == 2
-        assert pricing.quote.await_args.kwargs["input_image_count"] == 3
+        assert pricing.quote.await_args.kwargs["source_media_count"] == 3
         billing.assert_sufficient_balance.assert_awaited_once_with(account.id, 123, session=session)
         assert mock_provider.submit.await_args.kwargs["token_cost"] == 123
         assert response.tokens_charged == 123

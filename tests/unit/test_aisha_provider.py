@@ -19,7 +19,7 @@ import pytest
 import structlog.testing
 from PIL import Image
 
-from src.api.schemas.unified_generation import SourceImageReference, UnifiedGenerationRequest
+from src.api.schemas.unified_generation import SourceMediaReference, UnifiedGenerationRequest
 from src.api.services.bundle_index import BundleNotFoundError
 from src.api.services.generation.aisha.handlers import AishaImageGenerationHandler
 from src.api.services.generation.aisha_provider import AishaGenerationProvider
@@ -120,7 +120,7 @@ class TestAishaProviderValidation:
         with pytest.raises(FeatureNotSupportedError, match="Aisha video"):
             provider.validate(request)
 
-    def test_source_images_validation_is_deferred_to_the_service(self) -> None:
+    def test_source_media_validation_is_deferred_to_the_service(self) -> None:
         provider = AishaGenerationProvider(
             workflow_service=MagicMock(),
             gpu_session_service=MagicMock(),
@@ -130,7 +130,7 @@ class TestAishaProviderValidation:
             prompt="edit multiple references",
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE,
-            source_images=[SourceImageReference(input_image_id=uuid4())],
+            source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
         )
 
         provider.validate(request)
@@ -595,7 +595,7 @@ def _make_i2i_request_with_user_image(input_image_id: UUID) -> UnifiedGeneration
         model=ModelType.AISHA_IMAGE,
         aspect_ratio=AspectRatio.RATIO_1_1,
         n=1,
-        input_image_id=input_image_id,
+        source_media=[SourceMediaReference(asset_ref=f"upload:{input_image_id}")],
     )
 
 
@@ -606,7 +606,7 @@ def _make_i2i_request_with_source_output(source_output_id: UUID) -> UnifiedGener
         model=ModelType.AISHA_IMAGE,
         aspect_ratio=AspectRatio.RATIO_1_1,
         n=1,
-        source_output_id=source_output_id,
+        source_media=[SourceMediaReference(asset_ref=f"output:{source_output_id}")],
     )
 
 
@@ -1413,7 +1413,6 @@ class TestResolveEffectiveAspectRatio:
             model=ModelType.AISHA_IMAGE,
             aspect_ratio=AspectRatio.RATIO_9_16,
             n=1,
-            input_image_id=uuid4(),
         )
         result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
             request, (_png_bytes(size=(1600, 900)), "source.png")
@@ -1436,7 +1435,6 @@ class TestResolveEffectiveAspectRatio:
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE,
             n=1,
-            input_image_id=uuid4(),
         )
         result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
             request, (_png_bytes(size=(1600, 900)), "source.png")
@@ -1449,7 +1447,6 @@ class TestResolveEffectiveAspectRatio:
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE,
             n=1,
-            input_image_id=uuid4(),
         )
         with pytest.raises(ValueError, match="not decodable"):
             await AishaImageGenerationHandler._resolve_effective_aspect_ratio(

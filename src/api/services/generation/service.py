@@ -17,7 +17,6 @@ from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
     SourceMediaResolver,
     SourceMediaValidationError,
-    normalize_source_media,
 )
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
@@ -114,7 +113,7 @@ class GenerationService:
 
     Responsibilities:
     1. Validate model-generation_type compatibility (via ModelType enum)
-    2. Normalize, resolve, and validate owned media inputs
+    2. Resolve and validate owned media inputs
     3. Validate n <= model.max_concurrent_outputs
     4. Check model is enabled in generation_models table
     4.5. Global per-model rate limit check
@@ -194,7 +193,8 @@ class GenerationService:
         generation: BundleGenerationConfig,
     ) -> None:
         """Reject overrides a bound workflow cannot write before billing begins."""
-        if request.generation_type not in capabilities.generation_types:
+        resolved_modes = resolve_generation_modes(request.model, capabilities=capabilities)
+        if request.generation_type not in resolved_modes:
             raise UnsupportedGenerationParameterError(["generation_type"])
         unsupported: list[str] = []
         if request.negative_prompt is not None and not capabilities.supports_negative_prompt:
@@ -235,10 +235,6 @@ class GenerationService:
         post_commit_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
     ) -> JobCreatedResponse:
         """Execute the full generation pipeline."""
-        # The request crosses its only legacy compatibility boundary here.
-        # Every downstream consumer receives the normalized shape only.
-        request = normalize_source_media(request)
-
         # 1. Model-generation_type compatibility (declarative, enum-driven)
         if not request.model.supports_generation_type(request.generation_type):
             raise ValueError(
@@ -374,7 +370,7 @@ class GenerationService:
             request.generation_type.value,
             request.model.value,
             n=request.n,
-            input_image_count=self._source_media_count(request),
+            source_media_count=self._source_media_count(request),
             session=session,
         )
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)
@@ -698,5 +694,5 @@ class GenerationService:
 
     @staticmethod
     def _source_media_count(request: UnifiedGenerationRequest) -> int:
-        """Return normalized source cardinality for input-aware pricing."""
+        """Return source-media cardinality for input-aware pricing."""
         return len(request.source_media or [])

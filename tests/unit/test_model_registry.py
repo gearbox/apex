@@ -11,7 +11,6 @@ import pytest
 
 import src.db.models as models
 from src.core.enums import (
-    MEDIA_SLOT_KINDS,
     AspectRatio,
     GenerationType,
     MediaKind,
@@ -49,10 +48,6 @@ class TestModelRegistryCompleteness:
                 assert (contract is None) is (not generation_type.input_kinds)
                 if contract is not None:
                     assert contract.media_types <= generation_type.input_kinds
-                    assert not contract.roles or (
-                        len(contract.roles) == contract.min == contract.max
-                        and len({MEDIA_SLOT_KINDS[role] for role in contract.roles}) == 1
-                    )
 
 
 _EXPECTED_MODE_CONTRACTS: Mapping[

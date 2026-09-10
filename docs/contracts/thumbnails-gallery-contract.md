@@ -134,6 +134,9 @@ Set `sizes` per layout (grid vs lightbox) so the browser picks the right variant
 
 ## 4. Gallery refactor specifics
 
+> **Superseded shape:** For the current `LibraryGroupDetail` input-media contract, use the
+> [workflow-media contract](fe-api-contract-workflow-media-arc.md#4-get-v1librarygroupsjob_id).
+
 - **Grid cover is now the job's OWN output**, never the input/source image. Previously, N generations from one source rendered as N near-identical tiles (all showing the input). Now each tile shows that job's own output. Expect distinct covers per job.
 - **Lineage moved off the cover.** "This was image-to-image / video-to-video" is conveyed by `GalleryGridItem.badge` (and, in detail, by `input_media` + the structured `lineage` object). If any FE logic inferred lineage from the cover image, switch to `badge`/`lineage`.
 - **Grid media type:** there is no top-level `media_type` on `GalleryGridItem` — read `cover.media_type` (video covers carry the MP4 as `original` + poster `variants`).

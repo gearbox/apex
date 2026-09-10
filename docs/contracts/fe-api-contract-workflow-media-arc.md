@@ -46,20 +46,31 @@ enable, disable or bound a control now comes from `GET /v1/providers`.
 | `media_types` | Allowed asset media kinds. Values: `"image"`, `"video"`. |
 | `roles` | `null` ⇒ positions are interchangeable. Otherwise `roles[i]` names the slot filled by source `i` (`reference`, `first_frame`, `last_frame`, or `source`). |
 
-Resolution is deterministic: select a model and generation type, read that mode's contract, then
-apply its requiredness (`min`), cardinality bounds, media types, and positional roles. Do not infer
-a type from selected media and do not hardcode a model/type matrix.
+The backend still requires an explicit `generation_type`, but the user does not select one. The
+frontend resolves it from the user action, selected source media, and advertised modes:
 
-### 1.2 Deprecated compatibility fields: `capabilities`, `inputs`, and `required_for`
+```text
+model.generation_modes  +  selected source media  +  user action
+                            ↓
+                frontend resolves generation_type
+                            ↓
+                POST /v1/generate { generation_type, source_media }
+```
 
-These fields remain while apex-frontend migrates, but are derived from `generation_modes` and will
-be removed afterwards:
+The action supplies intent; the advertised contracts say which resolutions are legal. Cardinality
+alone is not enough: with two images selected, “add reference” keeps `i2v` where advertised,
+while “add end frame” selects `flf2v`.
 
-- `capabilities` is the stable-order list of `generation_modes` keys.
-- `inputs.source_media` unions every non-null mode contract (minimum of minima, maximum of maxima,
-  and union of media kinds).
-- `inputs.source_media.required_for` contains every mode whose per-mode `min >= 1`, including
-  `v2v` when it is offered.
+Video workflows currently cannot declare `reference` slots. Multi-reference video input is not
+representable yet, so every current video mode has named positional roles rather than `roles: null`.
+
+### 1.2 Removed compatibility fields: `capabilities`, `inputs`, and `required_for`
+
+These fields no longer exist. `generation_modes` is the only discovery input contract.
+
+`inputs.source_media` was hazardous because it was a lossy union across modes: for
+`grok-imagine-video`, it described `media_types: ["image", "video"]` with `max: 1`, a shape no
+individual mode accepts.
 
 ### 1.3 New: `unsupported_parameters`
 
@@ -86,28 +97,17 @@ Notes:
   consistent; use either, but prefer `unsupported_parameters` so one code path drives every
   control.
 
-### 1.4 Changed semantics: `capabilities`
-
-For on-demand (Aisha) models this is now the **intersection** of the static registry and the
-resolved bundle's workflow map. A bundle whose graph has no image loader advertises `["t2i"]`
-even though the model previously advertised `["t2i", "i2i"]`.
-
-Concretely, `zit.cyberrealistic` reports `capabilities: ["t2i"]`,
-`supports_negative_prompt: false` and `inputs.source_media: null`. If the UI offers i2i for that
-model, every such request 422s.
-
-### 1.5 Changed semantics: `is_enabled`
+### 1.4 Changed semantics: `is_enabled`
 
 For on-demand models, `is_enabled` is now `false` when the bundle index has not yet synced or the
 bundle is unresolvable — even if the model is enabled in the database. The model still appears in
 the list with its static constraints so a card can render, but it must be presented as
 unavailable. Treat `is_enabled: false` as "render disabled", never as "hide".
 
-### 1.6 Unchanged
+### 1.5 Unchanged
 
 `model_key`, `name`, `description`, `max_images`, `max_prompt_length`, `aspect_ratios`,
-`requires_age_verification`, `session_state`, `image`, `video`. Grok models are unaffected by all
-of the above except that they now also carry `inputs`.
+`requires_age_verification`, `session_state`, `image`, `video`.
 
 ---
 
@@ -137,21 +137,10 @@ of the above except that they now also carry `inputs`.
 - The backend resolves each reference, verifies ownership and product scope, and rejects
   thumbnails and duplicates.
 
-### 2.2 Deprecated aliases — remove them
+### 2.2 Removed aliases
 
-`input_image_id`, `source_output_id` and `source_images` still work for one minor release and are
-normalised server-side. Mapping:
-
-| Legacy | Replacement |
-|---|---|
-| `"input_image_id": "X"` | `"source_media": [{ "asset_ref": "upload:X" }]` |
-| `"source_output_id": "X"` | `"source_media": [{ "asset_ref": "output:X" }]` |
-| `"source_images": [{input_image_id: A}, {source_output_id: B}]` | `"source_media": [{asset_ref: "upload:A"}, {asset_ref: "output:B"}]` |
-
-**Combining any alias with `source_media` is a 422.** There is no precedence rule — send one
-shape or the other. Every alias use is logged server-side as
-`generation.request.legacy_source_field`; the aliases are removed once that log goes quiet, so
-migrating promptly is what sets the removal date.
+`source_media` is the only source input. `input_image_id`, `source_output_id`, and `source_images`
+are removed and rejected as unknown request fields.
 
 ### 2.3 Unchanged request fields
 
@@ -176,8 +165,8 @@ All errors use the existing `ErrorEnvelope` shape: `{ error, message, status_cod
 ### 3.1 `validation_error` — 422
 
 Returned for source-media problems: malformed `asset_ref`, unresolvable or non-owned reference,
-thumbnail reference, duplicate references, count outside `min`/`max`, wrong media kind, media
-supplied to a model that accepts none, or an alias combined with `source_media`.
+thumbnail reference, duplicate references, count outside `min`/`max`, wrong media kind, or media
+supplied to a model that accepts none.
 
 The `message` names the **position** in the list, not the asset id, so it is safe to surface
 directly. A missing asset and an asset belonging to another user return an identical response by
@@ -198,19 +187,13 @@ Two things worth knowing:
 - A parameter equal to the model's default never triggers this. Only a value that **differs** from
   the bundle default and is not writable is rejected. So leaving controls at their defaults is
   always safe.
-- `generation_type` can appear as the offending parameter when the resolved bundle does not
-  support the requested type — which is the §1.4 case reaching the server.
+- `generation_type` can appear as the offending parameter when the resolved effective mode set
+  does not offer the requested type.
 
 ### 3.3 `not_implemented` — 400
 
-One provider-level refusal can arrive even for a request that satisfies every advertised
-constraint: an Aisha model currently accepts **exactly one** source asset, while a bundle
-declaring two reference slots advertises `max: 2`. A two-item `source_media` therefore passes the
-count check and is refused downstream with `error: "not_implemented"` and a 400.
-
-Nothing is charged — the idempotency record is marked failed before the response. Until the
-backend lifts the single-asset limit, treat `max` as an upper bound the server may still refuse,
-and surface the message rather than assuming any within-bounds count will succeed.
+This remains a provider-level refusal for unsupported features unrelated to an advertised
+source-media shape. Nothing is charged; surface the returned message.
 
 If the UI honours `unsupported_parameters`, the 422 in §3.2 should be unreachable. Treat it as a bug
 signal (log it) rather than a routine user-facing state, but still render the message.
@@ -239,10 +222,10 @@ This is what makes Re-Generate correct:
   two-reference edit as a one-reference edit produces a different image with no indication
   anything changed.
 
-### 4.2 `input_media` — deprecated
+### 4.2 Removed `input_media`
 
-Still present, equal to the first available item's `media`. Use `source_media` instead; a single
-envelope cannot represent an ordered multi-reference job.
+`source_media` is the only generation-input authority on a library group. Its ordered entries and
+`available` flags preserve more information than the removed single-media projection.
 
 ### 4.3 `duration_ms` — on the asset schemas, **not** on `MediaObject`
 
@@ -250,7 +233,7 @@ The only components exposing `duration_ms` are `LibraryAssetItem`
 (`GET /v1/library/assets`), `LibraryAssetDetail`, and `FramePreviewResult`.
 
 `MediaObject` does **not** carry it, so it is absent everywhere `MediaObject` is embedded:
-`LibraryGroupDetail.source_media[].media`, `input_media`, job outputs and frames media.
+`LibraryGroupDetail.source_media[].media`, job outputs and frames media.
 
 Population:
 
@@ -287,16 +270,6 @@ interface GenerationModeInfo {
   source_media: SourceMediaModeConstraints | null;
 }
 
-interface ModelInputs {
-  /** @deprecated derived from generation_modes */
-  source_media: {
-    min: number;
-    max: number;
-    media_types: MediaKind[];
-    required_for: string[];
-  } | null;
-}
-
 type UnsupportedParameter =
   | 'aspect_ratio' | 'batch_size' | 'cfg' | 'denoise' | 'height'
   | 'image_resolution' | 'negative_prompt' | 'sampler' | 'scheduler'
@@ -305,9 +278,7 @@ type UnsupportedParameter =
 interface ModelInfo {
   // …existing fields…
   generation_modes: Record<string, GenerationModeInfo>; // authoritative
-  /** @deprecated derived from generation_modes */ capabilities: string[];
   is_enabled: boolean;                  // false when the bundle index has not synced
-  /** @deprecated derived from generation_modes */ inputs: ModelInputs;
   unsupported_parameters: UnsupportedParameter[];   // new
 }
 
@@ -318,9 +289,6 @@ interface SourceMediaReference {
 interface GenerateRequest {
   // …existing fields…
   source_media?: SourceMediaReference[];
-  /** @deprecated use source_media */ input_image_id?: string;
-  /** @deprecated use source_media */ source_output_id?: string;
-  /** @deprecated use source_media */ source_images?: unknown[];
 }
 
 interface LibrarySourceMediaItem {
@@ -333,7 +301,6 @@ interface LibrarySourceMediaItem {
 interface LibraryGroupDetail {
   // …existing fields…
   source_media: LibrarySourceMediaItem[];
-  /** @deprecated use source_media[0] */ input_media?: MediaObject | null;
 }
 ```
 
@@ -347,8 +314,7 @@ breaking change.
 
 1. Regenerate `gen:api` before the next frontend release; confirm the emitted types match §5
    field for field.
-2. Replace every `input_image_id` / `source_output_id` / `source_images` write with `source_media`.
-   Never send both shapes.
+2. Send `source_media` as the only source input.
 3. Drive the media picker from `generation_modes[generation_type].source_media` — visibility from
    `!== null`, requiredness and cardinality from `min`/`max`, accepted kinds from `media_types`,
    and positional labels from `roles`. No hardcoded list of media-consuming types anywhere in the
@@ -376,6 +342,3 @@ Raise these before building against them rather than assuming:
 
 - Whether `generation_modes` can change mid-session for a model the user already has open — and if so,
   whether the client should re-fetch `/v1/providers` on a session-state transition.
-- Whether `generation_modes.i2i.source_media.max` for `aisha-image` will track a bundle that
-  declares two reference slots. It does under B1's derivation, but a bundle update changes it
-  without a deploy, so the picker must read it per request rather than caching it for the session.
