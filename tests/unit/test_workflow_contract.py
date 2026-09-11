@@ -22,16 +22,16 @@ from src.api.services.workflow.capabilities import (
     derive_capabilities,
 )
 from src.api.services.workflow.contract import (
-    MEDIA_SLOT_KINDS,
     MODEL_TYPE_MEDIA,
     BoundWorkflow,
-    MediaSlot,
     WorkflowRole,
 )
 from src.api.services.workflow.parser import WorkflowContractError, parse_workflow_map
 from src.core.enums import (
+    MEDIA_SLOT_KINDS,
     GenerationType,
     MediaKind,
+    MediaSlot,
     ModelType,
     ProvisioningMode,
     Resolution,
@@ -247,9 +247,11 @@ def test_apply_tolerates_undersupplied_media_filenames() -> None:
 def test_capabilities_are_mechanical_from_the_bound_map() -> None:
     capabilities = derive_capabilities(_bound(), _generation())  # type: ignore[arg-type]
 
-    assert capabilities.generation_types == frozenset({GenerationType.T2I, GenerationType.I2I})
+    assert set(capabilities.generation_modes) == {GenerationType.T2I, GenerationType.I2I}
     assert capabilities.max_batch_size == 1
-    assert capabilities.max_reference_images == 1
+    source_media = capabilities.generation_modes[GenerationType.I2I].source_media
+    assert source_media is not None
+    assert source_media.max == 1
     assert capabilities.supports_negative_prompt is False
 
 
@@ -298,9 +300,17 @@ def test_wan_shaped_fixture_parses_binds_and_advertises_frame_to_video(
     """The video workflow contract is executable before a real WAN bundle lands."""
     capabilities = derive_capabilities(_wan_bound(wan_workflow_bundle), _generation())
 
-    assert capabilities.generation_types == frozenset(
-        {GenerationType.T2V, GenerationType.I2V, GenerationType.FLF2V}
-    )
+    assert set(capabilities.generation_modes) == {
+        GenerationType.T2V,
+        GenerationType.I2V,
+        GenerationType.FLF2V,
+    }
+    i2v = capabilities.generation_modes[GenerationType.I2V].source_media
+    flf2v = capabilities.generation_modes[GenerationType.FLF2V].source_media
+    assert i2v is not None
+    assert i2v.roles == (MediaSlot.FIRST_FRAME,)
+    assert flf2v is not None
+    assert flf2v.roles == (MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME)
 
 
 @pytest.mark.parametrize(
@@ -335,7 +345,7 @@ def test_video_capabilities_follow_declared_kind_and_slot(
     inputs = media_inputs(bound)  # type: ignore[operator]
     video_bound = replace(bound, map=replace(bound.map, media_inputs=inputs))
 
-    assert derive_capabilities(video_bound, _generation()).generation_types == expected
+    assert set(derive_capabilities(video_bound, _generation()).generation_modes) == expected
 
 
 def test_image_bundle_ignores_video_reference_slot_for_i2i_capability() -> None:
@@ -345,8 +355,8 @@ def test_image_bundle_ignores_video_reference_slot_for_i2i_capability() -> None:
 
     capabilities = derive_capabilities(malformed_bound, _generation())
 
-    assert capabilities.generation_types == frozenset({GenerationType.T2I})
-    assert capabilities.max_reference_images == 0
+    assert set(capabilities.generation_modes) == {GenerationType.T2I}
+    assert GenerationType.I2I not in capabilities.generation_modes
 
 
 def test_video_bundle_ignores_image_source_slot_for_v2v_capability(
@@ -358,9 +368,9 @@ def test_video_bundle_ignores_image_source_slot_for_v2v_capability(
     )
     malformed_bound = replace(bound, map=replace(bound.map, media_inputs=(invalid_source_kind,)))
 
-    assert derive_capabilities(malformed_bound, _generation()).generation_types == frozenset(
-        {GenerationType.T2V}
-    )
+    assert set(derive_capabilities(malformed_bound, _generation()).generation_modes) == {
+        GenerationType.T2V
+    }
 
 
 def test_capabilities_use_the_bundle_batch_constraint_only_when_batch_is_mapped() -> None:
@@ -498,6 +508,16 @@ def test_parser_rejects_video_slots_on_image_workflows(slot: MediaSlot, message:
         parse_workflow_map(raw, Path("bundle.yaml"))
 
     assert message in str(error.value)
+
+
+def test_parser_rejects_reference_slots_on_video_workflows() -> None:
+    raw = _map()
+    raw["media"] = "video"
+
+    with pytest.raises(WorkflowContractError) as error:
+        parse_workflow_map(raw, Path("bundle.yaml"))
+
+    assert "slot 'reference' is not supported for video workflows" in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -879,9 +899,9 @@ def _zit_bound(zit_workflow_bundle: Path) -> BoundWorkflow:
 def test_zit_shaped_fixture_derives_expected_capabilities(zit_workflow_bundle: Path) -> None:
     capabilities = derive_capabilities(_zit_bound(zit_workflow_bundle), _generation())
 
-    assert capabilities.generation_types == frozenset({GenerationType.T2I})
+    assert set(capabilities.generation_modes) == {GenerationType.T2I}
     assert capabilities.supports_negative_prompt is False
-    assert capabilities.max_reference_images == 0
+    assert GenerationType.I2I not in capabilities.generation_modes
     assert "model_sampling.shift" not in capabilities.writable
     assert len(capabilities.writable) == 11
 

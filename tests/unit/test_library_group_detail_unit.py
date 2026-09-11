@@ -219,7 +219,7 @@ class TestGetGroupDetail:
             result = await svc.get_group_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
-        assert result.input_media is None
+        assert result.source_media == []
 
     async def test_returns_detail_for_found_job_with_source_output(self) -> None:
         mock_session = AsyncMock()
@@ -250,8 +250,11 @@ class TestGetGroupDetail:
             result = await svc.get_group_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
-        assert result.input_media is not None
-        assert result.input_media.original.url == f"/v1/content/outputs/{source_output.id}"
+        assert result.source_media[0].available is True
+        assert result.source_media[0].media is not None
+        assert (
+            result.source_media[0].media.original.url == f"/v1/content/outputs/{source_output.id}"
+        )
 
     async def test_returns_detail_for_found_job_with_input_image(self) -> None:
         mock_session = AsyncMock()
@@ -282,8 +285,9 @@ class TestGetGroupDetail:
             result = await svc.get_group_detail(uuid4(), uuid4(), "vex", session=mock_session)
 
         assert result is not None
-        assert result.input_media is not None
-        assert result.input_media.original.url == f"/v1/content/uploads/{input_image.id}"
+        assert result.source_media[0].available is True
+        assert result.source_media[0].media is not None
+        assert result.source_media[0].media.original.url == f"/v1/content/uploads/{input_image.id}"
 
     async def test_preserves_unavailable_source_positions(self) -> None:
         mock_session = AsyncMock()
@@ -344,4 +348,3 @@ class TestGetGroupDetail:
         assert [source.available for source in result.source_media] == [True, False, True]
         assert result.source_media[1].asset_ref == f"upload:{missing_id}"
         assert result.source_media[1].media is None
-        assert result.input_media is result.source_media[0].media

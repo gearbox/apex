@@ -11,12 +11,12 @@ from src.api.schemas.jobs import JobCreatedResponse
 from src.api.schemas.ops_events import GenerationCreatedOpsPayload, OpsEventType
 from src.api.services.billing_errors import BillingError
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
+from src.api.services.generation.generation_modes import resolve_generation_modes
 from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
 from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
     SourceMediaResolver,
     SourceMediaValidationError,
-    normalize_source_media,
 )
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
@@ -53,9 +53,10 @@ if TYPE_CHECKING:
     from src.api.services.generation.base import GenerationProvider
     from src.api.services.generation.rate_limiter import ModelRateLimiter
     from src.api.services.pricing import PricingService
-    from src.api.services.workflow.contract import BoundWorkflow, BundleCapabilities
+    from src.api.services.workflow.contract import BundleCapabilities
     from src.core.bundle_config import BundleMapping
     from src.core.generation_config import BundleGenerationConfig
+    from src.core.generation_mode import GenerationModes, SourceMediaConstraints
     from src.core.product import ProductConfig
     from src.db.models.storage import GenerationJob
 
@@ -112,7 +113,7 @@ class GenerationService:
 
     Responsibilities:
     1. Validate model-generation_type compatibility (via ModelType enum)
-    2. Normalize, resolve, and validate owned media inputs
+    2. Resolve and validate owned media inputs
     3. Validate n <= model.max_concurrent_outputs
     4. Check model is enabled in generation_models table
     4.5. Global per-model rate limit check
@@ -185,21 +186,15 @@ class GenerationService:
         mapping = self._aisha_mapping(model)
         return mapping.capabilities if mapping is not None else None
 
-    def get_aisha_bound_workflow(self, model: ModelType) -> BoundWorkflow | None:
-        """Return the active bound workflow for provider catalogue derivation."""
-        mapping = self._aisha_mapping(model)
-        if mapping is None or self._bundle_index is None:
-            return None
-        return self._bundle_index.get_bound_workflow(mapping.bundle_name, mapping.bundle_version)
-
     @staticmethod
     def _validate_bundle_capabilities(
         request: UnifiedGenerationRequest,
         capabilities: BundleCapabilities,
         generation: BundleGenerationConfig,
+        modes: GenerationModes,
     ) -> None:
         """Reject overrides a bound workflow cannot write before billing begins."""
-        if request.generation_type not in capabilities.generation_types:
+        if request.generation_type not in modes:
             raise UnsupportedGenerationParameterError(["generation_type"])
         unsupported: list[str] = []
         if request.negative_prompt is not None and not capabilities.supports_negative_prompt:
@@ -240,10 +235,6 @@ class GenerationService:
         post_commit_callbacks: list[Callable[[], Awaitable[None]]] | None = None,
     ) -> JobCreatedResponse:
         """Execute the full generation pipeline."""
-        # The request crosses its only legacy compatibility boundary here.
-        # Every downstream consumer receives the normalized shape only.
-        request = normalize_source_media(request)
-
         # 1. Model-generation_type compatibility (declarative, enum-driven)
         if not request.model.supports_generation_type(request.generation_type):
             raise ValueError(
@@ -267,6 +258,8 @@ class GenerationService:
                     f"Model '{request.model.value}' requires age verification"
                 )
 
+        modes = resolve_generation_modes(request.model, capabilities=bundle_capabilities)
+
         # A production service always receives the index. Keeping the dependency
         # optional lets lightweight callers exercise the shared orchestration
         # path without fabricating a bundle graph, while an indexed on-demand
@@ -285,7 +278,12 @@ class GenerationService:
                 self._bundle_index.get_generation_config(
                     bundle_mapping.bundle_name, bundle_mapping.bundle_version
                 ),
+                modes,
             )
+
+        # This lookup is total: step 1 ensures static registry membership, and
+        # bundle validation above rejects any bundle-narrowed type first.
+        contract = modes[request.generation_type].source_media
 
         # 1.7 Aspect-ratio capability validation (registry-driven)
         if (
@@ -310,8 +308,7 @@ class GenerationService:
 
         # 2. Reject impossible source counts before resolving any asset. This
         # keeps count errors deterministic and avoids needless DB queries.
-        bound_workflow = self.get_aisha_bound_workflow(request.model)
-        self._validate_source_cardinality(request, bound_workflow=bound_workflow)
+        self._validate_source_cardinality(request, contract)
 
         # 2.1 Resolve owned-library media once, before any consumer needs it.
         resolved_source_media: list[ResolvedSourceMedia] = []
@@ -324,9 +321,7 @@ class GenerationService:
             )
 
         # 2.2 Per-item validation requires the ownership-checked rows.
-        self._validate_resolved_sources(
-            request, resolved_source_media, bound_workflow=bound_workflow
-        )
+        self._validate_resolved_sources(resolved_source_media, contract)
 
         # 3. Output count cap
         max_n = request.model.max_concurrent_outputs
@@ -377,7 +372,7 @@ class GenerationService:
             request.generation_type.value,
             request.model.value,
             n=request.n,
-            input_image_count=self._source_media_count(request),
+            source_media_count=self._source_media_count(request),
             session=session,
         )
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)
@@ -661,84 +656,45 @@ class GenerationService:
     @staticmethod
     def _validate_source_cardinality(
         request: UnifiedGenerationRequest,
-        *,
-        bound_workflow: BoundWorkflow | None = None,
+        contract: SourceMediaConstraints | None,
     ) -> None:
         """Validate source-media presence and count without resolving assets."""
-        source_media = request.source_media
-        has_source_media = source_media is not None
-        expected_kinds = request.generation_type.input_kinds
-        constraints = get_model_meta(request.model).inputs.source_media
-        if bound_workflow is not None:
-            media_inputs = bound_workflow.map.media_inputs
-            if not media_inputs:
-                constraints = None
-            else:
-                from src.core.model_registry import SourceMediaConstraints
-
-                constraints = SourceMediaConstraints(
-                    min=1,
-                    max=len(media_inputs),
-                    media_types=frozenset(item.kind for item in media_inputs),
-                )
-
-        if not expected_kinds and has_source_media:
-            raise SourceMediaValidationError(
-                f"generation_type '{request.generation_type.value}' does not accept source_media"
-            )
-        if expected_kinds and not has_source_media:
-            raise SourceMediaValidationError(
-                f"generation_type '{request.generation_type.value}' requires source_media"
-            )
-        if has_source_media and constraints is None:
-            raise SourceMediaValidationError(
-                f"Model '{request.model.value}' does not accept source_media"
-            )
-        if source_media is not None and constraints is not None:
-            actual_count = len(source_media)
-            if not constraints.min <= actual_count <= constraints.max:
+        refs = request.source_media
+        if contract is None:
+            if refs:
                 raise SourceMediaValidationError(
-                    f"source_media count must be between {constraints.min} and {constraints.max}; got {actual_count}"
+                    f"generation_type '{request.generation_type.value}' does not accept source_media"
                 )
-        if request.generation_type.requires_video_input and request.input_video_url is None:
-            raise ValueError(
-                f"generation_type '{request.generation_type.value}' requires input_video_url"
+            return
+        count = len(refs or [])
+        if not contract.min <= count <= contract.max:
+            raise SourceMediaValidationError(
+                f"generation_type '{request.generation_type.value}' requires between "
+                f"{contract.min} and {contract.max} source_media items; got {count}"
             )
 
     @staticmethod
     def _validate_resolved_sources(
-        request: UnifiedGenerationRequest,
         resolved_source_media: list[ResolvedSourceMedia],
-        *,
-        bound_workflow: BoundWorkflow | None = None,
+        contract: SourceMediaConstraints | None,
     ) -> None:
-        """Validate resolved source media against model media-kind limits."""
-        constraints = get_model_meta(request.model).inputs.source_media
-        if bound_workflow is not None:
-            from src.core.model_registry import SourceMediaConstraints
-
-            media_inputs = bound_workflow.map.media_inputs
-            constraints = (
-                SourceMediaConstraints(
-                    min=1,
-                    max=len(media_inputs),
-                    media_types=frozenset(item.kind for item in media_inputs),
-                )
-                if media_inputs
-                else None
-            )
-        if constraints is None:
+        """Validate resolved source media against the one mode's kind limits."""
+        if contract is None:
             return
 
         for source in resolved_source_media:
-            if source.media_kind not in constraints.media_types:
-                allowed = ", ".join(sorted(kind.value for kind in constraints.media_types))
+            accepted = contract.kind_at(source.position)
+            if source.media_kind not in accepted:
+                allowed = ", ".join(sorted(kind.value for kind in accepted))
+                role = (
+                    f" (role '{contract.roles[source.position].value}')" if contract.roles else ""
+                )
                 raise SourceMediaValidationError(
-                    f"source_media position {source.position} has media kind "
-                    f"'{source.media_kind.value}'; model accepts: {allowed}"
+                    f"source_media position {source.position}{role} has media kind "
+                    f"'{source.media_kind.value}'; accepted: {allowed}"
                 )
 
     @staticmethod
     def _source_media_count(request: UnifiedGenerationRequest) -> int:
-        """Return normalized source cardinality for input-aware pricing."""
+        """Return source-media cardinality for input-aware pricing."""
         return len(request.source_media or [])

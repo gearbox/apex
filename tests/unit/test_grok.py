@@ -28,13 +28,6 @@ class TestModelType:
         assert ModelType.GROK_2_IMAGE.provider == Provider.GROK
         assert ModelType.GROK_IMAGINE_VIDEO.provider == Provider.GROK
 
-    def test_supports_image_input(self) -> None:
-        """Test supports_image_input property."""
-        assert ModelType.GROK_IMAGINE_IMAGE.supports_image_input is True
-        assert ModelType.GROK_2_IMAGE.supports_image_input is False
-        assert ModelType.GROK_IMAGINE_VIDEO.supports_image_input is True
-        assert ModelType.AISHA_IMAGE.supports_image_input is True
-
     def test_output_media(self) -> None:
         """Test the media kinds each model can emit."""
         assert ModelType.GROK_IMAGINE_VIDEO.output_media == frozenset({MediaKind.VIDEO})
@@ -54,23 +47,6 @@ class TestGenerationType:
         assert GenerationType.FLF2V.output_kind is MediaKind.VIDEO
         assert GenerationType.T2I.output_kind is MediaKind.IMAGE
         assert GenerationType.I2I.output_kind is MediaKind.IMAGE
-
-    def test_requires_image_input(self) -> None:
-        """Test requires_image_input property."""
-        assert GenerationType.I2I.requires_image_input is True
-        assert GenerationType.I2V.requires_image_input is True
-        assert GenerationType.FLF2V.requires_image_input is True
-        assert GenerationType.T2I.requires_image_input is False
-        assert GenerationType.T2V.requires_image_input is False
-        assert GenerationType.V2V.requires_image_input is False
-
-    def test_requires_video_input(self) -> None:
-        """Test requires_video_input property."""
-        assert GenerationType.V2V.requires_video_input is True
-        assert GenerationType.T2I.requires_video_input is False
-        assert GenerationType.I2I.requires_video_input is False
-        assert GenerationType.T2V.requires_video_input is False
-        assert GenerationType.I2V.requires_video_input is False
 
 
 class TestJobCreatedResponse:

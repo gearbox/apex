@@ -77,13 +77,6 @@ class ModelType(StrEnum):
         return get_model_meta(self).provider
 
     @property
-    def supports_image_input(self) -> bool:
-        """Check if this model supports image input (I2I/I2V)."""
-        return self.supports_generation_type(GenerationType.I2I) or self.supports_generation_type(
-            GenerationType.I2V
-        )
-
-    @property
     def output_media(self) -> frozenset[MediaKind]:
         """Media kinds this model can emit, derived from registry sections."""
         from src.core.model_registry import get_model_meta
@@ -103,10 +96,7 @@ class ModelType(StrEnum):
         """
         from src.core.model_registry import get_model_meta
 
-        meta = get_model_meta(self)
-
-        section = getattr(meta, _META_BY_MEDIA[gen_type.output_kind])
-        return section is not None and gen_type in section.supported_types
+        return gen_type in get_model_meta(self).generation_modes
 
     @property
     def max_concurrent_outputs(self) -> int:
@@ -134,28 +124,8 @@ class GenerationType(StrEnum):
     FLF2V = "flf2v"  # First-last-frame to video
 
     @property
-    def requires_image_input(self) -> bool:
-        """Check if this generation type requires an input image."""
-        return MediaKind.IMAGE in self.input_kinds
-
-    @property
-    def requires_video_input(self) -> bool:
-        """Check if this generation type requires an input video.
-
-        F18: do not derive this from ``input_kinds``. ``v2v`` deliberately
-        has no owned media kind because it still uses a public
-        ``input_video_url``; deriving it would skip that required URL check.
-        """
-        return self == GenerationType.V2V
-
-    @property
     def input_kinds(self) -> frozenset[MediaKind]:
-        """Owned library-media kinds this generation type accepts as input.
-
-        ``v2v`` deliberately remains empty: its legacy ``input_video_url`` is
-        a public URL rather than an owned library asset, and is validated on
-        its existing path until video-to-video moves to ``source_media``.
-        """
+        """Owned library-media kinds this generation type accepts as input."""
         return _GENERATION_TYPE_MEDIA[self][0]
 
     @property
@@ -352,14 +322,30 @@ class MediaKind(StrEnum):
     VIDEO = "video"
 
 
+class MediaSlot(StrEnum):
+    """Named media positions supplied by a generation request."""
+
+    REFERENCE = "reference"
+    FIRST_FRAME = "first_frame"
+    LAST_FRAME = "last_frame"
+    SOURCE = "source"
+
+
+MEDIA_SLOT_KINDS: Final[Mapping[MediaSlot, MediaKind]] = {
+    MediaSlot.REFERENCE: MediaKind.IMAGE,
+    MediaSlot.FIRST_FRAME: MediaKind.IMAGE,
+    MediaSlot.LAST_FRAME: MediaKind.IMAGE,
+    MediaSlot.SOURCE: MediaKind.VIDEO,
+}
+
+
 _GENERATION_TYPE_MEDIA: Final[Mapping[GenerationType, tuple[frozenset[MediaKind], MediaKind]]] = {
     GenerationType.T2I: (frozenset(), MediaKind.IMAGE),
     GenerationType.I2I: (frozenset({MediaKind.IMAGE}), MediaKind.IMAGE),
     GenerationType.T2V: (frozenset(), MediaKind.VIDEO),
     GenerationType.I2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
     GenerationType.FLF2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
-    # v2v still takes a public input_video_url, not an owned library asset.
-    GenerationType.V2V: (frozenset(), MediaKind.VIDEO),
+    GenerationType.V2V: (frozenset({MediaKind.VIDEO}), MediaKind.VIDEO),
 }
 
 _META_BY_MEDIA: Final[Mapping[MediaKind, str]] = {

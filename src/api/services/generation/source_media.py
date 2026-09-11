@@ -1,14 +1,12 @@
-"""Normalization and resolution for ordered owned-library generation inputs."""
+"""Resolution for ordered owned-library generation inputs."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import msgspec
 import structlog
 
-from src.api.schemas.unified_generation import SourceMediaReference
 from src.core.enums import MediaKind, media_kind_from_content_type
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.db.repositories.output import OutputRepository
@@ -19,7 +17,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.schemas.unified_generation import UnifiedGenerationRequest
+    from src.api.schemas.unified_generation import SourceMediaReference
     from src.db.models.storage import GenerationOutput, UserImage
 
 logger = structlog.get_logger(__name__)
@@ -41,81 +39,6 @@ class ResolvedSourceMedia:
     storage_key: str
     size_bytes: int
     job_id: UUID | None
-
-
-def normalize_source_media(request: UnifiedGenerationRequest) -> UnifiedGenerationRequest:
-    """Collapse deprecated image aliases into ``source_media`` exactly once.
-
-    The returned request has every legacy source field cleared.  That makes
-    it mechanically impossible for later validation, pricing, retention,
-    lineage, or provider code to branch on the old request shape.
-    """
-    aliases = {
-        "input_image_id": request.input_image_id,
-        "source_output_id": request.source_output_id,
-        "source_images": request.source_images,
-    }
-    present = [name for name, value in aliases.items() if value is not None]
-    if request.source_media is not None and present:
-        raise SourceMediaValidationError(
-            "source_media cannot be combined with deprecated source fields"
-        )
-    if len(present) > 1:
-        raise SourceMediaValidationError(
-            "input_image_id, source_output_id, and source_images are mutually exclusive"
-        )
-
-    normalized = request.source_media
-    if present:
-        field_name = present[0]
-        logger.info("generation.request.legacy_source_field", field_name=field_name)
-        if field_name == "input_image_id":
-            if request.input_image_id is None:  # pragma: no cover - guarded by ``present``
-                raise RuntimeError("Missing deprecated upload reference")
-            normalized = [
-                SourceMediaReference(
-                    asset_ref=format_asset_ref(LibraryAssetSource.UPLOAD, request.input_image_id)
-                )
-            ]
-        elif field_name == "source_output_id":
-            if request.source_output_id is None:  # pragma: no cover - guarded by ``present``
-                raise RuntimeError("Missing deprecated output reference")
-            normalized = [
-                SourceMediaReference(
-                    asset_ref=format_asset_ref(LibraryAssetSource.OUTPUT, request.source_output_id)
-                )
-            ]
-        else:
-            if request.source_images is None:  # pragma: no cover - guarded by ``present``
-                raise RuntimeError("Missing deprecated source list")
-            normalized = []
-            for image in request.source_images:
-                if image.input_image_id is not None:
-                    normalized.append(
-                        SourceMediaReference(
-                            asset_ref=format_asset_ref(
-                                LibraryAssetSource.UPLOAD, image.input_image_id
-                            )
-                        )
-                    )
-                else:
-                    if image.source_output_id is None:  # pragma: no cover - schema invariant
-                        raise RuntimeError("Malformed deprecated source reference")
-                    normalized.append(
-                        SourceMediaReference(
-                            asset_ref=format_asset_ref(
-                                LibraryAssetSource.OUTPUT, image.source_output_id
-                            )
-                        )
-                    )
-
-    return msgspec.structs.replace(
-        request,
-        source_media=normalized,
-        input_image_id=None,
-        source_output_id=None,
-        source_images=None,
-    )
 
 
 class SourceMediaResolver:

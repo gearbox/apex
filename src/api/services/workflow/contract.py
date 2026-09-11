@@ -11,9 +11,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
-from src.core.enums import GenerationType, MediaKind
+from src.core.enums import GenerationType, MediaKind, MediaSlot
+
+if TYPE_CHECKING:
+    from src.core.generation_mode import GenerationModeMeta
 
 SUPPORTED_CONTRACT_VERSION: Final[int] = 2
 
@@ -30,15 +33,6 @@ class WorkflowRole(StrEnum):
     PREVIEW = "preview"
 
 
-class MediaSlot(StrEnum):
-    """Named media positions supplied by a generation request."""
-
-    REFERENCE = "reference"
-    FIRST_FRAME = "first_frame"
-    LAST_FRAME = "last_frame"
-    SOURCE = "source"
-
-
 ROLE_PARAMETERS: Final[Mapping[WorkflowRole, frozenset[str]]] = {
     WorkflowRole.LATENT: frozenset({"width", "height", "batch_size", "length"}),
     WorkflowRole.POSITIVE_PROMPT: frozenset({"text"}),
@@ -53,12 +47,6 @@ REQUIRED_ROLES: Final[frozenset[WorkflowRole]] = frozenset(
     {WorkflowRole.LATENT, WorkflowRole.POSITIVE_PROMPT, WorkflowRole.SAMPLER}
 )
 VIDEO_ONLY_PARAMETERS: Final[frozenset[str]] = frozenset({"length", "fps", "format"})
-MEDIA_SLOT_KINDS: Final[Mapping[MediaSlot, MediaKind]] = {
-    MediaSlot.REFERENCE: MediaKind.IMAGE,
-    MediaSlot.FIRST_FRAME: MediaKind.IMAGE,
-    MediaSlot.LAST_FRAME: MediaKind.IMAGE,
-    MediaSlot.SOURCE: MediaKind.VIDEO,
-}
 MODEL_TYPE_MEDIA: Final[Mapping[str, MediaKind]] = {
     "aisha-image": MediaKind.IMAGE,
     "aisha-image-lite": MediaKind.IMAGE,
@@ -128,11 +116,10 @@ class BundleCapabilities:
     """Capabilities mechanically derived from a bound workflow."""
 
     media: MediaKind
-    generation_types: frozenset[GenerationType]
+    generation_modes: Mapping[GenerationType, GenerationModeMeta]
     supports_negative_prompt: bool
     writable: frozenset[str]
     max_batch_size: int
-    max_reference_images: int
 
 
 @dataclass(frozen=True, slots=True)

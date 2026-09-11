@@ -4,7 +4,6 @@ from src.api.services.workflow.applier import ModelInputResolutionError, Workflo
 from src.api.services.workflow.contract import (
     BoundWorkflow,
     BundleCapabilities,
-    MediaSlot,
     WorkflowMap,
 )
 from src.api.services.workflow.parser import WorkflowContractError
@@ -13,7 +12,6 @@ from src.api.services.workflow.service import WorkflowNotFoundError, WorkflowSer
 __all__ = [
     "BoundWorkflow",
     "BundleCapabilities",
-    "MediaSlot",
     "ModelInputResolutionError",
     "WorkflowApplyError",
     "WorkflowContractError",

@@ -7,12 +7,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from src.api.services.workflow.contract import (
-    MEDIA_SLOT_KINDS,
     REQUIRED_ROLES,
     ROLE_PARAMETERS,
     SUPPORTED_CONTRACT_VERSION,
     VIDEO_ONLY_PARAMETERS,
-    MediaSlot,
     WorkflowMap,
     WorkflowMediaInput,
     WorkflowModelInput,
@@ -20,7 +18,7 @@ from src.api.services.workflow.contract import (
     WorkflowRole,
 )
 from src.core.bundle_config import BundleDefinitionError
-from src.core.enums import MediaKind
+from src.core.enums import MEDIA_SLOT_KINDS, MediaKind, MediaSlot
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -189,6 +187,11 @@ def parse_workflow_map(data: Mapping[str, object], source: Path) -> WorkflowMap:
                 MediaSlot.SOURCE,
             }:
                 errors.append(f"{prefix}.slot {slot.value!r} requires media video")
+            if media is MediaKind.VIDEO and slot is MediaSlot.REFERENCE:
+                errors.append(
+                    f"{prefix}.slot 'reference' is not supported for video workflows; "
+                    "use 'first_frame', 'last_frame' or 'source'"
+                )
         if target_role is not None:
             target_node = nodes.get(target_role)
             if target_node is None:

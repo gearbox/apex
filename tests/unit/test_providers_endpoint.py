@@ -18,14 +18,10 @@ from src.api.schemas.providers import (
     UserContext,
     VideoConstraints,
 )
+from src.api.services.generation.generation_modes import resolve_generation_modes
 from src.api.services.generation.service import GenerationService
 from src.api.services.workflow.contract import (
-    BoundWorkflow,
     BundleCapabilities,
-    MediaSlot,
-    WorkflowMap,
-    WorkflowMediaInput,
-    WorkflowRole,
 )
 from src.core.enums import (
     STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
@@ -39,7 +35,9 @@ from src.core.enums import (
     RuntimeState,
     runtime_state_from_session_status,
 )
+from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
 from src.core.model_registry import get_model_meta
+from tests.unit.helpers import aisha_video_capabilities
 
 
 class TestProvidersResponseSchema:
@@ -72,7 +70,7 @@ class TestModelInfoSchema:
             model_key="grok-imagine-image",
             name="Grok Imagine Image",
             description="Flagship image gen",
-            capabilities=["t2i", "i2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=10,
             max_prompt_length=4096,
@@ -85,14 +83,14 @@ class TestModelInfoSchema:
         assert info.image is not None
         assert info.image.output_resolutions == ["1024x1024", "2048x2048"]
         assert info.image.min_height is None  # Grok: not user-controllable
-        assert "t2i" in info.capabilities
+        assert "capabilities" not in msgspec.json.decode(msgspec.json.encode(info))
 
     def test_aisha_model_with_height_control(self) -> None:
         info = ModelInfo(
             model_key="aisha-image",
             name="Aisha Image",
             description="ComfyUI-based generation",
-            capabilities=["t2i", "i2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=4,
             max_prompt_length=4096,
@@ -114,7 +112,7 @@ class TestModelInfoSchema:
             model_key="grok-imagine-video",
             name="Grok Imagine Video",
             description="Video gen",
-            capabilities=["t2v", "i2v", "v2v", "flf2v"],
+            generation_modes={},
             is_enabled=True,
             max_images=1,
             max_prompt_length=4096,
@@ -130,7 +128,7 @@ class TestModelInfoSchema:
             model_key="test",
             name="Test",
             description="",
-            capabilities=["t2v"],
+            generation_modes={},
             is_enabled=True,
             max_images=1,
             max_prompt_length=4096,
@@ -148,7 +146,7 @@ class TestModelInfoSchema:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=4,
             max_prompt_length=4096,
@@ -162,7 +160,7 @@ class TestModelInfoSchema:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=4,
             max_prompt_length=4096,
@@ -183,7 +181,7 @@ class TestModelInfoSchema:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=4,
             max_prompt_length=4096,
@@ -226,7 +224,7 @@ class TestModelInfoSchema:
         assert info.provisioning is None
 
     @pytest.mark.parametrize("model_type", ModelType)
-    def test_source_media_required_for_is_derived_from_capabilities(
+    def test_generation_modes_are_the_only_discovery_input_contract(
         self, model_type: ModelType
     ) -> None:
         info = _build_model_info(
@@ -234,48 +232,66 @@ class TestModelInfoSchema:
             SimpleNamespace(name="Test", description="", is_enabled=True),
             runtime=None,
         )
-        source_media = info.inputs.source_media
 
-        if source_media is None:
-            assert get_model_meta(model_type).inputs.source_media is None
-            return
-
-        expected = [
-            generation_type
-            for generation_type in info.capabilities
-            if GenerationType(generation_type).input_kinds
+        encoded = msgspec.json.decode(msgspec.json.encode(info))
+        assert "capabilities" not in encoded
+        assert "inputs" not in encoded
+        assert list(info.generation_modes) == [
+            generation_type.value
+            for generation_type in GenerationType
+            if generation_type in get_model_meta(model_type).generation_modes
         ]
-        assert source_media.required_for == expected
-        assert set(source_media.required_for).issubset(info.capabilities)
-        assert GenerationType.V2V.value not in source_media.required_for
 
-    def test_source_media_required_for_tracks_narrowed_indexed_capabilities(self) -> None:
-        media_input = WorkflowMediaInput(
-            id="loader",
-            class_name="LoadImage",
-            input="image",
-            kind=MediaKind.IMAGE,
-            slot=MediaSlot.REFERENCE,
-            target_role=WorkflowRole.POSITIVE_PROMPT,
-            target_input="reference_image",
+    @pytest.mark.parametrize(
+        ("model_type", "capabilities"),
+        [
+            (ModelType.GROK_IMAGINE_VIDEO, None),
+            (ModelType.AISHA_VIDEO, aisha_video_capabilities()),
+        ],
+    )
+    def test_discovery_matches_the_resolved_mode_contracts(
+        self,
+        model_type: ModelType,
+        capabilities: BundleCapabilities | None,
+    ) -> None:
+        """Discovery and validation consume precisely the same mode contract."""
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=capabilities,
         )
-        bound_workflow = BoundWorkflow(
-            map=WorkflowMap(
-                contract_version=2,
-                media=MediaKind.IMAGE,
-                nodes={},
-                media_inputs=(media_input,),
-                model_inputs=(),
-            ),
-            api_graph={},
-        )
+        modes = resolve_generation_modes(model_type, capabilities=capabilities)
+
+        assert list(info.generation_modes) == [
+            generation_type.value for generation_type in GenerationType if generation_type in modes
+        ]
+        for generation_type, mode in modes.items():
+            advertised = info.generation_modes[generation_type.value].source_media
+            contract = mode.source_media
+            if contract is None:
+                assert advertised is None
+            else:
+                assert advertised is not None
+                assert advertised.min == contract.min
+                assert advertised.max == contract.max
+                assert advertised.media_types == sorted(
+                    contract.media_types,
+                    key=lambda kind: kind.value,
+                )
+                assert advertised.roles == (list(contract.roles) if contract.roles else None)
+
+    def test_generation_modes_track_narrowed_indexed_capabilities(self) -> None:
         capabilities = BundleCapabilities(
             media=MediaKind.IMAGE,
-            generation_types=frozenset({GenerationType.I2I}),
+            generation_modes={
+                GenerationType.I2I: GenerationModeMeta(
+                    SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.IMAGE}))
+                )
+            },
             supports_negative_prompt=False,
             writable=frozenset(),
             max_batch_size=1,
-            max_reference_images=1,
         )
 
         info = _build_model_info(
@@ -283,29 +299,44 @@ class TestModelInfoSchema:
             SimpleNamespace(name="Test", description="", is_enabled=True),
             runtime=None,
             capabilities=capabilities,
-            bound_workflow=bound_workflow,
         )
 
-        assert info.capabilities == [GenerationType.I2I.value]
-        assert info.inputs.source_media is not None
-        assert info.inputs.source_media.required_for == [GenerationType.I2I.value]
+        assert list(info.generation_modes) == [GenerationType.I2I.value]
+
+    def test_empty_resolved_modes_disable_the_model(self) -> None:
+        """An enabled model with no executable mode must not be actionable."""
+        capabilities = BundleCapabilities(
+            media=MediaKind.IMAGE,
+            generation_modes={
+                GenerationType.T2I: GenerationModeMeta(
+                    SourceMediaConstraints(
+                        min=1,
+                        max=1,
+                        media_types=frozenset({MediaKind.IMAGE}),
+                    )
+                )
+            },
+            supports_negative_prompt=False,
+            writable=frozenset(),
+            max_batch_size=1,
+        )
+
+        info = _build_model_info(
+            ModelType.AISHA_IMAGE,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=capabilities,
+        )
+
+        assert info.generation_modes == {}
+        assert info.is_enabled is False
 
     def test_aisha_image_lite_reports_t2i_only_no_negative_no_source_media(self) -> None:
         """Z-C1: aisha-image-lite (zit.cyberrealistic) is t2i-only, has no
         negative_prompt role, and declares no media_inputs at all."""
-        bound_workflow = BoundWorkflow(
-            map=WorkflowMap(
-                contract_version=2,
-                media=MediaKind.IMAGE,
-                nodes={},
-                media_inputs=(),
-                model_inputs=(),
-            ),
-            api_graph={},
-        )
         capabilities = BundleCapabilities(
             media=MediaKind.IMAGE,
-            generation_types=frozenset({GenerationType.T2I}),
+            generation_modes={GenerationType.T2I: GenerationModeMeta()},
             supports_negative_prompt=False,
             writable=frozenset(
                 {
@@ -323,7 +354,6 @@ class TestModelInfoSchema:
                 }
             ),
             max_batch_size=4,
-            max_reference_images=0,
         )
 
         info = _build_model_info(
@@ -331,12 +361,11 @@ class TestModelInfoSchema:
             SimpleNamespace(name="Aisha Lite", description="", is_enabled=True),
             runtime=None,
             capabilities=capabilities,
-            bound_workflow=bound_workflow,
         )
 
-        assert info.capabilities == [GenerationType.T2I.value]
+        assert list(info.generation_modes) == [GenerationType.T2I.value]
         assert info.supports_negative_prompt is False
-        assert info.inputs.source_media is None
+        assert info.generation_modes[GenerationType.T2I.value].source_media is None
         assert "negative_prompt" in info.unsupported_parameters
 
 
@@ -346,7 +375,7 @@ class TestProviderInfoSchema:
             model_key="aisha-image",
             name="Aisha Image",
             description="ComfyUI",
-            capabilities=["t2i", "i2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=4,
             max_prompt_length=4096,
@@ -394,7 +423,7 @@ class TestRequiresAgeVerification:
             model_key="grok-imagine-image",
             name="Grok",
             description="",
-            capabilities=["t2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=10,
             max_prompt_length=4096,
@@ -423,7 +452,7 @@ class TestRequiresAgeVerification:
             model_key="aisha-image",
             name="Aisha",
             description="",
-            capabilities=["t2i"],
+            generation_modes={},
             is_enabled=True,
             max_images=4,
             max_prompt_length=4096,

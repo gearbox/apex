@@ -1239,7 +1239,6 @@ class LibraryService:
         return LibraryGroupDetail(
             job_id=job.id,
             badge=self._resolve_group_badge(gt),
-            input_media=next((source.media for source in source_media if source.available), None),
             source_media=source_media,
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
@@ -1257,7 +1256,7 @@ class LibraryService:
 
     @staticmethod
     def _resolve_group_badge(gt: GenerationType) -> LibraryBadge:
-        if gt.requires_image_input or gt.requires_video_input:
+        if gt.input_kinds:
             return LibraryBadge.IMAGE
         return LibraryBadge.PROMPT
 

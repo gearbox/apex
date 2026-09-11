@@ -9,35 +9,23 @@ from uuid import UUID
 
 import msgspec
 
-from src.core.enums import MediaKind, RuntimeState
+from src.core.enums import MediaKind, MediaSlot, RuntimeState
 
 
-class SourceMediaConstraints(msgspec.Struct, kw_only=True):
-    """Limits for a model's ordered owned-library input assets.
-
-    ``source_media is None`` means the model accepts no owned media input.
-    ``min`` and ``max`` bound the total count across every listed media kind;
-    ``required_for`` identifies the generation types that require at least one
-    source asset. Input order is significant and preserved end to end.
-    """
+class SourceMediaModeConstraints(msgspec.Struct, kw_only=True):
+    """Ordered source-media contract for one generation mode."""
 
     min: int
     max: int
     media_types: list[MediaKind]
-    required_for: list[str]
+    roles: list[MediaSlot] | None = None
+    """Positional slot names. null means positions are interchangeable."""
 
 
-class ModelInputs(msgspec.Struct, kw_only=True):
-    """Model input capabilities independent from output constraints.
+class GenerationModeInfo(msgspec.Struct, kw_only=True):
+    """Discovery representation of one generation mode."""
 
-    ``inputs.source_media == null`` means the model accepts no media input.
-    ``min`` / ``max`` bound the total number of source assets across all
-    media types, and ``media_types`` lists the allowed asset media kinds.
-    ``required_for`` identifies generation types that require source media.
-    Order is significant and preserved end to end.
-    """
-
-    source_media: SourceMediaConstraints | None = None
+    source_media: SourceMediaModeConstraints | None = None
 
 
 class ImageConstraints(msgspec.Struct, kw_only=True):
@@ -114,8 +102,8 @@ class ModelInfo(msgspec.Struct, kw_only=True):
     description: str
     """Short description for UI tooltips."""
 
-    capabilities: list[str]
-    """Supported generation types: "t2i", "i2i", "t2v", "i2v", "v2v", "flf2v"."""
+    generation_modes: dict[str, GenerationModeInfo]
+    """Authoritative input contracts keyed by generation_type."""
 
     is_enabled: bool
     """Whether this model is currently enabled for use."""
@@ -137,9 +125,6 @@ class ModelInfo(msgspec.Struct, kw_only=True):
 
     requires_age_verification: bool = False
     """Whether users must be age-verified before generating with this model."""
-
-    inputs: ModelInputs = msgspec.field(default_factory=ModelInputs)
-    """Owned-library media input capabilities."""
 
     image: ImageConstraints | None = None
     """Image constraints. None for video-only models."""

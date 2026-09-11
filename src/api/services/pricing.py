@@ -74,17 +74,17 @@ class PricingService:
         model: str | None,
         *,
         n: int,
-        input_image_count: int,
+        source_media_count: int,
         session: AsyncSession,
     ) -> int:
         """Total token cost for a generation: (token_cost + input_token_cost * k) * n."""
         if n < 1:
             raise ValueError("n must be >= 1")
-        if input_image_count < 0:
-            raise ValueError("input_image_count must be >= 0")
+        if source_media_count < 0:
+            raise ValueError("source_media_count must be >= 0")
 
         rule = await self._get_rule(provider, generation_type, model, session=session)
-        return (rule.token_cost + rule.input_token_cost * input_image_count) * n
+        return (rule.token_cost + rule.input_token_cost * source_media_count) * n
 
     async def list_catalog(
         self,

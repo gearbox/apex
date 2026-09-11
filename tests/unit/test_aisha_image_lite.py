@@ -28,6 +28,7 @@ from src.api.services.generation.service import (
 )
 from src.api.services.workflow.contract import BundleCapabilities
 from src.core.enums import GenerationType, JobStatus, MediaKind, ModelType, Provider
+from src.core.generation_mode import GenerationModeMeta
 from src.core.product_registry import VEX_CONFIG
 
 pytestmark = pytest.mark.unit
@@ -66,7 +67,7 @@ def _zit_capabilities() -> BundleCapabilities:
     the sampler's negative), 11 writable parameters."""
     return BundleCapabilities(
         media=MediaKind.IMAGE,
-        generation_types=frozenset({GenerationType.T2I}),
+        generation_modes={GenerationType.T2I: GenerationModeMeta()},
         supports_negative_prompt=False,
         writable=frozenset(
             {
@@ -84,7 +85,6 @@ def _zit_capabilities() -> BundleCapabilities:
             }
         ),
         max_batch_size=4,
-        max_reference_images=0,
     )
 
 
@@ -137,7 +137,6 @@ class TestAishaImageLiteBundleCapabilityValidation:
             prompt="edit this",
             generation_type=GenerationType.I2I,
             model=ModelType.AISHA_IMAGE_LITE,
-            input_image_id=uuid4(),
         )
 
         patch_model, patch_user = _patched()
