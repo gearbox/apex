@@ -57,6 +57,16 @@ model.generation_modes  +  selected source media  +  user action
                 POST /v1/generate { generation_type, source_media }
 ```
 
+For on-demand (Aisha) models, `generation_modes` is the intersection of what the provider
+implementation can execute and what the resolved bundle declares. A bundle whose graph has no image
+loader offers only `t2i`, even though the model is registered for `t2i` and `i2i` — so
+`zit.cyberrealistic` reports `generation_modes: { "t2i": { "source_media": null } }`. Read the
+offered modes per request rather than caching a model→modes map for the session; a bundle update
+changes them without a deploy.
+
+Because the two sides intersect, anything advertised is executable: a bundle cannot widen a mode
+beyond what the provider can run, and a mode with no satisfiable intersection is not offered at all.
+
 The action supplies intent; the advertised contracts say which resolutions are legal. Cardinality
 alone is not enough: with two images selected, “add reference” keeps `i2v` where advertised,
 while “add end frame” selects `flf2v`.

@@ -121,11 +121,6 @@ class BundleCapabilities:
     writable: frozenset[str]
     max_batch_size: int
 
-    @property
-    def generation_types(self) -> frozenset[GenerationType]:
-        """Legacy projection of the bundle's per-mode contracts."""
-        return frozenset(self.generation_modes)
-
 
 @dataclass(frozen=True, slots=True)
 class RequestParameterBinding:

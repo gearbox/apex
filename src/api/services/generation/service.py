@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from src.api.services.workflow.contract import BundleCapabilities
     from src.core.bundle_config import BundleMapping
     from src.core.generation_config import BundleGenerationConfig
-    from src.core.generation_mode import SourceMediaConstraints
+    from src.core.generation_mode import GenerationModes, SourceMediaConstraints
     from src.core.product import ProductConfig
     from src.db.models.storage import GenerationJob
 
@@ -191,10 +191,10 @@ class GenerationService:
         request: UnifiedGenerationRequest,
         capabilities: BundleCapabilities,
         generation: BundleGenerationConfig,
+        modes: GenerationModes,
     ) -> None:
         """Reject overrides a bound workflow cannot write before billing begins."""
-        resolved_modes = resolve_generation_modes(request.model, capabilities=capabilities)
-        if request.generation_type not in resolved_modes:
+        if request.generation_type not in modes:
             raise UnsupportedGenerationParameterError(["generation_type"])
         unsupported: list[str] = []
         if request.negative_prompt is not None and not capabilities.supports_negative_prompt:
@@ -258,6 +258,8 @@ class GenerationService:
                     f"Model '{request.model.value}' requires age verification"
                 )
 
+        modes = resolve_generation_modes(request.model, capabilities=bundle_capabilities)
+
         # A production service always receives the index. Keeping the dependency
         # optional lets lightweight callers exercise the shared orchestration
         # path without fabricating a bundle graph, while an indexed on-demand
@@ -276,9 +278,9 @@ class GenerationService:
                 self._bundle_index.get_generation_config(
                     bundle_mapping.bundle_name, bundle_mapping.bundle_version
                 ),
+                modes,
             )
 
-        modes = resolve_generation_modes(request.model, capabilities=bundle_capabilities)
         # This lookup is total: step 1 ensures static registry membership, and
         # bundle validation above rejects any bundle-narrowed type first.
         contract = modes[request.generation_type].source_media

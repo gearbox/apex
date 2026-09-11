@@ -303,6 +303,34 @@ class TestModelInfoSchema:
 
         assert list(info.generation_modes) == [GenerationType.I2I.value]
 
+    def test_empty_resolved_modes_disable_the_model(self) -> None:
+        """An enabled model with no executable mode must not be actionable."""
+        capabilities = BundleCapabilities(
+            media=MediaKind.IMAGE,
+            generation_modes={
+                GenerationType.T2I: GenerationModeMeta(
+                    SourceMediaConstraints(
+                        min=1,
+                        max=1,
+                        media_types=frozenset({MediaKind.IMAGE}),
+                    )
+                )
+            },
+            supports_negative_prompt=False,
+            writable=frozenset(),
+            max_batch_size=1,
+        )
+
+        info = _build_model_info(
+            ModelType.AISHA_IMAGE,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=capabilities,
+        )
+
+        assert info.generation_modes == {}
+        assert info.is_enabled is False
+
     def test_aisha_image_lite_reports_t2i_only_no_negative_no_source_media(self) -> None:
         """Z-C1: aisha-image-lite (zit.cyberrealistic) is t2i-only, has no
         negative_prompt role, and declares no media_inputs at all."""

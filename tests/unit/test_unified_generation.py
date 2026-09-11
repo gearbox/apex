@@ -29,6 +29,7 @@ from src.api.services.generation.source_media import (
     SourceMediaResolver,
     SourceMediaValidationError,
 )
+from src.api.services.workflow.contract import BundleCapabilities
 from src.core.enums import (
     AspectRatio,
     GenerationType,
@@ -41,6 +42,7 @@ from src.core.enums import (
     Scheduler,
     VideoResolution,
 )
+from src.core.generation_mode import GenerationModeMeta
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.model_registry import get_model_meta
 from src.core.product_registry import VEX_CONFIG
@@ -685,9 +687,9 @@ class TestGenerationServiceGenerate:
     async def test_rejects_n_exceeding_model_cap(self) -> None:
         """Aisha supports max 4 outputs."""
         bundle_index = MagicMock()
-        capabilities = MagicMock(
-            generation_types=frozenset({GenerationType.T2I}),
-            generation_modes={GenerationType.T2I: MagicMock(source_media=None)},
+        capabilities = BundleCapabilities(
+            media=MediaKind.IMAGE,
+            generation_modes={GenerationType.T2I: GenerationModeMeta()},
             supports_negative_prompt=True,
             writable=frozenset({"latent.batch_size"}),
             max_batch_size=4,

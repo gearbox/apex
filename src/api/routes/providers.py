@@ -124,7 +124,11 @@ def _build_model_info(
             )
             for generation_type in ordered
         },
-        is_enabled=record.is_enabled and (not requires_indexed_workflow or has_indexed_workflow),  # type: ignore[attr-defined]
+        is_enabled=(
+            record.is_enabled  # type: ignore[attr-defined]
+            and (not requires_indexed_workflow or has_indexed_workflow)
+            and bool(modes)
+        ),
         max_images=max_images,
         max_prompt_length=meta.max_prompt_length,
         supports_negative_prompt=supports_negative,
