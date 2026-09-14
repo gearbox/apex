@@ -642,6 +642,16 @@ class ScriptVariant(StrEnum):
     base = "base"
 
 
+class ScriptServeOutcome(StrEnum):
+    """HTTP-mapping outcome of one provisioning-script request."""
+
+    ok = "ok"
+    bad_request = "bad_request"
+    unauthorized = "unauthorized"
+    not_found = "not_found"
+    unavailable = "unavailable"
+
+
 class DeploymentStatus(StrEnum):
     """Lifecycle states for one gpu_session_deployments row.
 

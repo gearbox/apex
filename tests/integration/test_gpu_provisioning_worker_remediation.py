@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -12,18 +15,27 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.schemas.events import EventType
+from src.api.schemas.provisioning import ProvisionerFailureWebhookBody
 from src.api.services.gpu_session.node_cooldown import NullNodeCooldownStore
 from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PENDING_TIMEOUT,
     GpuProvisioningWorker,
 )
-from src.api.services.provisioning_script import ResolvedScript
+from src.api.services.provisioning_script import ProvisioningScriptService, ResolvedScript
+from src.api.services.provisioning_webhook import ProvisioningWebhookService
 from src.api.services.vastai.schemas import VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
-from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind, OperationStatus
+from src.core.enums import (
+    DeploymentStatus,
+    GpuSessionStatus,
+    OperationKind,
+    OperationStatus,
+    ScriptServeOutcome,
+)
 from src.core.uid import new_id
 from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
+from src.db.repositories.gpu_session import GpuSessionRepository
 from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_deployment import GpuSessionDeploymentRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
@@ -47,7 +59,7 @@ class _RetrySettings:
     ai_bundles_branch = "main"
     aisha_repo_url = "https://example.test/aisha.git"
     aisha_branch = "main"
-    apex_callback_url = "https://apex.example.test/callback"
+    apex_callback_url = "https://apex.example.test"
     provisioning_script_ref = "v1.0.0"
     hf_token = "test-hf-token"
     civitai_api_token = "test-civitai-token"
@@ -251,3 +263,262 @@ async def test_provisioning_failure_cascade_bumps_revision_and_emits_operation_u
     assert len(operation_frames) == 1
     assert operation_frames[0].id == operation_id
     assert operation_frames[0].revision == 1
+
+
+class _WorkerFailureAdapter:
+    """Exercise the webhook's handoff against the worker's real locked transition."""
+
+    def __init__(self, worker: GpuProvisioningWorker, session: GpuSession) -> None:
+        self._worker = worker
+        self._session = session
+
+    async def fail_pre_active_session(self, session_id: object, *, reason: str) -> None:
+        assert session_id == self._session.id
+        await self._worker._mark_failed(self._session, reason)
+
+
+def _webhook_payload() -> ProvisionerFailureWebhookBody:
+    return ProvisionerFailureWebhookBody(
+        action="continue",
+        manifest="/node/manifest.yaml",
+        error="failed to fetch bootstrap script",
+        container_id="98765",
+        timestamp="2026-09-14T12:00:00",
+    )
+
+
+async def test_webhook_and_probe_failure_race_tears_down_and_refunds_once(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Postgres row locking makes external teardown terminal-once across both paths."""
+    token = "callback-token"
+    user = User(
+        id=new_id(),
+        email=f"retry-remediation-race-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="retry-bundle",
+        model_type="aisha-image",
+        vastai_instance_id=98765,
+        cf_tunnel_id="tunnel-id",
+        cf_dns_record_id="dns-id",
+        callback_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+    )
+    async with provisioning_session_factory() as db, db.begin():
+        db.add(user)
+        await db.flush()
+        db.add(gpu_session)
+
+    vastai = AsyncMock()
+    cloudflare = AsyncMock()
+    billing = AsyncMock()
+    worker = GpuProvisioningWorker(
+        session_factory=provisioning_session_factory,
+        vastai_client=vastai,
+        cf_client=cloudflare,
+        bundle_index=MagicMock(),
+        http_client=AsyncMock(),
+        settings=_RetrySettings(),  # type: ignore[arg-type]
+        cooldown_store=NullNodeCooldownStore(),
+        provisioning_script_service=_make_provisioning_script_service(),
+        billing_service=billing,
+        redis_enabled=False,
+        redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
+    )
+    webhook = ProvisioningWebhookService(
+        gpu_session_service=_WorkerFailureAdapter(worker, gpu_session),  # type: ignore[arg-type]
+        session_factory=provisioning_session_factory,
+    )
+
+    statuses = await asyncio.gather(
+        webhook.handle_failure(session_id=gpu_session.id, token=token, payload=_webhook_payload()),
+        worker._mark_failed(gpu_session, reason="probe_fail_fast"),
+    )
+
+    assert statuses[0] == 200
+    vastai.destroy_instance.assert_awaited_once_with(98765)
+    cloudflare.delete_session_tunnel.assert_awaited_once_with("tunnel-id", "dns-id")
+    billing.refund.assert_awaited_once()
+    async with provisioning_session_factory() as db:
+        failed = await db.get(GpuSession, gpu_session.id)
+    assert failed is not None
+    assert failed.status == GpuSessionStatus.failed
+
+
+async def test_webhook_persists_only_the_fixed_reason(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token = "callback-token"
+    leaked_token = "must-not-persist"
+    user = User(
+        id=new_id(),
+        email=f"retry-remediation-webhook-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="retry-bundle",
+        model_type="aisha-image",
+        callback_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+    )
+    async with provisioning_session_factory() as db, db.begin():
+        db.add(user)
+        await db.flush()
+        db.add(gpu_session)
+
+    worker = GpuProvisioningWorker(
+        session_factory=provisioning_session_factory,
+        vastai_client=AsyncMock(),
+        cf_client=AsyncMock(),
+        bundle_index=MagicMock(),
+        http_client=AsyncMock(),
+        settings=_RetrySettings(),  # type: ignore[arg-type]
+        cooldown_store=NullNodeCooldownStore(),
+        provisioning_script_service=_make_provisioning_script_service(),
+        redis_enabled=False,
+        redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
+    )
+    webhook = ProvisioningWebhookService(
+        gpu_session_service=_WorkerFailureAdapter(worker, gpu_session),  # type: ignore[arg-type]
+        session_factory=provisioning_session_factory,
+    )
+    payload = _webhook_payload()
+    payload = ProvisionerFailureWebhookBody(
+        action=payload.action,
+        manifest=f"/node/{leaked_token}/manifest.yaml",
+        error=f"fetch https://apex.test/script?token={leaked_token}",
+        container_id=payload.container_id,
+        timestamp=payload.timestamp,
+    )
+
+    assert (
+        await webhook.handle_failure(session_id=gpu_session.id, token=token, payload=payload) == 200
+    )
+    async with provisioning_session_factory() as db:
+        failed = await db.get(GpuSession, gpu_session.id)
+    assert failed is not None
+    assert failed.error_message == "node_provision_script_failed"
+    assert leaked_token not in failed.error_message
+
+
+async def test_script_service_authorizes_real_session_rows(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The script endpoint's service layer authenticates against committed Postgres rows."""
+    token = "callback-token"
+    user = User(
+        id=new_id(),
+        email=f"retry-remediation-script-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="retry-bundle",
+        model_type="aisha-image",
+        callback_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+    )
+    async with provisioning_session_factory() as db, db.begin():
+        db.add(user)
+        await db.flush()
+        db.add(gpu_session)
+
+    http = AsyncMock()
+    response = MagicMock()
+    response.status_code = 200
+    response.content = b"#!/bin/sh\necho bootstrap\n"
+    response.text = response.content.decode()
+    response.headers = {}
+    http.get.return_value = response
+    script_service = ProvisioningScriptService(
+        http=http,
+        redis=None,
+        settings=_RetrySettings(),  # type: ignore[arg-type]
+    )
+
+    async with provisioning_session_factory() as db:
+        valid = await script_service.serve_for_session(
+            db=db,
+            session_id=gpu_session.id,
+            token=token,
+            variant="comfyui",
+            ref="v1.0.0",
+        )
+        wrong = await script_service.serve_for_session(
+            db=db,
+            session_id=gpu_session.id,
+            token="wrong-token",
+            variant="comfyui",
+            ref="v1.0.0",
+        )
+        unknown = await script_service.serve_for_session(
+            db=db,
+            session_id=new_id(),
+            token=token,
+            variant="comfyui",
+            ref="v1.0.0",
+        )
+
+    assert valid.outcome == ScriptServeOutcome.ok
+    assert wrong.outcome == ScriptServeOutcome.unauthorized
+    assert unknown.outcome == ScriptServeOutcome.unauthorized
+
+
+async def test_replacement_node_atomically_resets_contract_failure_grace(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    user = User(
+        id=new_id(),
+        email=f"retry-remediation-grace-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.pending,
+        bundle_name="retry-bundle",
+        model_type="aisha-image",
+        consecutive_contract_failures=2,
+    )
+    async with provisioning_session_factory() as db, db.begin():
+        db.add(user)
+        await db.flush()
+        db.add(gpu_session)
+
+    fresh_hash = hashlib.sha256(b"replacement-token").hexdigest()
+    async with provisioning_session_factory() as db, db.begin():
+        repo = GpuSessionRepository(db)
+        await repo.update_instance(
+            gpu_session.id,
+            vastai_instance_id=777,
+            vastai_offer_id=42,
+            vastai_cost_per_hour_micros=500_000,
+            vastai_gpu_name="RTX_4090",
+            vastai_machine_id=99,
+            provisioning_started_at=datetime.now(UTC),
+            callback_token_hash=fresh_hash,
+        )
+
+    async with provisioning_session_factory() as db, db.begin():
+        repo = GpuSessionRepository(db)
+        replacement = await repo.get_by_id(gpu_session.id)
+        assert replacement is not None
+        assert replacement.vastai_instance_id == 777
+        assert replacement.callback_token_hash == fresh_hash
+        assert replacement.consecutive_contract_failures == 0
+        assert await repo.increment_consecutive_contract_failures(gpu_session.id) == 1

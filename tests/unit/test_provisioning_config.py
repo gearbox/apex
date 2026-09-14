@@ -119,12 +119,55 @@ class TestProvisioningScriptSettings:
         assert s.provisioning_script_ref == ""
 
     def test_ref_custom_value(self) -> None:
-        s = _base_settings(provisioning_script_ref="v1.2.3")
+        s = _base_settings(
+            provisioning_script_ref="v1.2.3",
+            apex_callback_url="https://apex.example.test",
+        )
         assert s.provisioning_script_ref == "v1.2.3"
 
     def test_dev_ref_defaults_none(self) -> None:
         s = _base_settings()
         assert s.provisioning_script_dev_ref is None
+
+    def test_dev_ref_empty_or_whitespace_is_none(self) -> None:
+        assert _base_settings(provisioning_script_dev_ref="").provisioning_script_dev_ref is None
+        assert _base_settings(provisioning_script_dev_ref="  ").provisioning_script_dev_ref is None
+
+    def test_empty_callback_url_is_rejected_when_script_delivery_is_configured(self) -> None:
+        with pytest.raises(ValidationError, match="apex_callback_url"):
+            _base_settings(provisioning_script_ref="v1.2.3", apex_callback_url="")
+
+    @pytest.mark.parametrize("value", ["apex.example.test", "https://apex.example.test/callback"])
+    def test_callback_url_must_be_an_absolute_origin(self, value: str) -> None:
+        with pytest.raises(ValidationError, match="apex_callback_url"):
+            _base_settings(provisioning_script_ref="v1.2.3", apex_callback_url=value)
+
+    def test_callback_url_is_normalized_to_an_origin(self) -> None:
+        with_slash = _base_settings(
+            provisioning_script_ref="v1.2.3", apex_callback_url="https://apex.example.test/"
+        )
+        without_slash = _base_settings(
+            provisioning_script_ref="v1.2.3", apex_callback_url="https://apex.example.test"
+        )
+        assert with_slash.apex_callback_url == without_slash.apex_callback_url
+
+    def test_production_rejects_mutable_script_ref(self) -> None:
+        with pytest.raises(ValidationError, match="provisioning_script_ref"):
+            _base_settings(
+                environment="production",
+                provisioning_script_ref="main",
+                provisioning_script_dev_ref="main",
+                apex_callback_url="https://apex.example.test",
+            )
+
+    def test_staging_accepts_its_explicit_dev_ref(self) -> None:
+        settings = _base_settings(
+            environment="staging",
+            provisioning_script_ref="main",
+            provisioning_script_dev_ref="main",
+            apex_callback_url="https://apex.example.test",
+        )
+        assert settings.provisioning_script_ref == "main"
 
     def test_cache_ttl_defaults(self) -> None:
         s = _base_settings()

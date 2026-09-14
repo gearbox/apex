@@ -231,7 +231,8 @@ class GpuSessionRepository:
             .returning(GpuSession.consecutive_contract_failures)
         )
         await self._session.flush()
-        return result.scalar_one()
+        new_count = result.scalar_one_or_none()
+        return new_count if new_count is not None else 0
 
     async def reset_consecutive_contract_failures(self, session_id: UUID) -> None:
         """Zero the counter after any non-contract_failed probe outcome."""
@@ -251,6 +252,7 @@ class GpuSessionRepository:
         vastai_cost_per_hour_micros: int,
         vastai_gpu_name: str,
         provisioning_started_at: datetime,
+        callback_token_hash: str,
         vastai_machine_id: int | None = None,
     ) -> None:
         """Swap instance info on a session after a retry; status unchanged (stays 'pending').
@@ -262,6 +264,7 @@ class GpuSessionRepository:
             vastai_cost_per_hour_micros: New hourly cost.
             vastai_gpu_name: New GPU model name.
             provisioning_started_at: Reset timestamp (restarts the timeout window).
+            callback_token_hash: Fresh callback token digest for the replacement node.
             vastai_machine_id: New Vast.ai physical machine id.
         """
         await self._session.execute(
@@ -274,6 +277,8 @@ class GpuSessionRepository:
                 vastai_gpu_name=vastai_gpu_name,
                 vastai_machine_id=vastai_machine_id,
                 provisioning_started_at=provisioning_started_at,
+                callback_token_hash=callback_token_hash,
+                consecutive_contract_failures=0,
             )
         )
         await self._session.flush()

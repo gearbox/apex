@@ -14,13 +14,33 @@ or log lengths/prefixes if logging is ever needed.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
+from src.core.config import normalize_apex_callback_url
 from src.core.enums import ScriptVariant
 
 if TYPE_CHECKING:
     from uuid import UUID
 
     from src.core.config import Settings
+
+
+def build_provisioning_callback_urls(
+    *,
+    apex_callback_url: str,
+    session_id: UUID,
+    callback_token: str,
+    provision_script_ref: str,
+) -> tuple[str, str]:
+    """Build the script and failure-webhook URLs from one normalized origin."""
+    query = urlencode({"session": str(session_id), "token": callback_token})
+    script_url = (
+        f"{apex_callback_url}/v1/provisioning/scripts/"
+        f"{ScriptVariant.comfyui.value}/{provision_script_ref}?{query}"
+    )
+    webhook_query = urlencode({"token": callback_token})
+    webhook_url = f"{apex_callback_url}/v1/provisioning/webhook/{session_id}?{webhook_query}"
+    return script_url, webhook_url
 
 
 def build_acs_env(
@@ -65,13 +85,14 @@ def build_acs_env(
           Apex owns the ref pin (settings.provisioning_script_ref); the Vast
           template itself no longer sets PROVISIONING_SCRIPT (D2).
     """
-    script_url = (
-        f"{settings.apex_callback_url}/v1/provisioning/scripts/"
-        f"{ScriptVariant.comfyui.value}/{settings.provisioning_script_ref}"
-        f"?session={session_id}&token={callback_token}"
-    )
-    webhook_url = (
-        f"{settings.apex_callback_url}/v1/provisioning/webhook/{session_id}?token={callback_token}"
+    callback_origin = normalize_apex_callback_url(settings.apex_callback_url)
+    if callback_origin is None:
+        raise ValueError("settings.apex_callback_url must be a valid absolute http(s) origin")
+    script_url, webhook_url = build_provisioning_callback_urls(
+        apex_callback_url=callback_origin,
+        session_id=session_id,
+        callback_token=callback_token,
+        provision_script_ref=settings.provisioning_script_ref,
     )
     return {
         # --- Bundle selection ---
@@ -92,7 +113,7 @@ def build_acs_env(
         "CF_TUNNEL_TOKEN": tunnel_token,
         "ACS_APEX_SESSION_ID": str(session_id),
         "ACS_APEX_OPERATION_ID": str(operation_id),
-        "ACS_APEX_CALLBACK_URL": settings.apex_callback_url,
+        "ACS_APEX_CALLBACK_URL": callback_origin,
         "ACS_APEX_CALLBACK_TOKEN": callback_token,
         # --- Bootstrap script delivery (D3) — Vast's own onstart-fetch + provisioner
         # settings overrides. See the module/function docstrings for the naming rule.

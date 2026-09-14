@@ -167,7 +167,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.vastai_offer_search_limit = 20
     settings.gpu_provision_worker_concurrency = 10
     settings.gpu_provision_terminal_grace_probes = 3
-    settings.apex_callback_url = "https://apex.example.com/callback"
+    settings.apex_callback_url = "https://apex.example.com"
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
     settings.aisha_cf_tunnel_domain = "gpu-domain.com"
@@ -678,9 +678,11 @@ class TestAdvanceProvisioning:
         # Fresh token generated per retry — must be a non-empty string
         fresh_callback_token = env["ACS_APEX_CALLBACK_TOKEN"]
         assert isinstance(fresh_callback_token, str) and len(fresh_callback_token) > 0
-        # The hash written to DB must match the fresh token in the env
+        # The hash written atomically with the replacement instance must match
+        # the fresh token in the env, and resets that node's contract grace.
         expected_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
-        mock_repo.update_callback_token_hash.assert_called_once_with(session.id, expected_hash)
+        update_instance_kwargs = mock_repo.update_instance.await_args.kwargs
+        assert update_instance_kwargs["callback_token_hash"] == expected_hash
         assert "ACS_HF_TOKEN" in env
         assert "ACS_CIVITAI_API_TOKEN" in env
         # New contract keys
@@ -1428,6 +1430,28 @@ class TestMarkFailed:
         # update_status(session_id, status, **extras) — second positional is status
         assert update_args[1] == GpuSessionStatus.failed
         assert update_kwargs.get("error_message") == "test failure"
+
+    async def test_losing_terminal_race_does_not_teardown_or_refund(self) -> None:
+        billing = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=12345,
+            cf_tunnel_id="tun-abc",
+            cf_dns_record_id="dns-abc",
+        )
+        terminal = _make_gpu_session(id=session.id, status=GpuSessionStatus.failed)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = terminal
+
+            await worker._mark_failed(session, reason="racing failure")
+
+        mocks["vastai_client"].destroy_instance.assert_not_awaited()
+        mocks["cf_client"].delete_session_tunnel.assert_not_awaited()
+        billing.refund.assert_not_awaited()
 
     async def test_skips_destroy_when_instance_id_missing(self) -> None:
         worker, mocks = _make_worker()

@@ -231,7 +231,7 @@ def _make_settings(
     settings.provisioning_recreation_attempts = recreation_attempts
     settings.vastai_destroy_retry_attempts = destroy_retry_attempts
     settings.vastai_offer_search_limit = 20
-    settings.apex_callback_url = "https://apex.example.com/callback"
+    settings.apex_callback_url = "https://apex.example.com"
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
     settings.gpu_session_tokens_per_minute = 100
@@ -1156,6 +1156,28 @@ class TestStartSession:
             MockRepo.return_value = mock_repo
 
             with pytest.raises(ProvisioningUnavailableError, match="provisioning_script_ref"):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                )
+
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.create.assert_not_called()
+
+    async def test_start_session_fails_fast_on_invalid_callback_url(self) -> None:
+        service, mocks = _make_service()
+        mocks["settings"].apex_callback_url = "https://apex.example.com/callback"
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with pytest.raises(ProvisioningUnavailableError, match="apex_callback_url"):
                 await service.start_session(
                     user_id=uuid4(),
                     product_id="vex",
@@ -3760,7 +3782,8 @@ class TestFailPreActiveSession:
         mock_repo.update_status.assert_not_called()
 
     async def test_valid_call_tears_down_refunds_and_marks_failed(self) -> None:
-        service, mocks = _make_service()
+        event_bus = AsyncMock()
+        service, mocks = _make_service(event_bus=event_bus)
         session = _make_gpu_session(
             status=GpuSessionStatus.provisioning,
             started_at=None,
@@ -3776,7 +3799,7 @@ class TestFailPreActiveSession:
             mock_repo.get_by_id.return_value = session
 
             result = await service.fail_pre_active_session(
-                session.id, reason="node_provision_script_failed: fetch 404"
+                session.id, reason="node_provision_script_failed"
             )
 
         assert result is session
@@ -3789,7 +3812,12 @@ class TestFailPreActiveSession:
             if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
         ]
         assert failed_calls
-        assert failed_calls[0].kwargs["error_message"] == "node_provision_script_failed: fetch 404"
+        assert failed_calls[0].kwargs["error_message"] == "node_provision_script_failed"
+        assert mocks["billing_service"].refund.await_args.kwargs["description"] == (
+            "GPU session failed: node_provision_script_failed"
+        )
+        status_event = event_bus.publish.await_args.kwargs["payload"]
+        assert status_event.error_message == "node_provision_script_failed"
 
     async def test_no_account_id_skips_refund(self) -> None:
         service, mocks = _make_service()

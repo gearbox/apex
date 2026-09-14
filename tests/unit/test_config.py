@@ -92,6 +92,10 @@ class TestNowpaymentsIpnCallbackUrl:
         settings = Settings(jwt_secret_key=_JWT_SECRET)
         assert settings.nowpayments_ipn_callback_url is None
 
+    def test_empty_value_is_treated_as_unset(self) -> None:
+        settings = Settings(jwt_secret_key=_JWT_SECRET, nowpayments_ipn_callback_url="")
+        assert settings.nowpayments_ipn_callback_url is None
+
     def test_valid_https_url_accepted(self) -> None:
         url = "https://api.example.com/v1/billing/webhooks/nowpayments"
         settings = Settings(jwt_secret_key=_JWT_SECRET, nowpayments_ipn_callback_url=url)

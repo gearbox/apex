@@ -9,14 +9,13 @@ SECURITY: never log tokens.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.security.callback_token import validate_callback_token
 from src.core.enums import (
     TERMINAL_GPU_SESSION_STATUSES,
     TERMINAL_OPERATION_STATUSES,
@@ -47,14 +46,6 @@ class OperationEventResult:
     status: int
     outcome: EventOutcome | None = None
     operation: GpuSessionOperation | None = None
-
-
-def _validate_token(presented: str, stored_hash: str | None) -> bool:
-    """Constant-time comparison of presented bearer token against stored SHA-256 hash."""
-    if not stored_hash:
-        return False
-    presented_hash = hashlib.sha256(presented.encode()).hexdigest()
-    return hmac.compare_digest(presented_hash, stored_hash)
 
 
 class OperationEventService:
@@ -95,7 +86,7 @@ class OperationEventService:
             )
             return OperationEventResult(authorized=False, status=401)
 
-        if not _validate_token(bearer_token, session.callback_token_hash):
+        if not validate_callback_token(bearer_token, session.callback_token_hash):
             logger.warning(
                 "gpu_session.operation.rejected", session_id=str(session_id), reason="invalid_token"
             )

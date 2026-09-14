@@ -1,14 +1,18 @@
 """Application configuration using pydantic-settings."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from annotated_types import Le
-from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.core.constants import MAX_EXTRACT_TIMESTAMPS, MAX_PREVIEW_FRAME_COUNT
+from src.core.constants import (
+    MAX_EXTRACT_TIMESTAMPS,
+    MAX_PREVIEW_FRAME_COUNT,
+    PROVISIONING_REF_PATTERN,
+)
 from src.core.enums import WorkerMode
 from src.core.topup_pricing import build_tiers
 
@@ -34,6 +38,38 @@ _INSECURE_JWT_DEFAULTS: frozenset[str] = frozenset(
     }
 )
 _MIN_JWT_SECRET_BYTES = 32
+
+
+def _empty_string_to_none(value: object) -> object:
+    """Make an environment variable set to whitespace behave as an unset optional value."""
+    return None if isinstance(value, str) and not value.strip() else value
+
+
+OptionalNonBlankStr = Annotated[str | None, BeforeValidator(_empty_string_to_none)]
+
+
+def normalize_apex_callback_url(value: str) -> str | None:
+    """Return a normalized absolute callback origin, or ``None`` when invalid."""
+    normalized_url = value.rstrip("/")
+    parsed = urlparse(normalized_url)
+    try:
+        port_is_valid = parsed.port is None or isinstance(parsed.port, int)
+    except ValueError:
+        port_is_valid = False
+    if (
+        not normalized_url
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not port_is_valid
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return normalized_url
 
 
 class Settings(BaseSettings):
@@ -567,7 +603,7 @@ class Settings(BaseSettings):
             "same fail-closed posture as an empty ai_bundles_github_token."
         ),
     )
-    provisioning_script_dev_ref: str | None = Field(
+    provisioning_script_dev_ref: OptionalNonBlankStr = Field(
         default=None,
         description=(
             "Single additional ref (typically a branch name) accepted by "
@@ -1265,7 +1301,7 @@ class Settings(BaseSettings):
         default="https://api.nowpayments.io",
         description="NowPayments API base URL; override to use the sandbox.",
     )
-    nowpayments_ipn_callback_url: str | None = Field(
+    nowpayments_ipn_callback_url: OptionalNonBlankStr = Field(
         default=None,
         description=(
             "Absolute public URL of this environment's NowPayments IPN endpoint, e.g. "
@@ -1479,6 +1515,34 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def validate_provisioning_bootstrap_settings(self) -> "Settings":
+        """Validate the callback origin and script ref before GPU provisioning can run."""
+        ref = self.provisioning_script_ref
+        if not ref:
+            return self
+
+        is_immutable = bool(PROVISIONING_REF_PATTERN.fullmatch(ref))
+        is_allowed_dev_ref = (
+            self.environment != "production"
+            and self.provisioning_script_dev_ref is not None
+            and ref == self.provisioning_script_dev_ref
+        )
+        if not is_immutable and not is_allowed_dev_ref:
+            raise ValueError(
+                "provisioning_script_ref must be a release tag/full commit SHA, or equal "
+                "provisioning_script_dev_ref outside production"
+            )
+
+        normalized_url = normalize_apex_callback_url(self.apex_callback_url)
+        if normalized_url is None:
+            raise ValueError(
+                "apex_callback_url must be a non-empty absolute http(s) origin without a "
+                "path, query, fragment, or userinfo"
+            )
+        self.apex_callback_url = normalized_url
+        return self
 
     @model_validator(mode="after")
     def validate_credit_warning_thresholds(self) -> "Settings":

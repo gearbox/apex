@@ -35,6 +35,7 @@ from src.api.schemas.provisioning import ProvisionerFailureWebhookBody
 from src.api.services.provisioning_script import ProvisioningScriptService
 from src.api.services.provisioning_webhook import ProvisioningWebhookService
 from src.core.config import Settings
+from src.core.enums import ScriptServeOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -93,15 +94,15 @@ class ProvisioningController(Controller):
             db=session, session_id=session_id, token=token, variant=variant, ref=ref
         )
 
-        if result.outcome == "bad_request":
+        if result.outcome == ScriptServeOutcome.bad_request:
             return _error("bad_request", "Invalid variant or ref", HTTP_400_BAD_REQUEST)
-        if result.outcome == "unauthorized":
+        if result.outcome == ScriptServeOutcome.unauthorized:
             return _error("unauthorized", "Invalid or missing token", HTTP_401_UNAUTHORIZED)
-        if result.outcome == "not_found":
+        if result.outcome == ScriptServeOutcome.not_found:
             return _error(
                 "provisioning_script_ref_not_found", "Script ref not found", HTTP_404_NOT_FOUND
             )
-        if result.outcome == "unavailable":
+        if result.outcome == ScriptServeOutcome.unavailable:
             return _error(
                 "provisioning_script_unavailable",
                 "Script temporarily unavailable",

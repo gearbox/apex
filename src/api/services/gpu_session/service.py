@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.provisioning_script import ProvisioningScriptError
 from src.api.services.vastai.exceptions import NoCapacityError
+from src.core.config import normalize_apex_callback_url
 from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
     STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
@@ -42,6 +43,7 @@ from .exceptions import (
     SessionAlreadyExistsError,
     SessionHasInFlightJobsError,
 )
+from .failure_reasons import bounded_failure_reason
 from .schemas import StopConfirmation
 
 if TYPE_CHECKING:
@@ -241,7 +243,7 @@ class GpuSessionService:
         2. Pre-check uniqueness via GpuSessionDeploymentRepository.get_live_for_model (fast fail)
         3. Generate session_id (UUIDv7) and callback_token (token_urlsafe)
         1.5. Assert sufficient balance BEFORE creating any external resources
-        3.6. Validate config (ai_bundles_github_token, provisioning_script_ref) — fail
+        3.6. Validate config (ai_bundles_github_token, provisioning_script_ref, apex_callback_url) — fail
              fast with no cleanup needed, since nothing external exists yet
         3.7. Resolve the bootstrap script via ProvisioningScriptService.resolve() (D6) —
              proves the ref apex is about to hand this node actually resolves BEFORE
@@ -344,6 +346,19 @@ class GpuSessionService:
             raise ProvisioningUnavailableError(
                 "Apex is misconfigured: provisioning_script_ref is empty. "
                 "Set PROVISIONING_SCRIPT_REF to a released gearbox/aisha tag or commit SHA."
+            )
+        if normalize_apex_callback_url(self._settings.apex_callback_url) is None:
+            logger.error(
+                "gpu_session.start.failed",
+                user_id=str(user_id),
+                model_type=model_type.value,
+                error_class="ConfigurationError",
+                phase="config_validation",
+                reason="apex_callback_url is invalid",
+            )
+            raise ProvisioningUnavailableError(
+                "Apex is misconfigured: apex_callback_url is invalid. "
+                "Set APEX_CALLBACK_URL to the public Apex http(s) origin."
             )
 
         # Step 3.7: resolve the bootstrap script apex is about to hand this node (D6) —
@@ -1274,6 +1289,7 @@ class GpuSessionService:
         authoritative probe has already accepted as working. Returns the row
         unchanged if it was already terminal/stopping (idempotent no-op).
         """
+        reason = bounded_failure_reason(reason)
         logger.info("gpu_session.fail_pre_active.start", session_id=str(session_id), reason=reason)
 
         async with self._session_factory() as db, db.begin():
@@ -1297,14 +1313,14 @@ class GpuSessionService:
                 return None
             previous_status = str(session_row.status)
             closed_operations = await self._set_status(
-                db, repo, session_row, GpuSessionStatus.failed, error_message=reason[:500]
+                db, repo, session_row, GpuSessionStatus.failed, error_message=reason
             )
 
         logger.info(
             "gpu_session.fail_pre_active.transitioned", session_id=str(session_id), reason=reason
         )
         await self._publish_status_event(
-            session_row, previous_status=previous_status, error_message=reason[:500]
+            session_row, previous_status=previous_status, error_message=reason
         )
         for operation in closed_operations:
             await publish_operation_event(self._event_bus, operation)
@@ -1318,7 +1334,7 @@ class GpuSessionService:
                 async with self._session_factory() as db, db.begin():
                     refund_result = await self._billing_service.refund(
                         session_row.id,
-                        description=f"GPU session failed: {reason[:200]}",
+                        description=f"GPU session failed: {reason}",
                         session=db,
                         product_id=session_row.product_id,
                         user_id=session_row.user_id,

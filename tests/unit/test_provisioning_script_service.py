@@ -95,6 +95,25 @@ def _make_response(
 
 
 class TestResolve:
+    async def test_disallowed_ref_is_rejected_before_any_http_call(self) -> None:
+        http = AsyncMock(spec=httpx.AsyncClient)
+        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
+
+        with pytest.raises(ProvisioningScriptRefNotFoundError, match="not allowed"):
+            await service.resolve(ScriptVariant.comfyui, "main")
+
+        http.get.assert_not_awaited()
+
+    def test_immutable_and_dev_refs_choose_their_respective_cache_ttls(self) -> None:
+        service = ProvisioningScriptService(
+            http=AsyncMock(spec=httpx.AsyncClient),
+            redis=None,
+            settings=_make_settings(),
+        )
+
+        assert service._cache_ttl_for(True) == 86400
+        assert service._cache_ttl_for(False) == 60
+
     async def test_cache_miss_fetches_and_caches(self) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)
         http.get.return_value = _make_response(200, content=b"#!/bin/sh\necho hi\n")

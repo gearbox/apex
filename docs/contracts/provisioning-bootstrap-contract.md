@@ -24,7 +24,7 @@ configurable headers, so auth rides entirely in the query string.
 | Part | Contract |
 |---|---|
 | `variant` | One of `ScriptVariant` (`src/core/enums.py`): today only `comfyui`. Maps to a hard-coded `(repo, path)` pair in `SCRIPT_VARIANT_SOURCES` (`src/core/constants.py`) — **never** taken from the request body or query. |
-| `ref` | Must match `PROVISIONING_REF_PATTERN` (`^(v\d+\.\d+\.\d+\|[0-9a-f]{40})$`), or equal `Settings.provisioning_script_dev_ref` outside production. |
+| `ref` | Must match `PROVISIONING_REF_PATTERN` (`^(v\d+\.\d+\.\d+|[0-9a-f]{40})$`), or equal `Settings.provisioning_script_dev_ref` outside production. The configured `Settings.provisioning_script_ref` is checked against this same rule at boot and again during start-time preflight. |
 | `session` / `token` | `token`, SHA-256'd, must match the session's `callback_token_hash` (D4). Both required. |
 
 Responses:
@@ -69,13 +69,13 @@ the query string, validated the same way.
 
 | Status | Body | Meaning |
 |---|---|---|
-| 200 | `{"ok": true}` | Applied, or a no-op (session not found / already terminal — D9, so the provisioner's own retry loop never gets a 404 to spam) |
+| 200 | `{"ok": true}` | Applied, or a no-op for an already-terminal/stopping session after its token validates |
 | 400 | error envelope | Malformed body |
-| 401 | `unauthorized` | Missing/invalid token |
+| 401 | `unauthorized` | Session not found, or missing/invalid token. These cases intentionally have the same status and response body. |
 
 On a valid call against a live session: the session transitions to `failed`
-with `error_message` set to the upstream `error` string (reason constant
-`_REASON_NODE_PROVISION_SCRIPT_FAILED`, `src/api/services/provisioning_webhook.py`),
+with `error_message` set only to the fixed reason constant
+`_REASON_NODE_PROVISION_SCRIPT_FAILED` (`src/api/services/provisioning_webhook.py`),
 its Vast.ai instance is destroyed, its Cloudflare tunnel is torn down, its base
 reservation is refunded in full, and the usual `GPU_SESSION_STATUS_CHANGED` SSE
 event fires — the same shape a client already handles for any other
@@ -86,7 +86,11 @@ token is the authority, not the container id.
 This is terminal-once: it races against apex's own probe fail-fast (below) on
 the same `gpu_sessions` row, serialized by a `SELECT ... FOR UPDATE`, so
 whichever side reaches it first is the only one that tears down
-infrastructure and refunds.
+infrastructure and refunds. The provisioner's free-text `error` and `manifest`
+are observability-only: they are redacted (URL query strings, callback params,
+and URL userinfo removed), bounded, and emitted only on the dedicated
+`provisioning.webhook.failure_detail` log event. They never reach the session
+row, SSE payload, or billing-refund metadata.
 
 ## Env-var contract (`build_acs_env`, `src/api/services/gpu_session/_env_builder.py`)
 
@@ -107,6 +111,13 @@ provisioner concepts. The Vast template itself no longer sets
 provisioning_unavailable` before creating any resource if that ref is
 unconfigured or fails to resolve (D6).
 
+`Settings.apex_callback_url` is required whenever bootstrap script delivery is
+configured. It must be a non-empty absolute `http://` or `https://` origin,
+with no path, query, fragment, or userinfo; trailing slashes normalize away at
+settings load. Both URLs above are derived through one builder from that
+normalized origin, so no path suffix or double slash can drift into one endpoint
+but not the other.
+
 **Retry/re-provision note:** each provisioning retry (`GpuProvisioningWorker._retry_or_fail`)
 mints a fresh callback token for the new instance and rebuilds this env from
 scratch, so the new `PROVISIONING_SCRIPT`/`PROVISIONER_WEBHOOK_URL` carry the
@@ -125,7 +136,7 @@ string containing `token=`/`session=` — logs should carry `session_id`,
 
 | Status | Code | When |
 |---|---|---|
-| 503 | `provisioning_unavailable` | `ai_bundles_github_token` or `provisioning_script_ref` unset, or the script ref fails to resolve (404/502 from GitHub) — no tunnel, no Vast.ai instance, no session row, no billing hold |
+| 503 | `provisioning_unavailable` | `ai_bundles_github_token`, `provisioning_script_ref`, or `apex_callback_url` unset, or the script ref fails to resolve (404/502 from GitHub) — no tunnel, no Vast.ai instance, no session row, no billing hold |
 
 ## gearbox/aisha coordination
 
@@ -136,3 +147,19 @@ string containing `token=`/`session=` — logs should carry `session_id`,
   its `acs.provision.ready` telemetry so apex can detect drift between what it
   served and what actually ran. Tracked as a separate aisha-side task — this
   repo only emits the var.
+
+## Staging rollout verification
+
+The following deployment facts are intentionally not inferred from this code:
+
+1. Start one cheap instance and inspect `/var/log/portal/provisioning.log` to
+   prove that the instance-level `PROVISIONING_SCRIPT` points at the Apex script
+   endpoint. Confirm an accompanying `provisioning.script.served` log event; an
+   alert on its absence detects a template-level override winning unexpectedly.
+2. Use that instance to force a script-fetch failure and verify that its webhook
+   POST completes before `PROVISIONER_FAILURE_ACTION=destroy` terminates the
+   node. Confirm the instance has the Vast credentials needed for self-destroy.
+
+These are required rollout checks because template environment precedence and
+the provisioner's shutdown ordering are external Vast.ai behaviours, not
+properties this repository can prove.

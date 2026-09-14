@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
 
-from src.api.services.gpu_session.operation_event_service import _validate_token
+from src.api.security.callback_token import validate_callback_token
 from src.core.constants import PROVISIONING_REF_PATTERN, SCRIPT_VARIANT_SOURCES
-from src.core.enums import ScriptVariant
+from src.core.enums import ScriptServeOutcome, ScriptVariant
 from src.db.repositories.gpu_session import GpuSessionRepository
 
 if TYPE_CHECKING:
@@ -63,7 +63,7 @@ class ResolvedScript:
 class ScriptServeResult:
     """Outcome of a full request-level resolve, for the route to map to HTTP."""
 
-    outcome: Literal["ok", "bad_request", "unauthorized", "not_found", "unavailable"]
+    outcome: ScriptServeOutcome
     script: ResolvedScript | None = None
 
 
@@ -94,6 +94,10 @@ class ProvisioningScriptService:
                 configured source (the `base` reserved slot today).
             ProvisioningScriptUnavailableError: upstream 5xx or rate-limited.
         """
+        immutable_ref = bool(PROVISIONING_REF_PATTERN.fullmatch(ref))
+        if not self._ref_allowed(ref):
+            raise ProvisioningScriptRefNotFoundError(f"Ref {ref!r} is not allowed")
+
         source = SCRIPT_VARIANT_SOURCES.get(variant)
         if source is None:
             raise ProvisioningScriptRefNotFoundError(
@@ -110,7 +114,7 @@ class ProvisioningScriptService:
         resolved = await self._fetch_from_github(repo=repo, path=path, ref=ref)
 
         if self._redis is not None:
-            await self._write_cache(cache_key, resolved, ttl=self._cache_ttl_for(ref))
+            await self._write_cache(cache_key, resolved, ttl=self._cache_ttl_for(immutable_ref))
 
         return resolved
 
@@ -130,29 +134,31 @@ class ProvisioningScriptService:
         stack — mirrors OperationEventService.handle_event's shape.
         """
         if variant not in {member.value for member in ScriptVariant}:
-            return ScriptServeResult(outcome="bad_request")
+            return ScriptServeResult(outcome=ScriptServeOutcome.bad_request)
         variant_enum = ScriptVariant(variant)
 
         if not self._ref_allowed(ref):
-            return ScriptServeResult(outcome="bad_request")
+            return ScriptServeResult(outcome=ScriptServeOutcome.bad_request)
 
         if session_id is None or not token:
             logger.warning("provisioning.script.rejected", reason="missing_session_or_token")
-            return ScriptServeResult(outcome="unauthorized")
+            return ScriptServeResult(outcome=ScriptServeOutcome.unauthorized)
 
         session_row = await GpuSessionRepository(db).get_by_id(session_id)
-        if session_row is None or not _validate_token(token, session_row.callback_token_hash):
+        if session_row is None or not validate_callback_token(
+            token, session_row.callback_token_hash
+        ):
             logger.warning(
                 "provisioning.script.rejected", session_id=str(session_id), reason="invalid_token"
             )
-            return ScriptServeResult(outcome="unauthorized")
+            return ScriptServeResult(outcome=ScriptServeOutcome.unauthorized)
 
         try:
             resolved = await self.resolve(variant_enum, ref)
         except ProvisioningScriptRefNotFoundError:
-            return ScriptServeResult(outcome="not_found")
+            return ScriptServeResult(outcome=ScriptServeOutcome.not_found)
         except ProvisioningScriptUnavailableError:
-            return ScriptServeResult(outcome="unavailable")
+            return ScriptServeResult(outcome=ScriptServeOutcome.unavailable)
 
         logger.info(
             "provisioning.script.served",
@@ -162,20 +168,20 @@ class ProvisioningScriptService:
             cache_hit=resolved.cache_hit,
             session_id=str(session_id),
         )
-        return ScriptServeResult(outcome="ok", script=resolved)
+        return ScriptServeResult(outcome=ScriptServeOutcome.ok, script=resolved)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _ref_allowed(self, ref: str) -> bool:
-        if PROVISIONING_REF_PATTERN.match(ref):
+        if PROVISIONING_REF_PATTERN.fullmatch(ref):
             return True
         dev_ref = self._settings.provisioning_script_dev_ref
         return bool(dev_ref) and ref == dev_ref and self._settings.environment != "production"
 
-    def _cache_ttl_for(self, ref: str) -> int:
-        if PROVISIONING_REF_PATTERN.match(ref):
+    def _cache_ttl_for(self, immutable_ref: bool) -> int:
+        if immutable_ref:
             return self._settings.provisioning_script_cache_ttl_seconds
         return self._settings.provisioning_script_dev_cache_ttl_seconds
 

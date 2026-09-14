@@ -49,6 +49,7 @@ from src.workers.base import PeriodicWorker
 from ._env_builder import build_acs_env
 from ._events import publish_deployment_event, publish_operation_event, publish_status_event
 from ._provisioning import make_onstart_cmd, provision_vastai_instance
+from .failure_reasons import bounded_failure_reason
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -79,6 +80,7 @@ _PROBE_TIMEOUT_SECONDS = 10.0
 # and every call site share a single source of truth (no typo risk, grep-friendly).
 _REASON_PROVISIONING_TIMEOUT = "provisioning_timeout"
 _REASON_PENDING_TIMEOUT = "pending_timeout"
+_REASON_BUNDLE_NOT_DEPLOYED = "bundle_not_deployed"
 _REASON_PENDING_TIMEOUT_AFTER_ERRORS = "pending_timeout_after_errors"
 # Retryable: stall = no callbacks for stall_timeout; node_reported_failure = node said it failed.
 # Both are eligible for recreation (unlike provisioning_timeout which stays terminal).
@@ -409,7 +411,8 @@ class GpuProvisioningWorker(PeriodicWorker):
                 )
                 await self._mark_failed(
                     session,
-                    f"bundle_not_deployed: contract check failed {new_count} consecutive probes",
+                    f"{_REASON_BUNDLE_NOT_DEPLOYED}: "
+                    f"contract check failed {new_count} consecutive probes",
                 )
             return
 
@@ -1032,8 +1035,6 @@ class GpuProvisioningWorker(PeriodicWorker):
                 # another transaction that needs that same lock.
                 retry_missing_primary = True
             else:
-                # Rotate the callback token so the old (destroyed) node's token is invalidated.
-                await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
                 await operation_repo.create(
                     id=bootstrap_operation_id,
                     session_id=session.id,
@@ -1060,6 +1061,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                     vastai_gpu_name=selected_offer.gpu_name,
                     vastai_machine_id=selected_offer.machine_id,
                     provisioning_started_at=now,
+                    callback_token_hash=fresh_callback_token_hash,
                 )
                 await repo.update_status(session.id, GpuSessionStatus.pending)
 
@@ -1200,7 +1202,8 @@ class GpuProvisioningWorker(PeriodicWorker):
         )
 
     async def _mark_failed(self, session: GpuSession, reason: str) -> None:
-        """Destroy instance + delete tunnel (best-effort), refund billing, transition to failed."""
+        """Transition once, then tear down and refund only for the winning caller."""
+        reason = bounded_failure_reason(reason)
         # Sweep in-flight jobs before the status transition so the user-visible
         # state stays consistent: jobs go FAILED, then session goes FAILED.
         if self._job_sweep is not None:
@@ -1210,6 +1213,15 @@ class GpuProvisioningWorker(PeriodicWorker):
                 failure=JobSweepFailure(internal_reason=f"GPU session failed: {reason}"),
                 log_event="gpu_session.provision.job_sweep",
             )
+
+        transitioned = await self._transition(
+            session,
+            new_status=GpuSessionStatus.failed,
+            log_event="gpu_session.provision.failed",
+            error_message=reason,
+        )
+        if not transitioned:
+            return
 
         if session.vastai_instance_id is not None:
             try:
@@ -1231,24 +1243,17 @@ class GpuProvisioningWorker(PeriodicWorker):
                     session_id=str(session.id),
                 )
 
-        transitioned = await self._transition(
-            session,
-            new_status=GpuSessionStatus.failed,
-            log_event="gpu_session.provision.failed",
-            error_message=reason[:500],
-        )
-
         # Issue full refund of base reservation — session never became usable. Gated on
         # `transitioned`: a racing caller that already failed this session (e.g. the
         # provisioner-failure webhook, Change 3) means this call changed nothing, so a
         # refund here would be a second one for the same session (see _transition's
         # docstring).
-        if transitioned and self._billing_service is not None:
+        if self._billing_service is not None:
             try:
                 async with self._session_factory() as db, db.begin():
                     refund_result = await self._billing_service.refund(
                         job_id=session.id,
-                        description=f"GPU session failed: {reason[:200]}",
+                        description=f"GPU session failed: {reason}",
                         session=db,
                         product_id=session.product_id,
                         user_id=session.user_id,

@@ -21,11 +21,11 @@ from litestar.testing import TestClient
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.schemas.events import EventType
 from src.api.schemas.gpu_session import GpuSessionResponse, OperationEventBody
+from src.api.security.callback_token import validate_callback_token
 from src.api.services.event_bus import EventBus
 from src.api.services.gpu_session.operation_event_service import (
     OperationEventResult,
     OperationEventService,
-    _validate_token,
 )
 from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
@@ -155,13 +155,13 @@ async def _write_event(
 
 class TestTokenValidation:
     def test_valid_token_matches(self) -> None:
-        assert _validate_token(_TOKEN, hashlib.sha256(_TOKEN.encode()).hexdigest()) is True
+        assert validate_callback_token(_TOKEN, hashlib.sha256(_TOKEN.encode()).hexdigest()) is True
 
     def test_wrong_or_missing_token_is_rejected(self) -> None:
         stored = hashlib.sha256(_TOKEN.encode()).hexdigest()
-        assert _validate_token("wrong", stored) is False
-        assert _validate_token(_TOKEN, None) is False
-        assert _validate_token(_TOKEN, "") is False
+        assert validate_callback_token("wrong", stored) is False
+        assert validate_callback_token(_TOKEN, None) is False
+        assert validate_callback_token(_TOKEN, "") is False
 
 
 class TestOperationEventService:

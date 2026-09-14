@@ -56,7 +56,7 @@ def _make_settings(**overrides: object) -> MagicMock:
     s.ai_bundles_branch = "master"
     s.aisha_repo_url = "https://github.com/gearbox/aisha.git"
     s.aisha_branch = "master"
-    s.apex_callback_url = "https://apex.example.com/callback"
+    s.apex_callback_url = "https://apex.example.com"
     s.provisioning_script_ref = "v1.2.3"
     s.hf_token = "hf-test-token"
     s.civitai_api_token = "civitai-test-token"

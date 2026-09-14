@@ -31,6 +31,7 @@ from src.api.services.provisioning_script import (
 )
 from src.api.services.provisioning_webhook import ProvisioningWebhookService
 from src.core.config import Settings
+from src.core.enums import ScriptServeOutcome
 
 
 def _make_settings(**overrides: object) -> Settings:
@@ -63,7 +64,7 @@ class TestGetScriptRoute:
     def test_ok_returns_text_plain_with_etag(self) -> None:
         script_service = AsyncMock(spec=ProvisioningScriptService)
         script_service.serve_for_session.return_value = ScriptServeResult(
-            outcome="ok",
+            outcome=ScriptServeOutcome.ok,
             script=ResolvedScript(content="#!/bin/sh\necho hi\n", sha256="a" * 64, cache_hit=True),
         )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
@@ -81,7 +82,7 @@ class TestGetScriptRoute:
         script_service = AsyncMock(spec=ProvisioningScriptService)
         sha = "b" * 64
         script_service.serve_for_session.return_value = ScriptServeResult(
-            outcome="ok",
+            outcome=ScriptServeOutcome.ok,
             script=ResolvedScript(content="body", sha256=sha, cache_hit=True),
         )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
@@ -96,7 +97,9 @@ class TestGetScriptRoute:
 
     def test_bad_request_outcome_is_400(self) -> None:
         script_service = AsyncMock(spec=ProvisioningScriptService)
-        script_service.serve_for_session.return_value = ScriptServeResult(outcome="bad_request")
+        script_service.serve_for_session.return_value = ScriptServeResult(
+            outcome=ScriptServeOutcome.bad_request
+        )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
             response = client.get(
                 "/v1/provisioning/scripts/comfyui/master",
@@ -107,7 +110,9 @@ class TestGetScriptRoute:
 
     def test_unauthorized_outcome_is_401(self) -> None:
         script_service = AsyncMock(spec=ProvisioningScriptService)
-        script_service.serve_for_session.return_value = ScriptServeResult(outcome="unauthorized")
+        script_service.serve_for_session.return_value = ScriptServeResult(
+            outcome=ScriptServeOutcome.unauthorized
+        )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
             response = client.get(
                 "/v1/provisioning/scripts/comfyui/v1.2.3",
@@ -118,7 +123,9 @@ class TestGetScriptRoute:
 
     def test_missing_token_is_401(self) -> None:
         script_service = AsyncMock(spec=ProvisioningScriptService)
-        script_service.serve_for_session.return_value = ScriptServeResult(outcome="unauthorized")
+        script_service.serve_for_session.return_value = ScriptServeResult(
+            outcome=ScriptServeOutcome.unauthorized
+        )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
             response = client.get(
                 "/v1/provisioning/scripts/comfyui/v1.2.3",
@@ -129,7 +136,9 @@ class TestGetScriptRoute:
 
     def test_not_found_outcome_is_404_with_code(self) -> None:
         script_service = AsyncMock(spec=ProvisioningScriptService)
-        script_service.serve_for_session.return_value = ScriptServeResult(outcome="not_found")
+        script_service.serve_for_session.return_value = ScriptServeResult(
+            outcome=ScriptServeOutcome.not_found
+        )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
             response = client.get(
                 "/v1/provisioning/scripts/comfyui/v9.9.9",
@@ -141,7 +150,9 @@ class TestGetScriptRoute:
 
     def test_unavailable_outcome_is_502_with_code(self) -> None:
         script_service = AsyncMock(spec=ProvisioningScriptService)
-        script_service.serve_for_session.return_value = ScriptServeResult(outcome="unavailable")
+        script_service.serve_for_session.return_value = ScriptServeResult(
+            outcome=ScriptServeOutcome.unavailable
+        )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
             response = client.get(
                 "/v1/provisioning/scripts/comfyui/v1.2.3",
@@ -156,7 +167,7 @@ class TestGetScriptRoute:
         the path template; extra query params are simply ignored by the route."""
         script_service = AsyncMock(spec=ProvisioningScriptService)
         script_service.serve_for_session.return_value = ScriptServeResult(
-            outcome="ok",
+            outcome=ScriptServeOutcome.ok,
             script=ResolvedScript(content="body", sha256="c" * 64, cache_hit=True),
         )
         with TestClient(app=_app(script_service, AsyncMock())) as client:
@@ -216,6 +227,29 @@ class TestWebhookRoute:
             )
 
         assert response.status_code == HTTP_401_UNAUTHORIZED
+
+    def test_unknown_session_and_wrong_token_have_identical_responses(self) -> None:
+        webhook_service = AsyncMock(spec=ProvisioningWebhookService)
+        webhook_service.handle_failure.side_effect = [
+            HTTP_401_UNAUTHORIZED,
+            HTTP_401_UNAUTHORIZED,
+        ]
+        with TestClient(app=_app(AsyncMock(), webhook_service)) as client:
+            wrong_token = client.post(
+                f"/v1/provisioning/webhook/{uuid4()}",
+                params={"token": "wrong"},
+                json=self._payload(),
+            )
+            unknown_session = client.post(
+                f"/v1/provisioning/webhook/{uuid4()}",
+                params={"token": "arbitrary"},
+                json=self._payload(),
+            )
+
+        assert (wrong_token.status_code, wrong_token.content) == (
+            unknown_session.status_code,
+            unknown_session.content,
+        )
 
     def test_malformed_body_is_400(self) -> None:
         webhook_service = AsyncMock(spec=ProvisioningWebhookService)

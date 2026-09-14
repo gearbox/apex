@@ -7,14 +7,13 @@ only externally reachable surface this module exposes.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from sqlalchemy.exc import IntegrityError
 
+from src.api.security.callback_token import validate_callback_token
 from src.api.services.gpu_session.command_payload import (
     BatchPosition,
     CommandBuildError,
@@ -45,18 +44,6 @@ logger = structlog.get_logger(__name__)
 
 class CommandEnqueueSessionError(ValueError):
     """A command cannot be enqueued because its GPU session is unavailable."""
-
-
-def _validate_token(presented: str, stored_hash: str | None) -> bool:
-    """Constant-time comparison of presented bearer token against stored SHA-256 hash.
-
-    Deliberately duplicated from operation_event_service.py rather than imported —
-    D27 scopes P3's only change to that file to the terminal-close addition.
-    """
-    if not stored_hash:
-        return False
-    presented_hash = hashlib.sha256(presented.encode()).hexdigest()
-    return hmac.compare_digest(presented_hash, stored_hash)
 
 
 def _validate(command: CommandInput, *, batch: BatchPosition | None) -> dict[str, Any]:
@@ -220,7 +207,7 @@ class GpuSessionCommandService:
                 session = await session_repo.get_by_id(session_id)
                 if session is None:
                     return 401, None
-                if not _validate_token(bearer_token, session.callback_token_hash):
+                if not validate_callback_token(bearer_token, session.callback_token_hash):
                     return 401, None
                 if session.status in TERMINAL_GPU_SESSION_STATUSES:
                     # The node is going away; an ERROR log + 60s backoff is the wrong

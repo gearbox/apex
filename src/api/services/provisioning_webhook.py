@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING
 import structlog
 from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED
 
-from src.api.services.gpu_session.operation_event_service import _validate_token
+from src.api.security.callback_token import validate_callback_token
+from src.api.utils.redaction import redact_secrets
 from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES
 from src.db.repositories.gpu_session import GpuSessionRepository
 
@@ -34,9 +35,7 @@ logger = structlog.get_logger(__name__)
 # failure taxonomy) but following the same naming convention.
 _REASON_NODE_PROVISION_SCRIPT_FAILED = "node_provision_script_failed"
 
-# Reason strings are persisted as error_message (String, effectively unbounded in
-# Postgres but kept short for logs/UI); the upstream `error` field is free text.
-_MAX_REASON_LENGTH = 500
+_MAX_UPSTREAM_DETAIL_LENGTH = 500
 
 
 class ProvisioningWebhookService:
@@ -64,16 +63,25 @@ class ProvisioningWebhookService:
     ) -> int:
         """Apply one webhook call. Returns the HTTP status the route should send.
 
-        Ordering matches the spec exactly: not-found/already-terminal is a cheap,
-        unauthenticated 200 no-op (D9 — a 404 would make the provisioner's own
-        retry loop spam this endpoint); only then is the token checked.
+        A callback token is validated before revealing whether a session exists or
+        is terminal. Valid callbacks still receive a 200 no-op for terminal rows,
+        so the provisioner does not retry a completed failure forever.
         """
         async with self._session_factory() as db:
             session_row = await GpuSessionRepository(db).get_by_id(session_id)
 
         if session_row is None:
-            logger.info("provisioning.webhook.noop", session_id=str(session_id), reason="not_found")
-            return HTTP_200_OK
+            logger.warning(
+                "provisioning.webhook.rejected", session_id=str(session_id), reason="invalid_token"
+            )
+            return HTTP_401_UNAUTHORIZED
+
+        if not token or not validate_callback_token(token, session_row.callback_token_hash):
+            logger.warning(
+                "provisioning.webhook.rejected", session_id=str(session_id), reason="invalid_token"
+            )
+            return HTTP_401_UNAUTHORIZED
+
         if session_row.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
             logger.info(
                 "provisioning.webhook.noop",
@@ -81,12 +89,6 @@ class ProvisioningWebhookService:
                 status=str(session_row.status),
             )
             return HTTP_200_OK
-
-        if not token or not _validate_token(token, session_row.callback_token_hash):
-            logger.warning(
-                "provisioning.webhook.rejected", session_id=str(session_id), reason="invalid_token"
-            )
-            return HTTP_401_UNAUTHORIZED
 
         # The token is the authority, not the container id (D9) — mismatch is only
         # ever a warning-level observability signal, never a reason to skip the fail.
@@ -101,6 +103,17 @@ class ProvisioningWebhookService:
                 container_id=payload.container_id,
             )
 
-        reason = f"{_REASON_NODE_PROVISION_SCRIPT_FAILED}: {payload.error}"[:_MAX_REASON_LENGTH]
-        await self._gpu_session_service.fail_pre_active_session(session_id, reason=reason)
+        # Upstream fields can include this callback's own query-string token. They
+        # are observability-only: never persist, publish, or bill against them.
+        logger.warning(
+            "provisioning.webhook.failure_detail",
+            session_id=str(session_id),
+            upstream_error=redact_secrets(payload.error, max_length=_MAX_UPSTREAM_DETAIL_LENGTH),
+            upstream_manifest=redact_secrets(
+                payload.manifest, max_length=_MAX_UPSTREAM_DETAIL_LENGTH
+            ),
+        )
+        await self._gpu_session_service.fail_pre_active_session(
+            session_id, reason=_REASON_NODE_PROVISION_SCRIPT_FAILED
+        )
         return HTTP_200_OK

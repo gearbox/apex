@@ -47,7 +47,7 @@ def _make_mock_session_factory() -> MagicMock:
 
 
 class TestHandleFailure:
-    async def test_unknown_session_is_200_noop(self) -> None:
+    async def test_unknown_session_is_401(self) -> None:
         gpu_session_service = AsyncMock()
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
@@ -59,7 +59,7 @@ class TestHandleFailure:
                 session_id=uuid4(), token="whatever", payload=_make_payload()
             )
 
-        assert status == HTTP_200_OK
+        assert status == HTTP_401_UNAUTHORIZED
         gpu_session_service.fail_pre_active_session.assert_not_awaited()
 
     async def test_already_terminal_session_is_200_noop_no_second_refund(self) -> None:
@@ -109,7 +109,7 @@ class TestHandleFailure:
 
         assert status == HTTP_401_UNAUTHORIZED
 
-    async def test_valid_call_fails_the_session_with_reason(self) -> None:
+    async def test_valid_call_fails_the_session_with_fixed_reason(self) -> None:
         gpu_session_service = AsyncMock()
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
@@ -129,8 +129,7 @@ class TestHandleFailure:
         gpu_session_service.fail_pre_active_session.assert_awaited_once()
         call = gpu_session_service.fail_pre_active_session.await_args
         assert call.args[0] == session_id
-        assert "node_provision_script_failed" in call.kwargs["reason"]
-        assert "provisioning failed after all retries" in call.kwargs["reason"]
+        assert call.kwargs["reason"] == "node_provision_script_failed"
 
     async def test_container_id_mismatch_still_fails_the_session(self) -> None:
         """The token is the authority, not the container id (D9)."""
@@ -176,23 +175,42 @@ class TestHandleFailure:
         ]
         assert not mismatch_logs
 
-    async def test_reason_is_length_bounded(self) -> None:
+    async def test_upstream_details_are_redacted_and_bounded_in_logs(self) -> None:
+        from structlog.testing import capture_logs
+
         gpu_session_service = AsyncMock()
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
         )
         row = _make_session_row(token="correct-token")
-        with patch(_REPO_PATH) as MockRepo:
+        token = "callback-secret"
+        query = f"?session=session-secret&token={token}"
+        with patch(_REPO_PATH) as MockRepo, capture_logs() as logs:
             MockRepo.return_value.get_by_id = AsyncMock(return_value=row)
             await service.handle_failure(
                 session_id=uuid4(),
                 token="correct-token",
-                payload=_make_payload(error="x" * 10_000),
+                payload=_make_payload(
+                    error=(
+                        f"failed https://apex.test/v1/provisioning/scripts/comfyui/v1.0.0{query}"
+                        * 20
+                    ),
+                    manifest=f"https://node:password@node.test/manifest.yaml{query}",
+                ),
             )
 
-        reason = gpu_session_service.fail_pre_active_session.await_args.kwargs["reason"]
-        assert len(reason) <= 500
+        detail = next(
+            log for log in logs if log.get("event") == "provisioning.webhook.failure_detail"
+        )
+        assert len(detail["upstream_error"]) <= 500
+        assert token not in str(logs)
+        assert "session-secret" not in str(logs)
+        assert query not in str(logs)
+        assert "node:password@" not in str(logs)
+        assert gpu_session_service.fail_pre_active_session.await_args.kwargs["reason"] == (
+            "node_provision_script_failed"
+        )
 
 
 class TestMalformedBody:
