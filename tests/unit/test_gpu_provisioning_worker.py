@@ -23,6 +23,7 @@ from src.api.services.gpu_session.provisioning_worker import (
     _classify_terminal_state,
     _match_checkpoint,
 )
+from src.api.services.provisioning_script import ProvisioningScriptService, ResolvedScript
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
 from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
@@ -34,6 +35,7 @@ from src.core.enums import (
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
+    ProbeOutcome,
 )
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
@@ -146,6 +148,7 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.stale_notified = False
     session.bootstrap_operation_id = None
     session.last_progress_at = None
+    session.consecutive_contract_failures = 0
     for k, v in kwargs.items():
         setattr(session, k, v)
     return session
@@ -163,11 +166,13 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.provisioning_recreation_attempts = 1
     settings.vastai_offer_search_limit = 20
     settings.gpu_provision_worker_concurrency = 10
+    settings.gpu_provision_terminal_grace_probes = 3
     settings.apex_callback_url = "https://apex.example.com/callback"
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
     settings.aisha_cf_tunnel_domain = "gpu-domain.com"
     settings.ai_bundles_github_token = "ghp_test_token"
+    settings.provisioning_script_ref = "v1.0.0"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
     settings.aisha_repo_url = "https://github.com/gearbox/aisha.git"
@@ -198,6 +203,10 @@ def _make_mock_session_factory() -> tuple[MagicMock, MagicMock]:
 
 def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any]]:
     mock_factory, mock_db = _make_mock_session_factory()
+    provisioning_script_service = AsyncMock(spec=ProvisioningScriptService)
+    provisioning_script_service.resolve.return_value = ResolvedScript(
+        content="#!/bin/sh\necho hi\n", sha256="a" * 64, cache_hit=True
+    )
     mocks: dict[str, Any] = {
         "session_factory": mock_factory,
         "mock_db": mock_db,
@@ -207,6 +216,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "http_client": AsyncMock(spec=httpx.AsyncClient),
         "settings": _make_settings(),
         "cooldown_store": NullNodeCooldownStore(),
+        "provisioning_script_service": provisioning_script_service,
         "billing_service": None,
         "event_bus": None,
         "job_sweep_service": None,
@@ -220,6 +230,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         http_client=mocks["http_client"],
         settings=mocks["settings"],
         cooldown_store=mocks["cooldown_store"],
+        provisioning_script_service=mocks["provisioning_script_service"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
@@ -956,7 +967,9 @@ class TestAdvanceResuming:
         sibling.readiness_marker_node_class = "SiblingMarker"
         sibling.status = DeploymentStatus.active
         mock_deployment_repo.list_for_session.return_value = [sibling]
-        worker._probe_comfyui = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        worker._probe_comfyui = AsyncMock(  # type: ignore[method-assign]
+            return_value=ProbeOutcome.not_ready
+        )
 
         with capture_logs() as logs:
             await worker._advance_resuming(session)
@@ -2210,7 +2223,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
 
     async def test_marker_present_class_missing_returns_false(self) -> None:
         worker, mocks = _make_worker()
@@ -2222,7 +2235,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
 
     async def test_no_checkpoint_no_marker_logs_unverifiable_and_returns_true(self) -> None:
         """Zero-checkpoint bundle + no marker → probe_unverifiable at WARNING, returns True."""
@@ -2237,7 +2250,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
         unverifiable_logs = [
             log for log in logs if log.get("event") == "gpu_session.provision.probe_unverifiable"
         ]
@@ -2259,7 +2272,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
         assert any(
             log.get("event") == "gpu_session.provision.probe_checkpoint_lookup_failed"
             for log in logs
@@ -2277,7 +2290,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_non_dict_json_returns_false(self) -> None:
         import json
@@ -2293,7 +2306,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_non_200_returns_false(self) -> None:
         worker, mocks = _make_worker()
@@ -2306,7 +2319,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_httpx_error_returns_false(self) -> None:
         worker, mocks = _make_worker()
@@ -2316,7 +2329,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_logs_first_five_classes_when_more_present(self) -> None:
         from structlog.testing import capture_logs
@@ -2330,7 +2343,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
         missing_logs = [
             log for log in logs if log.get("event") == "gpu_session.provision.probe_marker_missing"
         ]
@@ -2362,7 +2375,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
         assert all(
             log.get("event") != "gpu_session.provision.probe_checkpoint_path_mismatch"
             for log in logs
@@ -2384,7 +2397,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
         mismatch_logs = [
             log
             for log in logs
@@ -2411,7 +2424,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
         missing_logs = [
             log
             for log in logs
@@ -2439,7 +2452,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
         shape_logs = [
             log
             for log in logs
@@ -2461,10 +2474,10 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
 
     async def test_checkpoint_present_but_marker_missing_returns_false(self) -> None:
-        """Checkpoint passes, but marker class absent → False."""
+        """Checkpoint passes, but marker class absent → contract_failed."""
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
         marker = "WanVideoSampler"
@@ -2476,7 +2489,173 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
+
+
+# ---------------------------------------------------------------------------
+# TestProbeFailFast — Change 4: consecutive contract_failed grace-probe counter
+# ---------------------------------------------------------------------------
+
+
+class TestProbeFailFast:
+    async def test_three_consecutive_checkpoint_missing_fails_refunds_destroys(self) -> None:
+        billing_mock = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing_mock)
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["v1-5-pruned-emaonly.safetensors"]
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_consecutive_contract_failures.side_effect = [1, 2, 3]
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            for _ in range(3):
+                await worker._advance_provisioning(session)
+
+        assert mock_repo.increment_consecutive_contract_failures.await_count == 3
+        mock_repo.reset_consecutive_contract_failures.assert_not_awaited()
+        mocks["vastai_client"].destroy_instance.assert_awaited_once()
+        billing_mock.refund.assert_awaited_once()
+        failed_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
+        ]
+        assert failed_calls, "session must be transitioned to failed"
+        assert "bundle_not_deployed" in failed_calls[0].kwargs.get("error_message", "")
+
+    async def test_three_consecutive_marker_missing_fails_the_same_way(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        billing_mock = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing_mock)
+        mocks["bundle_index"].get_model_filenames.return_value = []  # unverifiable checkpoint side
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["http_client"].get.return_value = _make_object_info_response(["SomeOtherNode"])
+        deployment = MagicMock()
+        deployment.is_primary = True
+        deployment.readiness_marker_node_class = "RequiredMarker"
+        mock_deployment_repo.list_for_session.return_value = [deployment]
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_consecutive_contract_failures.side_effect = [1, 2, 3]
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            for _ in range(3):
+                await worker._advance_provisioning(session)
+
+        assert mock_repo.increment_consecutive_contract_failures.await_count == 3
+        mocks["vastai_client"].destroy_instance.assert_awaited_once()
+        billing_mock.refund.assert_awaited_once()
+
+    async def test_two_contract_failures_then_ready_activates_without_failing(self) -> None:
+        """A recovery probe (e.g. late filesystem move) must not be penalized once it's ready."""
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_consecutive_contract_failures.side_effect = [1, 2]
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+                available_checkpoints=["v1-5-pruned-emaonly.safetensors"]
+            )
+            await worker._advance_provisioning(session)
+            await worker._advance_provisioning(session)
+
+            mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+                available_checkpoints=["Qwen.safetensors"]
+            )
+            await worker._advance_provisioning(session)
+
+        assert mock_repo.increment_consecutive_contract_failures.await_count == 2
+        active_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.active
+        ]
+        assert active_calls, "session must reach active on the recovering probe"
+        failed_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
+        ]
+        assert not failed_calls
+
+    async def test_not_ready_after_prior_failures_resets_the_counter(self) -> None:
+        """Any non-contract_failed outcome resets the counter — here the node simply
+        becomes briefly unreachable between two contract_failed probes."""
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        # Simulates a row reloaded after a prior sweep already recorded 2 failures.
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning, consecutive_contract_failures=2
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            await worker._advance_provisioning(session)
+
+        mock_repo.increment_consecutive_contract_failures.assert_not_awaited()
+        mock_repo.reset_consecutive_contract_failures.assert_awaited_once_with(session.id)
+
+    async def test_repeated_object_info_shape_error_never_fails_the_session(self) -> None:
+        """probe_object_info_shape stays not_ready forever — apex-side ambiguity, not a
+        confirmed absent checkpoint (declined to touch, Change 4's scope)."""
+        import json
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = json.dumps({"CheckpointLoaderSimple": {}}).encode()
+        mocks["http_client"].get.return_value = resp
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            for _ in range(5):
+                await worker._advance_provisioning(session)
+
+        mock_repo.increment_consecutive_contract_failures.assert_not_awaited()
+        mock_repo.update_status.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

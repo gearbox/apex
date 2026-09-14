@@ -4,12 +4,18 @@ Centralizes the env-var contract with the Aisha CLI in one place so
 service.py (initial start_session) and provisioning_worker.py (retry
 path) cannot drift apart.
 
-SECURITY: the returned dict contains tokens — never log it.
+SECURITY: the returned dict contains tokens — never log it. Since D3, that
+includes PROVISIONING_SCRIPT and PROVISIONER_WEBHOOK_URL, which carry the
+per-session callback token in their query string — treat them exactly like
+tunnel_token/callback_token themselves; never log a full value, only redact
+or log lengths/prefixes if logging is ever needed.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from src.core.enums import ScriptVariant
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -27,6 +33,7 @@ def build_acs_env(
     comfyui_port: int,
     tunnel_token: str,
     callback_token: str,
+    provision_script_sha256: str,
 ) -> dict[str, str]:
     """Build the env dict for vastai_client.create_instance.
 
@@ -39,6 +46,10 @@ def build_acs_env(
         comfyui_port: Per-bundle port from bundle.hardware.comfyui_port
         tunnel_token: Cloudflared tunnel token (ephemeral, per-session)
         callback_token: Phase-2 callback auth token (ephemeral, per-session)
+        provision_script_sha256: sha256 of the bootstrap script apex is about to
+            serve for this ref (from ProvisioningScriptService.resolve()) — the
+            aisha script echoes this back in acs.provision.ready so apex can
+            detect drift between what it served and what actually ran (D3).
 
     Returns:
         Env dict ready to pass to vastai_client.create_instance(env=...).
@@ -48,7 +59,20 @@ def build_acs_env(
         - The "-p {port}:{port}" entry is a docker run flag, not an env var.
           Vast.ai's API treats both interchangeably in the env block.
         - ACS_COMFYUI_PORT and the -p mapping use the SAME port. They must.
+        - PROVISIONING_SCRIPT is Vast's own onstart-script-URL env var name;
+          PROVISIONER_WEBHOOK_URL/PROVISIONER_FAILURE_ACTION are provisioner
+          *settings* overrides — neither family gets the ACS_ prefix (D3).
+          Apex owns the ref pin (settings.provisioning_script_ref); the Vast
+          template itself no longer sets PROVISIONING_SCRIPT (D2).
     """
+    script_url = (
+        f"{settings.apex_callback_url}/v1/provisioning/scripts/"
+        f"{ScriptVariant.comfyui.value}/{settings.provisioning_script_ref}"
+        f"?session={session_id}&token={callback_token}"
+    )
+    webhook_url = (
+        f"{settings.apex_callback_url}/v1/provisioning/webhook/{session_id}?token={callback_token}"
+    )
     return {
         # --- Bundle selection ---
         "ACS_BUNDLE": bundle_name,
@@ -70,6 +94,12 @@ def build_acs_env(
         "ACS_APEX_OPERATION_ID": str(operation_id),
         "ACS_APEX_CALLBACK_URL": settings.apex_callback_url,
         "ACS_APEX_CALLBACK_TOKEN": callback_token,
+        # --- Bootstrap script delivery (D3) — Vast's own onstart-fetch + provisioner
+        # settings overrides. See the module/function docstrings for the naming rule.
+        "PROVISIONING_SCRIPT": script_url,
+        "PROVISIONER_WEBHOOK_URL": webhook_url,
+        "PROVISIONER_FAILURE_ACTION": "destroy",
+        "ACS_PROVISION_SCRIPT_SHA256": provision_script_sha256,
         # --- Model download tokens ---
         "ACS_HF_TOKEN": settings.hf_token,
         "ACS_CIVITAI_API_TOKEN": settings.civitai_api_token,

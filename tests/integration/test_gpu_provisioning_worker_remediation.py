@@ -17,6 +17,7 @@ from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PENDING_TIMEOUT,
     GpuProvisioningWorker,
 )
+from src.api.services.provisioning_script import ResolvedScript
 from src.api.services.vastai.schemas import VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
 from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind, OperationStatus
@@ -47,10 +48,19 @@ class _RetrySettings:
     aisha_repo_url = "https://example.test/aisha.git"
     aisha_branch = "main"
     apex_callback_url = "https://apex.example.test/callback"
+    provisioning_script_ref = "v1.0.0"
     hf_token = "test-hf-token"
     civitai_api_token = "test-civitai-token"
     aisha_comfyui_host = "0.0.0.0"  # noqa: S104
     aisha_comfyui_extra_args = ""
+
+
+def _make_provisioning_script_service() -> AsyncMock:
+    service = AsyncMock()
+    service.resolve.return_value = ResolvedScript(
+        content="#!/bin/sh\necho hi\n", sha256="a" * 64, cache_hit=True
+    )
+    return service
 
 
 @pytest.fixture
@@ -143,6 +153,7 @@ async def test_retry_missing_primary_destroys_new_instance_fails_and_stops_futur
         http_client=AsyncMock(),
         settings=_RetrySettings(),  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
+        provisioning_script_service=_make_provisioning_script_service(),
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
     )
@@ -214,6 +225,7 @@ async def test_provisioning_failure_cascade_bumps_revision_and_emits_operation_u
         http_client=AsyncMock(),
         settings=_RetrySettings(),  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
+        provisioning_script_service=_make_provisioning_script_service(),
         event_bus=event_bus,
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]

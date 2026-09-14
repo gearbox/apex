@@ -155,6 +155,17 @@ class GpuSession(Base):
         nullable=True,
         comment="Set on first provision attempt (or reset on retry) — used for timeout calculation",
     )
+    consecutive_contract_failures: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        comment=(
+            "Consecutive ProbeOutcome.contract_failed results during the initial "
+            "provisioning path. Reset to 0 by any non-contract_failed probe outcome. "
+            "At gpu_provision_terminal_grace_probes, the session fails as "
+            "'bundle_not_deployed' instead of waiting out the full provisioning timeout."
+        ),
+    )
 
     # Billing (set on session creation; used for debit/refund at stop time)
     account_id: Mapped[UUID | None] = mapped_column(

@@ -302,6 +302,19 @@ class Settings(BaseSettings):
             "the offer walk."
         ),
     )
+    gpu_provision_terminal_grace_probes: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Consecutive ProbeOutcome.contract_failed results (declared checkpoint or "
+            "readiness marker absent from a reachable, HTTP-200 ComfyUI) tolerated during "
+            "the initial provisioning path before the session is failed as "
+            "'bundle_not_deployed', refunded, and destroyed. At the default poll interval "
+            "this is ~50s. Any non-contract_failed probe outcome resets the counter. Never "
+            "applies to resume or additive-deployment attach (D11)."
+        ),
+    )
     node_cooldown_base_minutes: int = Field(
         default=30,
         ge=1,
@@ -528,10 +541,68 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Phase 2 Callback (pre-wired) ---
+    # --- Node -> Apex callbacks ---
     apex_callback_url: str = Field(
         default="",
-        description="Public URL for GPU node → Apex callbacks (Phase 2, unused in Phase 1)",
+        description=(
+            "Externally reachable base URL for GPU node -> Apex callbacks "
+            "(e.g. https://staging.your-domain.com). Forwarded to nodes as "
+            "ACS_APEX_CALLBACK_URL and used as the base for the per-session "
+            "PROVISIONING_SCRIPT and PROVISIONER_WEBHOOK_URL env vars (D3) — the "
+            "provisioner has no other way to reach apex, so this must be the real "
+            "public origin, not an internal/service-mesh address."
+        ),
+    )
+
+    # --- Bootstrap script delivery (D3) ---
+    provisioning_script_ref: str = Field(
+        default="",
+        description=(
+            "Apex-owned pin for the Vast.ai bootstrap script fetched from the private "
+            "gearbox/aisha repo (D2 — the Vast template no longer sets PROVISIONING_SCRIPT "
+            "itself). Must match PROVISIONING_REF_PATTERN in src/core/constants.py (a "
+            "vX.Y.Z tag or a full 40-hex commit SHA) unless it equals "
+            "provisioning_script_dev_ref. Required for GPU sessions to start — empty is "
+            "treated as a config-validation failure (503 provisioning_unavailable), the "
+            "same fail-closed posture as an empty ai_bundles_github_token."
+        ),
+    )
+    provisioning_script_dev_ref: str | None = Field(
+        default=None,
+        description=(
+            "Single additional ref (typically a branch name) accepted by "
+            "GET /v1/provisioning/scripts/{variant}/{ref} outside production, for testing "
+            "an unreleased bootstrap script. Ignored (never accepted) when "
+            "settings.environment == 'production', regardless of this value."
+        ),
+    )
+    provisioning_script_cache_ttl_seconds: int = Field(
+        default=86400,
+        ge=60,
+        le=604800,
+        description=(
+            "Redis cache TTL for a resolved bootstrap script fetched by an immutable ref "
+            "(tag or commit SHA). Long, because such a ref can never resolve to different "
+            "content. Failed fetches are never cached (D5) regardless of this setting."
+        ),
+    )
+    provisioning_script_dev_cache_ttl_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+        description=(
+            "Redis cache TTL when the resolved ref is provisioning_script_dev_ref (a "
+            "mutable branch, not a tag/SHA) — short, so pushing a fix during testing is "
+            "visible to the next node within seconds rather than a day."
+        ),
+    )
+    rate_limit_provisioning_script: str = Field(
+        default="120/minute",
+        description=(
+            "Per-IP rate limit for GET /v1/provisioning/scripts/{variant}/{ref}. Generous "
+            "because a legitimate node fetches once per boot/retry, but the endpoint is "
+            "unauthenticated-until-token-check and reachable from the open internet."
+        ),
     )
 
     # Grok video polling settings

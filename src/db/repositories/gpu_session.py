@@ -217,6 +217,31 @@ class GpuSessionRepository:
         await self._session.flush()
         return result.scalar_one()
 
+    async def increment_consecutive_contract_failures(self, session_id: UUID) -> int:
+        """Atomic increment of consecutive_contract_failures; returns the new value.
+
+        Only GpuProvisioningWorker._advance_provisioning writes this column, and only
+        one worker instance holds the leader lease at a time, so a plain atomic UPDATE
+        (no row lock) is sufficient — mirrors increment_provision_attempt.
+        """
+        result = await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(consecutive_contract_failures=GpuSession.consecutive_contract_failures + 1)
+            .returning(GpuSession.consecutive_contract_failures)
+        )
+        await self._session.flush()
+        return result.scalar_one()
+
+    async def reset_consecutive_contract_failures(self, session_id: UUID) -> None:
+        """Zero the counter after any non-contract_failed probe outcome."""
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(consecutive_contract_failures=0)
+        )
+        await self._session.flush()
+
     async def update_instance(
         self,
         session_id: UUID,

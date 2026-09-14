@@ -98,3 +98,39 @@ class TestGpuProvisionTimeoutSeconds:
         monkeypatch.setenv("GPU_PROVISION_TIMEOUT_SECONDS", "500")
         s = Settings(comfyui_host="127.0.0.1", comfyui_port=_DEFAULT_COMFYUI_PORT)
         assert s.gpu_provision_timeout_seconds == 500
+
+
+class TestGpuProvisionTerminalGraceProbes:
+    def test_default_is_3(self) -> None:
+        assert Settings.model_fields["gpu_provision_terminal_grace_probes"].default == 3
+
+    def test_custom_value(self) -> None:
+        s = _base_settings(gpu_provision_terminal_grace_probes=5)
+        assert s.gpu_provision_terminal_grace_probes == 5
+
+    def test_zero_is_invalid(self) -> None:
+        with pytest.raises(ValidationError):
+            _base_settings(gpu_provision_terminal_grace_probes=0)
+
+
+class TestProvisioningScriptSettings:
+    def test_ref_defaults_empty(self) -> None:
+        s = _base_settings()
+        assert s.provisioning_script_ref == ""
+
+    def test_ref_custom_value(self) -> None:
+        s = _base_settings(provisioning_script_ref="v1.2.3")
+        assert s.provisioning_script_ref == "v1.2.3"
+
+    def test_dev_ref_defaults_none(self) -> None:
+        s = _base_settings()
+        assert s.provisioning_script_dev_ref is None
+
+    def test_cache_ttl_defaults(self) -> None:
+        s = _base_settings()
+        assert s.provisioning_script_cache_ttl_seconds == 86400
+        assert s.provisioning_script_dev_cache_ttl_seconds == 60
+
+    def test_rate_limit_default(self) -> None:
+        s = _base_settings()
+        assert s.rate_limit_provisioning_script == "120/minute"

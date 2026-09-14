@@ -37,6 +37,10 @@ _EXPECTED_ACS_KEYS = {
     "ACS_APEX_OPERATION_ID",
     "ACS_APEX_CALLBACK_URL",
     "ACS_APEX_CALLBACK_TOKEN",
+    "PROVISIONING_SCRIPT",
+    "PROVISIONER_WEBHOOK_URL",
+    "PROVISIONER_FAILURE_ACTION",
+    "ACS_PROVISION_SCRIPT_SHA256",
     "ACS_HF_TOKEN",
     "ACS_CIVITAI_API_TOKEN",
     "ACS_COMFYUI_PORT",
@@ -53,6 +57,7 @@ def _make_settings(**overrides: object) -> MagicMock:
     s.aisha_repo_url = "https://github.com/gearbox/aisha.git"
     s.aisha_branch = "master"
     s.apex_callback_url = "https://apex.example.com/callback"
+    s.provisioning_script_ref = "v1.2.3"
     s.hf_token = "hf-test-token"
     s.civitai_api_token = "civitai-test-token"
     s.aisha_comfyui_host = "0.0.0.0"  # noqa: S104
@@ -76,6 +81,9 @@ def _build(**overrides: object) -> dict[str, str]:
         comfyui_port=overrides.pop("comfyui_port", _DEFAULT_COMFYUI_PORT),  # type: ignore[arg-type]
         tunnel_token=overrides.pop("tunnel_token", "tunnel-secret"),  # type: ignore[arg-type]
         callback_token=overrides.pop("callback_token", "cb-secret"),  # type: ignore[arg-type]
+        provision_script_sha256=overrides.pop(  # type: ignore[arg-type]
+            "provision_script_sha256", "a" * 64
+        ),
     )
 
 
@@ -172,3 +180,35 @@ def test_cf_tunnel_token_present_and_unprefixed() -> None:
     to ACS_CF_TUNNEL_TOKEN."""
     env = _build(tunnel_token="test-tunnel-secret")
     assert env["CF_TUNNEL_TOKEN"] == env["ACS_CF_TUNNEL_TOKEN"] == "test-tunnel-secret"
+
+
+def test_provisioning_script_url_contains_ref_session_and_token() -> None:
+    sid = uuid4()
+    s = _make_settings(
+        apex_callback_url="https://apex.example.com", provisioning_script_ref="v9.9.9"
+    )
+    env = _build(settings=s, session_id=sid, callback_token="tok-123")
+    expected = (
+        f"https://apex.example.com/v1/provisioning/scripts/comfyui/v9.9.9"
+        f"?session={sid}&token=tok-123"
+    )
+    assert env["PROVISIONING_SCRIPT"] == expected
+
+
+def test_provisioner_webhook_url_contains_session_and_token() -> None:
+    sid = uuid4()
+    s = _make_settings(apex_callback_url="https://apex.example.com")
+    env = _build(settings=s, session_id=sid, callback_token="tok-456")
+    assert env["PROVISIONER_WEBHOOK_URL"] == (
+        f"https://apex.example.com/v1/provisioning/webhook/{sid}?token=tok-456"
+    )
+
+
+def test_provisioner_failure_action_is_always_destroy() -> None:
+    env = _build()
+    assert env["PROVISIONER_FAILURE_ACTION"] == "destroy"
+
+
+def test_provision_script_sha256_passed_through() -> None:
+    env = _build(provision_script_sha256="b" * 64)
+    assert env["ACS_PROVISION_SCRIPT_SHA256"] == "b" * 64
