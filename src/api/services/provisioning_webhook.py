@@ -113,7 +113,12 @@ class ProvisioningWebhookService:
                 payload.manifest, max_length=_MAX_UPSTREAM_DETAIL_LENGTH
             ),
         )
+        # S2: `token` was only validated against the detached row read above.
+        # Pass it through so fail_pre_active_session re-validates it against the
+        # row under FOR UPDATE — the authority for the action, not just the
+        # response — closing the window where a concurrent retry rotates the
+        # hash between this check and that lock. See that method's docstring.
         await self._gpu_session_service.fail_pre_active_session(
-            session_id, reason=_REASON_NODE_PROVISION_SCRIPT_FAILED
+            session_id, reason=_REASON_NODE_PROVISION_SCRIPT_FAILED, expected_callback_token=token
         )
         return HTTP_200_OK

@@ -45,7 +45,7 @@ async def main() -> int:
 
     svc = BundleIndexService(
         repo_url=settings.ai_bundles_repo_url,
-        github_token=settings.ai_bundles_github_token,
+        github_token=settings.github_content_token,
         branch=settings.ai_bundles_branch,
         default_comfyui_port=settings.comfyui_port,
         max_download_bytes=50 * 1024 * 1024,  # 50 MiB should be more than enough for index parsing

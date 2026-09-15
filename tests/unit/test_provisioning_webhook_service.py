@@ -130,6 +130,27 @@ class TestHandleFailure:
         call = gpu_session_service.fail_pre_active_session.await_args
         assert call.args[0] == session_id
         assert call.kwargs["reason"] == "node_provision_script_failed"
+        assert call.kwargs["expected_callback_token"] == "correct-token"
+
+    async def test_locked_check_rejection_still_returns_200(self) -> None:
+        """S2: handle_failure doesn't branch on fail_pre_active_session's return
+        value — even a None (the locked check rejected a rotated token) must
+        still answer 200, not 401. The token was valid when presented; the
+        provisioner must not retry a completed failure forever."""
+        gpu_session_service = AsyncMock()
+        gpu_session_service.fail_pre_active_session.return_value = None
+        service = ProvisioningWebhookService(
+            gpu_session_service=gpu_session_service,
+            session_factory=_make_mock_session_factory(),
+        )
+        row = _make_session_row(token="correct-token")
+        with patch(_REPO_PATH) as MockRepo:
+            MockRepo.return_value.get_by_id = AsyncMock(return_value=row)
+            status = await service.handle_failure(
+                session_id=uuid4(), token="correct-token", payload=_make_payload()
+            )
+
+        assert status == HTTP_200_OK
 
     async def test_container_id_mismatch_still_fails_the_session(self) -> None:
         """The token is the authority, not the container id (D9)."""

@@ -1033,7 +1033,7 @@ async def init_services(settings: Settings) -> JWTService:
         )
         _services.bundle_index = BundleIndexService(
             repo_url=settings.ai_bundles_repo_url,
-            github_token=settings.ai_bundles_github_token,
+            github_token=settings.github_content_token,
             branch=settings.ai_bundles_branch,
             sync_interval_minutes=settings.ai_bundles_sync_interval_minutes,
             default_comfyui_port=settings.comfyui_port,

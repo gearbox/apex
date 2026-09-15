@@ -99,7 +99,7 @@ def build_acs_env(
         "ACS_BUNDLE": bundle_name,
         "ACS_BUNDLE_VERSION": bundle_version or "current",
         # --- GitHub auth + repos ---
-        "ACS_GITHUB_TOKEN": settings.ai_bundles_github_token,
+        "ACS_GITHUB_TOKEN": settings.github_content_token,
         "ACS_BUNDLES_REPO": settings.ai_bundles_repo_url,
         "ACS_BUNDLES_BRANCH": settings.ai_bundles_branch,
         "ACS_AISHA_REPO": settings.aisha_repo_url,

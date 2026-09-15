@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import exists, or_, select, update
 
-from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
+from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus, TransactionType
+from src.db.models.billing import TokenTransaction
 from src.db.models.gpu_session import GpuSession
 
 if TYPE_CHECKING:
@@ -318,6 +319,58 @@ class GpuSessionRepository:
                 or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
             )
             .order_by(GpuSession.stopped_at.asc())
+            .limit(limit)
+        )
+        return result.scalars().all()
+
+    async def list_pending_refund_reconciliation(
+        self,
+        *,
+        grace_cutoff: datetime,
+        limit: int,
+    ) -> Sequence[GpuSession]:
+        """List failed-before-active sessions whose base reservation may be unrefunded.
+
+        S3 remediation: ``fail_pre_active_session`` and
+        ``GpuProvisioningWorker._mark_failed`` both swallow a refund failure with
+        ``logger.exception`` and continue — the session is left terminally 'failed'
+        with the reservation still debited. Neither path is covered by
+        ``list_pending_billing_finalization`` (that query only ever matches
+        ``status == 'stopped'``), so without this query the debit is lost forever.
+
+        Filters:
+        - status = 'failed' (the only terminal status these two callers produce)
+        - started_at IS NULL (never became active — mirrors fail_pre_active_session's
+          own guard: an automated failure must never refund a session Apex's
+          authoritative probe already accepted as working)
+        - account_id IS NOT NULL (nothing was ever reserved otherwise)
+        - created_at < grace_cutoff (skip the in-line retry window; mirrors
+          list_pending_billing_finalization's stopped_at grace period)
+        - no REFUND transaction exists yet for this session id (mirrors
+          BillingRepository.has_refund_for_job) — the actual termination condition:
+          once BillingService.refund succeeds, the session stops matching and is
+          never re-selected. A missing DEBIT (nothing was ever reserved) is left
+          for billing_service.refund itself to reject via RefundNotEligibleError,
+          rather than duplicating that eligibility check here.
+
+        Ordered oldest-first so the longest-stuck sessions reconcile first.
+        Bounded by ``limit`` to cap per-sweep work — mirrors
+        list_pending_billing_finalization.
+        """
+        has_refund = select(TokenTransaction.id).where(
+            TokenTransaction.job_id == GpuSession.id,
+            TokenTransaction.transaction_type == TransactionType.REFUND.value,
+        )
+        result = await self._session.execute(
+            select(GpuSession)
+            .where(
+                GpuSession.status == GpuSessionStatus.failed,
+                GpuSession.started_at.is_(None),
+                GpuSession.account_id.is_not(None),
+                GpuSession.created_at < grace_cutoff,
+                ~exists(has_refund),
+            )
+            .order_by(GpuSession.created_at.asc())
             .limit(limit)
         )
         return result.scalars().all()

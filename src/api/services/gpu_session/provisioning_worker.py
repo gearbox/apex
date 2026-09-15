@@ -940,13 +940,13 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._mark_failed(session, "retry_get_token_failed")
             return
 
-        if not self._settings.ai_bundles_github_token:
+        if not self._settings.github_content_token:
             logger.error(
                 "gpu_session.provision.retry_config_error",
                 session_id=str(session.id),
-                reason="ai_bundles_github_token is empty; CLI clone will fail",
+                reason="github_content_token is empty; CLI clone will fail",
             )
-            await self._mark_failed(session, "misconfigured: ai_bundles_github_token is empty")
+            await self._mark_failed(session, "misconfigured: github_content_token is empty")
             return
         if not self._settings.provisioning_script_ref:
             logger.error(
@@ -981,17 +981,33 @@ class GpuProvisioningWorker(PeriodicWorker):
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
         # civitai_api_token, ACS_GITHUB_TOKEN, and (D3) PROVISIONING_SCRIPT /
         # PROVISIONER_WEBHOOK_URL, which carry the callback token in their query string.
-        env = build_acs_env(
-            settings=self._settings,
-            session_id=session.id,
-            operation_id=bootstrap_operation_id,
-            bundle_name=session.bundle_name,
-            bundle_version=session.bundle_version,
-            comfyui_port=bundle.hardware.comfyui_port,
-            tunnel_token=tunnel_token,
-            callback_token=fresh_callback_token,
-            provision_script_sha256=resolved_script.sha256,
-        )
+        # S7: guarded like the two config checks immediately above — build_acs_env
+        # raises a bare ValueError when apex_callback_url fails to normalize.
+        # Effectively unreachable today (the Settings validator catches an invalid
+        # apex_callback_url first), but ops can change env vars between an initial
+        # start and a retry without a restart, so this is defense in depth, not
+        # dead code — fail the retry cleanly via _mark_failed rather than let an
+        # unguarded ValueError escape run_once and poison the whole worker sweep.
+        try:
+            env = build_acs_env(
+                settings=self._settings,
+                session_id=session.id,
+                operation_id=bootstrap_operation_id,
+                bundle_name=session.bundle_name,
+                bundle_version=session.bundle_version,
+                comfyui_port=bundle.hardware.comfyui_port,
+                tunnel_token=tunnel_token,
+                callback_token=fresh_callback_token,
+                provision_script_sha256=resolved_script.sha256,
+            )
+        except ValueError:
+            logger.exception(
+                "gpu_session.provision.retry_config_error",
+                session_id=str(session.id),
+                reason="apex_callback_url invalid; build_acs_env raised",
+            )
+            await self._mark_failed(session, "misconfigured: apex_callback_url invalid")
+            return
 
         try:
             instance_id, selected_offer = await provision_vastai_instance(
@@ -1265,6 +1281,10 @@ class GpuProvisioningWorker(PeriodicWorker):
                     session_id=str(session.id),
                 )
             except Exception:
+                # BillingReconcilerWorker retries this via
+                # GpuSessionRepository.list_pending_refund_reconciliation +
+                # GpuSessionService.reconcile_pending_refund (S3) — the session is
+                # now terminal 'failed' with no refund transaction recorded.
                 logger.exception(
                     "gpu_session.provision.refund_failed",
                     session_id=str(session.id),

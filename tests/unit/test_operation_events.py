@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import msgspec
 import pytest
 from litestar import Litestar
 from litestar.di import Provide
@@ -422,6 +423,130 @@ class TestOperationEventService:
 
         operation_repo.get.assert_not_awaited()
         operation_repo.apply_event.assert_not_awaited()
+
+
+class TestOperationEventRedaction:
+    """S1: no node-supplied string reaches a repository write unredacted.
+
+    D3 put the callback token into the node's own environment
+    (PROVISIONING_SCRIPT / PROVISIONER_WEBHOOK_URL query strings), so any
+    failing command/curl error/env dump a node echoes into telemetry can
+    otherwise leak it into gpu_session_operations, gpu_session_commands.error,
+    and the published SSE event.
+    """
+
+    _TOKENIZED_URL = (
+        "https://apex.test/v1/provisioning/scripts/comfyui/v1.0.0"
+        "?session=11111111-1111-1111-1111-111111111111&token=leak-me-secret"
+    )
+
+    def _tokenized_event(
+        self,
+        *,
+        session_id: UUID,
+        operation_id: UUID,
+        status: str = "running",
+        progress: dict[str, object] | None = None,
+        plan: dict[str, object] | None = None,
+        summary: dict[str, object] | None = None,
+    ) -> OperationEventBody:
+        raw = _event_body(session_id=session_id, operation_id=operation_id, status=status)
+        raw["message"] = f"Failed to download script from {self._TOKENIZED_URL}: HTTP Error 404"
+        raw["error"] = f"curl {self._TOKENIZED_URL} failed"
+        if progress is not None:
+            raw["progress"] = progress
+        if plan is not None:
+            raw["plan"] = plan
+        if summary is not None:
+            raw["summary"] = summary
+        return msgspec.convert(raw, type=OperationEventBody)
+
+    async def test_message_and_error_are_redacted_before_apply_event(self) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = self._tokenized_event(session_id=session_id, operation_id=operation_id)
+        service = OperationEventService()
+
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        apply_kwargs = operation_repo.apply_event.await_args.kwargs
+        assert "leak-me-secret" not in apply_kwargs["message"]
+        assert "leak-me-secret" not in apply_kwargs["error"]
+        assert "?" not in apply_kwargs["message"]
+        assert "?" not in apply_kwargs["error"]
+
+    async def test_terminal_command_error_is_redacted_before_mark_terminal(self) -> None:
+        session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = self._tokenized_event(
+            session_id=session_id, operation_id=operation_id, status="failed"
+        )
+        service = OperationEventService()
+
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_OPERATION_REPO) as OperationRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id, command_id=command_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+            command_repo = AsyncMock()
+            CommandRepo.return_value = command_repo
+            command_repo.mark_terminal.return_value = True
+
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        mark_terminal_kwargs = command_repo.mark_terminal.await_args.kwargs
+        assert "leak-me-secret" not in mark_terminal_kwargs["error"]
+        assert "?" not in mark_terminal_kwargs["error"]
+
+    async def test_progress_plan_summary_are_redacted_at_any_depth(self) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = self._tokenized_event(
+            session_id=session_id,
+            operation_id=operation_id,
+            progress={"work": {"last_command": f"curl {self._TOKENIZED_URL}"}},
+            plan={"phases": [{"detail": f"fetch {self._TOKENIZED_URL}"}]},
+            summary={"final_error": f"failed: {self._TOKENIZED_URL}"},
+        )
+        service = OperationEventService()
+
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        apply_kwargs = operation_repo.apply_event.await_args.kwargs
+        assert "leak-me-secret" not in str(apply_kwargs["progress"])
+        assert "leak-me-secret" not in str(apply_kwargs["plan"])
+        assert "leak-me-secret" not in str(apply_kwargs["summary"])
 
 
 def _stub_service(result: OperationEventResult | None = None) -> OperationEventService:

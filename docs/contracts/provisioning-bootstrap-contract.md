@@ -92,6 +92,81 @@ and URL userinfo removed), bounded, and emitted only on the dedicated
 `provisioning.webhook.failure_detail` log event. They never reach the session
 row, SSE payload, or billing-refund metadata.
 
+### Two-stage token check (S2, round-2 remediation)
+
+`ProvisioningWebhookService.handle_failure` validates the presented `token`
+**twice**, against two different reads of the row, because they authorize two
+different things:
+
+1. **Pre-lock check (authorization for the response).** The webhook loads the
+   session row with a plain `get_by_id` (no lock) and validates the token
+   against that detached read *before* it will reveal whether the session
+   exists or its status — this is what produces the uniform `401` for an
+   unknown session or a bad token, before any row lock is taken.
+2. **Locked check (authorization for the action).** The presented token is
+   then passed through to `GpuSessionService.fail_pre_active_session(...,
+   expected_callback_token=token)`, which re-validates it against the row
+   *after* acquiring `SELECT ... FOR UPDATE`. This closes a window the
+   pre-lock check alone cannot: a delayed webhook call from an old,
+   already-destroyed node can pass check 1 against the hash as it existed at
+   read time, then a concurrent provisioning retry
+   (`GpuProvisioningWorker._retry_with_new_node`) can commit a *replacement*
+   instance with a fresh `callback_token_hash` before the webhook reaches its
+   lock. Without check 2, the stale caller would tear down and refund the
+   replacement node — a session mid-recovery, not the one that actually
+   failed.
+
+**When check 2 rejects (a rotated token), the webhook still returns `200`, not
+`401`.** The token was valid when presented — the provisioner should not
+retry — but the row it was validated against is no longer the row this call
+is authorized to act on, so `fail_pre_active_session` returns `None` and
+`handle_failure` never learns the difference between "applied" and "no-op on
+a rotated token"; both paths reach the same unconditional `return HTTP_200_OK`.
+Do not try to collapse these two checks into one — they run at different
+times against different (detached vs. locked) data and guard different
+things; see `fail_pre_active_session`'s docstring in
+`src/api/services/gpu_session/service.py`.
+
+`GpuProvisioningWorker`'s own probe-fail-fast path calls
+`fail_pre_active_session` with `expected_callback_token=None`, which skips
+check 2 entirely — its authorization is holding the worker's leader lease,
+not a callback token.
+
+## Trust boundary for node-supplied free text (S1, round-2 remediation)
+
+**No node-supplied string is persisted, published, or billed against without
+passing through `redact_secrets`/`redact_secrets_mapping`
+(`src/api/utils/redaction.py`) first.** This rule is enforced once, at each
+receiver's trust boundary, not re-derived per call site — see each redaction
+function's module docstring.
+
+D3 put the callback token into the node's own environment
+(`PROVISIONING_SCRIPT`/`PROVISIONER_WEBHOOK_URL` query strings, plus
+`CF_TUNNEL_TOKEN`/`ACS_GITHUB_TOKEN`/`ACS_HF_TOKEN`/`ACS_CIVITAI_API_TOKEN` as
+bare env vars), so any node-side code path that echoes a failing command, a
+curl error, or an env dump into free-text telemetry can otherwise leak a
+secret straight into a database row or the client's event stream. Two
+receivers apply this today:
+
+- **`POST /v1/provisioning/webhook/{session_id}`** (above): `error` and
+  `manifest` are redacted before the single `provisioning.webhook.failure_detail`
+  log line — this was closed in round 1.
+- **Telemetry v2 operation events** (`OperationEventService.handle_event`,
+  `src/api/services/gpu_session/operation_event_service.py` — the node's
+  *every-tick* channel, not just its terminal failure callback): `message`,
+  `error`, and the open-ended `progress`/`plan`/`summary` JSON bodies (a URL
+  can hide at any depth in these) are all redacted before they reach
+  `GpuSessionOperationRepository.apply_event` or
+  `GpuSessionCommandRepository.mark_terminal` — persisted to
+  `gpu_session_operations`/`gpu_session_commands.error` and published over
+  SSE. This was the gap closed in round 2: round 1 fixed the webhook call
+  site only, but D3's env-var change exposed the token on every path a node
+  can reach, and telemetry events are the node's most-used path.
+
+`redact_secrets` also recognizes any `KEY=value` where `KEY` case-insensitively
+contains `token`, `secret`, `key`, or `password` — not just the literal
+`token=`/`session=` forms — so a name nobody anticipated yet is still covered.
+
 ## Env-var contract (`build_acs_env`, `src/api/services/gpu_session/_env_builder.py`)
 
 Set on every `create_instance` call (initial start and provisioning retries):
@@ -110,6 +185,19 @@ provisioner concepts. The Vast template itself no longer sets
 `Settings.provisioning_script_ref` and rejects `POST /v1/sessions` with `503
 provisioning_unavailable` before creating any resource if that ref is
 unconfigured or fails to resolve (D6).
+
+**Token scope (S5, round-2 remediation):** `ACS_GITHUB_TOKEN` above, and the
+token `ProvisioningScriptService._fetch_from_github` presents to GitHub to
+resolve the bootstrap script, are the same value: `Settings.github_content_token`
+(env `AI_BUNDLES_GITHUB_TOKEN` — kept via `validation_alias` so no deployment's
+env needs to change). It requires read access to **both**
+`gearbox/ai-bundles` (bundle index cloning) and `gearbox/aisha` (bootstrap
+script fetch). The field/env name predates the aisha-repo caller and, read on
+its own, describes only the ai-bundles scope — an operator provisioning a
+fresh environment from that name alone would reasonably issue an
+ai-bundles-only-scoped PAT and get a `503 provisioning_unavailable` (a `404`
+from GitHub, logged but not surfaced to the caller) on every session start.
+Issue the PAT with both repos' read access.
 
 `Settings.apex_callback_url` is required whenever bootstrap script delivery is
 configured. It must be a non-empty absolute `http://` or `https://` origin,
@@ -136,7 +224,7 @@ string containing `token=`/`session=` — logs should carry `session_id`,
 
 | Status | Code | When |
 |---|---|---|
-| 503 | `provisioning_unavailable` | `ai_bundles_github_token`, `provisioning_script_ref`, or `apex_callback_url` unset, or the script ref fails to resolve (404/502 from GitHub) — no tunnel, no Vast.ai instance, no session row, no billing hold |
+| 503 | `provisioning_unavailable` | `github_content_token`, `provisioning_script_ref`, or `apex_callback_url` unset, or the script ref fails to resolve (404/502 from GitHub) — no tunnel, no Vast.ai instance, no session row, no billing hold |
 
 ## gearbox/aisha coordination
 
@@ -159,6 +247,14 @@ The following deployment facts are intentionally not inferred from this code:
 2. Use that instance to force a script-fetch failure and verify that its webhook
    POST completes before `PROVISIONER_FAILURE_ACTION=destroy` terminates the
    node. Confirm the instance has the Vast credentials needed for self-destroy.
+3. (S1, round-2) Force a node failure whose telemetry quotes the script URL
+   (e.g. a bad `ACS_BUNDLE` so the aisha script's own error message embeds the
+   `PROVISIONING_SCRIPT` value it tried to fetch), then read
+   `gpu_session_operations.error` back from the database **by hand** — psql,
+   not through any apex code path — and confirm the callback token is absent.
+   Automated tests cover the redaction function and the write path; this step
+   is the one check that the two are actually wired together in a real
+   deployment.
 
 These are required rollout checks because template environment precedence and
 the provisioner's shutdown ordering are external Vast.ai behaviours, not

@@ -4,7 +4,16 @@ The receiver is a pure writer: it validates node bearer auth, atomically updates
 the latest state of one operation, and updates the bootstrap stall projection.
 GpuProvisioningWorker remains the owner of all GPU session state transitions.
 
-SECURITY: never log tokens.
+SECURITY: never log tokens. This is also the trust boundary for every node-supplied
+free-text field on the wire envelope (``message``, ``error``, and the open-ended
+``progress``/``plan``/``summary`` bodies, where a URL carrying the callback token can
+hide at any depth): each is passed through ``redact_secrets``/``redact_secrets_mapping``
+here, once, before it reaches a repository write — never re-derive this at an
+individual call site. D3 put the callback token into the node's own environment
+(``PROVISIONING_SCRIPT``/``PROVISIONER_WEBHOOK_URL`` query strings), so any node-side
+code path that echoes a failing command or an env dump into telemetry can otherwise
+leak it straight into ``gpu_session_operations``, ``gpu_session_commands.error``, and
+the client's SSE stream.
 """
 
 from __future__ import annotations
@@ -16,6 +25,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.security.callback_token import validate_callback_token
+from src.api.services.gpu_session.failure_reasons import MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+from src.api.utils.redaction import redact_secrets, redact_secrets_mapping
 from src.core.enums import (
     TERMINAL_GPU_SESSION_STATUSES,
     TERMINAL_OPERATION_STATUSES,
@@ -112,6 +123,26 @@ class OperationEventService:
             )
             return OperationEventResult(authorized=True, status=404)
 
+        # SECURITY: the trust boundary — see module docstring. Every node-supplied
+        # free-text field is redacted here, before it reaches a repository write.
+        redacted_message = redact_secrets(
+            event.message, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+        )
+        redacted_error = (
+            redact_secrets(event.error, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH)
+            if event.error is not None
+            else None
+        )
+        redacted_progress = redact_secrets_mapping(
+            event.progress, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+        )
+        redacted_plan = redact_secrets_mapping(
+            event.plan, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+        )
+        redacted_summary = redact_secrets_mapping(
+            event.summary, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+        )
+
         outcome = await operation_repo.apply_event(
             operation_id=event.operation_id,
             session_id=session_id,
@@ -121,11 +152,11 @@ class OperationEventService:
             phase=event.phase.value if event.phase is not None else None,
             node_started_at=event.started_at,
             event_at=event.ts,
-            message=event.message,
-            progress=event.progress,
-            plan=event.plan,
-            summary=event.summary,
-            error=event.error,
+            message=redacted_message,
+            progress=redacted_progress,
+            plan=redacted_plan,
+            summary=redacted_summary,
+            error=redacted_error,
             target_bundle_version=(
                 event.target.bundle_version if event.target is not None else None
             ),
@@ -163,7 +194,7 @@ class OperationEventService:
                     else CommandStatus.failed
                 ),
                 at=event.ts,
-                error=event.error,
+                error=redacted_error,
             )
             if closed:
                 logger.info(

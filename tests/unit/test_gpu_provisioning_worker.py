@@ -171,7 +171,7 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
     settings.aisha_cf_tunnel_domain = "gpu-domain.com"
-    settings.ai_bundles_github_token = "ghp_test_token"
+    settings.github_content_token = "ghp_test_token"
     settings.provisioning_script_ref = "v1.0.0"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
@@ -704,11 +704,11 @@ class TestAdvanceProvisioning:
         )
 
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
-        """If ai_bundles_github_token is empty, mark session failed before create_instance."""
+        """If github_content_token is empty, mark session failed before create_instance."""
         # provisioning_recreation_attempts=3 so new_attempt=2 allows recreation to proceed
         # far enough to hit the github_token check
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
-        mocks["settings"].ai_bundles_github_token = ""
+        mocks["settings"].github_content_token = ""
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
@@ -733,6 +733,39 @@ class TestAdvanceProvisioning:
         # No instance creation attempted
         mocks["vastai_client"].create_instance.assert_not_called()
         # Session must be marked failed
+        mock_repo.update_status.assert_called()
+        failed_call = mock_repo.update_status.call_args_list[-1]
+        assert failed_call[0][1] == GpuSessionStatus.failed
+
+    async def test_retry_fails_fast_when_build_acs_env_raises(self) -> None:
+        """S7: build_acs_env's bare ValueError (invalid apex_callback_url) must be
+        guarded like the two config checks immediately above it — never let it
+        escape unguarded and poison the whole worker sweep."""
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        mocks["settings"].apex_callback_url = ""
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            bundle_name="wan_2.2_i2v",
+            bundle_version="260105-01",
+            callback_token_hash="some-existing-hash",
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "fetched-tunnel-token"
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="timeout")
+
+        # No instance creation attempted — the guard must fire before create_instance.
+        mocks["vastai_client"].create_instance.assert_not_called()
         mock_repo.update_status.assert_called()
         failed_call = mock_repo.update_status.call_args_list[-1]
         assert failed_call[0][1] == GpuSessionStatus.failed

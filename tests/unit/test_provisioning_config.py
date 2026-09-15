@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from pydantic import ValidationError
 
 from src.core.config import Settings
+from tests.unit.helpers import hermetic_settings
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
 
 
 def _base_settings(**overrides: object) -> Settings:
-    return Settings(
+    """Hermetic against a local .env file (S4) — see tests.unit.helpers.hermetic_settings."""
+    return hermetic_settings(
         comfyui_host="127.0.0.1",
         comfyui_port=_DEFAULT_COMFYUI_PORT,
-        **overrides,  # type: ignore[arg-type]
+        **overrides,
     )
 
 
@@ -96,7 +103,7 @@ class TestGpuProvisionTimeoutSeconds:
 
     def test_env_var_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GPU_PROVISION_TIMEOUT_SECONDS", "500")
-        s = Settings(comfyui_host="127.0.0.1", comfyui_port=_DEFAULT_COMFYUI_PORT)
+        s = _base_settings()
         assert s.gpu_provision_timeout_seconds == 500
 
 
@@ -151,6 +158,30 @@ class TestProvisioningScriptSettings:
         )
         assert with_slash.apex_callback_url == without_slash.apex_callback_url
 
+    def test_malformed_callback_url_rejected_even_with_no_script_ref(self) -> None:
+        """S6: the URL check must not be gated on the ref being set — apex_callback_url
+        is used by every node callback, not just bootstrap-script delivery. Previously
+        this was accepted (and left unnormalized) at startup because the whole
+        validator returned early when provisioning_script_ref was empty."""
+        with pytest.raises(ValidationError, match="apex_callback_url"):
+            _base_settings(provisioning_script_ref="", apex_callback_url="not-a-url")
+
+    def test_callback_url_alone_is_still_normalized_with_no_script_ref(self) -> None:
+        s = _base_settings(
+            provisioning_script_ref="", apex_callback_url="https://apex.example.test/"
+        )
+        assert s.apex_callback_url == "https://apex.example.test"
+
+    def test_both_empty_is_still_accepted_for_local_dev(self) -> None:
+        s = _base_settings(provisioning_script_ref="", apex_callback_url="")
+        assert s.provisioning_script_ref == ""
+        assert s.apex_callback_url == ""
+
+    def test_ref_validity_does_not_depend_on_callback_url(self) -> None:
+        """The ref check must fire on its own, independent of apex_callback_url."""
+        with pytest.raises(ValidationError, match="provisioning_script_ref"):
+            _base_settings(provisioning_script_ref="not-a-valid-ref", apex_callback_url="")
+
     def test_production_rejects_mutable_script_ref(self) -> None:
         with pytest.raises(ValidationError, match="provisioning_script_ref"):
             _base_settings(
@@ -177,3 +208,24 @@ class TestProvisioningScriptSettings:
     def test_rate_limit_default(self) -> None:
         s = _base_settings()
         assert s.rate_limit_provisioning_script == "120/minute"
+
+    def test_defaults_are_hermetic_against_a_local_env_file(self, tmp_path: Path) -> None:
+        """S4 regression: `.env.example` leaves these blank, so this only passed by
+        accident before — a developer's real `.env` setting PROVISIONING_SCRIPT_REF
+        would silently change what "default" means for every test in this class."""
+        dotenv = tmp_path / ".env"
+        dotenv.write_text(
+            "PROVISIONING_SCRIPT_REF=v1.2.3\nAPEX_CALLBACK_URL=https://from-dotenv.test\n"
+        )
+
+        # A bare Settings() honoring that file would resolve non-empty here...
+        loaded = Settings(
+            _env_file=str(dotenv),  # pyright: ignore[reportCallIssue]
+            comfyui_host="127.0.0.1",
+            comfyui_port=_DEFAULT_COMFYUI_PORT,
+        )
+        assert loaded.provisioning_script_ref == "v1.2.3"
+
+        # ...but _base_settings (hermetic_settings under the hood) never sees it.
+        s = _base_settings()
+        assert s.provisioning_script_ref == ""

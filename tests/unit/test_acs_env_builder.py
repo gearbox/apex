@@ -51,7 +51,7 @@ _EXPECTED_ACS_KEYS = {
 
 def _make_settings(**overrides: object) -> MagicMock:
     s = MagicMock()
-    s.ai_bundles_github_token = "ghp_test_token"
+    s.github_content_token = "ghp_test_token"
     s.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     s.ai_bundles_branch = "master"
     s.aisha_repo_url = "https://github.com/gearbox/aisha.git"
@@ -99,7 +99,7 @@ def test_all_acs_keys_present() -> None:
 
 
 def test_acs_github_token_from_settings() -> None:
-    s = _make_settings(ai_bundles_github_token="ghp_my_pat")
+    s = _make_settings(github_content_token="ghp_my_pat")
     env = _build(settings=s)
     assert env["ACS_GITHUB_TOKEN"] == "ghp_my_pat"
 

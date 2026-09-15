@@ -150,9 +150,20 @@ class Settings(BaseSettings):
     )
 
     # --- GPU Session Provisioning (ai-bundles) ---
-    ai_bundles_github_token: str = Field(
+    github_content_token: str = Field(
         default="",
-        description="GitHub PAT for cloning the private ai-bundles repository",
+        validation_alias="AI_BUNDLES_GITHUB_TOKEN",
+        description=(
+            "GitHub PAT read by ProvisioningScriptService to fetch the bootstrap script "
+            "from the private gearbox/aisha repo, AND by BundleIndexService to clone the "
+            "private gearbox/ai-bundles repo. Requires read access to BOTH repos — an "
+            "ai-bundles-only-scoped token clones bundles fine but 404s on every session "
+            "start (S5: the field/env name predates the aisha-repo caller and named it "
+            "for ai-bundles alone, which no longer describes what it reads). The env var "
+            "name AI_BUNDLES_GITHUB_TOKEN is kept via validation_alias so no deployment's "
+            "env needs to change; this field name is the seam a future GitHub App "
+            "credential migration will replace."
+        ),
     )
     ai_bundles_repo_url: str = Field(
         default="https://github.com/gearbox/ai-bundles.git",
@@ -600,7 +611,7 @@ class Settings(BaseSettings):
             "vX.Y.Z tag or a full 40-hex commit SHA) unless it equals "
             "provisioning_script_dev_ref. Required for GPU sessions to start — empty is "
             "treated as a config-validation failure (503 provisioning_unavailable), the "
-            "same fail-closed posture as an empty ai_bundles_github_token."
+            "same fail-closed posture as an empty github_content_token."
         ),
     )
     provisioning_script_dev_ref: OptionalNonBlankStr = Field(
@@ -1518,30 +1529,45 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_provisioning_bootstrap_settings(self) -> "Settings":
-        """Validate the callback origin and script ref before GPU provisioning can run."""
+        """Validate the script ref and callback origin independently (S6).
+
+        The two checks below are gated on separate conditions, not on each
+        other: the ref check runs whenever a ref is configured, and the URL
+        check runs whenever the GPU provisioning stack looks configured at
+        all (a ref OR a callback URL is set) — never only when the *other*
+        field happens to be set too. Previously the URL check was nested
+        inside `if ref:`, so `apex_callback_url` alone — set with no
+        `provisioning_script_ref` (a real, reachable misconfiguration; that
+        field is used by every node callback, not just bootstrap-script
+        delivery) — went completely unvalidated and unnormalized at startup,
+        surfacing only much later via the runtime check in
+        `GpuSessionService.start_session`. Local dev, where both fields
+        legitimately default to empty, still skips both checks.
+        """
         ref = self.provisioning_script_ref
-        if not ref:
-            return self
-
-        is_immutable = bool(PROVISIONING_REF_PATTERN.fullmatch(ref))
-        is_allowed_dev_ref = (
-            self.environment != "production"
-            and self.provisioning_script_dev_ref is not None
-            and ref == self.provisioning_script_dev_ref
-        )
-        if not is_immutable and not is_allowed_dev_ref:
-            raise ValueError(
-                "provisioning_script_ref must be a release tag/full commit SHA, or equal "
-                "provisioning_script_dev_ref outside production"
+        if ref:
+            is_immutable = bool(PROVISIONING_REF_PATTERN.fullmatch(ref))
+            is_allowed_dev_ref = (
+                self.environment != "production"
+                and self.provisioning_script_dev_ref is not None
+                and ref == self.provisioning_script_dev_ref
             )
+            if not is_immutable and not is_allowed_dev_ref:
+                raise ValueError(
+                    "provisioning_script_ref must be a release tag/full commit SHA, or equal "
+                    "provisioning_script_dev_ref outside production"
+                )
 
-        normalized_url = normalize_apex_callback_url(self.apex_callback_url)
-        if normalized_url is None:
-            raise ValueError(
-                "apex_callback_url must be a non-empty absolute http(s) origin without a "
-                "path, query, fragment, or userinfo"
-            )
-        self.apex_callback_url = normalized_url
+        gpu_stack_configured = bool(ref) or bool(self.apex_callback_url)
+        if gpu_stack_configured:
+            normalized_url = normalize_apex_callback_url(self.apex_callback_url)
+            if normalized_url is None:
+                raise ValueError(
+                    "apex_callback_url must be a non-empty absolute http(s) origin without a "
+                    "path, query, fragment, or userinfo"
+                )
+            self.apex_callback_url = normalized_url
+
         return self
 
     @model_validator(mode="after")

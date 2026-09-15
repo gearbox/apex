@@ -235,7 +235,7 @@ def _make_settings(
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
     settings.gpu_session_tokens_per_minute = 100
-    settings.ai_bundles_github_token = "ghp_test_token"
+    settings.github_content_token = "ghp_test_token"
     settings.provisioning_script_ref = "v1.0.0"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
@@ -1123,14 +1123,14 @@ class TestStartSession:
         for the old ordering bug where a misconfigured deploy leaked a tunnel on
         every attempt (2026-09-13 staging incident's root cause)."""
         service, mocks = _make_service()
-        mocks["settings"].ai_bundles_github_token = ""
+        mocks["settings"].github_content_token = ""
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
 
-            with pytest.raises(ProvisioningUnavailableError, match="ai_bundles_github_token"):
+            with pytest.raises(ProvisioningUnavailableError, match="github_content_token"):
                 await service.start_session(
                     user_id=uuid4(),
                     product_id="vex",
@@ -3818,6 +3818,92 @@ class TestFailPreActiveSession:
         )
         status_event = event_bus.publish.await_args.kwargs["payload"]
         assert status_event.error_message == "node_provision_script_failed"
+
+    async def test_expected_callback_token_none_is_unaffected(self) -> None:
+        """The worker's own callers (no token held) must skip the new check
+        entirely — behaviour identical to before the S2 remediation."""
+        service, mocks = _make_service()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=555,
+            cf_tunnel_id="tunnel-1",
+            cf_dns_record_id="dns-1",
+        )
+        session.account_id = uuid4()
+        session.callback_token_hash = hashlib.sha256(b"whatever").hexdigest()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(
+                session.id, reason="node_provision_script_failed"
+            )
+
+        assert result is session
+        mocks["billing_service"].refund.assert_awaited_once()
+
+    async def test_matching_expected_callback_token_transitions_normally(self) -> None:
+        service, mocks = _make_service()
+        token = "current-token"
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=555,
+            cf_tunnel_id="tunnel-1",
+            cf_dns_record_id="dns-1",
+            callback_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        )
+        session.account_id = uuid4()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(
+                session.id,
+                reason="node_provision_script_failed",
+                expected_callback_token=token,
+            )
+
+        assert result is session
+        mocks["vastai_client"].destroy_instance.assert_awaited_once_with(555)
+        mocks["billing_service"].refund.assert_awaited_once()
+
+    async def test_rotated_expected_callback_token_is_rejected_under_the_lock(self) -> None:
+        """S2: a token that no longer matches the *locked* row's hash must not
+        tear down or refund — the row may since be a concurrent retry's
+        replacement node, not the one that presented this token."""
+        service, mocks = _make_service()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=555,
+            cf_tunnel_id="tunnel-1",
+            cf_dns_record_id="dns-1",
+            callback_token_hash=hashlib.sha256(b"rotated-token").hexdigest(),
+        )
+        session.account_id = uuid4()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(
+                session.id,
+                reason="node_provision_script_failed",
+                expected_callback_token="stale-token",
+            )
+
+        assert result is None
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mocks["billing_service"].refund.assert_not_called()
+        mock_repo.update_status.assert_not_called()
 
     async def test_no_account_id_skips_refund(self) -> None:
         service, mocks = _make_service()

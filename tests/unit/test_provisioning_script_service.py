@@ -67,7 +67,7 @@ class _FakeRedis:
 
 def _make_settings(**overrides: Any) -> MagicMock:
     settings = MagicMock()
-    settings.ai_bundles_github_token = "ghp_test_token"
+    settings.github_content_token = "ghp_test_token"
     settings.provisioning_script_ref = "v1.0.0"
     settings.provisioning_script_dev_ref = None
     settings.provisioning_script_cache_ttl_seconds = 86400
@@ -321,6 +321,41 @@ class TestServeForSession:
             )
 
         assert result.outcome == "ok"
+
+    async def test_db_session_released_before_the_github_fetch(self) -> None:
+        """S8: don't hold the request-scoped DB session open across resolve()'s
+        outbound GitHub call (up to 10s on a cache miss) — release its pooled
+        connection right after the token check via db.commit()."""
+        from unittest.mock import patch
+
+        call_order: list[str] = []
+        http = AsyncMock(spec=httpx.AsyncClient)
+
+        async def _slow_get(*_args: object, **_kwargs: object) -> object:
+            call_order.append("http.get")
+            return _make_response(200, content=b"body")
+
+        http.get.side_effect = _slow_get
+        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
+        db = AsyncMock()
+
+        async def _commit() -> None:
+            call_order.append("db.commit")
+
+        db.commit.side_effect = _commit
+        repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
+
+        with patch(repo_patch_target) as MockRepo:
+            MockRepo.return_value.get_by_id = AsyncMock(
+                return_value=self._make_session_row(token="tok")
+            )
+            result = await service.serve_for_session(
+                db=db, session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
+            )
+
+        assert result.outcome == "ok"
+        db.commit.assert_awaited_once()
+        assert call_order == ["db.commit", "http.get"]
 
     async def test_dev_ref_rejected_in_production(self) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)

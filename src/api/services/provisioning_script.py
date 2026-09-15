@@ -153,6 +153,16 @@ class ProvisioningScriptService:
             )
             return ScriptServeResult(outcome=ScriptServeOutcome.unauthorized)
 
+        # S8: the request-scoped DB session isn't needed past the token check above —
+        # release its pooled connection before resolve()'s outbound GitHub fetch, which
+        # takes up to _FETCH_TIMEOUT_SECONDS (10s) on a cache miss. Committing (rather
+        # than closing) keeps `db` itself usable for the caller's later teardown without
+        # relying on close-then-reuse semantics; there's nothing to write here, so the
+        # commit is a no-op beyond returning the connection to the pool. Under a
+        # simultaneous multi-node boot this avoids tying up pool connections for the
+        # full fetch duration for no reason.
+        await db.commit()
+
         try:
             resolved = await self.resolve(variant_enum, ref)
         except ProvisioningScriptRefNotFoundError:
@@ -217,8 +227,8 @@ class ProvisioningScriptService:
             "Accept": "application/vnd.github.raw",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        if self._settings.ai_bundles_github_token:
-            headers["Authorization"] = f"Bearer {self._settings.ai_bundles_github_token}"
+        if self._settings.github_content_token:
+            headers["Authorization"] = f"Bearer {self._settings.github_content_token}"
 
         try:
             resp = await self._http.get(

@@ -12,6 +12,8 @@ import msgspec
 import structlog
 from sqlalchemy.exc import IntegrityError
 
+from src.api.security.callback_token import validate_callback_token
+from src.api.services.billing_errors import RefundNotEligibleError
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.provisioning_script import ProvisioningScriptError
 from src.api.services.vastai.exceptions import NoCapacityError
@@ -243,7 +245,7 @@ class GpuSessionService:
         2. Pre-check uniqueness via GpuSessionDeploymentRepository.get_live_for_model (fast fail)
         3. Generate session_id (UUIDv7) and callback_token (token_urlsafe)
         1.5. Assert sufficient balance BEFORE creating any external resources
-        3.6. Validate config (ai_bundles_github_token, provisioning_script_ref, apex_callback_url) — fail
+        3.6. Validate config (github_content_token, provisioning_script_ref, apex_callback_url) — fail
              fast with no cleanup needed, since nothing external exists yet
         3.7. Resolve the bootstrap script via ProvisioningScriptService.resolve() (D6) —
              proves the ref apex is about to hand this node actually resolves BEFORE
@@ -320,19 +322,19 @@ class GpuSessionService:
         # ahead of tunnel creation. Previously this guard ran after create_session_tunnel,
         # so a misconfigured deploy leaked a tunnel on every attempt (2026-09-13 staging
         # incident's root cause for the paired cloudflare.tunnel.delete_failed 400s).
-        if not self._settings.ai_bundles_github_token:
+        if not self._settings.github_content_token:
             logger.error(
                 "gpu_session.start.failed",
                 user_id=str(user_id),
                 model_type=model_type.value,
                 error_class="ConfigurationError",
                 phase="config_validation",
-                reason="ai_bundles_github_token is empty; ai-bundles is private and CLI clone will fail",
+                reason="github_content_token is empty; ai-bundles/aisha are private and CLI clone will fail",
             )
             raise ProvisioningUnavailableError(
-                "Apex is misconfigured: ai_bundles_github_token is empty. "
+                "Apex is misconfigured: github_content_token is empty. "
                 "Set AI_BUNDLES_GITHUB_TOKEN (pydantic-settings maps this to the field automatically) "
-                "to a GitHub PAT with read access to gearbox/ai-bundles."
+                "to a GitHub PAT with read access to BOTH gearbox/ai-bundles and gearbox/aisha."
             )
         if not self._settings.provisioning_script_ref:
             logger.error(
@@ -1231,8 +1233,12 @@ class GpuSessionService:
                     session_id=str(session_id),
                 )
             except Exception:
-                # Don't block the session transition on a refund failure — the
-                # billing reconciler will catch up.
+                # Don't block the session transition on a refund failure. Unlike
+                # fail_pre_active_session below, this path is NOT covered by
+                # BillingReconcilerWorker/list_pending_refund_reconciliation — TX2
+                # stamps billing_finalized_at unconditionally a few lines down, and
+                # that query only ever matches status='failed'. A refund failure
+                # here is currently only surfaced via this log line.
                 logger.exception(
                     "gpu_session.stop_pre_active.refund_failed",
                     session_id=str(session_id),
@@ -1262,6 +1268,7 @@ class GpuSessionService:
         session_id: UUID,
         *,
         reason: str,
+        expected_callback_token: str | None = None,
     ) -> GpuSession | None:
         """Terminal-fail a session that has not yet reached 'active', refunding in full.
 
@@ -1283,11 +1290,37 @@ class GpuSessionService:
         no shared code path is required for that guarantee, only that both sides
         gate their side effects on a locked terminal-state check, which they do.
 
+        `expected_callback_token` (round-2 remediation, S2) is a *second*,
+        independent authorization check, layered on top of whatever the caller
+        already did. The webhook's own pre-lock token check
+        (``ProvisioningWebhookService.handle_failure``) reads a detached row and
+        is authorization for the *response*: it must run before revealing
+        whether a session exists or its status, so a probe against an arbitrary
+        session id gets a uniform 401 without ever taking a row lock. That check
+        alone is not sufficient authorization for the *action*: a delayed
+        webhook call from an old, already-destroyed node can be validated
+        against the hash as read at that moment, then a concurrent
+        `_retry_with_new_node` can commit a replacement instance and a fresh
+        hash before this method acquires its lock — at which point the stale
+        caller would tear down and refund the *replacement* node, not the one
+        that actually failed. Passing the presented token through and
+        re-validating it here, against the row under `FOR UPDATE`, closes that
+        window: whichever hash is current at lock time is the only one that can
+        authorize the transition. Do not collapse these two checks into one —
+        they run at different times against different (detached vs. locked)
+        data and guard different things. Callers that hold no token of their
+        own (GpuProvisioningWorker's probe-fail-fast path) pass `None`, which
+        skips this second check entirely — their authorization is holding the
+        leader lease, not a callback token.
+
         Returns None (no-op, nothing torn down or refunded) if the session was
-        not found, or if it already reached 'active' — an automated failure
-        signal must never retroactively kill a session that Apex's own
-        authoritative probe has already accepted as working. Returns the row
-        unchanged if it was already terminal/stopping (idempotent no-op).
+        not found, if `expected_callback_token` no longer matches the locked
+        row's current hash (a rotated token — logged as
+        ``gpu_session.fail_pre_active.token_rotated``), or if the session
+        already reached 'active' — an automated failure signal must never
+        retroactively kill a session that Apex's own authoritative probe has
+        already accepted as working. Returns the row unchanged if it was
+        already terminal/stopping (idempotent no-op).
         """
         reason = bounded_failure_reason(reason)
         logger.info("gpu_session.fail_pre_active.start", session_id=str(session_id), reason=reason)
@@ -1297,6 +1330,14 @@ class GpuSessionService:
             session_row = await repo.get_by_id(session_id, for_update=True)
             if session_row is None:
                 logger.warning("gpu_session.fail_pre_active.not_found", session_id=str(session_id))
+                return None
+            if expected_callback_token is not None and not validate_callback_token(
+                expected_callback_token, session_row.callback_token_hash
+            ):
+                logger.warning(
+                    "gpu_session.fail_pre_active.token_rotated",
+                    session_id=str(session_id),
+                )
                 return None
             if session_row.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
                 logger.info(
@@ -1343,7 +1384,10 @@ class GpuSessionService:
                     await self._event_bus.publish_balance(refund_result.event)
                 logger.info("gpu_session.fail_pre_active.refunded", session_id=str(session_id))
             except Exception:
-                # Don't block on a refund failure — the billing reconciler will catch up.
+                # Don't block on a refund failure — BillingReconcilerWorker now
+                # retries this via GpuSessionRepository.list_pending_refund_reconciliation
+                # + reconcile_pending_refund (S3), since this session is terminal
+                # 'failed' with no refund transaction recorded.
                 logger.exception(
                     "gpu_session.fail_pre_active.refund_failed", session_id=str(session_id)
                 )
@@ -1582,6 +1626,47 @@ class GpuSessionService:
             repo = GpuSessionRepository(db)
             refreshed = await repo.get_by_id(session_row.id)
         return refreshed is not None and refreshed.billing_finalized_at is not None
+
+    async def reconcile_pending_refund(self, session_row: GpuSession) -> bool:
+        """Retry a base-reservation refund for a 'failed' pre-active session (S3).
+
+        Public wrapper for BillingReconcilerWorker: ``fail_pre_active_session`` and
+        ``GpuProvisioningWorker._mark_failed`` both swallow a refund failure with
+        ``logger.exception`` and continue — see both methods' docstrings — leaving
+        the base reservation debited with nothing left to retry it. This re-attempts
+        the same ``BillingService.refund`` call for exactly the candidates
+        ``GpuSessionRepository.list_pending_refund_reconciliation`` selects.
+
+        Raises on an unexpected failure so the worker can bump its attempt counter,
+        mirroring how ``BillingReconcilerWorker._process_session`` already treats
+        ``finalize_billing_for_session``. ``RefundNotEligibleError`` is caught and
+        treated as success: ``BillingService.refund`` is idempotent — it raises when
+        a REFUND transaction already exists for the job — so hitting it here means
+        an earlier or concurrent attempt already completed the refund and there is
+        nothing left to do.
+        """
+        if session_row.account_id is None:
+            return True
+        try:
+            async with self._session_factory() as db, db.begin():
+                refund_result = await self._billing_service.refund(
+                    session_row.id,
+                    description=f"GPU session failed: {session_row.error_message or 'unknown'}",
+                    session=db,
+                    product_id=session_row.product_id,
+                    user_id=session_row.user_id,
+                )
+        except RefundNotEligibleError:
+            logger.info(
+                "gpu_session.reconcile_refund.already_refunded",
+                session_id=str(session_row.id),
+            )
+            return True
+
+        if self._event_bus is not None:
+            await self._event_bus.publish_balance(refund_result.event)
+        logger.info("gpu_session.reconcile_refund.succeeded", session_id=str(session_row.id))
+        return True
 
     async def _apply_finalize_billing(
         self,

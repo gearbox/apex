@@ -1,10 +1,20 @@
-"""Background worker: reconciles sessions with NULL billing_finalized_at.
+"""Background worker: reconciles sessions with NULL billing_finalized_at, plus
+'failed' pre-active sessions whose base reservation was never refunded (S3).
 
 When GpuSessionService._finalize_billing fails both of its in-line retry
 attempts, the session is left in status='stopped' with
 billing_finalized_at NULL and 'gpu_session.billing.finalization_deferred'
 logged at ERROR. This worker periodically picks up those sessions and
 re-invokes _finalize_billing.
+
+Separately (S3, round-2 remediation): GpuSessionService.fail_pre_active_session
+and GpuProvisioningWorker._mark_failed both swallow a refund failure and
+continue, leaving a 'failed' session's base reservation debited with nothing
+to retry it — billing_finalized_at doesn't apply to that status, so the
+finalization sweep above never sees these. This worker's second pass picks up
+GpuSessionRepository.list_pending_refund_reconciliation candidates and
+re-invokes GpuSessionService.reconcile_pending_refund, which treats an
+already-completed refund (RefundNotEligibleError) as success.
 
 Runs once every ``settings.billing_reconciler_interval_minutes`` (default 10).
 """
@@ -62,12 +72,25 @@ class BillingReconcilerWorker(PeriodicWorker):
         self._settings = settings
 
     async def run_once(self) -> None:
-        """One reconciliation sweep."""
+        """One reconciliation sweep: billing finalization, then refund reconciliation.
+
+        The two candidate sets are disjoint by construction — finalization only
+        ever matches status='stopped', refund reconciliation only ever matches
+        status='failed' — so a session is never double-processed in one sweep.
+        """
         started = time.monotonic()
         grace_cutoff = datetime.now(UTC) - timedelta(
             minutes=self._settings.billing_reconciler_grace_period_minutes
         )
 
+        await self._sweep_finalization(grace_cutoff)
+        await self._sweep_refund_reconciliation(grace_cutoff)
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.debug("billing_reconciler.sweep.done", duration_ms=elapsed_ms)
+
+    async def _sweep_finalization(self, grace_cutoff: datetime) -> None:
+        """Retry billing_finalized_at IS NULL / status='stopped' sessions."""
         # 1. Pull candidates in one short transaction.
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
@@ -77,7 +100,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             )
 
         if not candidates:
-            logger.debug("billing_reconciler.sweep.no_candidates")
+            logger.debug("billing_reconciler.finalization_sweep.no_candidates")
             return
 
         reconciled = 0
@@ -95,15 +118,93 @@ class BillingReconcilerWorker(PeriodicWorker):
             else:  # still_failing
                 still_failing += 1
 
-        elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
-            "billing_reconciler.sweep.done",
+            "billing_reconciler.finalization_sweep.done",
             candidates=len(candidates),
             reconciled=reconciled,
             still_failing=still_failing,
             quarantined=quarantined,
-            duration_ms=elapsed_ms,
         )
+
+    async def _sweep_refund_reconciliation(self, grace_cutoff: datetime) -> None:
+        """Retry the base-reservation refund for 'failed' pre-active sessions (S3)."""
+        async with self._session_factory() as db:
+            repo = GpuSessionRepository(db)
+            candidates = await repo.list_pending_refund_reconciliation(
+                grace_cutoff=grace_cutoff,
+                limit=self._settings.billing_reconciler_max_per_sweep,
+            )
+
+        if not candidates:
+            logger.debug("billing_reconciler.refund_sweep.no_candidates")
+            return
+
+        reconciled = 0
+        still_failing = 0
+        quarantined = 0
+
+        for session_row in candidates:
+            outcome = await self._process_refund_session(session_row)
+            if outcome == "reconciled":
+                reconciled += 1
+            elif outcome == "quarantined":
+                quarantined += 1
+            else:  # still_failing
+                still_failing += 1
+
+        logger.info(
+            "billing_reconciler.refund_sweep.done",
+            candidates=len(candidates),
+            reconciled=reconciled,
+            still_failing=still_failing,
+            quarantined=quarantined,
+        )
+
+    async def _process_refund_session(self, session_row: GpuSession) -> str:
+        """Run refund reconciliation on one session and classify the outcome.
+
+        Returns one of: ``"reconciled"``, ``"still_failing"``, ``"quarantined"``.
+        Mirrors ``_process_session``'s shape, reusing the same
+        ``billing_finalization_attempts`` counter/quarantine threshold — a
+        session is only ever a candidate for one of the two sweeps (see
+        ``run_once``), so the shared counter can't conflate the two failure kinds.
+        """
+        try:
+            success = await self._service.reconcile_pending_refund(session_row)
+        except Exception:
+            logger.exception(
+                "billing_reconciler.refund_session_error",
+                session_id=str(session_row.id),
+            )
+            success = False
+
+        if success:
+            logger.info(
+                "billing_reconciler.refund_session_reconciled",
+                session_id=str(session_row.id),
+                attempts_before=session_row.billing_finalization_attempts,
+            )
+            return "reconciled"
+
+        try:
+            new_count = await self._bump_and_check_quarantine(session_row)
+        except Exception:
+            logger.exception(
+                "billing_reconciler.refund_bump_error",
+                session_id=str(session_row.id),
+            )
+            return "still_failing"
+
+        if new_count >= self._settings.billing_reconciler_quarantine_threshold:
+            logger.error(
+                "billing_reconciler.refund_session_quarantined",
+                session_id=str(session_row.id),
+                attempts=new_count,
+                quarantine=True,
+            )
+            return "quarantined"
+
+        return "still_failing"
 
     async def _process_session(self, session_row: GpuSession) -> str:
         """Run finalize on one session and classify the outcome.
