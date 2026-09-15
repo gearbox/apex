@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from src.core.config import normalize_apex_callback_url
+from src.core.constants import PROVISIONING_REF_PATTERN, validate_dev_ref_is_route_safe
 from src.core.enums import ScriptVariant
 
 if TYPE_CHECKING:
@@ -32,7 +33,21 @@ def build_provisioning_callback_urls(
     callback_token: str,
     provision_script_ref: str,
 ) -> tuple[str, str]:
-    """Build the script and failure-webhook URLs from one normalized origin."""
+    """Build the script and failure-webhook URLs from one normalized origin.
+
+    Raises:
+        ValueError: `provision_script_ref` is not route-safe as a single URL path
+            segment (T3, round-3 remediation) — it is interpolated raw into the
+            script URL below, and the GET /v1/provisioning/scripts/{variant}/{ref}
+            route accepts exactly one path segment for `{ref}`. Checked here too,
+            not only in Settings' validator, so this function itself can never
+            emit an unroutable URL regardless of who validated the ref upstream.
+            A pinned immutable ref (tag/SHA) always passes — only a dev ref can
+            be unsafe, and Settings.validate_provisioning_bootstrap_settings
+            already rejects an unsafe one at boot; this is defense in depth.
+    """
+    if not PROVISIONING_REF_PATTERN.fullmatch(provision_script_ref):
+        validate_dev_ref_is_route_safe(provision_script_ref)
     query = urlencode({"session": str(session_id), "token": callback_token})
     script_url = (
         f"{apex_callback_url}/v1/provisioning/scripts/"

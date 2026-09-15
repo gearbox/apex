@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from src.api.schemas.provisioning import ProvisionerFailureWebhookBody
     from src.api.services.gpu_session.service import GpuSessionService
+    from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
 
@@ -50,9 +51,23 @@ class ProvisioningWebhookService:
         *,
         gpu_session_service: GpuSessionService,
         session_factory: async_sessionmaker[AsyncSession],
+        settings: Settings,
     ) -> None:
         self._gpu_session_service = gpu_session_service
         self._session_factory = session_factory
+        # T1 Layer 1: every plaintext secret apex holds at call time. Does not
+        # include the callback token (only its hash is stored) or the tunnel
+        # token (never persisted) — see redaction.py's module docstring and T8
+        # in the round-3 remediation notes.
+        self._known_secrets = frozenset(
+            value
+            for value in (
+                settings.github_content_token,
+                settings.hf_token,
+                settings.civitai_api_token,
+            )
+            if value
+        )
 
     async def handle_failure(
         self,
@@ -108,9 +123,15 @@ class ProvisioningWebhookService:
         logger.warning(
             "provisioning.webhook.failure_detail",
             session_id=str(session_id),
-            upstream_error=redact_secrets(payload.error, max_length=_MAX_UPSTREAM_DETAIL_LENGTH),
+            upstream_error=redact_secrets(
+                payload.error,
+                max_length=_MAX_UPSTREAM_DETAIL_LENGTH,
+                known_secrets=self._known_secrets,
+            ),
             upstream_manifest=redact_secrets(
-                payload.manifest, max_length=_MAX_UPSTREAM_DETAIL_LENGTH
+                payload.manifest,
+                max_length=_MAX_UPSTREAM_DETAIL_LENGTH,
+                known_secrets=self._known_secrets,
             ),
         )
         # S2: `token` was only validated against the detached row read above.

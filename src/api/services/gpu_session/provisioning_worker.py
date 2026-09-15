@@ -1235,6 +1235,11 @@ class GpuProvisioningWorker(PeriodicWorker):
             new_status=GpuSessionStatus.failed,
             log_event="gpu_session.provision.failed",
             error_message=reason,
+            # T5, round-3 remediation: stamp the terminal timestamp on 'failed'
+            # the same as _set_status does for 'stopped' — the billing
+            # reconciler's refund-reconciliation grace period (T5) is measured
+            # from this, not from created_at.
+            stopped_at=datetime.now(UTC),
         )
         if not transitioned:
             return

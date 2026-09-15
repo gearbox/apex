@@ -298,6 +298,7 @@ class GpuSessionRepository:
         *,
         grace_cutoff: datetime,
         limit: int,
+        quarantine_threshold: int | None = None,
     ) -> Sequence[GpuSession]:
         """List stopped sessions whose billing has not been finalized.
 
@@ -305,21 +306,27 @@ class GpuSessionRepository:
         - status = 'stopped' (terminal — the only status _finalize_billing applies to)
         - billing_finalized_at IS NULL (not yet successfully finalized)
         - stopped_at < grace_cutoff (skip in-flight in-line retries)
+        - billing_finalization_attempts < quarantine_threshold, when given (T7,
+          round-3 remediation): once a session crosses the quarantine threshold,
+          the reconciler has already alerted on it every sweep via the ERROR
+          quarantine log — re-selecting it forever just re-emits that alert
+          without ever succeeding. Excluding it here is what makes "quarantined"
+          mean "stop trying" rather than "keep trying and keep shouting".
 
         Ordered oldest-first so the longest-stuck sessions reconcile first
         on each sweep. Bounded by ``limit`` to cap per-sweep work.
         """
+        conditions = [
+            GpuSession.status == GpuSessionStatus.stopped,
+            GpuSession.billing_finalized_at.is_(None),
+            # NULL stopped_at skips the grace period — include unconditionally
+            # (stopped sessions should always have stopped_at, but be defensive).
+            or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
+        ]
+        if quarantine_threshold is not None:
+            conditions.append(GpuSession.billing_finalization_attempts < quarantine_threshold)
         result = await self._session.execute(
-            select(GpuSession)
-            .where(
-                GpuSession.status == GpuSessionStatus.stopped,
-                GpuSession.billing_finalized_at.is_(None),
-                # NULL stopped_at skips the grace period — include unconditionally
-                # (stopped sessions should always have stopped_at, but be defensive).
-                or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
-            )
-            .order_by(GpuSession.stopped_at.asc())
-            .limit(limit)
+            select(GpuSession).where(*conditions).order_by(GpuSession.stopped_at.asc()).limit(limit)
         )
         return result.scalars().all()
 
@@ -328,6 +335,7 @@ class GpuSessionRepository:
         *,
         grace_cutoff: datetime,
         limit: int,
+        quarantine_threshold: int | None = None,
     ) -> Sequence[GpuSession]:
         """List failed-before-active sessions whose base reservation may be unrefunded.
 
@@ -344,34 +352,57 @@ class GpuSessionRepository:
           own guard: an automated failure must never refund a session Apex's
           authoritative probe already accepted as working)
         - account_id IS NOT NULL (nothing was ever reserved otherwise)
-        - created_at < grace_cutoff (skip the in-line retry window; mirrors
-          list_pending_billing_finalization's stopped_at grace period)
+        - stopped_at < grace_cutoff (skip the in-line retry window; T5, round-3
+          remediation — measured from the *terminal* timestamp, same as
+          list_pending_billing_finalization, not from created_at. A session can
+          legitimately run for up to gpu_provision_timeout_seconds before
+          failing, which can exceed the grace period at the defaults, so the
+          creation time is not a safe proxy for "this failure just happened" —
+          it undercounts how long ago the in-line refund attempt actually ran.
+          Both ``fail_pre_active_session`` and ``_mark_failed`` stamp
+          ``stopped_at`` on the transition to 'failed', same as on 'stopped'.)
+        - a DEBIT transaction exists for this session id (T4, round-3
+          remediation): without this, a session whose ``account_id`` was set but
+          that failed before the reservation debit was ever written matches
+          forever — ``refund()`` raises ``RefundNotEligibleError("No debit
+          transaction found")`` every sweep, which ``reconcile_pending_refund``
+          treats as success (logged ``already_refunded``, which is also the
+          wrong event name for this case) without ever removing the row from
+          the candidate set. Because the query orders oldest-first, these
+          permanent candidates are also the ones most likely to fill the
+          ``limit`` and head-of-line-block genuinely stuck refunds.
         - no REFUND transaction exists yet for this session id (mirrors
           BillingRepository.has_refund_for_job) — the actual termination condition:
           once BillingService.refund succeeds, the session stops matching and is
-          never re-selected. A missing DEBIT (nothing was ever reserved) is left
-          for billing_service.refund itself to reject via RefundNotEligibleError,
-          rather than duplicating that eligibility check here.
+          never re-selected.
+        - billing_finalization_attempts < quarantine_threshold, when given (T7)
+          — see list_pending_billing_finalization's matching note; this sweep
+          reuses the same counter/threshold.
 
         Ordered oldest-first so the longest-stuck sessions reconcile first.
         Bounded by ``limit`` to cap per-sweep work — mirrors
         list_pending_billing_finalization.
         """
+        has_debit = select(TokenTransaction.id).where(
+            TokenTransaction.job_id == GpuSession.id,
+            TokenTransaction.transaction_type == TransactionType.DEBIT.value,
+        )
         has_refund = select(TokenTransaction.id).where(
             TokenTransaction.job_id == GpuSession.id,
             TokenTransaction.transaction_type == TransactionType.REFUND.value,
         )
+        conditions = [
+            GpuSession.status == GpuSessionStatus.failed,
+            GpuSession.started_at.is_(None),
+            GpuSession.account_id.is_not(None),
+            or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
+            exists(has_debit),
+            ~exists(has_refund),
+        ]
+        if quarantine_threshold is not None:
+            conditions.append(GpuSession.billing_finalization_attempts < quarantine_threshold)
         result = await self._session.execute(
-            select(GpuSession)
-            .where(
-                GpuSession.status == GpuSessionStatus.failed,
-                GpuSession.started_at.is_(None),
-                GpuSession.account_id.is_not(None),
-                GpuSession.created_at < grace_cutoff,
-                ~exists(has_refund),
-            )
-            .order_by(GpuSession.created_at.asc())
-            .limit(limit)
+            select(GpuSession).where(*conditions).order_by(GpuSession.created_at.asc()).limit(limit)
         )
         return result.scalars().all()
 

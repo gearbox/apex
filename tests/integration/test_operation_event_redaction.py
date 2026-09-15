@@ -109,7 +109,11 @@ async def test_terminal_failure_event_with_a_tokenized_url_is_redacted_on_disk(
             )
 
         controller = object.__new__(InternalGpuSessionController)
-        receiver = OperationEventService()
+        settings = MagicMock()
+        settings.github_content_token = ""
+        settings.hf_token = ""
+        settings.civitai_api_token = ""
+        receiver = OperationEventService(settings=settings)
         request = MagicMock()
         request.headers = {"Authorization": f"Bearer {_CALLBACK_TOKEN}"}
         event_bus = AsyncMock()
@@ -147,6 +151,116 @@ async def test_terminal_failure_event_with_a_tokenized_url_is_redacted_on_disk(
         event_bus.publish.assert_awaited_once()
         published_payload = event_bus.publish.await_args.kwargs["payload"]
         assert _LEAKED_SECRET not in str(published_payload)
+    finally:
+        async with session_factory() as db:
+            await db.execute(delete(User).where(User.id == user.id))
+            await db.commit()
+
+
+def _deeply_nested(depth: int) -> dict[str, object]:
+    value: dict[str, object] = {"leaf": "bottom"}
+    for _ in range(depth):
+        value = {"nested": value}
+    return value
+
+
+def _deep_summary_event(*, session_id, operation_id, depth: int) -> OperationEventBody:  # type: ignore[no-untyped-def]
+    now = datetime.now(UTC)
+    return OperationEventBody(
+        schema_version=2,
+        event_id="deep-summary-event",
+        session_id=session_id,
+        operation_id=operation_id,
+        operation_kind=OperationKind.session_bootstrap,
+        batch=None,
+        sequence=0,
+        target=None,
+        status=OperationStatus.running,
+        phase=None,
+        started_at=now,
+        ts=now,
+        elapsed_seconds=1.0,
+        phase_elapsed_seconds=None,
+        progress=None,
+        plan=None,
+        summary=_deeply_nested(depth),
+        message="tick",
+        error=None,
+    )
+
+
+async def test_deeply_nested_summary_is_applied_not_500(
+    db_engine,  # type: ignore[no-untyped-def]
+) -> None:
+    """T2, round-3 remediation: a node-supplied summary/plan/progress body can be
+    arbitrarily deep. Before the depth bound, the redactor's unbounded recursive
+    walk raised RecursionError on this every-tick hot path, turning a deeply
+    nested (malicious or merely buggy) payload into a 500. It must now apply
+    the event and persist a bounded, truncated summary instead."""
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    user = User(
+        id=uuid4(),
+        email=f"operation-redaction-deep-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="qwen_rapid_aio",
+        model_type="aisha-image",
+        callback_token_hash=hashlib.sha256(_CALLBACK_TOKEN.encode()).hexdigest(),
+    )
+    operation_id = new_id()
+
+    try:
+        async with session_factory() as db, db.begin():
+            db.add(user)
+            await db.flush()
+            db.add(gpu_session)
+            await db.flush()
+            await GpuSessionOperationRepository(db).create(
+                id=operation_id,
+                session_id=gpu_session.id,
+                user_id=user.id,
+                product_id=gpu_session.product_id,
+                kind=OperationKind.bundle_provision,
+            )
+
+        controller = object.__new__(InternalGpuSessionController)
+        settings = MagicMock()
+        settings.github_content_token = ""
+        settings.hf_token = ""
+        settings.civitai_api_token = ""
+        receiver = OperationEventService(settings=settings)
+        request = MagicMock()
+        request.headers = {"Authorization": f"Bearer {_CALLBACK_TOKEN}"}
+        event_bus = AsyncMock()
+
+        async with session_factory() as db:
+            response = await InternalGpuSessionController.operation_event.fn(
+                controller,
+                session_id=gpu_session.id,
+                operation_id=operation_id,
+                request=request,
+                data=_deep_summary_event(
+                    session_id=gpu_session.id, operation_id=operation_id, depth=2000
+                ),
+                operation_event_service=receiver,
+                session=db,
+                event_bus=event_bus,
+            )
+
+        # Never a 500 — either applied (200) or a deliberate rejection, never
+        # an unhandled RecursionError bubbling out of the handler.
+        assert response.status_code == 200
+
+        async with session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(operation_id)
+            assert operation is not None
+            assert "[TRUNCATED: max depth]" in str(operation.summary)
     finally:
         async with session_factory() as db:
             await db.execute(delete(User).where(User.id == user.id))

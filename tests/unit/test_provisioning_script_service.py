@@ -89,6 +89,26 @@ def _make_response(
     return resp
 
 
+class _FakeSessionContext:
+    """Minimal async-context-manager stand-in for one `async with session_factory()`."""
+
+    def __init__(self, db: AsyncMock) -> None:
+        self._db = db
+
+    async def __aenter__(self) -> AsyncMock:
+        return self._db
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+def _make_session_factory(db: AsyncMock | None = None) -> MagicMock:
+    """A fake `async_sessionmaker`: calling it returns a fresh context manager,
+    same as the real one, so `async with self._session_factory() as db:` works."""
+    session_db = db if db is not None else AsyncMock()
+    return MagicMock(return_value=_FakeSessionContext(session_db))
+
+
 # ---------------------------------------------------------------------------
 # resolve()
 # ---------------------------------------------------------------------------
@@ -97,7 +117,12 @@ def _make_response(
 class TestResolve:
     async def test_disallowed_ref_is_rejected_before_any_http_call(self) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
+        )
 
         with pytest.raises(ProvisioningScriptRefNotFoundError, match="not allowed"):
             await service.resolve(ScriptVariant.comfyui, "main")
@@ -109,6 +134,7 @@ class TestResolve:
             http=AsyncMock(spec=httpx.AsyncClient),
             redis=None,
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         assert service._cache_ttl_for(True) == 86400
@@ -122,6 +148,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         result = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -147,6 +174,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         first = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -166,6 +194,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         with pytest.raises(ProvisioningScriptRefNotFoundError):
@@ -181,6 +210,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         with pytest.raises(ProvisioningScriptUnavailableError):
@@ -196,6 +226,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         with pytest.raises(ProvisioningScriptUnavailableError):
@@ -209,6 +240,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         with pytest.raises(ProvisioningScriptUnavailableError):
@@ -224,6 +256,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         result = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -240,6 +273,7 @@ class TestResolve:
             http=http,
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         result = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -249,7 +283,12 @@ class TestResolve:
     async def test_none_redis_never_caches(self) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)
         http.get.return_value = _make_response(200, content=b"body")
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
+        )
 
         await service.resolve(ScriptVariant.comfyui, "v1.2.3")
         await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -274,10 +313,14 @@ class TestServeForSession:
 
     async def test_unknown_variant_is_bad_request_with_no_outbound_call(self) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
+        )
 
         result = await service.serve_for_session(
-            db=AsyncMock(),
             session_id=uuid4(),
             token="tok",
             variant="not-a-real-variant",
@@ -290,10 +333,15 @@ class TestServeForSession:
     @pytest.mark.parametrize("bad_ref", ["../../etc/passwd", "master", "x", ""])
     async def test_bad_ref_is_bad_request_with_no_outbound_call(self, bad_ref: str) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
+        )
 
         result = await service.serve_for_session(
-            db=AsyncMock(), session_id=uuid4(), token="tok", variant="comfyui", ref=bad_ref
+            session_id=uuid4(), token="tok", variant="comfyui", ref=bad_ref
         )
 
         assert result.outcome == "bad_request"
@@ -305,9 +353,7 @@ class TestServeForSession:
         settings = _make_settings(
             provisioning_script_dev_ref="my-test-branch", environment="staging"
         )
-        service = ProvisioningScriptService(http=http, redis=None, settings=settings)
         session_id = uuid4()
-        db = AsyncMock()
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
         from unittest.mock import patch
@@ -316,16 +362,24 @@ class TestServeForSession:
             MockRepo.return_value.get_by_id = AsyncMock(
                 return_value=self._make_session_row(token="tok")
             )
+            service = ProvisioningScriptService(
+                http=http,
+                redis=None,
+                settings=settings,
+                session_factory=_make_session_factory(),
+            )
             result = await service.serve_for_session(
-                db=db, session_id=session_id, token="tok", variant="comfyui", ref="my-test-branch"
+                session_id=session_id, token="tok", variant="comfyui", ref="my-test-branch"
             )
 
         assert result.outcome == "ok"
 
-    async def test_db_session_released_before_the_github_fetch(self) -> None:
-        """S8: don't hold the request-scoped DB session open across resolve()'s
-        outbound GitHub call (up to 10s on a cache miss) — release its pooled
-        connection right after the token check via db.commit()."""
+    async def test_token_check_uses_its_own_session_not_a_caller_owned_one(self) -> None:
+        """T6, round-3 remediation: serve_for_session takes a dedicated session
+        from self._session_factory for the token read rather than accepting one
+        from the caller — verify the factory (not some externally-passed
+        session) is what's used, and that it's released (exits its `async
+        with` block) before the slow outbound GitHub fetch runs."""
         from unittest.mock import patch
 
         call_order: list[str] = []
@@ -336,13 +390,24 @@ class TestServeForSession:
             return _make_response(200, content=b"body")
 
         http.get.side_effect = _slow_get
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
-        db = AsyncMock()
 
-        async def _commit() -> None:
-            call_order.append("db.commit")
+        session_db = AsyncMock()
+        exited = False
 
-        db.commit.side_effect = _commit
+        class _TrackingSessionContext(_FakeSessionContext):
+            async def __aexit__(self, *exc_info: object) -> None:
+                nonlocal exited
+                exited = True
+                call_order.append("session_closed")
+                return await super().__aexit__(*exc_info)
+
+        session_factory = MagicMock(return_value=_TrackingSessionContext(session_db))
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=_make_settings(),
+            session_factory=session_factory,
+        )
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
         with patch(repo_patch_target) as MockRepo:
@@ -350,22 +415,28 @@ class TestServeForSession:
                 return_value=self._make_session_row(token="tok")
             )
             result = await service.serve_for_session(
-                db=db, session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
+                session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
             )
 
         assert result.outcome == "ok"
-        db.commit.assert_awaited_once()
-        assert call_order == ["db.commit", "http.get"]
+        session_factory.assert_called_once()
+        assert exited is True
+        assert call_order == ["session_closed", "http.get"]
 
     async def test_dev_ref_rejected_in_production(self) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)
         settings = _make_settings(
             provisioning_script_dev_ref="my-test-branch", environment="production"
         )
-        service = ProvisioningScriptService(http=http, redis=None, settings=settings)
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=settings,
+            session_factory=_make_session_factory(),
+        )
 
         result = await service.serve_for_session(
-            db=AsyncMock(), session_id=uuid4(), token="tok", variant="comfyui", ref="my-test-branch"
+            session_id=uuid4(), token="tok", variant="comfyui", ref="my-test-branch"
         )
 
         assert result.outcome == "bad_request"
@@ -373,14 +444,17 @@ class TestServeForSession:
 
     async def test_missing_session_or_token_is_unauthorized(self) -> None:
         service = ProvisioningScriptService(
-            http=AsyncMock(spec=httpx.AsyncClient), redis=None, settings=_make_settings()
+            http=AsyncMock(spec=httpx.AsyncClient),
+            redis=None,
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
         )
 
         missing_session = await service.serve_for_session(
-            db=AsyncMock(), session_id=None, token="tok", variant="comfyui", ref="v1.0.0"
+            session_id=None, token="tok", variant="comfyui", ref="v1.0.0"
         )
         missing_token = await service.serve_for_session(
-            db=AsyncMock(), session_id=uuid4(), token=None, variant="comfyui", ref="v1.0.0"
+            session_id=uuid4(), token=None, variant="comfyui", ref="v1.0.0"
         )
 
         assert missing_session.outcome == "unauthorized"
@@ -389,17 +463,19 @@ class TestServeForSession:
     async def test_wrong_token_is_unauthorized(self) -> None:
         from unittest.mock import patch
 
-        service = ProvisioningScriptService(
-            http=AsyncMock(spec=httpx.AsyncClient), redis=None, settings=_make_settings()
-        )
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
         with patch(repo_patch_target) as MockRepo:
             MockRepo.return_value.get_by_id = AsyncMock(
                 return_value=self._make_session_row(token="correct-token")
             )
+            service = ProvisioningScriptService(
+                http=AsyncMock(spec=httpx.AsyncClient),
+                redis=None,
+                settings=_make_settings(),
+                session_factory=_make_session_factory(),
+            )
             result = await service.serve_for_session(
-                db=AsyncMock(),
                 session_id=uuid4(),
                 token="wrong-token",
                 variant="comfyui",
@@ -412,16 +488,18 @@ class TestServeForSession:
         """A token that hashes correctly for a DIFFERENT session's hash must not validate."""
         from unittest.mock import patch
 
-        service = ProvisioningScriptService(
-            http=AsyncMock(spec=httpx.AsyncClient), redis=None, settings=_make_settings()
-        )
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
         other_sessions_row = self._make_session_row(token="other-session-token")
 
         with patch(repo_patch_target) as MockRepo:
             MockRepo.return_value.get_by_id = AsyncMock(return_value=other_sessions_row)
+            service = ProvisioningScriptService(
+                http=AsyncMock(spec=httpx.AsyncClient),
+                redis=None,
+                settings=_make_settings(),
+                session_factory=_make_session_factory(),
+            )
             result = await service.serve_for_session(
-                db=AsyncMock(),
                 session_id=uuid4(),
                 token="my-session-token",
                 variant="comfyui",
@@ -433,15 +511,18 @@ class TestServeForSession:
     async def test_unknown_session_is_unauthorized(self) -> None:
         from unittest.mock import patch
 
-        service = ProvisioningScriptService(
-            http=AsyncMock(spec=httpx.AsyncClient), redis=None, settings=_make_settings()
-        )
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
         with patch(repo_patch_target) as MockRepo:
             MockRepo.return_value.get_by_id = AsyncMock(return_value=None)
+            service = ProvisioningScriptService(
+                http=AsyncMock(spec=httpx.AsyncClient),
+                redis=None,
+                settings=_make_settings(),
+                session_factory=_make_session_factory(),
+            )
             result = await service.serve_for_session(
-                db=AsyncMock(), session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
+                session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
             )
 
         assert result.outcome == "unauthorized"
@@ -451,15 +532,20 @@ class TestServeForSession:
 
         http = AsyncMock(spec=httpx.AsyncClient)
         http.get.return_value = _make_response(200, content=b"script body")
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
         with patch(repo_patch_target) as MockRepo:
             MockRepo.return_value.get_by_id = AsyncMock(
                 return_value=self._make_session_row(token="tok")
             )
+            service = ProvisioningScriptService(
+                http=http,
+                redis=None,
+                settings=_make_settings(),
+                session_factory=_make_session_factory(),
+            )
             result = await service.serve_for_session(
-                db=AsyncMock(), session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
+                session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
             )
 
         assert result.outcome == "ok"
@@ -471,15 +557,20 @@ class TestServeForSession:
 
         http = AsyncMock(spec=httpx.AsyncClient)
         http.get.return_value = _make_response(404)
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
         with patch(repo_patch_target) as MockRepo:
             MockRepo.return_value.get_by_id = AsyncMock(
                 return_value=self._make_session_row(token="tok")
             )
+            service = ProvisioningScriptService(
+                http=http,
+                redis=None,
+                settings=_make_settings(),
+                session_factory=_make_session_factory(),
+            )
             result = await service.serve_for_session(
-                db=AsyncMock(), session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
+                session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
             )
 
         assert result.outcome == "not_found"
@@ -489,15 +580,20 @@ class TestServeForSession:
 
         http = AsyncMock(spec=httpx.AsyncClient)
         http.get.return_value = _make_response(503)
-        service = ProvisioningScriptService(http=http, redis=None, settings=_make_settings())
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
         with patch(repo_patch_target) as MockRepo:
             MockRepo.return_value.get_by_id = AsyncMock(
                 return_value=self._make_session_row(token="tok")
             )
+            service = ProvisioningScriptService(
+                http=http,
+                redis=None,
+                settings=_make_settings(),
+                session_factory=_make_session_factory(),
+            )
             result = await service.serve_for_session(
-                db=AsyncMock(), session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
+                session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
             )
 
         assert result.outcome == "unavailable"

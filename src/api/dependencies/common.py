@@ -696,7 +696,7 @@ async def init_services(settings: Settings) -> JWTService:
     logger.info("db.pool_initialized")
 
     # The callback route supplies the request transaction to this pure writer.
-    _services.operation_event_service = OperationEventService()
+    _services.operation_event_service = OperationEventService(settings=settings)
     logger.info("operation_event_service.initialized")
 
     # Initialize the command queue service (DB + settings only, not GPU-stack-gated —
@@ -1069,6 +1069,7 @@ async def init_services(settings: Settings) -> JWTService:
             http=_services.gpu_session_http_client,
             redis=script_cache_redis,
             settings=settings,
+            session_factory=_services.db_manager.session_factory,
         )
 
         _services.gpu_session_service = GpuSessionService(
@@ -1087,6 +1088,7 @@ async def init_services(settings: Settings) -> JWTService:
         _services.provisioning_webhook_service = ProvisioningWebhookService(
             gpu_session_service=_services.gpu_session_service,
             session_factory=_services.db_manager.session_factory,
+            settings=settings,
         )
 
         if _services.gpu_session_command_service is None:

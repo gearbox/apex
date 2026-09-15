@@ -12,6 +12,7 @@ from src.core.constants import (
     MAX_EXTRACT_TIMESTAMPS,
     MAX_PREVIEW_FRAME_COUNT,
     PROVISIONING_REF_PATTERN,
+    validate_dev_ref_is_route_safe,
 )
 from src.core.enums import WorkerMode
 from src.core.topup_pricing import build_tiers
@@ -1544,6 +1545,9 @@ class Settings(BaseSettings):
         `GpuSessionService.start_session`. Local dev, where both fields
         legitimately default to empty, still skips both checks.
         """
+        if self.provisioning_script_dev_ref is not None:
+            validate_dev_ref_is_route_safe(self.provisioning_script_dev_ref)
+
         ref = self.provisioning_script_ref
         if ref:
             is_immutable = bool(PROVISIONING_REF_PATTERN.fullmatch(ref))

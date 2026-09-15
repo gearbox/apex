@@ -1353,8 +1353,14 @@ class GpuSessionService:
                 )
                 return None
             previous_status = str(session_row.status)
+            fail_now = datetime.now(UTC)
             closed_operations = await self._set_status(
-                db, repo, session_row, GpuSessionStatus.failed, error_message=reason
+                db,
+                repo,
+                session_row,
+                GpuSessionStatus.failed,
+                stopped_at=fail_now,
+                error_message=reason,
             )
 
         logger.info(
@@ -1639,12 +1645,13 @@ class GpuSessionService:
 
         Raises on an unexpected failure so the worker can bump its attempt counter,
         mirroring how ``BillingReconcilerWorker._process_session`` already treats
-        ``finalize_billing_for_session``. ``RefundNotEligibleError`` is caught and
-        treated as success: ``BillingService.refund`` is idempotent — it raises when
-        a REFUND transaction already exists for the job — so hitting it here means
-        an earlier or concurrent attempt already completed the refund and there is
-        nothing left to do.
+        ``finalize_billing_for_session``. ``RefundNotEligibleError`` has two
+        distinct causes (T4, round-3 remediation) — see below.
         """
+        # Defensive invariant, not reachable via BillingReconcilerWorker: the
+        # repository query (list_pending_refund_reconciliation) already filters
+        # account_id IS NOT NULL. Kept in case this method is ever called
+        # directly with a row that didn't come through that query.
         if session_row.account_id is None:
             return True
         try:
@@ -1656,7 +1663,19 @@ class GpuSessionService:
                     product_id=session_row.product_id,
                     user_id=session_row.user_id,
                 )
-        except RefundNotEligibleError:
+        except RefundNotEligibleError as exc:
+            # T4: the query now requires a DEBIT to exist, so "no debit" should
+            # be unreachable here — if it still happens, the row raced between
+            # selection and this call (or the query's invariant broke), which is
+            # a genuine anomaly worth a distinct, louder event than the normal
+            # "someone already refunded this" race BillingService.refund's
+            # idempotency check exists to handle.
+            if "No debit transaction found" in str(exc):
+                logger.warning(
+                    "gpu_session.reconcile_refund.missing_debit",
+                    session_id=str(session_row.id),
+                )
+                return False
             logger.info(
                 "gpu_session.reconcile_refund.already_refunded",
                 session_id=str(session_row.id),

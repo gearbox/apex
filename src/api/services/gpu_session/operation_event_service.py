@@ -14,6 +14,17 @@ individual call site. D3 put the callback token into the node's own environment
 code path that echoes a failing command or an env dump into telemetry can otherwise
 leak it straight into ``gpu_session_operations``, ``gpu_session_commands.error``, and
 the client's SSE stream.
+
+T1/T11 (round-3 remediation): Layer 1 of the redactor (exact known-secret
+replacement — see ``src/api/utils/redaction.py``'s module docstring) needs the
+plaintext values apex actually holds; ``_known_secrets`` is built once from
+``Settings`` at construction. It intentionally does not include the per-session
+callback token or tunnel token — apex only ever stores the callback token's hash,
+and the tunnel token is never persisted at all, so neither is in scope here (see
+T8 in the round-3 remediation notes; this is a documented limitation, not an
+oversight). ``event.event_id`` and ``event.target.bundle_version`` are also routed
+through Layer 1 (cheap — a ``str.replace`` pass) even though they are structurally
+simple, not free text.
 """
 
 from __future__ import annotations
@@ -26,7 +37,7 @@ import structlog
 
 from src.api.security.callback_token import validate_callback_token
 from src.api.services.gpu_session.failure_reasons import MAX_GPU_SESSION_FAILURE_REASON_LENGTH
-from src.api.utils.redaction import redact_secrets, redact_secrets_mapping
+from src.api.utils.redaction import redact_known_secrets, redact_secrets, redact_secrets_mapping
 from src.core.enums import (
     TERMINAL_GPU_SESSION_STATUSES,
     TERMINAL_OPERATION_STATUSES,
@@ -43,10 +54,20 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.schemas.gpu_session import OperationEventBody
+    from src.core.config import Settings
     from src.db.models.gpu_session_operation import GpuSessionOperation
     from src.db.repositories.gpu_session_operation import EventOutcome
 
 logger = structlog.get_logger(__name__)
+
+
+def _known_secrets_from_settings(settings: Settings) -> frozenset[str]:
+    """Layer 1 exact-match set: every plaintext secret apex holds at startup."""
+    return frozenset(
+        value
+        for value in (settings.github_content_token, settings.hf_token, settings.civitai_api_token)
+        if value
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +82,9 @@ class OperationEventResult:
 
 class OperationEventService:
     """Validate and persist operation telemetry using a caller-owned transaction."""
+
+    def __init__(self, *, settings: Settings) -> None:
+        self._known_secrets = _known_secrets_from_settings(settings)
 
     async def handle_event(
         self,
@@ -126,28 +150,43 @@ class OperationEventService:
         # SECURITY: the trust boundary — see module docstring. Every node-supplied
         # free-text field is redacted here, before it reaches a repository write.
         redacted_message = redact_secrets(
-            event.message, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+            event.message,
+            max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH,
+            known_secrets=self._known_secrets,
         )
         redacted_error = (
-            redact_secrets(event.error, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH)
+            redact_secrets(
+                event.error,
+                max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH,
+                known_secrets=self._known_secrets,
+            )
             if event.error is not None
             else None
         )
         redacted_progress = redact_secrets_mapping(
-            event.progress, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+            event.progress,
+            max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH,
+            known_secrets=self._known_secrets,
         )
         redacted_plan = redact_secrets_mapping(
-            event.plan, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+            event.plan,
+            max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH,
+            known_secrets=self._known_secrets,
         )
         redacted_summary = redact_secrets_mapping(
-            event.summary, max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH
+            event.summary,
+            max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH,
+            known_secrets=self._known_secrets,
         )
+        # T11: not free text, but still routed through the cheap Layer-1-only
+        # pass — an exact known-secret match must never survive even here.
+        redacted_event_id = redact_known_secrets(event.event_id, self._known_secrets)
 
         outcome = await operation_repo.apply_event(
             operation_id=event.operation_id,
             session_id=session_id,
             sequence=event.sequence,
-            event_id=event.event_id,
+            event_id=redacted_event_id,
             status=event.status,
             phase=event.phase.value if event.phase is not None else None,
             node_started_at=event.started_at,
@@ -158,7 +197,9 @@ class OperationEventService:
             summary=redacted_summary,
             error=redacted_error,
             target_bundle_version=(
-                event.target.bundle_version if event.target is not None else None
+                redact_known_secrets(event.target.bundle_version, self._known_secrets)
+                if event.target is not None and event.target.bundle_version is not None
+                else None
             ),
         )
         if not outcome.applied:

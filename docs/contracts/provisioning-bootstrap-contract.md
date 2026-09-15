@@ -24,7 +24,7 @@ configurable headers, so auth rides entirely in the query string.
 | Part | Contract |
 |---|---|
 | `variant` | One of `ScriptVariant` (`src/core/enums.py`): today only `comfyui`. Maps to a hard-coded `(repo, path)` pair in `SCRIPT_VARIANT_SOURCES` (`src/core/constants.py`) — **never** taken from the request body or query. |
-| `ref` | Must match `PROVISIONING_REF_PATTERN` (`^(v\d+\.\d+\.\d+|[0-9a-f]{40})$`), or equal `Settings.provisioning_script_dev_ref` outside production. The configured `Settings.provisioning_script_ref` is checked against this same rule at boot and again during start-time preflight. |
+| `ref` | Must match `PROVISIONING_REF_PATTERN` (`^(v\d+\.\d+\.\d+|[0-9a-f]{40})$`), or equal `Settings.provisioning_script_dev_ref` outside production. The configured `Settings.provisioning_script_ref` is checked against this same rule at boot and again during start-time preflight. `provisioning_script_dev_ref` must additionally be route-safe (T3, round-3 remediation): no `/`, `?`, `#`, `%`, or whitespace, and not `.`/`..` — it is interpolated raw as this single `{ref:str}` path segment, so e.g. a branch named `feature/bootstrap` would build a URL the router 404s on. Checked at Settings load (`validate_dev_ref_is_route_safe`) and again in `build_provisioning_callback_urls` itself, so an unsafe ref can never reach a node's boot env regardless of who validated it upstream. Use a slash-free branch name for dev testing. |
 | `session` / `token` | `token`, SHA-256'd, must match the session's `callback_token_hash` (D4). Both required. |
 
 Responses:
@@ -132,10 +132,10 @@ things; see `fail_pre_active_session`'s docstring in
 check 2 entirely — its authorization is holding the worker's leader lease,
 not a callback token.
 
-## Trust boundary for node-supplied free text (S1, round-2 remediation)
+## Trust boundary for node-supplied free text (S1 round-2, T1/T8 round-3 remediation)
 
 **No node-supplied string is persisted, published, or billed against without
-passing through `redact_secrets`/`redact_secrets_mapping`
+passing through `redact_secrets`/`redact_secrets_mapping`/`redact_known_secrets`
 (`src/api/utils/redaction.py`) first.** This rule is enforced once, at each
 receiver's trust boundary, not re-derived per call site — see each redaction
 function's module docstring.
@@ -159,13 +159,58 @@ receivers apply this today:
   `GpuSessionOperationRepository.apply_event` or
   `GpuSessionCommandRepository.mark_terminal` — persisted to
   `gpu_session_operations`/`gpu_session_commands.error` and published over
-  SSE. This was the gap closed in round 2: round 1 fixed the webhook call
-  site only, but D3's env-var change exposed the token on every path a node
-  can reach, and telemetry events are the node's most-used path.
+  SSE. `event.event_id` and `event.target.bundle_version` are also routed
+  through `redact_known_secrets` (cheap — they're structurally simple, not
+  free text, but an exact known-secret match must still never survive). This
+  was the gap closed in round 2: round 1 fixed the webhook call site only,
+  but D3's env-var change exposed the token on every path a node can reach,
+  and telemetry events are the node's most-used path.
 
-`redact_secrets` also recognizes any `KEY=value` where `KEY` case-insensitively
-contains `token`, `secret`, `key`, or `password` — not just the literal
-`token=`/`session=` forms — so a name nobody anticipated yet is still covered.
+### What redaction guarantees, and what it does not (T1/T8, round-3 remediation)
+
+The redactor is three layers, applied in order (see the module docstring for
+the full design):
+
+1. **Exact known-value replacement** — a plain `str.replace` against every
+   plaintext secret apex holds at call time: `Settings.github_content_token`,
+   `hf_token`, `civitai_api_token`. **This is the only layer that is a
+   guarantee** — no false negatives for those exact values, regardless of how
+   they're quoted, prefixed, or embedded.
+2. **Key-based structural redaction** — in `redact_secrets_mapping`'s dict
+   walker, a sensitive key's value is replaced wholesale before descending
+   into it.
+3. **A tokenizer over free text** — whitespace-delimited shape matching for
+   `KEY=value`, `Authorization:`-style headers, and URLs. Layers 2 and 3 are
+   **best-effort, not a guarantee** — round 3 found real leak forms the
+   previous regex-based version of this layer missed (see the round-3
+   remediation prompt's T1 finding for the empirical table).
+
+**The per-session callback token is the one secret Layer 1 can never cover.**
+Apex stores only `callback_token_hash` — the plaintext never exists anywhere
+after minting except in the URLs handed to the node — so there is nothing for
+Layer 1 to `str.replace` against at redaction time. It is protected *only* by
+Layers 2/3's best-effort shape matching, which is also the layer round 3 had
+to rebuild after finding it unreliable. It is also the token with the widest
+exposure: D3 put it into two URLs (`PROVISIONING_SCRIPT`,
+`PROVISIONER_WEBHOOK_URL`) that live in the node's own environment and that
+failure text naturally quotes. The tunnel token is in the same position
+(never persisted at all, so also outside Layer 1's reach) but has no
+comparable exposure path today.
+
+Two options were considered as a follow-up (not implemented in round 3):
+splitting the callback token into a one-shot script-fetch token (consumed on
+first serve, worthless after boot) plus a separate long-lived webhook token,
+which would shrink the window instead of trying to redact it better; or
+storing a short non-secret fingerprint alongside the hash so Layer 1 could
+match it, which is cheaper but weakens the "only the hash is stored"
+property. Do not treat redaction as a complete defence for this value in any
+future change to this contract.
+
+`redact_secrets` recognizes any `KEY=value`/`KEY:` where `KEY`
+case-insensitively contains `token`, `secret`, `key`, `password`, `passwd`,
+`credential`, `auth`, `cookie`, or `session` — not just the literal
+`token=`/`session=` forms — so a name nobody anticipated yet is still covered
+by Layers 2/3's best-effort matching.
 
 ## Env-var contract (`build_acs_env`, `src/api/services/gpu_session/_env_builder.py`)
 
@@ -255,6 +300,14 @@ The following deployment facts are intentionally not inferred from this code:
    Automated tests cover the redaction function and the write path; this step
    is the one check that the two are actually wired together in a real
    deployment.
+4. (T1, round-3) Post telemetry containing each leak form from the round-3
+   remediation's T1 finding table (quoted env assignment, `declare -x`,
+   `Authorization: Bearer`, `Authorization: token`, a JSON-as-text `"token":`
+   field) as the `message`/`error`/`summary` of one or more operation events,
+   then read `gpu_session_operations` back **by hand** and confirm none of
+   them survives. This is the round-3 equivalent of step 3 — the redactor was
+   rebuilt in round 3, so the wiring-vs-function split above still holds, but
+   the function itself needs re-proving against the new leak-form table.
 
 These are required rollout checks because template environment precedence and
 the provisioner's shutdown ordering are external Vast.ai behaviours, not

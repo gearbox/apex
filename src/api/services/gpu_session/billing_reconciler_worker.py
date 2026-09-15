@@ -97,6 +97,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             candidates = await repo.list_pending_billing_finalization(
                 grace_cutoff=grace_cutoff,
                 limit=self._settings.billing_reconciler_max_per_sweep,
+                quarantine_threshold=self._settings.billing_reconciler_quarantine_threshold,
             )
 
         if not candidates:
@@ -133,6 +134,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             candidates = await repo.list_pending_refund_reconciliation(
                 grace_cutoff=grace_cutoff,
                 limit=self._settings.billing_reconciler_max_per_sweep,
+                quarantine_threshold=self._settings.billing_reconciler_quarantine_threshold,
             )
 
         if not candidates:

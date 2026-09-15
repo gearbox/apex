@@ -11,9 +11,17 @@ The builder is a pure function — no mocks needed. Tests cover:
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from src.api.services.gpu_session._env_builder import build_acs_env
+import pytest
+from litestar import Litestar
+
+from src.api.routes.provisioning import ProvisioningController
+from src.api.services.gpu_session._env_builder import (
+    build_acs_env,
+    build_provisioning_callback_urls,
+)
 from src.core.config import Settings
 
 # Single source of truth — stays in sync with Settings automatically.
@@ -212,3 +220,51 @@ def test_provisioner_failure_action_is_always_destroy() -> None:
 def test_provision_script_sha256_passed_through() -> None:
     env = _build(provision_script_sha256="b" * 64)
     assert env["ACS_PROVISION_SCRIPT_SHA256"] == "b" * 64
+
+
+# ---------------------------------------------------------------------------
+# T3 (round-3 remediation): build_provisioning_callback_urls must never emit
+# an unroutable script URL, regardless of who validated the ref upstream.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildProvisioningCallbackUrlsRouteSafety:
+    @pytest.mark.parametrize(
+        "bad_ref", ["feature/bootstrap", "a?b", "a#b", "a%b", "a b", ".", ".."]
+    )
+    def test_unsafe_ref_raises(self, bad_ref: str) -> None:
+        with pytest.raises(ValueError, match=r"provision_script_dev_ref|route-safe|path segment"):
+            build_provisioning_callback_urls(
+                apex_callback_url="https://apex.example.com",
+                session_id=uuid4(),
+                callback_token="tok",
+                provision_script_ref=bad_ref,
+            )
+
+    def test_pinned_immutable_ref_is_never_checked_for_route_safety(self) -> None:
+        """A release tag/SHA always passes PROVISIONING_REF_PATTERN, so the
+        route-safety check is skipped for it entirely — it can never contain
+        a '/' by construction of the pattern anyway."""
+        script_url, _ = build_provisioning_callback_urls(
+            apex_callback_url="https://apex.example.com",
+            session_id=uuid4(),
+            callback_token="tok",
+            provision_script_ref="v1.2.3",
+        )
+        assert "/v1.2.3?" in script_url
+
+    def test_slash_free_dev_ref_round_trips_through_the_registered_route(self) -> None:
+        app = Litestar(route_handlers=[ProvisioningController])
+        route = next(r for r in app.routes if "/scripts/" in r.path)
+        expected_path = route.path.replace("{variant:str}", "comfyui").replace(
+            "{ref:str}", "bootstrap-test"
+        )
+
+        script_url, _ = build_provisioning_callback_urls(
+            apex_callback_url="https://apex.example.com",
+            session_id=uuid4(),
+            callback_token="tok",
+            provision_script_ref="bootstrap-test",
+        )
+
+        assert urlsplit(script_url).path == expected_path

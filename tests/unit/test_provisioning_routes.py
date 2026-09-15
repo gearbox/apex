@@ -21,7 +21,6 @@ from litestar.status_codes import (
     HTTP_502_BAD_GATEWAY,
 )
 from litestar.testing import TestClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.routes.provisioning import ProvisioningController
 from src.api.services.provisioning_script import (
@@ -55,7 +54,6 @@ def _app(
             "provisioning_script_service": Provide(lambda: script_service, sync_to_thread=False),
             "provisioning_webhook_service": Provide(lambda: webhook_service, sync_to_thread=False),
             "settings": Provide(lambda: settings or _make_settings(), sync_to_thread=False),
-            "session": Provide(lambda: AsyncMock(spec=AsyncSession), sync_to_thread=False),
         },
     )
 

@@ -46,12 +46,21 @@ def _make_mock_session_factory() -> MagicMock:
     return MagicMock(return_value=mock_db)
 
 
+def _make_settings() -> MagicMock:
+    settings = MagicMock()
+    settings.github_content_token = ""
+    settings.hf_token = ""
+    settings.civitai_api_token = ""
+    return settings
+
+
 class TestHandleFailure:
     async def test_unknown_session_is_401(self) -> None:
         gpu_session_service = AsyncMock()
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         with patch(_REPO_PATH) as MockRepo:
             MockRepo.return_value.get_by_id = AsyncMock(return_value=None)
@@ -67,6 +76,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         row = _make_session_row(status=GpuSessionStatus.failed)
         with patch(_REPO_PATH) as MockRepo:
@@ -83,6 +93,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         row = _make_session_row(token="correct-token")
         with patch(_REPO_PATH) as MockRepo:
@@ -99,6 +110,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         row = _make_session_row()
         with patch(_REPO_PATH) as MockRepo:
@@ -114,6 +126,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         session_id = uuid4()
         row = _make_session_row(token="correct-token")
@@ -142,6 +155,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         row = _make_session_row(token="correct-token")
         with patch(_REPO_PATH) as MockRepo:
@@ -158,6 +172,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         row = _make_session_row(token="correct-token", vastai_instance_id=111)
         with patch(_REPO_PATH) as MockRepo:
@@ -178,6 +193,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         row = _make_session_row(token="correct-token", vastai_instance_id=50885024)
         with (
@@ -203,6 +219,7 @@ class TestHandleFailure:
         service = ProvisioningWebhookService(
             gpu_session_service=gpu_session_service,
             session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
         )
         row = _make_session_row(token="correct-token")
         token = "callback-secret"

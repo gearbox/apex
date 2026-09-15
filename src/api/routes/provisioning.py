@@ -27,7 +27,6 @@ from litestar.status_codes import (
     HTTP_502_BAD_GATEWAY,
 )
 from redis.exceptions import RedisError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.rate_limit import get_rate_limiter_storage, get_real_ip
 from src.api.responses import error_response as _error
@@ -79,7 +78,6 @@ class ProvisioningController(Controller):
         variant: str,
         ref: str,
         request: Request[Any, Any, Any],
-        session: AsyncSession,
         provisioning_script_service: ProvisioningScriptService,
         settings: Settings,
         token: str | None = None,
@@ -91,7 +89,7 @@ class ProvisioningController(Controller):
             return _error("rate_limited", "Too many requests", HTTP_429_TOO_MANY_REQUESTS)
 
         result = await provisioning_script_service.serve_for_session(
-            db=session, session_id=session_id, token=token, variant=variant, ref=ref
+            session_id=session_id, token=token, variant=variant, ref=ref
         )
 
         if result.outcome == ScriptServeOutcome.bad_request:

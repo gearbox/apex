@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from redis.asyncio import Redis
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from src.core.config import Settings
 
@@ -81,10 +81,12 @@ class ProvisioningScriptService:
         http: httpx.AsyncClient,
         redis: Redis | None,
         settings: Settings,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._http = http
         self._redis = redis
         self._settings = settings
+        self._session_factory = session_factory
 
     async def resolve(self, variant: ScriptVariant, ref: str) -> ResolvedScript:
         """Return the script body + sha256, from cache when available.
@@ -121,7 +123,6 @@ class ProvisioningScriptService:
     async def serve_for_session(
         self,
         *,
-        db: AsyncSession,
         session_id: UUID | None,
         token: str | None,
         variant: str,
@@ -132,6 +133,16 @@ class ProvisioningScriptService:
         Kept on the service (rather than in the route) so the route stays a thin
         HTTP-mapping layer and this logic is unit-testable without a live DB/HTTP
         stack — mirrors OperationEventService.handle_event's shape.
+
+        T6 (round-3 remediation): takes its own short-lived session from
+        ``self._session_factory`` for the token read, rather than accepting the
+        caller's request-scoped one — committing a caller-owned transaction (the
+        prior approach, to release the pooled connection before the outbound
+        GitHub fetch below) is a layering inversion, and with
+        ``expire_on_commit=True`` it would expire every ORM object the caller
+        loaded from that session, a footgun for whatever code runs after this
+        returns. Owning a dedicated session sidesteps both: it is opened, used,
+        and closed entirely within this method, well before the slow fetch.
         """
         if variant not in {member.value for member in ScriptVariant}:
             return ScriptServeResult(outcome=ScriptServeOutcome.bad_request)
@@ -144,7 +155,8 @@ class ProvisioningScriptService:
             logger.warning("provisioning.script.rejected", reason="missing_session_or_token")
             return ScriptServeResult(outcome=ScriptServeOutcome.unauthorized)
 
-        session_row = await GpuSessionRepository(db).get_by_id(session_id)
+        async with self._session_factory() as db:
+            session_row = await GpuSessionRepository(db).get_by_id(session_id)
         if session_row is None or not validate_callback_token(
             token, session_row.callback_token_hash
         ):
@@ -152,16 +164,6 @@ class ProvisioningScriptService:
                 "provisioning.script.rejected", session_id=str(session_id), reason="invalid_token"
             )
             return ScriptServeResult(outcome=ScriptServeOutcome.unauthorized)
-
-        # S8: the request-scoped DB session isn't needed past the token check above —
-        # release its pooled connection before resolve()'s outbound GitHub fetch, which
-        # takes up to _FETCH_TIMEOUT_SECONDS (10s) on a cache miss. Committing (rather
-        # than closing) keeps `db` itself usable for the caller's later teardown without
-        # relying on close-then-reuse semantics; there's nothing to write here, so the
-        # commit is a no-op beyond returning the connection to the pool. Under a
-        # simultaneous multi-node boot this avoids tying up pool connections for the
-        # full fetch duration for no reason.
-        await db.commit()
 
         try:
             resolved = await self.resolve(variant_enum, ref)

@@ -210,6 +210,7 @@ class TestSweep:
         mock_repo.list_pending_billing_finalization.assert_called_once_with(
             grace_cutoff=expected_cutoff,
             limit=mocks["settings"].billing_reconciler_max_per_sweep,
+            quarantine_threshold=mocks["settings"].billing_reconciler_quarantine_threshold,
         )
 
     async def test_max_per_sweep_caps_query_limit(self) -> None:
@@ -226,6 +227,28 @@ class TestSweep:
         mock_repo.list_pending_billing_finalization.assert_called_once()
         _, call_kwargs = mock_repo.list_pending_billing_finalization.call_args
         assert call_kwargs["limit"] == 7
+
+    async def test_refund_sweep_passes_quarantine_threshold_through(self) -> None:
+        """T7: both sweeps pass the same quarantine threshold to their query so
+        a quarantined row stops being re-selected, not just re-logged."""
+        worker, mocks = _make_worker(
+            settings=_make_settings(billing_reconciler_quarantine_threshold=8)
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_pending_billing_finalization.return_value = []
+            mock_repo.list_pending_refund_reconciliation.return_value = []
+
+            await worker.run_once()
+
+        mock_repo.list_pending_refund_reconciliation.assert_called_once()
+        _, refund_kwargs = mock_repo.list_pending_refund_reconciliation.call_args
+        assert refund_kwargs["quarantine_threshold"] == 8
+        _, finalize_kwargs = mock_repo.list_pending_billing_finalization.call_args
+        assert finalize_kwargs["quarantine_threshold"] == 8
+        assert mocks["settings"].billing_reconciler_quarantine_threshold == 8
 
     async def test_per_session_exception_does_not_break_sweep(self) -> None:
         """First candidate raises RuntimeError; second candidate is still processed."""

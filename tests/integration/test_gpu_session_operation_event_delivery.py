@@ -84,7 +84,11 @@ async def test_stale_telemetry_does_not_emit_an_operation_update(db_engine) -> N
         # The handler has no instance state; bypass Litestar's route-registration
         # constructor so this remains a real database/publish-path test.
         controller = object.__new__(InternalGpuSessionController)
-        receiver = OperationEventService()
+        settings = MagicMock()
+        settings.github_content_token = ""
+        settings.hf_token = ""
+        settings.civitai_api_token = ""
+        receiver = OperationEventService(settings=settings)
         request = MagicMock()
         request.headers = {"Authorization": f"Bearer {_CALLBACK_TOKEN}"}
         event_bus = AsyncMock()

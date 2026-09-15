@@ -128,10 +128,19 @@ async def _seed_failed_session_with_debit(
     account: TokenAccount,
     started_at: datetime | None,
     created_at: datetime | None = None,
+    stopped_at: datetime | None = None,
+    with_debit: bool = True,
+    billing_finalization_attempts: int = 0,
 ) -> GpuSession:
-    """A terminal 'failed' pre-active session with a real base-reservation debit,
-    but (deliberately) no refund — the exact state a swallowed refund failure
-    leaves behind."""
+    """A terminal 'failed' pre-active session, optionally with a real
+    base-reservation debit but (deliberately) no refund — the exact state a
+    swallowed refund failure leaves behind. ``stopped_at`` is the terminal
+    timestamp the T5 grace-window check now uses (mirroring what
+    ``fail_pre_active_session``/``_mark_failed`` stamp on the real path) —
+    ``created_at`` no longer controls eligibility and is only here for realism.
+    ``with_debit=False`` reproduces the T4 anomaly: ``account_id`` set but the
+    reservation debit was never written.
+    """
     gpu_session = GpuSession(
         id=new_id(),
         user_id=user.id,
@@ -141,23 +150,26 @@ async def _seed_failed_session_with_debit(
         model_type="aisha-image",
         account_id=account.id,
         started_at=started_at,
+        stopped_at=stopped_at,
         error_message="node_provision_script_failed",
+        billing_finalization_attempts=billing_finalization_attempts,
     )
     if created_at is not None:
         gpu_session.created_at = created_at
     async with session_factory() as db, db.begin():
         db.add(gpu_session)
-        billing_service = BillingService()
-        await billing_service.check_and_reserve(
-            account.id,
-            500,
-            gpu_session.id,
-            metadata={"type": "gpu_session_reservation"},
-            description="GPU session base reservation",
-            session=db,
-            product_id="vex",
-            user_id=user.id,
-        )
+        if with_debit:
+            billing_service = BillingService()
+            await billing_service.check_and_reserve(
+                account.id,
+                500,
+                gpu_session.id,
+                metadata={"type": "gpu_session_reservation"},
+                description="GPU session base reservation",
+                session=db,
+                product_id="vex",
+                user_id=user.id,
+            )
     return gpu_session
 
 
@@ -186,7 +198,7 @@ class TestListPendingRefundReconciliation:
             user=user,
             account=account,
             started_at=None,
-            created_at=datetime.now(UTC) - timedelta(hours=1),
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
         )
 
         async with session_factory() as db:
@@ -205,7 +217,7 @@ class TestListPendingRefundReconciliation:
             user=user,
             account=account,
             started_at=datetime.now(UTC) - timedelta(hours=2),
-            created_at=datetime.now(UTC) - timedelta(hours=1),
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
         )
 
         async with session_factory() as db:
@@ -224,7 +236,7 @@ class TestListPendingRefundReconciliation:
             user=user,
             account=account,
             started_at=None,
-            created_at=datetime.now(UTC),
+            stopped_at=datetime.now(UTC),
         )
 
         async with session_factory() as db:
@@ -233,6 +245,41 @@ class TestListPendingRefundReconciliation:
             )
 
         assert session.id not in {row.id for row in candidates}
+
+    async def test_grace_window_is_measured_from_stopped_at_not_created_at(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """T5: a session can legitimately run for a long provisioning window
+        before failing — created_at alone must not decide eligibility. A
+        session created long ago but that only just failed (stopped_at now)
+        is still inside the grace period; one created recently but that failed
+        a while ago (stopped_at old) is already eligible."""
+        user, account = await _seed_user_and_account(session_factory)
+        old_creation_recent_failure = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            created_at=datetime.now(UTC) - timedelta(hours=2),
+            stopped_at=datetime.now(UTC),
+        )
+        recent_creation_old_failure = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            created_at=datetime.now(UTC),
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+
+        async with session_factory() as db:
+            candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=datetime.now(UTC) - timedelta(minutes=2), limit=50
+            )
+
+        candidate_ids = {row.id for row in candidates}
+        assert old_creation_recent_failure.id not in candidate_ids
+        assert recent_creation_old_failure.id in candidate_ids
 
     async def test_an_already_refunded_session_is_never_selected(
         self, session_factory: async_sessionmaker[AsyncSession]
@@ -243,7 +290,7 @@ class TestListPendingRefundReconciliation:
             user=user,
             account=account,
             started_at=None,
-            created_at=datetime.now(UTC) - timedelta(hours=1),
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
         )
         async with session_factory() as db, db.begin():
             await BillingService().refund(
@@ -260,6 +307,170 @@ class TestListPendingRefundReconciliation:
             )
 
         assert session.id not in {row.id for row in candidates}
+
+    async def test_no_debit_ever_written_is_never_selected(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """T4: account_id set but the reservation debit was never written (the
+        session failed before check_and_reserve ran) — without the has_debit
+        requirement this row matched forever, since refund() raises
+        RefundNotEligibleError every time and reconcile_pending_refund treated
+        that as success without ever removing the row from the candidate set."""
+        user, account = await _seed_user_and_account(session_factory)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+            with_debit=False,
+        )
+
+        async with session_factory() as db:
+            candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=datetime.now(UTC), limit=50
+            )
+
+        assert session.id not in {row.id for row in candidates}
+
+    async def test_debit_present_no_refund_is_selected_then_excluded_after_reconcile(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        user, account = await _seed_user_and_account(session_factory)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+
+        async with session_factory() as db:
+            before = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=datetime.now(UTC), limit=50
+            )
+        assert session.id in {row.id for row in before}
+
+        service = _make_service(session_factory, billing_service=BillingService())
+        assert await service.reconcile_pending_refund(session) is True
+
+        async with session_factory() as db:
+            after = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=datetime.now(UTC), limit=50
+            )
+        assert session.id not in {row.id for row in after}
+
+    async def test_debit_and_refund_both_present_is_not_selected(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        user, account = await _seed_user_and_account(session_factory)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        async with session_factory() as db, db.begin():
+            await BillingService().refund(
+                session.id,
+                description="already refunded",
+                session=db,
+                product_id="vex",
+                user_id=user.id,
+            )
+
+        async with session_factory() as db:
+            candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=datetime.now(UTC), limit=50
+            )
+
+        assert session.id not in {row.id for row in candidates}
+
+    async def test_no_debit_rows_do_not_head_of_line_block_genuinely_stuck_rows(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """T4: without the has_debit filter, the two permanent no-DEBIT
+        candidates — being the oldest — would fill a limit=2 sweep and starve
+        the genuinely stuck (has-debit, no-refund) row below them."""
+        user, account = await _seed_user_and_account(session_factory)
+        now = datetime.now(UTC)
+        no_debit_1 = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=now - timedelta(hours=3),
+            with_debit=False,
+        )
+        no_debit_2 = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=now - timedelta(hours=2),
+            with_debit=False,
+        )
+        genuinely_stuck = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=now - timedelta(hours=1),
+        )
+
+        async with session_factory() as db:
+            candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=now, limit=2
+            )
+
+        candidate_ids = {row.id for row in candidates}
+        assert no_debit_1.id not in candidate_ids
+        assert no_debit_2.id not in candidate_ids
+        assert genuinely_stuck.id in candidate_ids
+
+    async def test_quarantined_session_is_excluded_from_selection(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """T7: past the quarantine threshold, a candidate must stop being
+        re-selected — quarantine means "stop trying", not "keep trying and
+        keep shouting" via an ERROR log every sweep forever."""
+        user, account = await _seed_user_and_account(session_factory)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+            billing_finalization_attempts=5,
+        )
+
+        async with session_factory() as db:
+            candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=datetime.now(UTC), limit=50, quarantine_threshold=5
+            )
+
+        assert session.id not in {row.id for row in candidates}
+
+    async def test_quarantine_threshold_none_disables_the_filter(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        user, account = await _seed_user_and_account(session_factory)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+            billing_finalization_attempts=999,
+        )
+
+        async with session_factory() as db:
+            candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=datetime.now(UTC), limit=50
+            )
+
+        assert session.id in {row.id for row in candidates}
 
 
 class TestReconcilePendingRefund:
@@ -324,6 +535,29 @@ class TestReconcilePendingRefund:
             )
             refund_txns = result.scalars().all()
         assert len(refund_txns) == 1
+
+    async def test_missing_debit_is_a_genuine_anomaly_not_treated_as_success(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """T4: reconcile_pending_refund must distinguish 'someone already
+        refunded this' (success) from 'the debit that should exist doesn't'
+        (a real anomaly — the row got here via a direct call, not the query,
+        which now filters this shape out) by returning False so the worker
+        bumps its attempt counter instead of logging false success."""
+        user, account = await _seed_user_and_account(session_factory)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+            with_debit=False,
+        )
+
+        service = _make_service(session_factory, billing_service=BillingService())
+        success = await service.reconcile_pending_refund(session)
+
+        assert success is False
 
     async def test_no_account_id_is_a_trivial_success(
         self, session_factory: async_sessionmaker[AsyncSession]

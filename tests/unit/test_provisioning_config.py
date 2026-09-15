@@ -209,6 +209,37 @@ class TestProvisioningScriptSettings:
         s = _base_settings()
         assert s.rate_limit_provisioning_script == "120/minute"
 
+    def test_dev_ref_with_slash_is_rejected_naming_the_character(self) -> None:
+        """T3: an entirely ordinary branch name like 'feature/bootstrap' builds
+        an unroutable script URL — reject it at boot, not at node fetch time."""
+        with pytest.raises(ValidationError, match=r"provisioning_script_dev_ref.*'/'"):
+            _base_settings(provisioning_script_dev_ref="feature/bootstrap")
+
+    @pytest.mark.parametrize("bad_ref", ["a?b", "a#b", "a%b", "a b", "a\tb"])
+    def test_dev_ref_with_other_unsafe_characters_is_rejected(self, bad_ref: str) -> None:
+        with pytest.raises(ValidationError, match="provisioning_script_dev_ref"):
+            _base_settings(provisioning_script_dev_ref=bad_ref)
+
+    @pytest.mark.parametrize("bad_ref", [".", ".."])
+    def test_dev_ref_dot_or_dotdot_is_rejected(self, bad_ref: str) -> None:
+        with pytest.raises(ValidationError, match="provisioning_script_dev_ref"):
+            _base_settings(provisioning_script_dev_ref=bad_ref)
+
+    def test_dev_ref_slash_free_branch_name_is_accepted(self) -> None:
+        s = _base_settings(
+            environment="staging",
+            provisioning_script_ref="bootstrap-test",
+            provisioning_script_dev_ref="bootstrap-test",
+            apex_callback_url="https://apex.example.test",
+        )
+        assert s.provisioning_script_dev_ref == "bootstrap-test"
+
+    def test_dev_ref_route_safety_checked_even_when_not_the_active_ref(self) -> None:
+        """The dev ref is validated on its own — independent of whether
+        provisioning_script_ref currently equals it."""
+        with pytest.raises(ValidationError, match=r"provisioning_script_dev_ref.*'/'"):
+            _base_settings(provisioning_script_ref="", provisioning_script_dev_ref="a/b")
+
     def test_defaults_are_hermetic_against_a_local_env_file(self, tmp_path: Path) -> None:
         """S4 regression: `.env.example` leaves these blank, so this only passed by
         accident before — a developer's real `.env` setting PROVISIONING_SCRIPT_REF

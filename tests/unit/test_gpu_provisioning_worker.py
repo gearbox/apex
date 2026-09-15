@@ -611,11 +611,13 @@ class TestAdvanceProvisioning:
             call.args[0] for call in mocks["vastai_client"].destroy_instance.await_args_list
         ]
         mock_repo.update_instance.assert_not_awaited()
-        mock_repo.update_status.assert_awaited_with(
-            session.id,
-            GpuSessionStatus.failed,
-            error_message="retry_missing_primary: session has no primary deployment",
+        mock_repo.update_status.assert_awaited_once()
+        call = mock_repo.update_status.await_args
+        assert call.args == (session.id, GpuSessionStatus.failed)
+        assert call.kwargs["error_message"] == (
+            "retry_missing_primary: session has no primary deployment"
         )
+        assert "stopped_at" in call.kwargs
 
     async def test_retry_exhausted_marks_failed(self) -> None:
         # provisioning_recreation_attempts=2 → new_attempt=3 >= 2+1=3 → exhausted
@@ -1463,6 +1465,23 @@ class TestMarkFailed:
         # update_status(session_id, status, **extras) — second positional is status
         assert update_args[1] == GpuSessionStatus.failed
         assert update_kwargs.get("error_message") == "test failure"
+
+    async def test_stamps_stopped_at_on_the_failed_transition(self) -> None:
+        """T5, round-3 remediation: the billing reconciler's refund-reconciliation
+        grace period is measured from this timestamp, not created_at — a
+        session that fails without it would be immediately (mis)eligible."""
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test failure")
+
+        update_kwargs = mock_repo.update_status.await_args.kwargs
+        assert isinstance(update_kwargs.get("stopped_at"), datetime)
 
     async def test_losing_terminal_race_does_not_teardown_or_refund(self) -> None:
         billing = AsyncMock()

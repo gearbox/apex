@@ -3813,6 +3813,9 @@ class TestFailPreActiveSession:
         ]
         assert failed_calls
         assert failed_calls[0].kwargs["error_message"] == "node_provision_script_failed"
+        # T5, round-3 remediation: stopped_at is the terminal timestamp the
+        # billing reconciler's grace-period check is measured from.
+        assert isinstance(failed_calls[0].kwargs.get("stopped_at"), datetime)
         assert mocks["billing_service"].refund.await_args.kwargs["description"] == (
             "GPU session failed: node_provision_script_failed"
         )

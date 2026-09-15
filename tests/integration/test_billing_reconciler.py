@@ -183,6 +183,41 @@ async def test_list_pending_billing_finalization_limit_caps_results_oldest_first
     assert [r.stopped_at for r in results] == stopped_times[:2]
 
 
+async def test_list_pending_billing_finalization_excludes_quarantined(
+    db_session: AsyncSession,
+    make_user: UserFactory,
+) -> None:
+    """T7, round-3 remediation: past the quarantine threshold, a candidate must
+    stop being re-selected by the finalization sweep too — the same
+    billing_finalization_attempts counter and threshold the refund-reconciliation
+    sweep uses (see test_gpu_session_refund_reconciliation.py's equivalent)."""
+    user = await make_user(email=f"reconciler-quarantine-{uuid4().hex[:6]}@example.com")
+    old_stopped_at = datetime.now(UTC) - timedelta(hours=2)
+    grace_cutoff = datetime.now(UTC) - timedelta(minutes=2)
+
+    quarantined = await _create_stopped_session(
+        db_session,
+        user_id=user.id,
+        stopped_at=old_stopped_at,
+        billing_finalization_attempts=5,
+    )
+    still_trying = await _create_stopped_session(
+        db_session,
+        user_id=user.id,
+        stopped_at=old_stopped_at,
+        billing_finalization_attempts=4,
+    )
+
+    repo = GpuSessionRepository(db_session)
+    results = await repo.list_pending_billing_finalization(
+        grace_cutoff=grace_cutoff, limit=10, quarantine_threshold=5
+    )
+
+    ids = [r.id for r in results]
+    assert quarantined.id not in ids
+    assert still_trying.id in ids
+
+
 async def test_increment_billing_finalization_attempts_bumps_counter(
     db_session: AsyncSession,
     make_user: UserFactory,

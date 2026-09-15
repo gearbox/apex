@@ -42,6 +42,16 @@ _COMMAND_REPO = "src.api.services.gpu_session.operation_event_service.GpuSession
 _TOKEN = "callback-token"
 
 
+def _service() -> OperationEventService:
+    """OperationEventService with no real Layer-1 known secrets configured —
+    these tests exercise auth/routing/Layer-3 redaction, not Layer 1."""
+    settings = MagicMock()
+    settings.github_content_token = ""
+    settings.hf_token = ""
+    settings.civitai_api_token = ""
+    return OperationEventService(settings=settings)
+
+
 def _event_body(
     *,
     session_id: UUID,
@@ -176,7 +186,7 @@ class TestOperationEventService:
             target_bundle_version="260105-01",
             progress={"future_field": {"preserved": True}},
         )
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -205,7 +215,7 @@ class TestOperationEventService:
         session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="succeeded")
-        service = OperationEventService()
+        service = _service()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -239,7 +249,7 @@ class TestOperationEventService:
         session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="running")
-        service = OperationEventService()
+        service = _service()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -264,7 +274,7 @@ class TestOperationEventService:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="failed")
-        service = OperationEventService()
+        service = _service()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -290,7 +300,7 @@ class TestOperationEventService:
         session = _gpu_session(session_id=session_id)
         session.bootstrap_operation_id = uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -313,7 +323,7 @@ class TestOperationEventService:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -337,7 +347,7 @@ class TestOperationEventService:
     async def test_missing_session_does_not_write(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -354,7 +364,7 @@ class TestOperationEventService:
     async def test_existing_session_with_wrong_token_does_not_write(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -385,7 +395,7 @@ class TestOperationEventService:
     async def test_non_terminal_sessions_accept_events(self, status: GpuSessionStatus) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -408,7 +418,7 @@ class TestOperationEventService:
     async def test_terminal_sessions_do_not_write(self, status: GpuSessionStatus) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -465,7 +475,7 @@ class TestOperationEventRedaction:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = self._tokenized_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -492,7 +502,7 @@ class TestOperationEventRedaction:
         event = self._tokenized_event(
             session_id=session_id, operation_id=operation_id, status="failed"
         )
-        service = OperationEventService()
+        service = _service()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -528,7 +538,7 @@ class TestOperationEventRedaction:
             plan={"phases": [{"detail": f"fetch {self._TOKENIZED_URL}"}]},
             summary={"final_error": f"failed: {self._TOKENIZED_URL}"},
         )
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -550,7 +560,7 @@ class TestOperationEventRedaction:
 
 
 def _stub_service(result: OperationEventResult | None = None) -> OperationEventService:
-    service = OperationEventService()
+    service = _service()
     service.handle_event = AsyncMock(  # type: ignore[method-assign]
         return_value=result or OperationEventResult(authorized=True, status=200)
     )

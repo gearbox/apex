@@ -343,6 +343,7 @@ async def test_webhook_and_probe_failure_race_tears_down_and_refunds_once(
     webhook = ProvisioningWebhookService(
         gpu_session_service=_WorkerFailureAdapter(worker, gpu_session),  # type: ignore[arg-type]
         session_factory=provisioning_session_factory,
+        settings=_RetrySettings(),  # type: ignore[arg-type]
     )
 
     statuses = await asyncio.gather(
@@ -400,6 +401,7 @@ async def test_webhook_persists_only_the_fixed_reason(
     webhook = ProvisioningWebhookService(
         gpu_session_service=_WorkerFailureAdapter(worker, gpu_session),  # type: ignore[arg-type]
         session_factory=provisioning_session_factory,
+        settings=_RetrySettings(),  # type: ignore[arg-type]
     )
     payload = _webhook_payload()
     payload = ProvisionerFailureWebhookBody(
@@ -456,30 +458,27 @@ async def test_script_service_authorizes_real_session_rows(
         http=http,
         redis=None,
         settings=_RetrySettings(),  # type: ignore[arg-type]
+        session_factory=provisioning_session_factory,
     )
 
-    async with provisioning_session_factory() as db:
-        valid = await script_service.serve_for_session(
-            db=db,
-            session_id=gpu_session.id,
-            token=token,
-            variant="comfyui",
-            ref="v1.0.0",
-        )
-        wrong = await script_service.serve_for_session(
-            db=db,
-            session_id=gpu_session.id,
-            token="wrong-token",
-            variant="comfyui",
-            ref="v1.0.0",
-        )
-        unknown = await script_service.serve_for_session(
-            db=db,
-            session_id=new_id(),
-            token=token,
-            variant="comfyui",
-            ref="v1.0.0",
-        )
+    valid = await script_service.serve_for_session(
+        session_id=gpu_session.id,
+        token=token,
+        variant="comfyui",
+        ref="v1.0.0",
+    )
+    wrong = await script_service.serve_for_session(
+        session_id=gpu_session.id,
+        token="wrong-token",
+        variant="comfyui",
+        ref="v1.0.0",
+    )
+    unknown = await script_service.serve_for_session(
+        session_id=new_id(),
+        token=token,
+        variant="comfyui",
+        ref="v1.0.0",
+    )
 
     assert valid.outcome == ScriptServeOutcome.ok
     assert wrong.outcome == ScriptServeOutcome.unauthorized
@@ -707,6 +706,7 @@ async def test_webhook_returns_200_not_401_when_a_rotation_races_its_locked_chec
     webhook = ProvisioningWebhookService(
         gpu_session_service=rotating_service,  # type: ignore[arg-type]
         session_factory=provisioning_session_factory,
+        settings=_RetrySettings(),  # type: ignore[arg-type]
     )
 
     status = await webhook.handle_failure(
