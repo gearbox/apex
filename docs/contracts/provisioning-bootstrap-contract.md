@@ -183,7 +183,9 @@ the full design):
    `KEY=value`, `Authorization:`-style headers, and URLs. Layers 2 and 3 are
    **best-effort, not a guarantee** — round 3 found real leak forms the
    previous regex-based version of this layer missed (see the round-3
-   remediation prompt's T1 finding for the empirical table).
+   remediation prompt's T1 finding for the empirical table), and round 4
+   found a further gap in Layer 3's URL handling (`KEY=<url>` shapes — U1,
+   below).
 
 **The per-session callback token is the one secret Layer 1 can never cover.**
 Apex stores only `callback_token_hash` — the plaintext never exists anywhere
@@ -206,11 +208,49 @@ match it, which is cheaper but weakens the "only the hash is stored"
 property. Do not treat redaction as a complete defence for this value in any
 future change to this contract.
 
-`redact_secrets` recognizes any `KEY=value`/`KEY:` where `KEY`
-case-insensitively contains `token`, `secret`, `key`, `password`, `passwd`,
-`credential`, `auth`, `cookie`, or `session` — not just the literal
-`token=`/`session=` forms — so a name nobody anticipated yet is still covered
-by Layers 2/3's best-effort matching.
+`redact_secrets_mapping`'s key check (Layer 2) recognizes any mapping key that
+case-insensitively **contains** `token`, `secret`, `key`, `password`,
+`passwd`, `credential`, `auth`, `cookie`, or `session` as a substring — not
+just the literal `token`/`session` forms — so a name nobody anticipated yet is
+still covered. `redact_secrets`'s tokenizer (Layer 3) uses a **different**,
+narrower test for the same purpose (U3, round-4): a `KEY=value`/`KEY:` marker
+only matches when the key, split on `_`/`-`/`.`, has a segment that *equals* a
+marker (plus an `endswith` fallback for glued spellings like `apikey`), and
+Layer 3 additionally drops `session` from its marker set. These are
+deliberately different rules, not an inconsistency to "fix" by unifying them:
+Layer 2's broad substring match costs nothing on a false positive (one
+mapping value redacted early), so it stays broad to minimize false negatives;
+Layer 3's false positives used to redact to the end of the line — a bare
+substring match (`session` inside `session_id`, `key` inside `keyframes`,
+`auth` inside `author`) turned ordinary progress telemetry into confetti. For
+the same reason, a non-allowlisted Layer-3 `KEY:` match now redacts only the
+next value token rather than the rest of the line; full rest-of-line
+redaction is reserved for an explicit allowlist of header names
+(`Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`,
+`X-Auth-Token`) whose entire remainder genuinely is credential material —
+spelled out in full because under boundary matching `authorization` no longer
+matches the substring marker `auth`.
+
+**Malformed-URL policy (U2, round-4):** Layer 3's URL handling
+(`_redact_url`) uses `urlsplit`, which raises `ValueError` on shapes like
+`"http://["` (unbalanced IPv6 brackets) — a shape ordinary log text can
+produce without anyone trying (a URL that wraps or truncates mid-token,
+bracketed IPv6 in a container/Cloudflare context). A URL this module cannot
+parse is redacted **wholesale** to `[REDACTED]` rather than left as the
+unparsed (possibly secret-bearing) original or allowed to raise. This is a
+module-wide invariant, not specific to URLs: `redact_secrets`,
+`redact_secrets_mapping`, and `redact_known_secrets` must never raise for any
+`str` input, because each is the trust boundary for untrusted node text on a
+hot path (a webhook, a per-tick telemetry POST) — an exception escaping the
+redactor turns one malformed field into a 500 for the whole request, exactly
+the class of failure T2 (round-3) fixed for unbounded recursion depth.
+
+**Node-budget truncation (U4, round-4):** `redact_secrets_mapping`'s dict/list
+walker stops iterating entirely once its node budget is exhausted and appends
+a single truncation marker for the remainder, rather than continuing to visit
+and copy every remaining entry with a marker value. The budget bounds total
+walk work and output size, not merely how many entries get replaced with a
+marker.
 
 ## Env-var contract (`build_acs_env`, `src/api/services/gpu_session/_env_builder.py`)
 
@@ -308,6 +348,18 @@ The following deployment facts are intentionally not inferred from this code:
    them survives. This is the round-3 equivalent of step 3 — the redactor was
    rebuilt in round 3, so the wiring-vs-function split above still holds, but
    the function itself needs re-proving against the new leak-form table.
+5. (U1, round-4) Post telemetry whose `message`/`error` contains a bare
+   `PROVISIONING_SCRIPT=<real tokenised URL>` line (the exact `env`/
+   `declare -x` shape a node's own shell trace emits, not the URL alone),
+   then read `gpu_session_operations` back **by hand** and confirm the token
+   is absent. This is the leak form round 3's leak-form table did not cover —
+   the URL branch caught a bare URL, but not one sitting on the right of a
+   non-sensitive `KEY=` that round 3's key-marker check didn't recognize.
+6. (U2, round-4) Post telemetry whose `message`/`error` contains `http://[`
+   (or force the provisioner failure webhook to deliver the same shape in
+   `error`) and confirm the request returns 200, not 500 — `urlsplit` raising
+   on malformed input must never escape the redaction boundary on either of
+   these hot paths.
 
 These are required rollout checks because template environment precedence and
 the provisioner's shutdown ordering are external Vast.ai behaviours, not

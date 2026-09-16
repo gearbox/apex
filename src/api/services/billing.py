@@ -13,6 +13,7 @@ from src.api.services.billing_errors import (
     InsufficientBalanceError,
     OrganizationPermissionError,
     RefundNotEligibleError,
+    RefundNotEligibleReason,
 )
 from src.core.enums import AccountType, TransactionType
 from src.core.uid import new_id
@@ -457,16 +458,24 @@ class BillingService:
         # Find original debit
         debit = await repo.get_debit_for_job(job_id, for_update=True)
         if debit is None:
-            raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
+            raise RefundNotEligibleError(
+                f"No debit transaction found for job {job_id}",
+                reason=RefundNotEligibleReason.NO_DEBIT_FOUND,
+            )
 
         # Check if already refunded
         if await repo.has_refund_for_job(job_id):
-            raise RefundNotEligibleError(f"Job {job_id} has already been refunded")
+            raise RefundNotEligibleError(
+                f"Job {job_id} has already been refunded",
+                reason=RefundNotEligibleReason.ALREADY_REFUNDED,
+            )
 
         # Lock account and compute balance
         account = await repo.get_account_for_update(debit.account_id)
         if account is None:
-            raise RefundNotEligibleError("Account not found for refund")
+            raise RefundNotEligibleError(
+                "Account not found for refund", reason=RefundNotEligibleReason.ACCOUNT_NOT_FOUND
+            )
 
         balance = await repo.get_balance(debit.account_id)
         refund_amount = abs(debit.amount)
@@ -532,7 +541,10 @@ class BillingService:
                 ``already_refunded + amount > original_amount``.
         """
         if amount <= 0:
-            raise RefundNotEligibleError(f"Partial refund amount must be positive, got {amount}")
+            raise RefundNotEligibleError(
+                f"Partial refund amount must be positive, got {amount}",
+                reason=RefundNotEligibleReason.INVALID_AMOUNT,
+            )
 
         repo = BillingRepository(session)
 
@@ -542,7 +554,10 @@ class BillingService:
         # producing a cumulative over-refund.
         debit = await repo.get_debit_for_job(job_id, for_update=True)
         if debit is None:
-            raise RefundNotEligibleError(f"No debit transaction found for job {job_id}")
+            raise RefundNotEligibleError(
+                f"No debit transaction found for job {job_id}",
+                reason=RefundNotEligibleReason.NO_DEBIT_FOUND,
+            )
 
         original_amount = abs(debit.amount)
         already_refunded = await repo.sum_refunds_for_job(job_id)
@@ -550,12 +565,16 @@ class BillingService:
             raise RefundNotEligibleError(
                 f"Partial refund would exceed original debit for job {job_id}: "
                 f"already_refunded={already_refunded}, requested={amount}, "
-                f"original={original_amount}"
+                f"original={original_amount}",
+                reason=RefundNotEligibleReason.EXCEEDS_ORIGINAL_DEBIT,
             )
 
         account = await repo.get_account_for_update(debit.account_id)
         if account is None:
-            raise RefundNotEligibleError("Account not found for partial refund")
+            raise RefundNotEligibleError(
+                "Account not found for partial refund",
+                reason=RefundNotEligibleReason.ACCOUNT_NOT_FOUND,
+            )
 
         balance = await repo.get_balance(debit.account_id)
         new_balance = balance + amount

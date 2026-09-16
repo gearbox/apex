@@ -13,7 +13,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.api.security.callback_token import validate_callback_token
-from src.api.services.billing_errors import RefundNotEligibleError
+from src.api.services.billing_errors import RefundNotEligibleError, RefundNotEligibleReason
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.provisioning_script import ProvisioningScriptError
 from src.api.services.vastai.exceptions import NoCapacityError
@@ -1645,8 +1645,10 @@ class GpuSessionService:
 
         Raises on an unexpected failure so the worker can bump its attempt counter,
         mirroring how ``BillingReconcilerWorker._process_session`` already treats
-        ``finalize_billing_for_session``. ``RefundNotEligibleError`` has two
-        distinct causes (T4, round-3 remediation) — see below.
+        ``finalize_billing_for_session``. ``RefundNotEligibleError.reason`` (U6,
+        round-4 — a structured discriminator, not string-matching on
+        ``str(exc)``, which silently stops distinguishing anything the day the
+        message is reworded) has three cases relevant here — see below.
         """
         # Defensive invariant, not reachable via BillingReconcilerWorker: the
         # repository query (list_pending_refund_reconciliation) already filters
@@ -1664,23 +1666,33 @@ class GpuSessionService:
                     user_id=session_row.user_id,
                 )
         except RefundNotEligibleError as exc:
-            # T4: the query now requires a DEBIT to exist, so "no debit" should
-            # be unreachable here — if it still happens, the row raced between
-            # selection and this call (or the query's invariant broke), which is
-            # a genuine anomaly worth a distinct, louder event than the normal
-            # "someone already refunded this" race BillingService.refund's
-            # idempotency check exists to handle.
-            if "No debit transaction found" in str(exc):
+            # T4/U6: the query now requires a DEBIT to exist, so "no debit"
+            # should be unreachable here — if it still happens, the row raced
+            # between selection and this call (or the query's invariant
+            # broke), which is a genuine anomaly worth a distinct, louder
+            # event than the normal "someone already refunded this" race
+            # BillingService.refund's idempotency check exists to handle.
+            # ACCOUNT_NOT_FOUND is a third, similarly genuine anomaly — an
+            # account that vanished out from under a valid debit — and must
+            # not be folded into the "already refunded" success path either.
+            if exc.reason is RefundNotEligibleReason.ALREADY_REFUNDED:
+                logger.info(
+                    "gpu_session.reconcile_refund.already_refunded",
+                    session_id=str(session_row.id),
+                )
+                return True
+            if exc.reason is RefundNotEligibleReason.NO_DEBIT_FOUND:
                 logger.warning(
                     "gpu_session.reconcile_refund.missing_debit",
                     session_id=str(session_row.id),
                 )
                 return False
-            logger.info(
-                "gpu_session.reconcile_refund.already_refunded",
+            logger.warning(
+                "gpu_session.reconcile_refund.unexpected_reason",
                 session_id=str(session_row.id),
+                reason=exc.reason.value,
             )
-            return True
+            return False
 
         if self._event_bus is not None:
             await self._event_bus.publish_balance(refund_result.event)

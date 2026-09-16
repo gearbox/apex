@@ -26,19 +26,62 @@ Three layers, applied in order (round-3 remediation, T1):
    ``KEY = value``), and ``Authorization:``-style / JSON ``"key":``-style markers.
    Whitespace is a hard separator and never treated as part of a value, so this
    layer cannot reach across a line and consume an unrelated token the way a regex
-   with a bare ``\\s*`` could.
+   with a bare ``\\s*`` could. A URL is redacted wherever it appears — as a bare
+   token, or as the value on the right of ``KEY=`` — not only when the whole
+   token happens to start with ``http(s)://`` (U1, round-4): ``PROVISIONING_SCRIPT``
+   and ``PROVISIONER_WEBHOOK_URL`` are exactly this shape and contain none of the
+   sensitive-key markers, so without this a query string carrying the callback
+   token survived untouched.
 
 Layers 2 and 3 are shape-matching and therefore best-effort — see T8 in the round-3
 remediation notes: the per-session callback token is stored only as a hash, so
 Layer 1 can never cover it, and it is the one secret this module cannot guarantee
 to catch. Do not represent redaction as a complete defence for that value.
 
+**Layer 2 vs Layer 3 key matching are deliberately different tests (U3, round-4).**
+Layer 2 (a mapping key, tested in the dict walker) uses a broad, lowercase
+*substring* match: over-redacting costs exactly one field's value, so the risk
+worth avoiding is a false negative — a secret hiding under a key name nobody
+anticipated. Layer 3 (free text — a ``KEY=value`` shape, or a ``KEY:``/JSON
+``"key":`` marker) uses a boundary-aware test instead: the key is split on
+``_``/``-``/``.`` and a segment must *equal* a marker (plus an ``endswith``
+fallback for glued spellings like ``apikey``/``authtoken``), because a Layer-3
+false positive does not cost one field — a marker matching as a bare substring
+(``session`` inside ``session_id``, ``key`` inside ``keyframes``, ``auth`` inside
+``author``) used to redact to the end of the line, destroying an unbounded run of
+ordinary telemetry text around it. For the same reason, a Layer-3 ``KEY:``-style
+match only redacts the one value token that follows (plus a recognized
+auth-scheme word, e.g. ``Bearer``) rather than the rest of the line — full
+rest-of-line redaction is now reserved for an explicit, exact-match allowlist of
+header names (``Authorization``, ``Cookie``, etc.) whose entire remainder really
+is credential material. Layer 3 also drops ``session`` from its marker set
+entirely (Layer 2 keeps it): a session id is not a credential, ``session=`` in a
+URL query is already stripped by the URL-handling above, and it was the single
+noisiest word in ordinary node telemetry.
+
 The mapping walker also bounds recursion depth and total node count (T2/T10): a
 node-supplied ``progress``/``plan``/``summary`` body is open-ended JSON, and an
 unbounded recursive walk over a maliciously (or just buggily) deep or wide payload
 is a crash (``RecursionError``) or unbounded-write vector on a hot path every node
-hits on every tick. Exceeding either bound truncates the subtree with a marker
-string; it never raises.
+hits on every tick. Exceeding the depth bound truncates the subtree with a marker
+string. Exceeding the node budget (U4, round-4) stops iterating a dict/list
+entirely and appends a single truncation marker for the remainder, rather than
+continuing to visit and copy every remaining entry with a marker value — the
+budget bounds total walk work (and therefore output size), not just how many
+entries get replaced.
+
+**Invariant: this module's public entry points never raise for any ``str``
+input.** ``redact_secrets``, ``redact_secrets_mapping``, and
+``redact_known_secrets`` are the trust boundary for untrusted node text on hot
+paths (a webhook, a per-tick telemetry POST) — an input that crashes the
+redactor crashes the boundary, not just the field being redacted (U2, round-4:
+``urlsplit`` raises ``ValueError`` on inputs like ``"http://["``, which ordinary
+log text can produce without anyone trying, e.g. a URL that wraps or truncates
+mid-token, or bracketed IPv6). A malformed URL that cannot be safely parsed
+degrades to a wholesale ``[REDACTED]`` rather than propagating an exception or
+returning the unparsed (possibly secret-bearing) original — a URL this module
+cannot parse is a URL whose query it cannot safely strip, so the fail-safe
+output is the redaction marker, not the input.
 """
 
 from __future__ import annotations
@@ -48,8 +91,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 _REDACTED = "[REDACTED]"
 
-# Layer 2/3 sensitivity test: a lowercase substring check, deliberately broad —
-# over-redacting a benign field costs nothing, missing a real secret does.
+# Layer 2 (mapping-key) sensitivity test: a lowercase substring check,
+# deliberately broad — over-redacting a benign field costs nothing, missing a
+# real secret does. See _SENSITIVE_KEY_MARKERS_FREE_TEXT for why Layer 3 does
+# not reuse this set unchanged (U3, round-4).
 _SENSITIVE_KEY_MARKERS = (
     "token",
     "secret",
@@ -60,6 +105,37 @@ _SENSITIVE_KEY_MARKERS = (
     "auth",
     "cookie",
     "session",
+)
+
+# Layer 3 (free-text tokenizer) marker set — same as Layer 2 minus "session"
+# (U3, round-4): a session id is not a credential, `session=` in a URL query is
+# already stripped by _redact_url, and it is the single noisiest word in
+# ordinary node telemetry. Layer 2 keeps "session" since over-redacting a whole
+# mapping value there costs exactly one field, a cost Layer 3 does not share.
+_SENSITIVE_KEY_MARKERS_FREE_TEXT = tuple(
+    marker for marker in _SENSITIVE_KEY_MARKERS if marker != "session"
+)
+
+# Layer 3 glued-spelling fallback (U3): compound names with no separator to
+# split on, e.g. `APIKEY=`/`authtoken=`. Checked via `str.endswith`, not
+# segment equality.
+_GLUED_KEY_SUFFIXES = ("apikey", "authtoken")
+
+# Layer 3 exact-match allowlist (U3): header names whose entire remainder of
+# the line really is credential material, so rest-of-line redaction is safe
+# there specifically — unlike the general `KEY:` marker match, which now
+# redacts only the next value token (see _redact_next_value_token). Spelled
+# out in full because boundary-aware matching means `authorization` no longer
+# matches the substring marker `auth`.
+_REST_OF_LINE_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+    }
 )
 
 # Recognized auth schemes kept as-is right after a redacted `Authorization:`-style
@@ -85,11 +161,40 @@ _DEFAULT_MAX_DEPTH = 16
 _DEFAULT_MAX_NODES = 2000
 _MAX_DEPTH_MARKER = "[TRUNCATED: max depth]"
 _MAX_NODES_MARKER = "[TRUNCATED: max nodes]"
+# U4: sentinel key for the single truncation entry appended when a dict's node
+# budget runs out mid-walk — arbitrary but chosen not to collide with an
+# ordinary telemetry key name.
+_MAX_NODES_TRUNCATION_KEY = "__truncated__"
 
 
 def _is_sensitive_key(key: str) -> bool:
+    """Layer 2 (mapping-key) sensitivity test — broad substring match.
+
+    Used only by the JSON/dict walker (_redact_json_value). See the module
+    docstring's "Layer 2 vs Layer 3" note for why this is intentionally
+    broader than _is_sensitive_key_segment.
+    """
     lowered = key.lower()
     return any(marker in lowered for marker in _SENSITIVE_KEY_MARKERS)
+
+
+def _is_sensitive_key_segment(key: str) -> bool:
+    """Layer 3 (free-text tokenizer) sensitivity test — boundary-aware (U3).
+
+    Splits `key` on `_`/`-`/`.` and requires an exact segment match against a
+    Layer-3 marker, with an `endswith` fallback for glued spellings that have
+    no separator to split on (`apikey`, `authtoken`). `session_id`,
+    `keyframes`, `author`, and `monkey` must not match here — none of them
+    contain a marker as a whole `_`/`-`/`.`-delimited segment — see the module
+    docstring for why a Layer-3 false positive is expensive in a way a
+    Layer-2 one is not.
+    """
+    lowered = key.lower()
+    if lowered.endswith(_GLUED_KEY_SUFFIXES):
+        return True
+    normalized = lowered.replace("-", "_").replace(".", "_")
+    segments = normalized.split("_")
+    return any(segment in _SENSITIVE_KEY_MARKERS_FREE_TEXT for segment in segments)
 
 
 def _strip_wrapping(token: str) -> tuple[str, str, str]:
@@ -105,18 +210,48 @@ def _strip_wrapping(token: str) -> tuple[str, str, str]:
 def _redact_value_token(token: str) -> str:
     """Replace a token's core with [REDACTED], preserving surrounding punctuation."""
     prefix, core, suffix = _strip_wrapping(token)
-    if not core:
-        # Nothing but punctuation (or truly empty) — leave alone rather than
-        # inventing a redaction for a value that isn't there.
-        return token
-    return f"{prefix}{_REDACTED}{suffix}"
+    # Nothing but punctuation (or truly empty) — leave alone rather than
+    # inventing a redaction for a value that isn't there.
+    return f"{prefix}{_REDACTED}{suffix}" if core else token
 
 
 def _redact_url(url: str) -> str:
-    """Remove a URL's query and userinfo while retaining safe routing context."""
-    parsed = urlsplit(url)
-    netloc = parsed.netloc.rsplit("@", 1)[-1]
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    """Remove a URL's query and userinfo while retaining safe routing context.
+
+    On a parse failure the URL is treated as opaque and redacted wholesale
+    (U2, round-4) — see the module docstring's no-raise invariant. `urlsplit`
+    raises `ValueError` on shapes like `"http://["` (unbalanced IPv6 brackets),
+    which ordinary log text produces without anyone trying; a URL this
+    function cannot parse is a URL whose query it cannot safely strip, so the
+    fail-safe output is the redaction marker, not the unparsed original.
+    """
+    try:
+        parsed = urlsplit(url)
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except ValueError:
+        return _REDACTED
+
+
+def _redact_url_in_token(token: str) -> str | None:
+    """If `token`'s core (after stripping wrapping punctuation/quotes) is a
+    URL, redact it and reassemble with the stripped punctuation preserved.
+    Returns `None` when the core is not a URL, so callers can leave
+    non-URL tokens untouched.
+
+    Shared by both the bare-URL branch and the `KEY=<url>` branch of
+    `_redact_free_text` (U1, round-4) so a URL is redacted wherever it
+    appears in a token, not only when the *whole* token happens to start with
+    `http(s)://` — `PROVISIONING_SCRIPT=<url>` and
+    `PROVISIONER_WEBHOOK_URL=<url>` are exactly the shape that fell through
+    before this existed. Stripping wrapping punctuation first (rather than
+    only quotes) also preserves a trailing separator like the `:` in
+    `...token=X: HTTP 404` instead of losing it along with the query (U8).
+    """
+    prefix, core, suffix = _strip_wrapping(token)
+    if not core.lower().startswith(("http://", "https://")):
+        return None
+    return f"{prefix}{_redact_url(core)}{suffix}"
 
 
 def _tokenize(text: str) -> list[tuple[bool, str]]:
@@ -190,6 +325,37 @@ def _redact_remainder_of_line(segments: list[tuple[bool, str]], out: list[str], 
     return k
 
 
+def _redact_next_value_token(segments: list[tuple[bool, str]], out: list[str], start: int) -> int:
+    """Redact only the next value token after a sensitive `KEY:` marker token.
+
+    U3, round-4: the general (non-allowlisted) `KEY:` marker match must not
+    cost more than the one value that follows it — unlike
+    `_redact_remainder_of_line`, which the caller now reserves for an
+    explicit exact-match header allowlist. Mirrors that function's
+    line-boundary and auth-scheme-word handling so `token: Bearer secret`
+    still reads naturally, but stops after a single value token instead of
+    consuming the rest of the line.
+    """
+    n = len(segments)
+    j = start + 1
+    if j < n and segments[j][0]:
+        if "\n" in segments[j][1]:
+            return j
+        j += 1
+    if j < n and not segments[j][0]:
+        _, core, _ = _strip_wrapping(segments[j][1])
+        if core.lower() in _AUTH_SCHEME_WORDS:
+            j += 1
+            if j < n and segments[j][0]:
+                if "\n" in segments[j][1]:
+                    return j
+                j += 1
+    if j < n and not segments[j][0]:
+        out[j] = _redact_value_token(segments[j][1])
+        return j + 1
+    return j
+
+
 def _redact_free_text(text: str) -> str:
     """Layer 3: best-effort shape-based redaction over whitespace-delimited tokens."""
     segments = _tokenize(text)
@@ -203,9 +369,9 @@ def _redact_free_text(text: str) -> str:
             i += 1
             continue
 
-        lowered = token.lower()
-        if lowered.startswith(("http://", "https://")):
-            out[i] = _redact_url(token)
+        redacted_url = _redact_url_in_token(token)
+        if redacted_url is not None:
+            out[i] = redacted_url
             prev_bare_sensitive_key = False
             i += 1
             continue
@@ -224,7 +390,7 @@ def _redact_free_text(text: str) -> str:
         if "=" in token:
             left, _, right = token.partition("=")
             _, left_core, _ = _strip_wrapping(left)
-            if _is_sensitive_key(left_core):
+            if _is_sensitive_key_segment(left_core):
                 quote = right[0] if right and right[0] in _QUOTE_CHARS else None
                 unclosed = quote is not None and not (len(right) >= 2 and right.endswith(quote))
                 if quote is not None and unclosed:
@@ -232,17 +398,37 @@ def _redact_free_text(text: str) -> str:
                     prev_bare_sensitive_key = False
                     continue
                 out[i] = f"{left}={_redact_value_token(right)}" if right else token
+            elif right:
+                # U1: the key itself isn't recognized as sensitive, but the
+                # value may still be a URL carrying a secret in its query
+                # string (e.g. PROVISIONING_SCRIPT=<url>) — strip that.
+                redacted_right = _redact_url_in_token(right)
+                if redacted_right is not None:
+                    out[i] = f"{left}={redacted_right}"
             prev_bare_sensitive_key = False
             i += 1
             continue
 
         _, core, suffix = _strip_wrapping(token)
-        if ":" in suffix and core and _is_sensitive_key(core):
-            i = _redact_remainder_of_line(segments, out, i)
-            prev_bare_sensitive_key = False
-            continue
+        if ":" in suffix and core:
+            # U3: the exact-match header allowlist is checked independently
+            # of the boundary-aware segment test below — "authorization" no
+            # longer matches the substring marker "auth" under boundary
+            # rules (it has no `_`/`-`/`.` to split on), which is exactly why
+            # it must be named in the allowlist rather than relying on that
+            # test. Anything in the allowlist gets full rest-of-line
+            # redaction; any other sensitive `KEY:` marker only costs the one
+            # value token that follows it.
+            if core.lower() in _REST_OF_LINE_HEADER_NAMES:
+                i = _redact_remainder_of_line(segments, out, i)
+                prev_bare_sensitive_key = False
+                continue
+            if _is_sensitive_key_segment(core):
+                i = _redact_next_value_token(segments, out, i)
+                prev_bare_sensitive_key = False
+                continue
 
-        prev_bare_sensitive_key = bool(core) and _is_sensitive_key(core)
+        prev_bare_sensitive_key = bool(core) and _is_sensitive_key_segment(core)
         i += 1
 
     return "".join(out)
@@ -301,9 +487,13 @@ def _redact_json_value(
 
     Bounded on two axes (T2/T10): `depth` caps recursion so a maliciously or
     buggily deep payload truncates instead of raising `RecursionError`, and
-    `budget` caps total nodes visited so a wide-but-shallow payload can't produce
-    an unbounded JSONB write either. Both bounds truncate with a marker; neither
-    ever raises.
+    `budget` caps total nodes visited. Depth exhaustion truncates the current
+    subtree with a marker. Node-budget exhaustion (U4, round-4) *stops*
+    iterating the current dict/list entirely and appends a single truncation
+    marker for the remainder, rather than continuing to visit and copy every
+    remaining entry with a marker value — the budget bounds total walk work
+    (and therefore output size), not just how many entries get replaced with
+    a marker. Neither bound ever raises.
     """
     if budget.remaining <= 0:
         return _MAX_NODES_MARKER
@@ -318,8 +508,8 @@ def _redact_json_value(
         result: dict[str, Any] = {}
         for key, v in value.items():
             if budget.remaining <= 0:
-                result[key] = _MAX_NODES_MARKER
-                continue
+                result[_MAX_NODES_TRUNCATION_KEY] = _MAX_NODES_MARKER
+                return result
             if _is_sensitive_key(str(key)):
                 # Layer 2: sensitive key -> whole value redacted wholesale,
                 # never descended into (even if it's itself a dict/list).
@@ -340,7 +530,7 @@ def _redact_json_value(
         for item in value:
             if budget.remaining <= 0:
                 items.append(_MAX_NODES_MARKER)
-                continue
+                return items
             items.append(
                 _redact_json_value(
                     item,

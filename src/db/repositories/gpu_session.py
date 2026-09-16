@@ -379,9 +379,20 @@ class GpuSessionRepository:
           — see list_pending_billing_finalization's matching note; this sweep
           reuses the same counter/threshold.
 
-        Ordered oldest-first so the longest-stuck sessions reconcile first.
-        Bounded by ``limit`` to cap per-sweep work — mirrors
-        list_pending_billing_finalization.
+        Ordered oldest-``stopped_at``-first (U7, round-4 — previously ordered by
+        ``created_at`` while filtering on ``stopped_at``; harmless but
+        inconsistent, now ordered by the same column it filters on) so the
+        longest-stuck sessions reconcile first. Bounded by ``limit`` to cap
+        per-sweep work — mirrors list_pending_billing_finalization.
+
+        Deploy note (not a code concern): historical 'failed' sessions that
+        predate the ``stopped_at`` stamping added in T5 have a NULL
+        ``stopped_at`` and, per the ``or_`` clause above, bypass the grace
+        period entirely — they become eligible on the first sweep after
+        deploy. Count them first (``status='failed' AND started_at IS NULL
+        AND account_id IS NOT NULL`` with a DEBIT and no REFUND) so the
+        resulting refund burst is a deliberate decision paced by
+        ``billing_reconciler_max_per_sweep``, not a surprise.
         """
         has_debit = select(TokenTransaction.id).where(
             TokenTransaction.job_id == GpuSession.id,
@@ -402,7 +413,7 @@ class GpuSessionRepository:
         if quarantine_threshold is not None:
             conditions.append(GpuSession.billing_finalization_attempts < quarantine_threshold)
         result = await self._session.execute(
-            select(GpuSession).where(*conditions).order_by(GpuSession.created_at.asc()).limit(limit)
+            select(GpuSession).where(*conditions).order_by(GpuSession.stopped_at.asc()).limit(limit)
         )
         return result.scalars().all()
 

@@ -22,6 +22,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.services.billing import BillingService
+from src.api.services.billing_errors import RefundNotEligibleError, RefundNotEligibleReason
 from src.api.services.gpu_session import GpuSessionService, NullNodeCooldownStore
 from src.core.enums import GpuSessionStatus
 from src.core.uid import new_id
@@ -558,6 +559,29 @@ class TestReconcilePendingRefund:
         success = await service.reconcile_pending_refund(session)
 
         assert success is False
+
+    async def test_account_not_found_is_not_treated_as_success(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """U6: a structured `reason` discriminator, not string-matching on
+        str(exc), decides the branch — ACCOUNT_NOT_FOUND is a genuine anomaly
+        like NO_DEBIT_FOUND, not the ordinary 'someone already refunded this'
+        race, and must not be silently reported as success."""
+        user, account = await _seed_user_and_account(session_factory)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        broken_billing = AsyncMock()
+        broken_billing.refund.side_effect = RefundNotEligibleError(
+            "Account not found for refund", reason=RefundNotEligibleReason.ACCOUNT_NOT_FOUND
+        )
+        service = _make_service(session_factory, billing_service=broken_billing)
+
+        assert await service.reconcile_pending_refund(session) is False
 
     async def test_no_account_id_is_a_trivial_success(
         self, session_factory: async_sessionmaker[AsyncSession]

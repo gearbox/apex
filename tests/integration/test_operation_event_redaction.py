@@ -265,3 +265,104 @@ async def test_deeply_nested_summary_is_applied_not_500(
         async with session_factory() as db:
             await db.execute(delete(User).where(User.id == user.id))
             await db.commit()
+
+
+def _malformed_url_event(*, session_id, operation_id) -> OperationEventBody:  # type: ignore[no-untyped-def]
+    now = datetime.now(UTC)
+    return OperationEventBody(
+        schema_version=2,
+        event_id="malformed-url-event",
+        session_id=session_id,
+        operation_id=operation_id,
+        operation_kind=OperationKind.session_bootstrap,
+        batch=None,
+        sequence=0,
+        target=None,
+        status=OperationStatus.failed,
+        phase=None,
+        started_at=now,
+        ts=now,
+        elapsed_seconds=1.0,
+        phase_elapsed_seconds=None,
+        progress=None,
+        plan=None,
+        summary=None,
+        message="see http://[ for details",
+        error="script fetch failed: http://[",
+    )
+
+
+async def test_malformed_url_in_message_is_applied_not_500(
+    db_engine,  # type: ignore[no-untyped-def]
+) -> None:
+    """U2, round-4: `urlsplit` raises `ValueError` on shapes like `http://[`,
+    which ordinary node text (a wrapped/truncated URL, bracketed IPv6) can
+    produce without anyone trying. Before this was guarded, that shape 500'd
+    every telemetry POST for the affected session, wedging its progress
+    reporting entirely. It must now apply the event and persist the redacted
+    (not crashed-on) text instead."""
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    user = User(
+        id=uuid4(),
+        email=f"operation-redaction-malformed-url-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="qwen_rapid_aio",
+        model_type="aisha-image",
+        callback_token_hash=hashlib.sha256(_CALLBACK_TOKEN.encode()).hexdigest(),
+    )
+    operation_id = new_id()
+
+    try:
+        async with session_factory() as db, db.begin():
+            db.add(user)
+            await db.flush()
+            db.add(gpu_session)
+            await db.flush()
+            await GpuSessionOperationRepository(db).create(
+                id=operation_id,
+                session_id=gpu_session.id,
+                user_id=user.id,
+                product_id=gpu_session.product_id,
+                kind=OperationKind.bundle_provision,
+            )
+
+        controller = object.__new__(InternalGpuSessionController)
+        settings = MagicMock()
+        settings.github_content_token = ""
+        settings.hf_token = ""
+        settings.civitai_api_token = ""
+        receiver = OperationEventService(settings=settings)
+        request = MagicMock()
+        request.headers = {"Authorization": f"Bearer {_CALLBACK_TOKEN}"}
+        event_bus = AsyncMock()
+
+        async with session_factory() as db:
+            response = await InternalGpuSessionController.operation_event.fn(
+                controller,
+                session_id=gpu_session.id,
+                operation_id=operation_id,
+                request=request,
+                data=_malformed_url_event(session_id=gpu_session.id, operation_id=operation_id),
+                operation_event_service=receiver,
+                session=db,
+                event_bus=event_bus,
+            )
+
+        assert response.status_code == 200
+
+        async with session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(operation_id)
+            assert operation is not None
+            assert operation.message == "see [REDACTED] for details"
+            assert operation.error == "script fetch failed: [REDACTED]"
+    finally:
+        async with session_factory() as db:
+            await db.execute(delete(User).where(User.id == user.id))
+            await db.commit()
