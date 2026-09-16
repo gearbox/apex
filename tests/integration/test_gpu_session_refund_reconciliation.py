@@ -132,6 +132,7 @@ async def _seed_failed_session_with_debit(
     stopped_at: datetime | None = None,
     with_debit: bool = True,
     billing_finalization_attempts: int = 0,
+    billing_reconciliation_next_attempt_at: datetime | None = None,
 ) -> GpuSession:
     """A terminal 'failed' pre-active session, optionally with a real
     base-reservation debit but (deliberately) no refund — the exact state a
@@ -154,6 +155,7 @@ async def _seed_failed_session_with_debit(
         stopped_at=stopped_at,
         error_message="node_provision_script_failed",
         billing_finalization_attempts=billing_finalization_attempts,
+        billing_reconciliation_next_attempt_at=billing_reconciliation_next_attempt_at,
     )
     if created_at is not None:
         gpu_session.created_at = created_at
@@ -204,7 +206,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
 
         assert session.id in {row.id for row in candidates}
@@ -223,7 +225,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
 
         assert session.id not in {row.id for row in candidates}
@@ -242,7 +244,9 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC) - timedelta(minutes=2), limit=50
+                grace_cutoff=datetime.now(UTC) - timedelta(minutes=2),
+                limit=50,
+                now=datetime.now(UTC),
             )
 
         assert session.id not in {row.id for row in candidates}
@@ -275,7 +279,9 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC) - timedelta(minutes=2), limit=50
+                grace_cutoff=datetime.now(UTC) - timedelta(minutes=2),
+                limit=50,
+                now=datetime.now(UTC),
             )
 
         candidate_ids = {row.id for row in candidates}
@@ -304,7 +310,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
 
         assert session.id not in {row.id for row in candidates}
@@ -329,7 +335,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
 
         assert session.id not in {row.id for row in candidates}
@@ -348,7 +354,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             before = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
         assert session.id in {row.id for row in before}
 
@@ -357,7 +363,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             after = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
         assert session.id not in {row.id for row in after}
 
@@ -383,7 +389,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
 
         assert session.id not in {row.id for row in candidates}
@@ -422,7 +428,7 @@ class TestListPendingRefundReconciliation:
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=now, limit=2
+                grace_cutoff=now, limit=2, now=datetime.now(UTC)
             )
 
         candidate_ids = {row.id for row in candidates}
@@ -430,45 +436,78 @@ class TestListPendingRefundReconciliation:
         assert no_debit_2.id not in candidate_ids
         assert genuinely_stuck.id in candidate_ids
 
-    async def test_quarantined_session_is_excluded_from_selection(
+    async def test_session_past_quarantine_threshold_is_returned_once_backoff_elapses(
         self, session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        """T7: past the quarantine threshold, a candidate must stop being
-        re-selected — quarantine means "stop trying", not "keep trying and
-        keep shouting" via an ERROR log every sweep forever."""
+        """X1, round-5 remediation: a session that has failed reconciliation
+        many times (far past any realistic quarantine_threshold) must still
+        be reconcilable once its backoff window has elapsed — quarantine
+        means "stop shouting", never "stop trying". Replaces round-3 T7's
+        exclusion test, which asserted permanent exclusion — the bug X1
+        fixes (see test_billing_reconciler.py's equivalent for the
+        finalization-sweep side)."""
         user, account = await _seed_user_and_account(session_factory)
+        now = datetime.now(UTC)
         session = await _seed_failed_session_with_debit(
             session_factory,
             user=user,
             account=account,
             started_at=None,
-            stopped_at=datetime.now(UTC) - timedelta(hours=1),
-            billing_finalization_attempts=5,
+            stopped_at=now - timedelta(hours=1),
+            billing_finalization_attempts=50,
+            billing_reconciliation_next_attempt_at=now - timedelta(seconds=1),
         )
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50, quarantine_threshold=5
+                grace_cutoff=now, limit=50, now=now
+            )
+
+        assert session.id in {row.id for row in candidates}
+
+    async def test_session_within_its_backoff_window_is_not_selected(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The complement of the above: a row whose backoff hasn't elapsed
+        yet is skipped, so a chronically failing session costs at most one
+        attempt per backoff period rather than one per sweep."""
+        user, account = await _seed_user_and_account(session_factory)
+        now = datetime.now(UTC)
+        session = await _seed_failed_session_with_debit(
+            session_factory,
+            user=user,
+            account=account,
+            started_at=None,
+            stopped_at=now - timedelta(hours=1),
+            billing_finalization_attempts=50,
+            billing_reconciliation_next_attempt_at=now + timedelta(hours=1),
+        )
+
+        async with session_factory() as db:
+            candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
+                grace_cutoff=now, limit=50, now=now
             )
 
         assert session.id not in {row.id for row in candidates}
 
-    async def test_quarantine_threshold_none_disables_the_filter(
+    async def test_next_attempt_at_null_is_immediately_eligible(
         self, session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
+        """A session that has never failed reconciliation before (NULL
+        next_attempt_at) is selectable immediately — the common case."""
         user, account = await _seed_user_and_account(session_factory)
+        now = datetime.now(UTC)
         session = await _seed_failed_session_with_debit(
             session_factory,
             user=user,
             account=account,
             started_at=None,
-            stopped_at=datetime.now(UTC) - timedelta(hours=1),
-            billing_finalization_attempts=999,
+            stopped_at=now - timedelta(hours=1),
         )
 
         async with session_factory() as db:
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=now, limit=50, now=now
             )
 
         assert session.id in {row.id for row in candidates}
@@ -498,7 +537,7 @@ class TestReconcilePendingRefund:
             assert has_refund is True
 
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
         assert session.id not in {row.id for row in candidates}
 
@@ -651,7 +690,7 @@ class TestFailPreActiveSessionSwallowedRefundIsReconcilable:
             assert has_refund is False
 
             candidates = await GpuSessionRepository(db).list_pending_refund_reconciliation(
-                grace_cutoff=datetime.now(UTC), limit=50
+                grace_cutoff=datetime.now(UTC), limit=50, now=datetime.now(UTC)
             )
         assert gpu_session.id in {row.id for row in candidates}
 

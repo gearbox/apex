@@ -523,9 +523,37 @@ class Settings(BaseSettings):
         le=100,
         description=(
             "After this many failed reconciliation attempts, the worker logs "
-            "at ERROR with a quarantine flag for ops alerting. The session "
-            "row is NOT mutated — billing_finalized_at stays NULL so the "
-            "worker keeps retrying after the underlying issue is fixed."
+            "at ERROR once (on crossing the threshold) with a quarantine flag "
+            "for ops alerting; subsequent failures log at WARNING instead so "
+            "the alert channel isn't re-triggered every sweep forever. The "
+            "session row is NOT excluded from future sweeps and "
+            "billing_finalized_at is NOT mutated — the row stays retryable, "
+            "paced by billing_reconciler_backoff_base_minutes/"
+            "billing_reconciler_backoff_cap_hours rather than re-attempted "
+            "every sweep, so a persistently failing row can't starve the "
+            "sweep budget while it waits to be retried again."
+        ),
+    )
+    billing_reconciler_backoff_base_minutes: int = Field(
+        default=5,
+        ge=1,
+        le=120,
+        description=(
+            "Base delay for the billing reconciler's per-session exponential "
+            "backoff: after the Nth failed attempt, the next retry is not "
+            "attempted before min(base * 2**(N-1), cap) has elapsed. Keeps a "
+            "transient failure retrying quickly while a chronic one backs off."
+        ),
+    )
+    billing_reconciler_backoff_cap_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description=(
+            "Upper bound on the billing reconciler's per-session exponential "
+            "backoff delay — a session that has failed many times in a row is "
+            "retried at most this often, rather than the delay growing "
+            "unbounded."
         ),
     )
     billing_reconciler_max_per_sweep: int = Field(

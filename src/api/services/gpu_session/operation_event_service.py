@@ -122,8 +122,14 @@ class OperationEventService:
             return OperationEventResult(authorized=False, status=401)
 
         if not validate_callback_token(bearer_token, session.callback_token_hash):
+            # X2, round-5 remediation: distinct from "session_not_found" above —
+            # the session exists but the token doesn't match its current hash,
+            # which is expected (not a bug) for a node a provisioning retry just
+            # abandoned during its callback-token rotation window.
             logger.warning(
-                "gpu_session.operation.rejected", session_id=str(session_id), reason="invalid_token"
+                "gpu_session.callback.stale_token",
+                session_id=str(session_id),
+                reason="invalid_token",
             )
             return OperationEventResult(authorized=False, status=401)
 

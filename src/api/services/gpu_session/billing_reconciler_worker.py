@@ -17,6 +17,21 @@ re-invokes GpuSessionService.reconcile_pending_refund, which treats an
 already-completed refund (RefundNotEligibleError) as success.
 
 Runs once every ``settings.billing_reconciler_interval_minutes`` (default 10).
+
+**Backoff, not exclusion (X1, round-5 remediation).** A session that keeps
+failing reconciliation is never dropped from either sweep query — it stays
+retryable forever, per the documented contract that billing_finalized_at
+stays NULL so the worker keeps retrying once the underlying issue is fixed.
+Round-3's T7 instead excluded any row past ``quarantine_threshold`` attempts,
+which silently stopped reconciling it forever (the only externally visible
+signal, an ERROR log, also stopped — indistinguishable from recovery). This
+version paces retries with per-session exponential backoff
+(``compute_next_attempt_at``) written to
+``GpuSession.billing_reconciliation_next_attempt_at`` instead: a persistently
+failing row costs one attempt per backoff period rather than one per sweep,
+which is what keeps it from flooding ops alerts or head-of-line-blocking
+healthy candidates — the two properties the threshold predicate was actually
+protecting — without ever making the row unreachable.
 """
 
 from __future__ import annotations
@@ -41,6 +56,25 @@ if TYPE_CHECKING:
     from src.db.models.gpu_session import GpuSession
 
 logger = structlog.get_logger(__name__)
+
+
+def compute_next_attempt_at(
+    attempts: int, *, now: datetime, base_minutes: int, cap_hours: int
+) -> datetime:
+    """Exponential backoff for the next reconciliation attempt: ``base * 2**(n-1)``, capped.
+
+    ``attempts`` is the *new* (post-increment) attempt count, so the first
+    failure (attempts=1) backs off by exactly ``base_minutes``. Pure function
+    so the schedule (and its cap) can be unit-tested without touching a DB.
+
+    The cap is applied to the plain-int minute count *before* a ``timedelta``
+    is constructed: ``2 ** (attempts - 1)`` is unbounded (a session can fail
+    indefinitely), and ``timedelta`` raises ``OverflowError`` once a delay
+    this large is built directly — Python ints have no such limit, so the
+    ``min()`` must happen first.
+    """
+    delay_minutes = min(base_minutes * (2 ** (attempts - 1)), cap_hours * 60)
+    return now + timedelta(minutes=delay_minutes)
 
 
 class BillingReconcilerWorker(PeriodicWorker):
@@ -97,7 +131,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             candidates = await repo.list_pending_billing_finalization(
                 grace_cutoff=grace_cutoff,
                 limit=self._settings.billing_reconciler_max_per_sweep,
-                quarantine_threshold=self._settings.billing_reconciler_quarantine_threshold,
+                now=datetime.now(UTC),
             )
 
         if not candidates:
@@ -134,7 +168,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             candidates = await repo.list_pending_refund_reconciliation(
                 grace_cutoff=grace_cutoff,
                 limit=self._settings.billing_reconciler_max_per_sweep,
-                quarantine_threshold=self._settings.billing_reconciler_quarantine_threshold,
+                now=datetime.now(UTC),
             )
 
         if not candidates:
@@ -167,7 +201,7 @@ class BillingReconcilerWorker(PeriodicWorker):
 
         Returns one of: ``"reconciled"``, ``"still_failing"``, ``"quarantined"``.
         Mirrors ``_process_session``'s shape, reusing the same
-        ``billing_finalization_attempts`` counter/quarantine threshold — a
+        ``billing_finalization_attempts`` counter/backoff schedule — a
         session is only ever a candidate for one of the two sweeps (see
         ``run_once``), so the shared counter can't conflate the two failure kinds.
         """
@@ -188,6 +222,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             )
             return "reconciled"
 
+        previous_count = session_row.billing_finalization_attempts
         try:
             new_count = await self._bump_and_check_quarantine(session_row)
         except Exception:
@@ -197,8 +232,10 @@ class BillingReconcilerWorker(PeriodicWorker):
             )
             return "still_failing"
 
-        if new_count >= self._settings.billing_reconciler_quarantine_threshold:
-            logger.error(
+        threshold = self._settings.billing_reconciler_quarantine_threshold
+        if new_count >= threshold:
+            log = logger.error if previous_count < threshold else logger.warning
+            log(
                 "billing_reconciler.refund_session_quarantined",
                 session_id=str(session_row.id),
                 attempts=new_count,
@@ -238,6 +275,7 @@ class BillingReconcilerWorker(PeriodicWorker):
             return "reconciled"
 
         # Failed: bump the attempt counter; emit quarantine log if threshold hit.
+        previous_count = session_row.billing_finalization_attempts
         try:
             new_count = await self._bump_and_check_quarantine(session_row)
         except Exception:
@@ -247,8 +285,13 @@ class BillingReconcilerWorker(PeriodicWorker):
             )
             return "still_failing"
 
-        if new_count >= self._settings.billing_reconciler_quarantine_threshold:
-            logger.error(
+        threshold = self._settings.billing_reconciler_quarantine_threshold
+        if new_count >= threshold:
+            # ERROR exactly once, on crossing the threshold — past that, WARNING,
+            # so a chronically failing session doesn't re-trigger the ops alert
+            # every sweep forever (X1, round-5 remediation).
+            log = logger.error if previous_count < threshold else logger.warning
+            log(
                 "billing_reconciler.session_quarantined",
                 session_id=str(session_row.id),
                 attempts=new_count,
@@ -260,9 +303,18 @@ class BillingReconcilerWorker(PeriodicWorker):
         return "still_failing"
 
     async def _bump_and_check_quarantine(self, session_row: GpuSession) -> int:
-        """Increment attempt counter; return the new value."""
+        """Increment attempt counter, set the backoff timestamp, return the new value."""
+        now = datetime.now(UTC)
+        next_attempt_at = compute_next_attempt_at(
+            session_row.billing_finalization_attempts + 1,
+            now=now,
+            base_minutes=self._settings.billing_reconciler_backoff_base_minutes,
+            cap_hours=self._settings.billing_reconciler_backoff_cap_hours,
+        )
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
-            new_count = await repo.increment_billing_finalization_attempts(session_row.id)
+            new_count = await repo.increment_billing_finalization_attempts(
+                session_row.id, next_attempt_at=next_attempt_at
+            )
             await db.commit()
         return new_count

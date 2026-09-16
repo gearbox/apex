@@ -190,6 +190,119 @@ class TestU1UrlInsideKeyValueAssignment:
 
 
 # ---------------------------------------------------------------------------
+# X3 (round-5): boundary-aware key matching lost glued compound keys —
+# _GLUED_KEY_SUFFIXES only covered "apikey"/"authtoken"; every other
+# separator-less compound (mytoken=, githubtoken=, clientsecret=) leaked.
+# ---------------------------------------------------------------------------
+
+
+class TestX3GluedCompoundKeys:
+    @pytest.mark.parametrize(
+        ("line", "secret"),
+        [
+            ("ACS_GITHUB_TOKEN=S1", "S1"),
+            ("api_key=S3", "S3"),
+            ("apikey=S4", "S4"),
+            ("access_token=S10", "S10"),
+            ("mytoken=S7", "S7"),
+            ("githubtoken=S8", "S8"),
+            ("clientsecret=S9", "S9"),
+            ("authtoken=S11", "S11"),
+        ],
+    )
+    def test_glued_and_separated_keys_all_redact(self, line: str, secret: str) -> None:
+        redacted = redact_secrets(line, max_length=500)
+        assert secret not in redacted
+        assert "[REDACTED]" in redacted
+
+    def test_monkey_is_an_accepted_false_positive(self) -> None:
+        """The suffix rule costs one accepted false positive — 'monkey' ends
+        with 'key' — in exchange for never missing an un-anticipated glued
+        spelling. Recorded here so the trade-off is a documented decision,
+        not a surprise rediscovered later."""
+        redacted = redact_secrets("monkey=x", max_length=500)
+        assert redacted == "monkey=[REDACTED]"
+
+    def test_keyframes_and_author_still_survive_intact(self) -> None:
+        """Layer-3 preservation regression guard (U3): neither ends with a
+        marker (keyframes ends with 'frames', author ends with 'thor')."""
+        assert redact_secrets("keyframes: 12", max_length=500) == "keyframes: 12"
+        assert redact_secrets("author: alice", max_length=500) == "author: alice"
+
+    def test_session_id_still_survives_intact(self) -> None:
+        """U3: 'session' was already dropped from the Layer-3 marker set, and
+        neither 'session' nor 'id' ends with a remaining marker."""
+        redacted = redact_secrets("session_id=abc123", max_length=500)
+        assert redacted == "session_id=abc123"
+
+
+# ---------------------------------------------------------------------------
+# X4 (round-5): a URL preceded by a non-strippable prefix still leaked its
+# query string, because _redact_url_in_token required the URL at offset 0.
+# ---------------------------------------------------------------------------
+
+
+class TestX4UrlAtAnyOffsetInToken:
+    def test_url_prefixed_lowercase_key_style_marker(self) -> None:
+        redacted = redact_secrets("url:https://a.test/x?token=S", max_length=500)
+        assert redacted == "url:https://a.test/x"
+
+    def test_url_inside_function_call_parens(self) -> None:
+        redacted = redact_secrets("fetch(https://a.test/x?token=S)", max_length=500)
+        assert redacted == "fetch(https://a.test/x)"
+
+    def test_url_inside_markdown_link(self) -> None:
+        redacted = redact_secrets("[link](https://a.test/x?token=S)", max_length=500)
+        assert redacted == "[link](https://a.test/x)"
+
+    def test_url_after_non_strippable_message_prefix(self) -> None:
+        redacted = redact_secrets("msg=failed:https://a.test/x?token=S", max_length=500)
+        assert redacted == "msg=failed:https://a.test/x"
+
+    def test_href_double_quoted_url_still_works(self) -> None:
+        """Already worked before X4 — regression guard."""
+        redacted = redact_secrets('href="https://a.test/x?token=S"', max_length=500)
+        assert redacted == 'href="https://a.test/x"'
+
+    def test_angle_bracketed_url_still_works(self) -> None:
+        """Already worked before X4 — regression guard."""
+        redacted = redact_secrets("<https://a.test/x?token=S>", max_length=500)
+        assert redacted == "<https://a.test/x>"
+
+    def test_two_urls_in_a_single_token_leak_neither(self) -> None:
+        """The second URL lands inside the first URL's query and is stripped
+        along with it — no separate handling needed, and nothing survives."""
+        redacted = redact_secrets(
+            "https://a.test/x?token=1,https://b.test/y?token=2", max_length=500
+        )
+        assert "token=1" not in redacted
+        assert "token=2" not in redacted
+        assert "b.test" not in redacted
+        assert redacted == "https://a.test/x"
+
+    def test_url_with_no_query_after_a_prefix_is_unchanged(self) -> None:
+        redacted = redact_secrets("url:https://a.test/x", max_length=500)
+        assert redacted == "url:https://a.test/x"
+
+    def test_bare_http_prefix_with_no_host_does_not_raise(self) -> None:
+        """U2's no-raise property must still hold after X4's offset scan.
+
+        `urlsplit("http://")` doesn't raise (empty netloc/path are valid), so
+        this degrades to itself rather than [REDACTED] — the point is only
+        that it never raises out of the redaction boundary."""
+        redacted = redact_secrets("see http:// for details", max_length=500)
+        assert redacted == "see http:// for details"
+
+    def test_sensitive_key_still_wins_when_url_is_found_at_an_offset(self) -> None:
+        """X4 must not weaken the existing sensitive-key-wins guarantee
+        (test_sensitive_key_url_value_is_redacted_wholesale_not_just_query)
+        merely because the URL can now be found at a non-zero offset."""
+        redacted = redact_secrets('TOKEN="https://a.test/x?y=1"', max_length=500)
+        assert redacted == 'TOKEN="[REDACTED]"'
+        assert "a.test" not in redacted
+
+
+# ---------------------------------------------------------------------------
 # U2 (round-4): a malformed URL must never raise out of the redaction
 # boundary — it degrades to a wholesale [REDACTED] instead.
 # ---------------------------------------------------------------------------

@@ -973,10 +973,36 @@ class GpuProvisioningWorker(PeriodicWorker):
             return
 
         # Generate a fresh callback token so the destroyed node's leaked token is dead.
-        # The hash is written to the DB atomically with the new instance info below.
         fresh_callback_token = secrets.token_urlsafe(48)
         fresh_callback_token_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
         bootstrap_operation_id = new_id()
+
+        # X2, round-5 remediation: persist the new hash NOW, in its own short
+        # transaction, before the slow external calls below (build_acs_env is
+        # local/fast, but provision_vastai_instance issues real Vast.ai API
+        # calls that can take tens of seconds). Previously the hash was only
+        # written alongside update_instance() at the end of this function,
+        # which left the OLD node's token as the session's current hash for
+        # the whole recreation window — a delayed failure webhook from the
+        # node this retry is replacing would validate successfully during
+        # that window (the S2 locked-revalidation fix doesn't help here: the
+        # stale hash *is* the current hash) and fail_pre_active_session would
+        # tear down and refund the session mid-recovery. Rotating first closes
+        # that window entirely: every callback carrying the old token from
+        # this point on is, correctly, from the node being abandoned and must
+        # be rejected (see gpu_session.callback.stale_token at the validation
+        # sites) — see docs/contracts/provisioning-bootstrap-contract.md.
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionRepository(db)
+            current = await repo.get_by_id(session.id, for_update=True)
+            if current is None or current.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
+                logger.info(
+                    "gpu_session.provision.retry_abandoned_before_rotation",
+                    session_id=str(session.id),
+                    observed_status=current.status if current is not None else None,
+                )
+                return
+            await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
 
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
         # civitai_api_token, ACS_GITHUB_TOKEN, and (D3) PROVISIONING_SCRIPT /

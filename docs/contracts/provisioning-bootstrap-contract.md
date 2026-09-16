@@ -296,6 +296,37 @@ mints a fresh callback token for the new instance and rebuilds this env from
 scratch, so the new `PROVISIONING_SCRIPT`/`PROVISIONER_WEBHOOK_URL` carry the
 new token and the old instance's URLs stop validating (401) immediately.
 
+### Callback token rotation window (X2, round-5 remediation)
+
+"Immediately" above means exactly that: the new hash is persisted in its own
+short transaction right after minting, **before** `build_acs_env` and
+`provision_vastai_instance` (offer search already happened earlier in the
+retry; instance creation via the Vast.ai API is the slow, tens-of-seconds
+external call this ordering protects). Earlier, the hash was only written
+alongside `update_instance()` at the very end of the retry — for the whole
+recreation window in between, the session's stored hash still belonged to the
+node being replaced, so a delayed failure webhook from that old node would
+validate successfully (the S2 locked-revalidation check above doesn't help
+here: the stale hash *is* the current hash at that point) and
+`fail_pre_active_session` would tear down and refund a session that was mid-
+recovery, having rented a second GPU for nothing.
+
+Rotating first closes the window entirely: from the moment the transaction
+commits, the session's stored hash corresponds to a token no live node holds
+until the new node's first callback arrives. Every callback in that window —
+from the node being abandoned — is correctly rejected with `401`, logged as
+`gpu_session.callback.stale_token` at the three bearer-auth call sites
+(`ProvisioningWebhookService.handle_failure`, `OperationEventService`,
+`ProvisioningScriptService.serve`) rather than the generic
+`*.rejected`/`invalid_token` event used for an unknown session — **expect
+these 401s during a retry's recreation window; they are the fix working, not
+an auth regression to chase.** If the retry itself then fails before a new
+instance is created, the session goes terminal via `_mark_failed` anyway and
+the orphaned hash (matching no live node) is harmless. If the session is
+concurrently stopped between rotation and instance creation, the retry bails
+before minting anything billable — see
+`gpu_session.provision.retry_abandoned_before_rotation`.
+
 **SECURITY:** every value above except `ACS_PROVISION_SCRIPT_SHA256` carries
 the per-session callback token in its query string. Never log a full env dict,
 a full `PROVISIONING_SCRIPT`/`PROVISIONER_WEBHOOK_URL` value, or any query

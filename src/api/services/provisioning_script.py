@@ -157,11 +157,22 @@ class ProvisioningScriptService:
 
         async with self._session_factory() as db:
             session_row = await GpuSessionRepository(db).get_by_id(session_id)
-        if session_row is None or not validate_callback_token(
-            token, session_row.callback_token_hash
-        ):
+        if session_row is None:
             logger.warning(
-                "provisioning.script.rejected", session_id=str(session_id), reason="invalid_token"
+                "provisioning.script.rejected",
+                session_id=str(session_id),
+                reason="session_not_found",
+            )
+            return ScriptServeResult(outcome=ScriptServeOutcome.unauthorized)
+        if not validate_callback_token(token, session_row.callback_token_hash):
+            # X2, round-5 remediation: distinct from "session_not_found" above —
+            # the session exists but the token doesn't match its current hash,
+            # expected (not a bug) for a node a provisioning retry just abandoned
+            # during its callback-token rotation window.
+            logger.warning(
+                "gpu_session.callback.stale_token",
+                session_id=str(session_id),
+                reason="invalid_token",
             )
             return ScriptServeResult(outcome=ScriptServeOutcome.unauthorized)
 

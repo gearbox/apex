@@ -705,6 +705,61 @@ class TestAdvanceProvisioning:
             session.id, operation_kwargs["id"]
         )
 
+    async def test_retry_rotates_callback_token_hash_before_creating_new_instance(self) -> None:
+        """X2, round-5 remediation: the new hash must be persisted BEFORE the
+        slow create_instance call, not alongside it — otherwise a delayed
+        webhook from the old node still validates against the current hash
+        for the whole recreation window."""
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        manager = MagicMock()
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+            manager.attach_mock(mock_repo.update_callback_token_hash, "rotate_hash")
+            manager.attach_mock(mocks["vastai_client"].create_instance, "create_instance")
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        mock_repo.update_callback_token_hash.assert_awaited_once()
+        call_names = [call[0] for call in manager.mock_calls]
+        assert call_names.index("rotate_hash") < call_names.index("create_instance")
+
+    async def test_retry_abandons_before_rotation_when_session_already_terminal(self) -> None:
+        """X2: if the session was stopped/failed concurrently before the hash
+        rotation transaction commits, the retry must bail without minting a
+        new instance — nothing has been created yet, so there's nothing to
+        clean up beyond the old instance already destroyed at retry start."""
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.stopped)
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        mock_repo.update_callback_token_hash.assert_not_awaited()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.update_instance.assert_not_awaited()
+
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
         """If github_content_token is empty, mark session failed before create_instance."""
         # provisioning_recreation_attempts=3 so new_attempt=2 allows recreation to proceed

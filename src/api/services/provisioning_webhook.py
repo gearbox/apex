@@ -92,8 +92,17 @@ class ProvisioningWebhookService:
             return HTTP_401_UNAUTHORIZED
 
         if not token or not validate_callback_token(token, session_row.callback_token_hash):
+            # X2, round-5 remediation: a distinct event from the session-not-found
+            # case above — the session exists but the presented token doesn't match
+            # its current hash, which is exactly what a delayed webhook from a node
+            # a provisioning retry just abandoned looks like (its token was rotated
+            # out from under it). Expected during a retry's recreation window, not
+            # necessarily a bug — see the contract doc's "Callback token rotation
+            # window" section.
             logger.warning(
-                "provisioning.webhook.rejected", session_id=str(session_id), reason="invalid_token"
+                "gpu_session.callback.stale_token",
+                session_id=str(session_id),
+                reason="invalid_token",
             )
             return HTTP_401_UNAUTHORIZED
 

@@ -282,9 +282,23 @@ class GpuSession(Base):
         comment=(
             "Number of times the billing reconciler has attempted to finalize "
             "this session. Bumped each sweep when finalization fails. Used to "
-            "trigger ops alerts after a quarantine threshold without mutating "
-            "billing_finalized_at (the session must remain reconcilable once "
-            "the underlying issue is fixed)."
+            "trigger ops alerts after a quarantine threshold and to compute "
+            "billing_reconciliation_next_attempt_at's exponential backoff — "
+            "never used to exclude the row from future sweeps (the session "
+            "must remain reconcilable once the underlying issue is fixed)."
+        ),
+    )
+    billing_reconciliation_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment=(
+            "Earliest time the billing reconciler may re-select this session. "
+            "NULL means eligible immediately. Set on each failed attempt to "
+            "now() + exponential backoff (X1, round-5 remediation) so a "
+            "chronically failing session is paced rather than either "
+            "re-attempted every sweep (flooding ops alerts) or permanently "
+            "excluded (the bug this replaces — quarantine must mean "
+            "'stop shouting', never 'stop trying')."
         ),
     )
 
@@ -307,5 +321,25 @@ class GpuSession(Base):
             "status",
             "stale_detected_at",
             postgresql_where=text("status IN ('active', 'stale', 'paused', 'resuming')"),
+        ),
+        # X1, round-5 remediation: support BillingReconcilerWorker's two sweep
+        # queries (GpuSessionRepository.list_pending_billing_finalization /
+        # list_pending_refund_reconciliation), each ordered by stopped_at ASC
+        # with a LIMIT. Partial on the fixed (non-EXISTS, non-OR) predicates
+        # each query filters on; the backoff OR-condition on
+        # billing_reconciliation_next_attempt_at is evaluated as an index
+        # filter rather than an index condition, which is fine at gpu_sessions'
+        # scale (see the migration for the EXPLAIN this was checked against).
+        Index(
+            "ix_gpu_sessions_billing_finalization_pending",
+            "stopped_at",
+            postgresql_where=text("status = 'stopped' AND billing_finalized_at IS NULL"),
+        ),
+        Index(
+            "ix_gpu_sessions_refund_reconciliation_pending",
+            "stopped_at",
+            postgresql_where=text(
+                "status = 'failed' AND started_at IS NULL AND account_id IS NOT NULL"
+            ),
         ),
     )

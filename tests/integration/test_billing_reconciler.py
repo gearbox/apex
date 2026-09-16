@@ -37,6 +37,7 @@ async def _create_stopped_session(
     stopped_at: datetime,
     billing_finalized_at: datetime | None = None,
     billing_finalization_attempts: int = 0,
+    billing_reconciliation_next_attempt_at: datetime | None = None,
 ) -> GpuSession:
     """Insert a stopped GpuSession with the given billing state."""
     session = GpuSession(
@@ -49,6 +50,7 @@ async def _create_stopped_session(
         stopped_at=stopped_at,
         billing_finalized_at=billing_finalized_at,
         billing_finalization_attempts=billing_finalization_attempts,
+        billing_reconciliation_next_attempt_at=billing_reconciliation_next_attempt_at,
     )
     db_session.add(session)
     await db_session.flush()
@@ -79,6 +81,7 @@ async def test_list_pending_billing_finalization_returns_stuck_session(
     results = await repo.list_pending_billing_finalization(
         grace_cutoff=grace_cutoff,
         limit=10,
+        now=datetime.now(UTC),
     )
 
     ids = [r.id for r in results]
@@ -110,6 +113,7 @@ async def test_list_pending_billing_finalization_excludes_finalized(
     results = await repo.list_pending_billing_finalization(
         grace_cutoff=grace_cutoff,
         limit=10,
+        now=datetime.now(UTC),
     )
 
     ids = [r.id for r in results]
@@ -137,6 +141,7 @@ async def test_list_pending_billing_finalization_respects_grace_period(
     results = await repo.list_pending_billing_finalization(
         grace_cutoff=grace_cutoff,
         limit=10,
+        now=datetime.now(UTC),
     )
 
     ids = [r.id for r in results]
@@ -175,6 +180,7 @@ async def test_list_pending_billing_finalization_limit_caps_results_oldest_first
     results = await repo.list_pending_billing_finalization(
         grace_cutoff=grace_cutoff,
         limit=2,
+        now=now,
     )
 
     # Limit honoured.
@@ -183,46 +189,57 @@ async def test_list_pending_billing_finalization_limit_caps_results_oldest_first
     assert [r.stopped_at for r in results] == stopped_times[:2]
 
 
-async def test_list_pending_billing_finalization_excludes_quarantined(
+async def test_list_pending_billing_finalization_returns_session_past_quarantine_threshold_once_backoff_elapses(
     db_session: AsyncSession,
     make_user: UserFactory,
 ) -> None:
-    """T7, round-3 remediation: past the quarantine threshold, a candidate must
-    stop being re-selected by the finalization sweep too — the same
-    billing_finalization_attempts counter and threshold the refund-reconciliation
-    sweep uses (see test_gpu_session_refund_reconciliation.py's equivalent)."""
-    user = await make_user(email=f"reconciler-quarantine-{uuid4().hex[:6]}@example.com")
+    """X1, round-5 remediation: a session that failed reconciliation
+    ``quarantine_threshold`` times (or more) must still be reconcilable once
+    its backoff window has elapsed — quarantine means "stop shouting", never
+    "stop trying". Replaces round-3 T7's exclusion test, which asserted the
+    opposite (permanent exclusion) — the bug X1 fixes."""
+    user = await make_user(email=f"reconciler-backoff-{uuid4().hex[:6]}@example.com")
     old_stopped_at = datetime.now(UTC) - timedelta(hours=2)
     grace_cutoff = datetime.now(UTC) - timedelta(minutes=2)
+    now = datetime.now(UTC)
 
-    quarantined = await _create_stopped_session(
+    past_backoff = await _create_stopped_session(
         db_session,
         user_id=user.id,
         stopped_at=old_stopped_at,
-        billing_finalization_attempts=5,
+        billing_finalization_attempts=50,  # far past any realistic quarantine_threshold
+        billing_reconciliation_next_attempt_at=now - timedelta(seconds=1),
     )
-    still_trying = await _create_stopped_session(
+    still_in_backoff = await _create_stopped_session(
         db_session,
         user_id=user.id,
         stopped_at=old_stopped_at,
-        billing_finalization_attempts=4,
+        billing_finalization_attempts=50,
+        billing_reconciliation_next_attempt_at=now + timedelta(hours=1),
+    )
+    never_attempted = await _create_stopped_session(
+        db_session,
+        user_id=user.id,
+        stopped_at=old_stopped_at,
     )
 
     repo = GpuSessionRepository(db_session)
     results = await repo.list_pending_billing_finalization(
-        grace_cutoff=grace_cutoff, limit=10, quarantine_threshold=5
+        grace_cutoff=grace_cutoff, limit=10, now=now
     )
 
     ids = [r.id for r in results]
-    assert quarantined.id not in ids
-    assert still_trying.id in ids
+    assert past_backoff.id in ids
+    assert never_attempted.id in ids
+    assert still_in_backoff.id not in ids
 
 
-async def test_increment_billing_finalization_attempts_bumps_counter(
+async def test_increment_billing_finalization_attempts_bumps_counter_and_sets_backoff(
     db_session: AsyncSession,
     make_user: UserFactory,
 ) -> None:
-    """increment_billing_finalization_attempts returns the new value and persists it."""
+    """increment_billing_finalization_attempts returns the new value, persists
+    it, and stamps the backoff timestamp it's given (X1)."""
     user = await make_user(email=f"reconciler-bump-{uuid4().hex[:6]}@example.com")
     old_stopped_at = datetime.now(UTC) - timedelta(hours=2)
 
@@ -234,13 +251,17 @@ async def test_increment_billing_finalization_attempts_bumps_counter(
     )
 
     repo = GpuSessionRepository(db_session)
-    new_count = await repo.increment_billing_finalization_attempts(session.id)
+    next_attempt_at = datetime.now(UTC) + timedelta(minutes=40)
+    new_count = await repo.increment_billing_finalization_attempts(
+        session.id, next_attempt_at=next_attempt_at
+    )
 
     assert new_count == 4
 
     # Verify the value is persisted (re-fetch via the same session)
     await db_session.refresh(session)
     assert session.billing_finalization_attempts == 4
+    assert session.billing_reconciliation_next_attempt_at == next_attempt_at
 
 
 async def test_increment_billing_finalization_attempts_starts_from_zero(
@@ -259,7 +280,10 @@ async def test_increment_billing_finalization_attempts_starts_from_zero(
     assert session.billing_finalization_attempts == 0
 
     repo = GpuSessionRepository(db_session)
-    new_count = await repo.increment_billing_finalization_attempts(session.id)
+    next_attempt_at = datetime.now(UTC) + timedelta(minutes=5)
+    new_count = await repo.increment_billing_finalization_attempts(
+        session.id, next_attempt_at=next_attempt_at
+    )
 
     assert new_count == 1
 

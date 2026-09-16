@@ -26,10 +26,13 @@ Three layers, applied in order (round-3 remediation, T1):
    ``KEY = value``), and ``Authorization:``-style / JSON ``"key":``-style markers.
    Whitespace is a hard separator and never treated as part of a value, so this
    layer cannot reach across a line and consume an unrelated token the way a regex
-   with a bare ``\\s*`` could. A URL is redacted wherever it appears — as a bare
-   token, or as the value on the right of ``KEY=`` — not only when the whole
-   token happens to start with ``http(s)://`` (U1, round-4): ``PROVISIONING_SCRIPT``
-   and ``PROVISIONER_WEBHOOK_URL`` are exactly this shape and contain none of the
+   with a bare ``\\s*`` could. A URL is redacted wherever it appears **at any
+   offset** within a token (X4, round-5 remediation — a plain ``str.find``, no
+   regex) — as a bare token, preceded by a non-strippable prefix
+   (``fetch(``, ``url:``, ``msg=failed:``), or as the value on the right of
+   ``KEY=`` — not only when the whole token happens to start with
+   ``http(s)://`` (U1, round-4): ``PROVISIONING_SCRIPT`` and
+   ``PROVISIONER_WEBHOOK_URL`` are exactly this shape and contain none of the
    sensitive-key markers, so without this a query string carrying the callback
    token survived untouched.
 
@@ -44,9 +47,12 @@ Layer 2 (a mapping key, tested in the dict walker) uses a broad, lowercase
 worth avoiding is a false negative — a secret hiding under a key name nobody
 anticipated. Layer 3 (free text — a ``KEY=value`` shape, or a ``KEY:``/JSON
 ``"key":`` marker) uses a boundary-aware test instead: the key is split on
-``_``/``-``/``.`` and a segment must *equal* a marker (plus an ``endswith``
-fallback for glued spellings like ``apikey``/``authtoken``), because a Layer-3
-false positive does not cost one field — a marker matching as a bare substring
+``_``/``-``/``.`` and a segment must *end with* a marker (X3, round-5
+remediation — a plain ``segment.endswith(marker)`` test, which subsumes exact
+equality; it replaced a two-item curated list of specific glued spellings
+that was always one spelling behind — ``mytoken``, ``githubtoken``, and
+``clientsecret`` all fell through it and leaked before this change), because
+a Layer-3 false positive does not cost one field — a marker matching as a bare substring
 (``session`` inside ``session_id``, ``key`` inside ``keyframes``, ``auth`` inside
 ``author``) used to redact to the end of the line, destroying an unbounded run of
 ordinary telemetry text around it. For the same reason, a Layer-3 ``KEY:``-style
@@ -116,10 +122,6 @@ _SENSITIVE_KEY_MARKERS_FREE_TEXT = tuple(
     marker for marker in _SENSITIVE_KEY_MARKERS if marker != "session"
 )
 
-# Layer 3 glued-spelling fallback (U3): compound names with no separator to
-# split on, e.g. `APIKEY=`/`authtoken=`. Checked via `str.endswith`, not
-# segment equality.
-_GLUED_KEY_SUFFIXES = ("apikey", "authtoken")
 
 # Layer 3 exact-match allowlist (U3): header names whose entire remainder of
 # the line really is credential material, so rest-of-line redaction is safe
@@ -179,22 +181,30 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def _is_sensitive_key_segment(key: str) -> bool:
-    """Layer 3 (free-text tokenizer) sensitivity test — boundary-aware (U3).
+    """Layer 3 (free-text tokenizer) sensitivity test — boundary-aware (U3, X3).
 
-    Splits `key` on `_`/`-`/`.` and requires an exact segment match against a
-    Layer-3 marker, with an `endswith` fallback for glued spellings that have
-    no separator to split on (`apikey`, `authtoken`). `session_id`,
-    `keyframes`, `author`, and `monkey` must not match here — none of them
-    contain a marker as a whole `_`/`-`/`.`-delimited segment — see the module
-    docstring for why a Layer-3 false positive is expensive in a way a
-    Layer-2 one is not.
+    Splits `key` on `_`/`-`/`.` and matches if any segment either *equals* a
+    Layer-3 marker, or *ends with* one — the `endswith` arm is what catches
+    glued compound spellings with no separator to split on at all
+    (`mytoken`, `githubtoken`, `clientsecret`, `apikey`, `authtoken`, ...).
+    X3, round-5 remediation: a curated list of specific glued spellings
+    (formerly `_GLUED_KEY_SUFFIXES = ("apikey", "authtoken")`) is always one
+    spelling behind — `mytoken=`/`githubtoken=`/`clientsecret=` all fell
+    through it and leaked. A general suffix test costs one accepted false
+    positive (`monkey` ends with `key`) in exchange for never missing an
+    un-anticipated glued spelling — the same false-negative-averse trade U3
+    already made for this layer (see the module docstring); `keyframes` and
+    `author` still don't match (neither *ends with* a marker: `keyframes`
+    ends with `frames`, `author` ends with `thor`), so they remain
+    unaffected. `session_id` still doesn't match either — "session" was
+    already dropped from `_SENSITIVE_KEY_MARKERS_FREE_TEXT` by U3.
     """
     lowered = key.lower()
-    if lowered.endswith(_GLUED_KEY_SUFFIXES):
-        return True
     normalized = lowered.replace("-", "_").replace(".", "_")
     segments = normalized.split("_")
-    return any(segment in _SENSITIVE_KEY_MARKERS_FREE_TEXT for segment in segments)
+    # `str.endswith` against an equal string is True, so this single test
+    # subsumes the old exact-match check — no separate equality branch needed.
+    return any(segment.endswith(_SENSITIVE_KEY_MARKERS_FREE_TEXT) for segment in segments)
 
 
 def _strip_wrapping(token: str) -> tuple[str, str, str]:
@@ -233,25 +243,55 @@ def _redact_url(url: str) -> str:
         return _REDACTED
 
 
+def _find_url_offset(lowered_core: str) -> int:
+    """Index of the first `http://` or `https://` in `lowered_core`, or -1."""
+    positions = [i for i in (lowered_core.find("http://"), lowered_core.find("https://")) if i >= 0]
+    return min(positions) if positions else -1
+
+
 def _redact_url_in_token(token: str) -> str | None:
-    """If `token`'s core (after stripping wrapping punctuation/quotes) is a
-    URL, redact it and reassemble with the stripped punctuation preserved.
-    Returns `None` when the core is not a URL, so callers can leave
-    non-URL tokens untouched.
+    """If a URL appears anywhere in `token`'s core (after stripping wrapping
+    punctuation/quotes), redact from that point to the end of the core and
+    reassemble with the stripped punctuation and any text before the URL
+    preserved verbatim. Returns `None` when no URL is found, so callers can
+    leave the token untouched.
 
     Shared by both the bare-URL branch and the `KEY=<url>` branch of
     `_redact_free_text` (U1, round-4) so a URL is redacted wherever it
     appears in a token, not only when the *whole* token happens to start with
     `http(s)://` — `PROVISIONING_SCRIPT=<url>` and
     `PROVISIONER_WEBHOOK_URL=<url>` are exactly the shape that fell through
-    before this existed. Stripping wrapping punctuation first (rather than
-    only quotes) also preserves a trailing separator like the `:` in
-    `...token=X: HTTP 404` instead of losing it along with the query (U8).
+    before U1. X4, round-5 remediation: a URL preceded by a prefix that isn't
+    pure wrapping punctuation (`fetch(`, `url:`, `msg=failed:`) still fell
+    through U1's `core.startswith(...)` check, because the URL wasn't at
+    offset 0 even after stripping. Scanning for the URL at any offset (via
+    `str.find`, no regex) subsumes the old strip-then-check logic — this is
+    the only place either branch needs to call.
+
+    If everything before the URL reduces (after stripping any quote) to a
+    sensitive `KEY=`, the whole value is redacted wholesale instead of just
+    the URL's query — matching the `KEY=value` sensitive-key path elsewhere
+    in `_redact_free_text` (see `test_sensitive_key_url_value_is_redacted_
+    wholesale_not_just_query`). Without this, scanning at any offset would
+    let a call on the *whole* token (e.g. `TOKEN=https://...`) hijack that
+    case ahead of the dedicated sensitive-key branch and under-redact it to
+    only the query string.
+
+    Stripping wrapping punctuation first (rather than only quotes) also
+    preserves a trailing separator like the `:` in `...token=X: HTTP 404`
+    instead of losing it along with the query (U8).
     """
     prefix, core, suffix = _strip_wrapping(token)
-    if not core.lower().startswith(("http://", "https://")):
+    idx = _find_url_offset(core.lower())
+    if idx < 0:
         return None
-    return f"{prefix}{_redact_url(core)}{suffix}"
+    before, url_part = core[:idx], core[idx:]
+    key_candidate = before.rstrip(_QUOTE_CHARS)
+    if key_candidate.endswith("="):
+        _, key_core, _ = _strip_wrapping(key_candidate[:-1])
+        if _is_sensitive_key_segment(key_core):
+            return f"{prefix}{before}{_REDACTED}{suffix}"
+    return f"{prefix}{before}{_redact_url(url_part)}{suffix}"
 
 
 def _tokenize(text: str) -> list[tuple[bool, str]]:

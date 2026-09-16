@@ -298,7 +298,7 @@ class GpuSessionRepository:
         *,
         grace_cutoff: datetime,
         limit: int,
-        quarantine_threshold: int | None = None,
+        now: datetime,
     ) -> Sequence[GpuSession]:
         """List stopped sessions whose billing has not been finalized.
 
@@ -306,12 +306,18 @@ class GpuSessionRepository:
         - status = 'stopped' (terminal — the only status _finalize_billing applies to)
         - billing_finalized_at IS NULL (not yet successfully finalized)
         - stopped_at < grace_cutoff (skip in-flight in-line retries)
-        - billing_finalization_attempts < quarantine_threshold, when given (T7,
-          round-3 remediation): once a session crosses the quarantine threshold,
-          the reconciler has already alerted on it every sweep via the ERROR
-          quarantine log — re-selecting it forever just re-emits that alert
-          without ever succeeding. Excluding it here is what makes "quarantined"
-          mean "stop trying" rather than "keep trying and keep shouting".
+        - billing_reconciliation_next_attempt_at IS NULL OR <= now (X1, round-5
+          remediation): a session that has failed reconciliation before is
+          paced by exponential backoff rather than excluded outright (as
+          round-3's T7 quarantine-threshold predicate did — that made
+          "quarantined" mean "never reconciled again", contradicting the
+          documented contract that billing_finalized_at stays NULL so the
+          worker keeps retrying once the underlying issue is fixed). A row
+          past its backoff window is selectable again the moment the outage
+          clears; a chronically failing row still costs at most one attempt
+          per backoff period instead of one per sweep, which is what keeps it
+          from flooding ops alerts or head-of-line-blocking healthy
+          candidates (see BillingReconcilerWorker for the backoff schedule).
 
         Ordered oldest-first so the longest-stuck sessions reconcile first
         on each sweep. Bounded by ``limit`` to cap per-sweep work.
@@ -322,9 +328,11 @@ class GpuSessionRepository:
             # NULL stopped_at skips the grace period — include unconditionally
             # (stopped sessions should always have stopped_at, but be defensive).
             or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
+            or_(
+                GpuSession.billing_reconciliation_next_attempt_at.is_(None),
+                GpuSession.billing_reconciliation_next_attempt_at <= now,
+            ),
         ]
-        if quarantine_threshold is not None:
-            conditions.append(GpuSession.billing_finalization_attempts < quarantine_threshold)
         result = await self._session.execute(
             select(GpuSession).where(*conditions).order_by(GpuSession.stopped_at.asc()).limit(limit)
         )
@@ -335,7 +343,7 @@ class GpuSessionRepository:
         *,
         grace_cutoff: datetime,
         limit: int,
-        quarantine_threshold: int | None = None,
+        now: datetime,
     ) -> Sequence[GpuSession]:
         """List failed-before-active sessions whose base reservation may be unrefunded.
 
@@ -375,9 +383,9 @@ class GpuSessionRepository:
           BillingRepository.has_refund_for_job) — the actual termination condition:
           once BillingService.refund succeeds, the session stops matching and is
           never re-selected.
-        - billing_finalization_attempts < quarantine_threshold, when given (T7)
-          — see list_pending_billing_finalization's matching note; this sweep
-          reuses the same counter/threshold.
+        - billing_reconciliation_next_attempt_at IS NULL OR <= now (X1, round-5
+          remediation) — see list_pending_billing_finalization's matching
+          note; this sweep reuses the same counter/backoff schedule.
 
         Ordered oldest-``stopped_at``-first (U7, round-4 — previously ordered by
         ``created_at`` while filtering on ``stopped_at``; harmless but
@@ -409,24 +417,33 @@ class GpuSessionRepository:
             or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
             exists(has_debit),
             ~exists(has_refund),
+            or_(
+                GpuSession.billing_reconciliation_next_attempt_at.is_(None),
+                GpuSession.billing_reconciliation_next_attempt_at <= now,
+            ),
         ]
-        if quarantine_threshold is not None:
-            conditions.append(GpuSession.billing_finalization_attempts < quarantine_threshold)
         result = await self._session.execute(
             select(GpuSession).where(*conditions).order_by(GpuSession.stopped_at.asc()).limit(limit)
         )
         return result.scalars().all()
 
-    async def increment_billing_finalization_attempts(self, session_id: UUID) -> int:
-        """Bump the attempt counter and return the new value.
+    async def increment_billing_finalization_attempts(
+        self, session_id: UUID, *, next_attempt_at: datetime
+    ) -> int:
+        """Bump the attempt counter, set the backoff timestamp, return the new count.
 
         Called by the reconciler after each failed sweep to track repeat
-        failures for quarantine alerting.
+        failures for quarantine alerting and to pace the next retry (X1,
+        round-5 remediation) — see BillingReconcilerWorker for how
+        ``next_attempt_at`` is computed.
         """
         result = await self._session.execute(
             update(GpuSession)
             .where(GpuSession.id == session_id)
-            .values(billing_finalization_attempts=GpuSession.billing_finalization_attempts + 1)
+            .values(
+                billing_finalization_attempts=GpuSession.billing_finalization_attempts + 1,
+                billing_reconciliation_next_attempt_at=next_attempt_at,
+            )
             .returning(GpuSession.billing_finalization_attempts)
         )
         new_count = result.scalar_one()

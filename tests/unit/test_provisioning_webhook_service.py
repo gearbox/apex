@@ -105,6 +105,33 @@ class TestHandleFailure:
         assert status == HTTP_401_UNAUTHORIZED
         gpu_session_service.fail_pre_active_session.assert_not_awaited()
 
+    async def test_wrong_token_for_known_session_logs_stale_token_event(self) -> None:
+        """X2, round-5 remediation: a token that fails validation against a
+        session that *does* exist gets a distinct log event from an unknown
+        session — this is exactly the shape of a delayed webhook call from a
+        node a provisioning retry has just abandoned (its callback token was
+        rotated out from under it), which is expected during the retry's
+        recreation window, not necessarily a bug."""
+        from structlog.testing import capture_logs
+
+        gpu_session_service = AsyncMock()
+        service = ProvisioningWebhookService(
+            gpu_session_service=gpu_session_service,
+            session_factory=_make_mock_session_factory(),
+            settings=_make_settings(),
+        )
+        row = _make_session_row(token="correct-token")
+        with patch(_REPO_PATH) as MockRepo, capture_logs() as logs:
+            MockRepo.return_value.get_by_id = AsyncMock(return_value=row)
+            status = await service.handle_failure(
+                session_id=uuid4(), token="stale-token", payload=_make_payload()
+            )
+
+        assert status == HTTP_401_UNAUTHORIZED
+        events = [entry["event"] for entry in logs]
+        assert "gpu_session.callback.stale_token" in events
+        assert "provisioning.webhook.rejected" not in events
+
     async def test_missing_token_is_401(self) -> None:
         gpu_session_service = AsyncMock()
         service = ProvisioningWebhookService(
