@@ -75,6 +75,7 @@ async def test_terminal_session_cascade_bumps_revision_and_emits_operation_updat
             settings=MagicMock(),
             billing_service=MagicMock(),
             cooldown_store=NullNodeCooldownStore(),
+            provisioning_script_service=AsyncMock(),
             event_bus=event_bus,
         )
 

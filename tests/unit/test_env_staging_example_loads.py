@@ -49,6 +49,9 @@ def test_env_staging_example_loads_into_settings(monkeypatch: pytest.MonkeyPatch
         "AISHA_CF_TUNNEL_DOMAIN": "test.example",
         "AI_BUNDLES_GITHUB_TOKEN": "ghp_test",
         "APEX_CALLBACK_URL": "https://staging.test.example",
+        # Must match PROVISIONING_REF_PATTERN (vX.Y.Z tag or full 40-hex SHA) —
+        # the example file's human-readable placeholder does not.
+        "PROVISIONING_SCRIPT_REF": "v1.0.0",
         "R2_ACCOUNT_ID": "r2_test",
         "R2_ACCESS_KEY_ID": "r2_test",
         "R2_SECRET_ACCESS_KEY": "r2_test",

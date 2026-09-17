@@ -51,6 +51,7 @@ from src.api.routes.library_tag import LibraryTagController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.payment_provider_admin import PaymentProviderAdminController
 from src.api.routes.providers import ProvidersController
+from src.api.routes.provisioning import ProvisioningController
 from src.api.routes.push import PushController
 from src.api.routes.sse import SSEController
 from src.api.routes.storage import StorageController
@@ -475,6 +476,7 @@ def create_app() -> Litestar:
             # GPU Sessions
             GpuSessionController,  # /v1/sessions/*
             InternalGpuSessionController,  # /v1/internal/gpu-sessions/*
+            ProvisioningController,  # /v1/provisioning/scripts/*, /v1/provisioning/webhook/*
             # Storage
             StorageController,
             # Video frame extraction

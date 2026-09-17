@@ -147,6 +147,7 @@ class TestUpdateInstance:
             vastai_cost_per_hour_micros=500000,
             vastai_gpu_name="RTX 4090",
             provisioning_started_at=datetime.now(UTC),
+            callback_token_hash="a" * 64,
         )
 
         db.execute.assert_awaited_once()

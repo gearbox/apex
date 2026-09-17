@@ -2556,7 +2556,11 @@ async def test_operation_event_service_never_transitions_a_deployment(
     )
     operation_id = commands[0].operation_id
 
-    receiver = OperationEventService()
+    settings = MagicMock()
+    settings.github_content_token = ""
+    settings.hf_token = ""
+    settings.civitai_api_token = ""
+    receiver = OperationEventService(settings=settings)
     now = datetime.now(UTC)
     async with orchestration_session_factory() as session, session.begin():
         result = await receiver.handle_event(

@@ -30,8 +30,29 @@ class AccountInactiveError(BillingError):
     """Token account is suspended/inactive. → HTTP 403"""
 
 
+class RefundNotEligibleReason(StrEnum):
+    """Structured discriminator for RefundNotEligibleError (U6, round-4).
+
+    Callers that need to distinguish "the ordinary already-refunded race" from
+    a genuine anomaly (e.g. reconcile_pending_refund) must branch on this, not
+    on ``str(exc)`` — a message-text match silently stops working the moment
+    the message is reworded, at which point a real anomaly is misreported as
+    the benign case.
+    """
+
+    NO_DEBIT_FOUND = "no_debit_found"
+    ALREADY_REFUNDED = "already_refunded"
+    ACCOUNT_NOT_FOUND = "account_not_found"
+    INVALID_AMOUNT = "invalid_amount"
+    EXCEEDS_ORIGINAL_DEBIT = "exceeds_original_debit"
+
+
 class RefundNotEligibleError(BillingError):
     """No debit found for job, or already refunded. → HTTP 409"""
+
+    def __init__(self, message: str, *, reason: RefundNotEligibleReason) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 class PriceNotFoundError(BillingError):

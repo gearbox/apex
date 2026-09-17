@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import msgspec
 import pytest
 from litestar import Litestar
 from litestar.di import Provide
@@ -21,11 +22,11 @@ from litestar.testing import TestClient
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.schemas.events import EventType
 from src.api.schemas.gpu_session import GpuSessionResponse, OperationEventBody
+from src.api.security.callback_token import validate_callback_token
 from src.api.services.event_bus import EventBus
 from src.api.services.gpu_session.operation_event_service import (
     OperationEventResult,
     OperationEventService,
-    _validate_token,
 )
 from src.core.enums import DeploymentStatus, GpuSessionStatus, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
@@ -39,6 +40,16 @@ _OPERATION_REPO = (
 )
 _COMMAND_REPO = "src.api.services.gpu_session.operation_event_service.GpuSessionCommandRepository"
 _TOKEN = "callback-token"
+
+
+def _service() -> OperationEventService:
+    """OperationEventService with no real Layer-1 known secrets configured —
+    these tests exercise auth/routing/Layer-3 redaction, not Layer 1."""
+    settings = MagicMock()
+    settings.github_content_token = ""
+    settings.hf_token = ""
+    settings.civitai_api_token = ""
+    return OperationEventService(settings=settings)
 
 
 def _event_body(
@@ -155,13 +166,13 @@ async def _write_event(
 
 class TestTokenValidation:
     def test_valid_token_matches(self) -> None:
-        assert _validate_token(_TOKEN, hashlib.sha256(_TOKEN.encode()).hexdigest()) is True
+        assert validate_callback_token(_TOKEN, hashlib.sha256(_TOKEN.encode()).hexdigest()) is True
 
     def test_wrong_or_missing_token_is_rejected(self) -> None:
         stored = hashlib.sha256(_TOKEN.encode()).hexdigest()
-        assert _validate_token("wrong", stored) is False
-        assert _validate_token(_TOKEN, None) is False
-        assert _validate_token(_TOKEN, "") is False
+        assert validate_callback_token("wrong", stored) is False
+        assert validate_callback_token(_TOKEN, None) is False
+        assert validate_callback_token(_TOKEN, "") is False
 
 
 class TestOperationEventService:
@@ -175,7 +186,7 @@ class TestOperationEventService:
             target_bundle_version="260105-01",
             progress={"future_field": {"preserved": True}},
         )
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -204,7 +215,7 @@ class TestOperationEventService:
         session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="succeeded")
-        service = OperationEventService()
+        service = _service()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -238,7 +249,7 @@ class TestOperationEventService:
         session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="running")
-        service = OperationEventService()
+        service = _service()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -263,7 +274,7 @@ class TestOperationEventService:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id, status="failed")
-        service = OperationEventService()
+        service = _service()
 
         with (
             patch(_SESSION_REPO) as SessionRepo,
@@ -289,7 +300,7 @@ class TestOperationEventService:
         session = _gpu_session(session_id=session_id)
         session.bootstrap_operation_id = uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -312,7 +323,7 @@ class TestOperationEventService:
         session_id, operation_id = uuid4(), uuid4()
         session = _gpu_session(session_id=session_id)
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -336,7 +347,7 @@ class TestOperationEventService:
     async def test_missing_session_does_not_write(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -353,7 +364,7 @@ class TestOperationEventService:
     async def test_existing_session_with_wrong_token_does_not_write(self) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -384,7 +395,7 @@ class TestOperationEventService:
     async def test_non_terminal_sessions_accept_events(self, status: GpuSessionStatus) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -407,7 +418,7 @@ class TestOperationEventService:
     async def test_terminal_sessions_do_not_write(self, status: GpuSessionStatus) -> None:
         session_id, operation_id = uuid4(), uuid4()
         event = _decode_event(session_id=session_id, operation_id=operation_id)
-        service = OperationEventService()
+        service = _service()
 
         with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
             session_repo = AsyncMock()
@@ -424,8 +435,132 @@ class TestOperationEventService:
         operation_repo.apply_event.assert_not_awaited()
 
 
+class TestOperationEventRedaction:
+    """S1: no node-supplied string reaches a repository write unredacted.
+
+    D3 put the callback token into the node's own environment
+    (PROVISIONING_SCRIPT / PROVISIONER_WEBHOOK_URL query strings), so any
+    failing command/curl error/env dump a node echoes into telemetry can
+    otherwise leak it into gpu_session_operations, gpu_session_commands.error,
+    and the published SSE event.
+    """
+
+    _TOKENIZED_URL = (
+        "https://apex.test/v1/provisioning/scripts/comfyui/v1.0.0"
+        "?session=11111111-1111-1111-1111-111111111111&token=leak-me-secret"
+    )
+
+    def _tokenized_event(
+        self,
+        *,
+        session_id: UUID,
+        operation_id: UUID,
+        status: str = "running",
+        progress: dict[str, object] | None = None,
+        plan: dict[str, object] | None = None,
+        summary: dict[str, object] | None = None,
+    ) -> OperationEventBody:
+        raw = _event_body(session_id=session_id, operation_id=operation_id, status=status)
+        raw["message"] = f"Failed to download script from {self._TOKENIZED_URL}: HTTP Error 404"
+        raw["error"] = f"curl {self._TOKENIZED_URL} failed"
+        if progress is not None:
+            raw["progress"] = progress
+        if plan is not None:
+            raw["plan"] = plan
+        if summary is not None:
+            raw["summary"] = summary
+        return msgspec.convert(raw, type=OperationEventBody)
+
+    async def test_message_and_error_are_redacted_before_apply_event(self) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = self._tokenized_event(session_id=session_id, operation_id=operation_id)
+        service = _service()
+
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        apply_kwargs = operation_repo.apply_event.await_args.kwargs
+        assert "leak-me-secret" not in apply_kwargs["message"]
+        assert "leak-me-secret" not in apply_kwargs["error"]
+        assert "?" not in apply_kwargs["message"]
+        assert "?" not in apply_kwargs["error"]
+
+    async def test_terminal_command_error_is_redacted_before_mark_terminal(self) -> None:
+        session_id, operation_id, command_id = uuid4(), uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = self._tokenized_event(
+            session_id=session_id, operation_id=operation_id, status="failed"
+        )
+        service = _service()
+
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_OPERATION_REPO) as OperationRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id, command_id=command_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+            command_repo = AsyncMock()
+            CommandRepo.return_value = command_repo
+            command_repo.mark_terminal.return_value = True
+
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        mark_terminal_kwargs = command_repo.mark_terminal.await_args.kwargs
+        assert "leak-me-secret" not in mark_terminal_kwargs["error"]
+        assert "?" not in mark_terminal_kwargs["error"]
+
+    async def test_progress_plan_summary_are_redacted_at_any_depth(self) -> None:
+        session_id, operation_id = uuid4(), uuid4()
+        session = _gpu_session(session_id=session_id)
+        event = self._tokenized_event(
+            session_id=session_id,
+            operation_id=operation_id,
+            progress={"work": {"last_command": f"curl {self._TOKENIZED_URL}"}},
+            plan={"phases": [{"detail": f"fetch {self._TOKENIZED_URL}"}]},
+            summary={"final_error": f"failed: {self._TOKENIZED_URL}"},
+        )
+        service = _service()
+
+        with patch(_SESSION_REPO) as SessionRepo, patch(_OPERATION_REPO) as OperationRepo:
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = session
+            operation_repo = AsyncMock()
+            OperationRepo.return_value = operation_repo
+            operation_repo.get.return_value = _operation(
+                operation_id=operation_id, session_id=session_id
+            )
+            operation_repo.apply_event.return_value = EventOutcome(applied=True, reason="applied")
+
+            await _write_event(service, session_id=session_id, bearer_token=_TOKEN, event=event)
+
+        apply_kwargs = operation_repo.apply_event.await_args.kwargs
+        assert "leak-me-secret" not in str(apply_kwargs["progress"])
+        assert "leak-me-secret" not in str(apply_kwargs["plan"])
+        assert "leak-me-secret" not in str(apply_kwargs["summary"])
+
+
 def _stub_service(result: OperationEventResult | None = None) -> OperationEventService:
-    service = OperationEventService()
+    service = _service()
     service.handle_event = AsyncMock(  # type: ignore[method-assign]
         return_value=result or OperationEventResult(authorized=True, status=200)
     )

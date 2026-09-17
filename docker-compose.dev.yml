@@ -42,6 +42,8 @@ services:
       - ./alembic:/app/alembic:ro
       - ./tests:/app/tests:ro
       - ./.env.staging.example:/app/.env.staging.example:ro
+      - ./docker-compose.staging.yml:/app/docker-compose.staging.yml:ro
+      - ./docker-compose.portainer-staging.yml:/app/docker-compose.portainer-staging.yml:ro
       # Pass through coverage report to local filesystem
       - ./htmlcov:/app/htmlcov
     

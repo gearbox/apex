@@ -226,6 +226,25 @@ Choose **"Repository"** (not "Web editor"):
 | `CLOUDFLARE_TUNNEL_TOKEN` | `your-tunnel-token` |
 | `XAI_API_KEY` | `your-key` |
 
+**Every `change-me-*` placeholder in `.env.staging.example` must be replaced
+before first boot** — a `change-me-*` value left in place either fails to
+construct `Settings` at startup or silently ships a non-functional default
+(a weak Postgres/Redis password, an inert VAPID key, a NowPayments key that
+rejects every request). Search the file for `change-me` and fill in every
+match, including:
+
+- `POSTGRES_PASSWORD` / `REDIS_PASSWORD` — a real strong password, not the
+  placeholder text.
+- `PROVISIONING_SCRIPT_REF` — the gearbox/aisha release tag or commit SHA to
+  pin bootstrap script delivery to. Accepted formats: a `vX.Y.Z` tag (e.g.
+  `v1.2.0`) or a full 40-character hex commit SHA. Anything else fails
+  `Settings` validation at startup.
+- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` — generate with
+  `uv run python tools/generate_vapid_keys.py`; both are required together
+  (with `REDIS_URL`) for Web Push to enable.
+- `NOWPAYMENTS_API_KEY_VEX` / `NOWPAYMENTS_IPN_SECRET_VEX` — from the
+  NowPayments dashboard for this product, if crypto top-ups are enabled.
+
 Click **Deploy the stack**.
 
 ### Step 4: Get the Portainer Webhook URL

@@ -37,6 +37,7 @@ from src.api.services.billing_errors import (
     PaymentVerificationReason,
     PriceNotFoundError,
     RefundNotEligibleError,
+    RefundNotEligibleReason,
 )
 from src.api.services.idempotency import IdempotencyConflictError
 from src.api.services.payments.contracts import WebhookEnvelope
@@ -166,7 +167,9 @@ class TestBusinessExceptionHandlers:
 
     def test_refund_not_eligible_logs_and_returns_409(self) -> None:
         req = _mock_request()
-        exc = RefundNotEligibleError("Already refunded")
+        exc = RefundNotEligibleError(
+            "Already refunded", reason=RefundNotEligibleReason.ALREADY_REFUNDED
+        )
 
         with capture_logs() as cap:
             resp = refund_not_eligible_handler(req, exc)
