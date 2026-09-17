@@ -93,7 +93,6 @@ cannot parse is a URL whose query it cannot safely strip, so the fail-safe
 output is the redaction marker, not the input.
 """
 
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -445,12 +444,7 @@ def _redact_intra_token_pairs(
             value_end = _find_pair_value_end(core, value_start)
             value = core[value_start:value_end]
 
-            if (
-                (not value
-                and value_start == len(core))
-                or (value
-                and _is_auth_scheme_value(value))
-            ):
+            if (not value and value_start == len(core)) or (value and _is_auth_scheme_value(value)):
                 follow_up = "remainder" if is_header else "next"
             elif value:
                 quote = value[0] if value[0] in _QUOTE_CHARS else None
