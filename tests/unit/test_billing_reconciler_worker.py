@@ -161,11 +161,44 @@ class TestSweep:
 
             await worker.run_once()
 
-        mock_repo.increment_billing_finalization_attempts.assert_called_once_with(
+        mock_repo.increment_billing_finalization_attempts.assert_called_once_with(candidate.id)
+        mock_repo.set_billing_reconciliation_next_attempt_at.assert_called_once_with(
             candidate.id, next_attempt_at=ANY
         )
         # No quarantine error — just still_failing
         mocks["gpu_session_service"].finalize_billing_for_session.assert_called_once_with(candidate)
+
+    async def test_backoff_uses_the_atomic_updates_returned_count(self) -> None:
+        """Y2: a stale candidate count must not choose the backoff exponent.
+
+        The in-memory row says this is the first failure, while the atomic SQL
+        update returns four. The persisted timestamp must therefore use the
+        fourth-failure (40 minute) schedule rather than five minutes.
+        """
+        worker, mocks = _make_worker()
+        candidate = _make_gpu_session(billing_finalization_attempts=0)
+        mocks["gpu_session_service"].finalize_billing_for_session.return_value = False
+        fixed_now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch(
+                "src.api.services.gpu_session.billing_reconciler_worker.datetime"
+            ) as mock_datetime,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_pending_billing_finalization.return_value = [candidate]
+            mock_repo.increment_billing_finalization_attempts.return_value = 4
+            mock_datetime.now.return_value = fixed_now
+
+            await worker.run_once()
+
+        mock_repo.increment_billing_finalization_attempts.assert_called_once_with(candidate.id)
+        mock_repo.set_billing_reconciliation_next_attempt_at.assert_called_once_with(
+            candidate.id,
+            next_attempt_at=fixed_now + timedelta(minutes=40),
+        )
 
     async def test_quarantine_threshold_triggers_error_log_once_on_crossing(self) -> None:
         """Attempt counter crosses threshold → quarantine log at ERROR; session NOT mutated."""

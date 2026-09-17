@@ -303,17 +303,24 @@ class BillingReconcilerWorker(PeriodicWorker):
         return "still_failing"
 
     async def _bump_and_check_quarantine(self, session_row: GpuSession) -> int:
-        """Increment attempt counter, set the backoff timestamp, return the new value."""
+        """Bump, then calculate/store backoff from the returned DB count.
+
+        The counter increment is atomic in SQL. Its returned value, not the
+        candidate object's possibly stale attempt count, selects the backoff
+        exponent; both writes commit together in this short transaction (Y2,
+        round-6 remediation).
+        """
         now = datetime.now(UTC)
-        next_attempt_at = compute_next_attempt_at(
-            session_row.billing_finalization_attempts + 1,
-            now=now,
-            base_minutes=self._settings.billing_reconciler_backoff_base_minutes,
-            cap_hours=self._settings.billing_reconciler_backoff_cap_hours,
-        )
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
-            new_count = await repo.increment_billing_finalization_attempts(
+            new_count = await repo.increment_billing_finalization_attempts(session_row.id)
+            next_attempt_at = compute_next_attempt_at(
+                new_count,
+                now=now,
+                base_minutes=self._settings.billing_reconciler_backoff_base_minutes,
+                cap_hours=self._settings.billing_reconciler_backoff_cap_hours,
+            )
+            await repo.set_billing_reconciliation_next_attempt_at(
                 session_row.id, next_attempt_at=next_attempt_at
             )
             await db.commit()

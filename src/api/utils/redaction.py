@@ -22,11 +22,14 @@ Three layers, applied in order (round-3 remediation, T1):
    still caught as long as the key name itself is recognizable.
 3. **A tokenizer, best-effort, for free text** — walks the string once on
    whitespace boundaries and inspects each non-whitespace token for URL query
-   strings, ``KEY=value`` assignment shapes (quoted or not, split across tokens as
-   ``KEY = value``), and ``Authorization:``-style / JSON ``"key":``-style markers.
-   Whitespace is a hard separator and never treated as part of a value, so this
-   layer cannot reach across a line and consume an unrelated token the way a regex
-   with a bare ``\\s*`` could. A URL is redacted wherever it appears **at any
+   strings and one or more ``KEY=value`` / ``KEY:value`` pairs (quoted or not,
+   split across tokens as ``KEY = value``). Within a token, pair values stop at
+   a structural delimiter (comma, semicolon, ampersand, closing brace/bracket/
+   parenthesis) so redacting ``{"token":"x","message":"keep"}`` cannot consume
+   the unrelated ``message`` field. Whitespace is a hard separator and never
+   treated as part of a value, so this layer cannot reach across a line and
+   consume an unrelated token the way a regex with a bare ``\\s*`` could. A URL is
+   redacted wherever it appears **at any
    offset** within a token (X4, round-5 remediation — a plain ``str.find``, no
    regex) — as a bare token, preceded by a non-strippable prefix
    (``fetch(``, ``url:``, ``msg=failed:``), or as the value on the right of
@@ -90,6 +93,7 @@ cannot parse is a URL whose query it cannot safely strip, so the fail-safe
 output is the redaction marker, not the input.
 """
 
+
 from __future__ import annotations
 
 from typing import Any, cast
@@ -144,6 +148,14 @@ _REST_OF_LINE_HEADER_NAMES = frozenset(
 # marker (e.g. "Authorization: Bearer [REDACTED]", not "Authorization: [REDACTED]").
 _AUTH_SCHEME_WORDS = frozenset({"bearer", "basic", "token", "digest"})
 
+# Layer 3 can contain several assignment-like pairs without whitespace, for
+# example msgspec's compact JSON or shell/query-string fragments. A value ends
+# at a structural delimiter rather than at every following separator: that is
+# what lets the scanner keep examining ``a=1;token=x`` while preserving the
+# unrelated fields around a redacted JSON value.
+_PAIR_SEPARATORS = frozenset({"=", ":"})
+_VALUE_TERMINATORS = frozenset({",", ";", "&", "}", "]", ")"})
+
 # Punctuation stripped from a token's edges before it is inspected for shape —
 # quotes, braces, and the trailing ':' that marks a header/JSON-key token. Square
 # brackets are deliberately excluded: they wrap our own [REDACTED] marker, and
@@ -151,6 +163,11 @@ _AUTH_SCHEME_WORDS = frozenset({"bearer", "basic", "token", "digest"})
 # value (breaking idempotency) instead of treating it as stable output.
 _STRIP_CHARS = "\"'(){}<>,;:"
 _QUOTE_CHARS = "\"'"
+
+# Square brackets are intentionally not in _STRIP_CHARS: a second pass must
+# leave [REDACTED] stable. They *are* safe to strip while recognizing a pair
+# key, where they can only be JSON/list wrapping syntax (e.g. [{"token":...]).
+_PAIR_KEY_STRIP_CHARS = f"{_STRIP_CHARS}[]"
 
 # Layer 1: ignore settings values shorter than this so an empty/trivial config
 # value can never blank out unrelated text.
@@ -246,7 +263,7 @@ def _redact_url(url: str) -> str:
 def _find_url_offset(lowered_core: str) -> int:
     """Index of the first `http://` or `https://` in `lowered_core`, or -1."""
     positions = [i for i in (lowered_core.find("http://"), lowered_core.find("https://")) if i >= 0]
-    return min(positions) if positions else -1
+    return min(positions, default=-1)
 
 
 def _redact_url_in_token(token: str) -> str | None:
@@ -294,6 +311,166 @@ def _redact_url_in_token(token: str) -> str | None:
     return f"{prefix}{before}{_redact_url(url_part)}{suffix}"
 
 
+def _strip_pair_key(key: str) -> str:
+    """Remove punctuation that can wrap a key inside a compact token.
+
+    This is intentionally narrower in scope than _strip_wrapping: square
+    brackets stay significant for ordinary value redaction so ``[REDACTED]``
+    is idempotent, but are only JSON/list wrapping syntax when recognizing the
+    key portion of ``[{\"token\":...}]``.
+    """
+    return key.strip(_PAIR_KEY_STRIP_CHARS)
+
+
+def _is_rest_of_line_header(key: str) -> bool:
+    """Whether a compact pair key names a credential-only HTTP header."""
+    return _strip_pair_key(key).lower() in _REST_OF_LINE_HEADER_NAMES
+
+
+def _is_sensitive_pair_key(key: str) -> bool:
+    """Layer-3 pair-key test, including exact credential-header names."""
+    stripped_key = _strip_pair_key(key)
+    return stripped_key.lower() in _REST_OF_LINE_HEADER_NAMES or _is_sensitive_key_segment(
+        stripped_key
+    )
+
+
+def _pair_key_before_separator(
+    core: str, *, separator_at: int, last_terminator: int, last_separator: int
+) -> str:
+    """Return the most specific plausible key before a pair separator.
+
+    Structural terminators define the normal start of a pair. Looking back to
+    the preceding pair separator as a fallback also catches compact nested
+    forms such as ``opts=--token=X`` and ``headers={\"Authorization\":X}``,
+    whose sensitive pair begins inside the preceding value.
+    """
+    structural_start = last_terminator + 1
+    key = core[structural_start:separator_at]
+    if _is_sensitive_pair_key(key) or last_separator <= last_terminator:
+        return key
+    return core[last_separator + 1 : separator_at]
+
+
+def _is_auth_scheme_value(value: str) -> bool:
+    """Whether a pair's complete in-token value is an auth scheme word."""
+    _, core, _ = _strip_wrapping(value)
+    return core.lower() in _AUTH_SCHEME_WORDS
+
+
+def _replace_spans(text: str, replacements: list[tuple[int, int, str]]) -> str:
+    """Apply ordered, non-overlapping replacements without using a regex."""
+    if not replacements:
+        return text
+
+    pieces: list[str] = []
+    previous_end = 0
+    for start, end, replacement in replacements:
+        pieces.extend((text[previous_end:start], replacement))
+        previous_end = end
+    pieces.append(text[previous_end:])
+    return "".join(pieces)
+
+
+def _find_pair_value_end(core: str, value_start: int) -> int:
+    """Find a bounded pair value, preserving an existing redaction marker.
+
+    ``]`` is deliberately a structural terminator, but it is also part of our
+    stable ``[REDACTED]`` output. Treating that marker as one existing value
+    prevents a second pass from mistaking its closing bracket for a malformed,
+    unclosed quote and consuming the rest of the line.
+    """
+    marker_start = value_start
+    if marker_start < len(core) and core[marker_start] in _QUOTE_CHARS:
+        marker_start += 1
+    if core.startswith(_REDACTED, marker_start):
+        value_end = marker_start + len(_REDACTED)
+        if (
+            value_start < marker_start
+            and value_end < len(core)
+            and core[value_end] == core[value_start]
+        ):
+            value_end += 1
+        return value_end
+
+    value_end = value_start
+    while value_end < len(core) and core[value_end] not in _VALUE_TERMINATORS:
+        value_end += 1
+    return value_end
+
+
+def _redact_intra_token_pairs(
+    token: str,
+) -> tuple[str, str | None, tuple[str, str, str] | None]:
+    """Redact every sensitive ``key=value`` / ``key:value`` pair in ``token``.
+
+    The scanner is deliberately structural rather than regex-based. A pair
+    value extends to the first member of _VALUE_TERMINATORS or the token end;
+    the bound preserves sibling JSON/query fields while letting the scan resume
+    after the delimiter. It returns a follow-up mode for a marker whose value
+    starts in the next whitespace token, plus the parts needed to redact an
+    unclosed quoted value spanning whitespace.
+    """
+    prefix, core, suffix = _strip_wrapping(token)
+    # _strip_wrapping treats quotes/braces/colons at the edge as punctuation.
+    # They are meaningful to this scanner: appending them makes `token:`,
+    # `{"token":"x"}`, and similar compact forms visible as pairs while the
+    # prefix remains available for exact reassembly.
+    core = f"{core}{suffix}"
+
+    replacements: list[tuple[int, int, str]] = []
+    follow_up: str | None = None
+    last_terminator = -1
+    last_separator = -1
+    i = 0
+    while i < len(core):
+        char = core[i]
+        if char in _VALUE_TERMINATORS:
+            last_terminator = i
+            i += 1
+            continue
+        if char not in _PAIR_SEPARATORS:
+            i += 1
+            continue
+
+        key = _pair_key_before_separator(
+            core,
+            separator_at=i,
+            last_terminator=last_terminator,
+            last_separator=last_separator,
+        )
+        is_header = _is_rest_of_line_header(key)
+        if _is_sensitive_pair_key(key):
+            value_start = i + 1
+            value_end = _find_pair_value_end(core, value_start)
+            value = core[value_start:value_end]
+
+            if (
+                (not value
+                and value_start == len(core))
+                or (value
+                and _is_auth_scheme_value(value))
+            ):
+                follow_up = "remainder" if is_header else "next"
+            elif value:
+                quote = value[0] if value[0] in _QUOTE_CHARS else None
+                if quote is not None and quote not in value[1:]:
+                    # Preserve the existing KEY="a b" behavior for a quoted
+                    # value whose closing quote falls in a later whitespace
+                    # token. The caller consumes those later chunks safely.
+                    return token, None, (f"{prefix}{core[:i]}", char, quote)
+                replacements.append((value_start, value_end, _redact_value_token(value)))
+                # A credential-only header is safe to redact through the rest
+                # of its line even when its first value is compactly attached.
+                if is_header:
+                    follow_up = "remainder"
+
+        last_separator = i
+        i += 1
+
+    return f"{prefix}{_replace_spans(core, replacements)}", follow_up, None
+
+
 def _tokenize(text: str) -> list[tuple[bool, str]]:
     """Split `text` into (is_whitespace, chunk) segments that concatenate back to it."""
     segments: list[tuple[bool, str]] = []
@@ -308,9 +485,14 @@ def _tokenize(text: str) -> list[tuple[bool, str]]:
 
 
 def _consume_quoted_value(
-    segments: list[tuple[bool, str]], out: list[str], start: int, left: str, quote: str
+    segments: list[tuple[bool, str]],
+    out: list[str],
+    start: int,
+    left: str,
+    separator: str,
+    quote: str,
 ) -> int:
-    """Handle `KEY="a b"` where the value's closing quote is in a later token.
+    """Handle `KEY="a b"` / `KEY:"a b"` values spanning later tokens.
 
     Redacts everything from the opening quote (in the `start` token) through the
     token that closes it (or through the end of the string if it is never closed),
@@ -325,7 +507,7 @@ def _consume_quoted_value(
             break
         j += 1
     end = closed_at if closed_at is not None else n - 1
-    out[start] = f"{left}={quote}{_REDACTED}{quote}"
+    out[start] = f"{left}{separator}{quote}{_REDACTED}{quote}"
     for k in range(start + 1, end + 1):
         out[k] = ""
     return end + 1
@@ -427,47 +609,28 @@ def _redact_free_text(text: str) -> str:
             i += 1
             continue
 
-        if "=" in token:
-            left, _, right = token.partition("=")
-            _, left_core, _ = _strip_wrapping(left)
-            if _is_sensitive_key_segment(left_core):
-                quote = right[0] if right and right[0] in _QUOTE_CHARS else None
-                unclosed = quote is not None and not (len(right) >= 2 and right.endswith(quote))
-                if quote is not None and unclosed:
-                    i = _consume_quoted_value(segments, out, i, left, quote)
-                    prev_bare_sensitive_key = False
-                    continue
-                out[i] = f"{left}={_redact_value_token(right)}" if right else token
-            elif right:
-                # U1: the key itself isn't recognized as sensitive, but the
-                # value may still be a URL carrying a secret in its query
-                # string (e.g. PROVISIONING_SCRIPT=<url>) — strip that.
-                redacted_right = _redact_url_in_token(right)
-                if redacted_right is not None:
-                    out[i] = f"{left}={redacted_right}"
+        redacted_pairs, follow_up, unclosed_quote = _redact_intra_token_pairs(token)
+        if unclosed_quote is not None:
+            left, separator, quote = unclosed_quote
+            i = _consume_quoted_value(segments, out, i, left, separator, quote)
             prev_bare_sensitive_key = False
-            i += 1
             continue
 
-        _, core, suffix = _strip_wrapping(token)
-        if ":" in suffix and core:
-            # U3: the exact-match header allowlist is checked independently
-            # of the boundary-aware segment test below — "authorization" no
-            # longer matches the substring marker "auth" under boundary
-            # rules (it has no `_`/`-`/`.` to split on), which is exactly why
-            # it must be named in the allowlist rather than relying on that
-            # test. Anything in the allowlist gets full rest-of-line
-            # redaction; any other sensitive `KEY:` marker only costs the one
-            # value token that follows it.
-            if core.lower() in _REST_OF_LINE_HEADER_NAMES:
-                i = _redact_remainder_of_line(segments, out, i)
-                prev_bare_sensitive_key = False
-                continue
-            if _is_sensitive_key_segment(core):
-                i = _redact_next_value_token(segments, out, i)
-                prev_bare_sensitive_key = False
-                continue
+        # A preceding split `KEY = value` or header helper can already have
+        # redacted this segment. Do not overwrite that result while walking
+        # the original token list.
+        if out[i] == token:
+            out[i] = redacted_pairs
+        if follow_up == "remainder":
+            i = _redact_remainder_of_line(segments, out, i)
+            prev_bare_sensitive_key = False
+            continue
+        if follow_up == "next":
+            i = _redact_next_value_token(segments, out, i)
+            prev_bare_sensitive_key = False
+            continue
 
+        _, core, _ = _strip_wrapping(token)
         prev_bare_sensitive_key = bool(core) and _is_sensitive_key_segment(core)
         i += 1
 

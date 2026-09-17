@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+import msgspec
 import pytest
 
 from src.api.utils.redaction import (
@@ -300,6 +301,105 @@ class TestX4UrlAtAnyOffsetInToken:
         redacted = redact_secrets('TOKEN="https://a.test/x?y=1"', max_length=500)
         assert redacted == 'TOKEN="[REDACTED]"'
         assert "a.test" not in redacted
+
+
+# ---------------------------------------------------------------------------
+# Y1 (round-6): a compact token can hold many KEY=value / KEY:value pairs.
+# msgspec emits this no-whitespace JSON form in production, so every observed
+# leak shape and the nearby preservation boundary has an exact-output test.
+# ---------------------------------------------------------------------------
+
+
+_Y1_COMPACT_LEAK_CASES: tuple[tuple[str, str], ...] = (
+    ("Authorization:Bearer CALLBACKTOK", "Authorization:Bearer [REDACTED]"),
+    ("authorization:CALLBACKTOK", "authorization:[REDACTED]"),
+    ("x-auth-token:CALLBACKTOK", "x-auth-token:[REDACTED]"),
+    ("X-Api-Key:CALLBACKTOK", "X-Api-Key:[REDACTED]"),
+    ("cookie:a=CALLBACKTOK", "cookie:[REDACTED]"),
+    ("api_key:CALLBACKTOK", "api_key:[REDACTED]"),
+    ("token:'CALLBACKTOK'", "token:'[REDACTED]'"),
+    ('token:"CALLBACKTOK"', 'token:"[REDACTED]"'),
+    ('{"token":"CALLBACKTOK"}', '{"token":"[REDACTED]"}'),
+    ('[{"secret":"CALLBACKTOK"}]', '[{"secret":"[REDACTED]"}]'),
+    ("a=1;token=CALLBACKTOK;b=2", "a=1;token=[REDACTED];b=2"),
+    ("env=prod&api_key=CALLBACKTOK", "env=prod&api_key=[REDACTED]"),
+    ("opts=--token=CALLBACKTOK", "opts=--token=[REDACTED]"),
+    ("x=1,secret=CALLBACKTOK", "x=1,secret=[REDACTED]"),
+    (
+        'headers={"Authorization":"Bearer CALLBACKTOK"}',
+        'headers={"Authorization":"Bearer [REDACTED]"}',
+    ),
+)
+_Y1_SPACED_REGRESSION_CASES: tuple[tuple[str, str], ...] = (
+    ("Authorization: Bearer CALLBACKTOK", "Authorization: Bearer [REDACTED]"),
+    ('"token": "CALLBACKTOK"', '"token": "[REDACTED]"'),
+)
+_Y1_OVER_REDACTION_GUARDS: tuple[str, ...] = (
+    "Error: no space left on device",
+    "elapsed 12:30:05",
+    "https://a/b:8080/x",
+    "phase: download, progress: 42",
+    "keyframes: 12 rendered, 4 pending",
+    "author: gearbox, revision: 3",
+    "session_id: abc-123",
+)
+
+
+class TestY1IntraTokenPairScanner:
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        _Y1_COMPACT_LEAK_CASES,
+        ids=(
+            "authorization-bearer",
+            "authorization-lowercase",
+            "x-auth-token",
+            "x-api-key",
+            "cookie-with-nested-pair",
+            "api-key-colon",
+            "single-quoted-value",
+            "double-quoted-value",
+            "compact-json-object",
+            "compact-json-list",
+            "semicolon-separated-pairs",
+            "ampersand-separated-pairs",
+            "nested-assignment",
+            "comma-separated-pairs",
+            "embedded-compact-header-json",
+        ),
+    )
+    def test_compact_leak_forms_are_redacted(self, line: str, expected: str) -> None:
+        assert redact_secrets(line, max_length=500) == expected
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        _Y1_SPACED_REGRESSION_CASES,
+        ids=("authorization", "json-key"),
+    )
+    def test_spaced_forms_keep_their_existing_output(self, line: str, expected: str) -> None:
+        assert redact_secrets(line, max_length=500) == expected
+
+    @pytest.mark.parametrize("line", _Y1_OVER_REDACTION_GUARDS)
+    def test_benign_colon_forms_are_preserved(self, line: str) -> None:
+        assert redact_secrets(line, max_length=500) == line
+
+    def test_msgspec_compact_json_redacts_only_the_token_field(self) -> None:
+        line = msgspec.json.encode({"token": "x", "message": "boom"}).decode()
+        assert redact_secrets(line, max_length=500) == '{"token":"[REDACTED]","message":"boom"}'
+
+    def test_multiple_sensitive_compact_json_pairs_leave_benign_field_intact(self) -> None:
+        line = '{"token":"A","api_key":"B","phase":"download"}'
+        assert redact_secrets(line, max_length=500) == (
+            '{"token":"[REDACTED]","api_key":"[REDACTED]","phase":"download"}'
+        )
+
+    @pytest.mark.parametrize(
+        "source",
+        tuple(line for line, _ in _Y1_COMPACT_LEAK_CASES + _Y1_SPACED_REGRESSION_CASES)
+        + _Y1_OVER_REDACTION_GUARDS,
+    )
+    def test_new_pair_scanner_table_is_idempotent(self, source: str) -> None:
+        once = redact_secrets(source, max_length=500)
+        assert redact_secrets(once, max_length=500) == once
 
 
 # ---------------------------------------------------------------------------
@@ -716,7 +816,7 @@ class TestDepthAndNodeBounds:
         # produce 10,000 output keys. Bounded to roughly the node budget,
         # plus exactly one truncation marker entry.
         assert len(result) <= 101
-        assert sum(1 for v in result.values() if v == "[TRUNCATED: max nodes]") == 1
+        assert sum(v == "[TRUNCATED: max nodes]" for v in result.values()) == 1
 
     def test_custom_max_depth_is_respected(self) -> None:
         payload = self._nested(5)

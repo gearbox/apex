@@ -16,6 +16,21 @@ excluding by attempt count, so a row stays retryable but paced by exponential
 backoff — it stops flooding the alert channel and stops head-of-line-blocking
 healthy candidates without ever becoming permanently unreachable.
 
+Deployment note (Y3, round-6): this nullable column is deliberately not
+backfilled. Existing rows at or above the old quarantine threshold are eligible
+on the first post-deploy sweep, where their oldest-first ordering can fill a
+small ``billing_reconciler_max_per_sweep`` before they receive fresh backoff
+timestamps. Count that one-time burst before deploying:
+
+    SELECT count(*) FROM gpu_sessions
+    WHERE billing_finalization_attempts >= 10
+      AND ((status = 'stopped' AND billing_finalized_at IS NULL)
+        OR (status = 'failed' AND started_at IS NULL AND account_id IS NOT NULL));
+
+If the count is large relative to the sweep limit, stage a one-off timestamp
+backfill operationally rather than changing this migration's intended NULL =
+eligible-immediately semantics.
+
 Revision ID: 045
 Revises: 044
 Create Date: 2026-09-16 00:00:00.000000

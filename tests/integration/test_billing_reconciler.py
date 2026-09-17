@@ -234,12 +234,11 @@ async def test_list_pending_billing_finalization_returns_session_past_quarantine
     assert still_in_backoff.id not in ids
 
 
-async def test_increment_billing_finalization_attempts_bumps_counter_and_sets_backoff(
+async def test_increment_billing_finalization_attempts_returns_post_increment_count(
     db_session: AsyncSession,
     make_user: UserFactory,
 ) -> None:
-    """increment_billing_finalization_attempts returns the new value, persists
-    it, and stamps the backoff timestamp it's given (X1)."""
+    """The atomic increment returns and persists its post-increment count (Y2)."""
     user = await make_user(email=f"reconciler-bump-{uuid4().hex[:6]}@example.com")
     old_stopped_at = datetime.now(UTC) - timedelta(hours=2)
 
@@ -251,14 +250,36 @@ async def test_increment_billing_finalization_attempts_bumps_counter_and_sets_ba
     )
 
     repo = GpuSessionRepository(db_session)
-    next_attempt_at = datetime.now(UTC) + timedelta(minutes=40)
-    new_count = await repo.increment_billing_finalization_attempts(
-        session.id, next_attempt_at=next_attempt_at
-    )
+    new_count = await repo.increment_billing_finalization_attempts(session.id)
 
     assert new_count == 4
 
     # Verify the value is persisted (re-fetch via the same session)
+    await db_session.refresh(session)
+    assert session.billing_finalization_attempts == 4
+    assert session.billing_reconciliation_next_attempt_at is None
+
+
+async def test_set_billing_reconciliation_next_attempt_at_persists_timestamp(
+    db_session: AsyncSession,
+    make_user: UserFactory,
+) -> None:
+    """The timestamp write can follow the returned count in the same transaction (Y2)."""
+    user = await make_user(email=f"reconciler-backoff-{uuid4().hex[:6]}@example.com")
+    old_stopped_at = datetime.now(UTC) - timedelta(hours=2)
+    session = await _create_stopped_session(
+        db_session,
+        user_id=user.id,
+        stopped_at=old_stopped_at,
+        billing_finalization_attempts=4,
+    )
+    next_attempt_at = datetime.now(UTC) + timedelta(minutes=40)
+
+    repo = GpuSessionRepository(db_session)
+    await repo.set_billing_reconciliation_next_attempt_at(
+        session.id, next_attempt_at=next_attempt_at
+    )
+
     await db_session.refresh(session)
     assert session.billing_finalization_attempts == 4
     assert session.billing_reconciliation_next_attempt_at == next_attempt_at
@@ -280,10 +301,7 @@ async def test_increment_billing_finalization_attempts_starts_from_zero(
     assert session.billing_finalization_attempts == 0
 
     repo = GpuSessionRepository(db_session)
-    next_attempt_at = datetime.now(UTC) + timedelta(minutes=5)
-    new_count = await repo.increment_billing_finalization_attempts(
-        session.id, next_attempt_at=next_attempt_at
-    )
+    new_count = await repo.increment_billing_finalization_attempts(session.id)
 
     assert new_count == 1
 

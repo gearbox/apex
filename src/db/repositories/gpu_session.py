@@ -427,28 +427,41 @@ class GpuSessionRepository:
         )
         return result.scalars().all()
 
-    async def increment_billing_finalization_attempts(
-        self, session_id: UUID, *, next_attempt_at: datetime
-    ) -> int:
-        """Bump the attempt counter, set the backoff timestamp, return the new count.
+    async def increment_billing_finalization_attempts(self, session_id: UUID) -> int:
+        """Atomically bump and return the authoritative new attempt count.
 
-        Called by the reconciler after each failed sweep to track repeat
-        failures for quarantine alerting and to pace the next retry (X1,
-        round-5 remediation) — see BillingReconcilerWorker for how
-        ``next_attempt_at`` is computed.
+        The reconciler derives its exponential-backoff timestamp from this
+        returned post-increment value, then stores it in the same transaction.
+        Keeping those two writes separate avoids deriving a delay from a stale
+        in-memory model when another worker has updated the row (Y2, round-6).
         """
         result = await self._session.execute(
             update(GpuSession)
             .where(GpuSession.id == session_id)
             .values(
                 billing_finalization_attempts=GpuSession.billing_finalization_attempts + 1,
-                billing_reconciliation_next_attempt_at=next_attempt_at,
             )
             .returning(GpuSession.billing_finalization_attempts)
         )
         new_count = result.scalar_one()
         await self._session.flush()
         return new_count
+
+    async def set_billing_reconciliation_next_attempt_at(
+        self, session_id: UUID, *, next_attempt_at: datetime
+    ) -> None:
+        """Store the next eligible reconciliation time for a failed attempt.
+
+        Called immediately after increment_billing_finalization_attempts in
+        the same transaction, after the worker has calculated backoff from the
+        count returned by that atomic update.
+        """
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(billing_reconciliation_next_attempt_at=next_attempt_at)
+        )
+        await self._session.flush()
 
     async def mark_billing_finalized(self, session_id: UUID, finalized_at: datetime) -> None:
         """Stamp ``billing_finalized_at`` to mark a session as billing-complete.
