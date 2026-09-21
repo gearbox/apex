@@ -705,16 +705,23 @@ class TestAdvanceProvisioning:
             session.id, operation_kwargs["id"]
         )
 
-    async def test_retry_rotates_callback_token_hash_before_creating_new_instance(self) -> None:
-        """X2, round-5 remediation: the new hash must be persisted BEFORE the
-        slow create_instance call, not alongside it — otherwise a delayed
-        webhook from the old node still validates against the current hash
-        for the whole recreation window."""
-        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
-        session = _make_gpu_session(status=GpuSessionStatus.pending)
+    async def test_retry_rotates_callback_token_hash_before_any_external_await(self) -> None:
+        """Z1, round-7 remediation: rotation is the FIRST thing the retry path does.
+
+        X2 only put it ahead of create_instance; the old node's hash stayed current
+        across the old-instance destroy, the cooldown write, search_offers,
+        get_tunnel_token and the script resolve. Every one of those must come after
+        the (single) rotation — and after the attempt increment it shares a
+        transaction with.
+        """
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3),
+            cooldown_store=cooldown,
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
         mocks["vastai_client"].destroy_instance = AsyncMock()
-        bundle = _make_bundle_mapping()
-        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
         mocks["vastai_client"].search_offers.return_value = [_make_offer()]
         mocks["cf_client"].get_tunnel_token.return_value = "new-token"
         mocks["vastai_client"].create_instance.return_value = 99999
@@ -724,41 +731,166 @@ class TestAdvanceProvisioning:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.increment_provision_attempt.return_value = 2
-            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
-            mock_repo.get_by_id.return_value = reloaded
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+            manager.attach_mock(mock_repo.increment_provision_attempt, "increment")
             manager.attach_mock(mock_repo.update_callback_token_hash, "rotate_hash")
+            manager.attach_mock(mocks["vastai_client"].destroy_instance, "destroy_instance")
+            manager.attach_mock(cooldown.record_failure, "record_failure")
+            manager.attach_mock(mocks["vastai_client"].search_offers, "search_offers")
+            manager.attach_mock(mocks["cf_client"].get_tunnel_token, "get_tunnel_token")
+            manager.attach_mock(mocks["provisioning_script_service"].resolve, "resolve")
             manager.attach_mock(mocks["vastai_client"].create_instance, "create_instance")
 
             await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
 
         mock_repo.update_callback_token_hash.assert_awaited_once()
         call_names = [call[0] for call in manager.mock_calls]
-        assert call_names.index("rotate_hash") < call_names.index("create_instance")
+        assert call_names.index("increment") < call_names.index("rotate_hash")
+        for later in (
+            "destroy_instance",
+            "record_failure",
+            "search_offers",
+            "get_tunnel_token",
+            "resolve",
+            "create_instance",
+        ):
+            assert call_names.index("rotate_hash") < call_names.index(later), later
 
-    async def test_retry_abandons_before_rotation_when_session_already_terminal(self) -> None:
-        """X2: if the session was stopped/failed concurrently before the hash
-        rotation transaction commits, the retry must bail without minting a
-        new instance — nothing has been created yet, so there's nothing to
-        clean up beyond the old instance already destroyed at retry start."""
+    async def test_retry_env_token_matches_the_hash_persisted_on_entry(self) -> None:
+        """Z1: the token minted on entry is the one carried down to build_acs_env, and the
+        end-of-retry update_instance re-writes the same hash (the X2 rule), so the
+        row's hash and the node's token can't diverge."""
+        import hashlib
+
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         session = _make_gpu_session(status=GpuSessionStatus.pending)
         mocks["vastai_client"].destroy_instance = AsyncMock()
-        bundle = _make_bundle_mapping()
-        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
         mocks["vastai_client"].search_offers.return_value = [_make_offer()]
         mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+        mocks["vastai_client"].create_instance.return_value = 99999
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        env_token = mocks["vastai_client"].create_instance.call_args.kwargs["env"][
+            "ACS_APEX_CALLBACK_TOKEN"
+        ]
+        expected_hash = hashlib.sha256(env_token.encode()).hexdigest()
+        mock_repo.update_callback_token_hash.assert_awaited_once_with(session.id, expected_hash)
+        assert mock_repo.update_instance.await_args.kwargs["callback_token_hash"] == expected_hash
+
+    @pytest.mark.parametrize(
+        ("reason", "attempts_after_increment"),
+        [
+            # Attempts exhausted under the default provisioning_recreation_attempts=1.
+            ("provisioning_stalled", 2),
+            # provisioning_timeout is terminal regardless of the attempt budget.
+            (_REASON_PROVISIONING_TIMEOUT, 2),
+        ],
+    )
+    async def test_terminal_branch_still_rotates_the_token(
+        self, reason: str, attempts_after_increment: int
+    ) -> None:
+        """Z1: rotation is unconditional — it precedes the retry-vs-terminal decision, so a
+        session about to be failed has its old node's token killed too. Harmless (the
+        session is being failed anyway) and it keeps the window closed; pinning it here
+        stops someone "optimizing" rotation back behind the decision."""
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=1), cooldown_store=cooldown
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        manager = MagicMock()
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = attempts_after_increment
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+            manager.attach_mock(mock_repo.update_callback_token_hash, "rotate_hash")
+            manager.attach_mock(mocks["vastai_client"].destroy_instance, "destroy_instance")
+
+            await worker._retry_or_fail(session, reason=reason)
+
+        mock_repo.update_callback_token_hash.assert_awaited_once()
+        call_names = [call[0] for call in manager.mock_calls]
+        assert call_names.index("rotate_hash") < call_names.index("destroy_instance")
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.update_status.assert_awaited_once()
+        assert mock_repo.update_status.await_args.args[1] == GpuSessionStatus.failed
+
+    async def test_retry_abandons_before_rotation_when_session_already_terminal(self) -> None:
+        """Z1: a session stopped/failed before the retry path runs is abandoned at the top —
+        no attempt increment, no rotation, no destroy of the old instance (whoever moved
+        the session owns that teardown), no cooldown write, nothing created."""
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3), cooldown_store=cooldown
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.provisioning_worker.logger") as mock_logger,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
             mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.stopped)
 
             await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
 
+        mock_repo.get_by_id.assert_awaited_once_with(session.id, for_update=True)
+        mock_repo.increment_provision_attempt.assert_not_awaited()
         mock_repo.update_callback_token_hash.assert_not_awaited()
+        mocks["vastai_client"].destroy_instance.assert_not_awaited()
+        cooldown.record_failure.assert_not_awaited()
+        mocks["vastai_client"].search_offers.assert_not_called()
         mocks["vastai_client"].create_instance.assert_not_called()
         mock_repo.update_instance.assert_not_awaited()
+        mock_repo.update_status.assert_not_awaited()
+        mock_logger.info.assert_any_call(
+            "gpu_session.provision.retry_abandoned_before_rotation",
+            session_id=str(session.id),
+            observed_status=GpuSessionStatus.stopped,
+        )
+
+    async def test_retry_abandons_before_rotation_when_session_row_is_gone(self) -> None:
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = None
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        mock_repo.increment_provision_attempt.assert_not_awaited()
+        mock_repo.update_callback_token_hash.assert_not_awaited()
+        mocks["vastai_client"].destroy_instance.assert_not_awaited()
+
+    def test_exactly_one_callback_token_rotation_call_site(self) -> None:
+        """Z1 grep guard: rotation lives only at the top of _retry_or_fail. A second call
+        site is how the window reopens (X2 put one mid-function, after four awaits)."""
+        import inspect
+
+        from src.api.services.gpu_session import provisioning_worker
+
+        source = inspect.getsource(provisioning_worker)
+        assert source.count("update_callback_token_hash") == 1
 
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
         """If github_content_token is empty, mark session failed before create_instance."""

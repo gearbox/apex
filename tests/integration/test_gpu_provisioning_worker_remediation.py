@@ -814,3 +814,298 @@ async def test_fail_pre_active_session_with_no_expected_token_is_unaffected(
     assert result.status == GpuSessionStatus.failed
     vastai.destroy_instance.assert_awaited_once_with(33333)
     billing.refund.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Z1: callback-token rotation on entry to _retry_or_fail (round-7 remediation)
+# ---------------------------------------------------------------------------
+
+
+class _TerminalRetrySettings(_RetrySettings):
+    """The default policy: the first failure is terminal, no recreation."""
+
+    provisioning_recreation_attempts = 1
+
+
+_OLD_INSTANCE_ID = 111
+_NEW_INSTANCE_ID = 222
+
+
+async def _seed_retryable_session(
+    provisioning_session_factory: async_sessionmaker[AsyncSession], *, old_token: str
+) -> GpuSession:
+    """A 'pending' session on its original node, with a primary deployment and an account."""
+    user = User(
+        id=new_id(),
+        email=f"retry-remediation-z1-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    async with provisioning_session_factory() as db, db.begin():
+        db.add(user)
+    account = await _seed_personal_account(provisioning_session_factory, user)
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.pending,
+        bundle_name="retry-bundle",
+        bundle_version="20260908-01",
+        model_type="aisha-image",
+        vastai_instance_id=_OLD_INSTANCE_ID,
+        cf_tunnel_id="tunnel-id-z1",
+        cf_dns_record_id="dns-id-z1",
+        callback_token_hash=hashlib.sha256(old_token.encode()).hexdigest(),
+        provision_attempt=1,
+        account_id=account.id,
+    )
+    async with provisioning_session_factory() as db, db.begin():
+        db.add(gpu_session)
+        await db.flush()
+        await GpuSessionDeploymentRepository(db).create(
+            id=new_id(),
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id="vex",
+            model_type="aisha-image",
+            bundle_name="retry-bundle",
+            status=DeploymentStatus.deploying,
+            is_primary=True,
+        )
+    return gpu_session
+
+
+def _make_retry_worker(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    settings: type[_RetrySettings],
+    vastai: AsyncMock,
+    cloudflare: AsyncMock,
+    script_service: AsyncMock,
+    billing: AsyncMock,
+) -> GpuProvisioningWorker:
+    bundle_index = MagicMock()
+    bundle_index.resolve_bundle_override.return_value = BundleMapping(
+        bundle_name="retry-bundle",
+        bundle_version="20260908-01",
+        hardware=HardwareRequirements(
+            gpu_whitelist=("RTX_4090",),
+            min_disk_gb=100,
+            min_network_upload_mbps=100,
+            min_network_download_mbps=500,
+            cuda_min_version="12.1",
+            num_gpus=1,
+        ),
+    )
+    return GpuProvisioningWorker(
+        session_factory=provisioning_session_factory,
+        vastai_client=vastai,
+        cf_client=cloudflare,
+        bundle_index=bundle_index,
+        http_client=AsyncMock(),
+        settings=settings(),  # type: ignore[arg-type]
+        cooldown_store=NullNodeCooldownStore(),
+        provisioning_script_service=script_service,
+        billing_service=billing,
+        redis_enabled=False,
+        redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
+    )
+
+
+class _StaleNodeWebhook:
+    """Delivers the abandoned node's failure webhook, through the real receiver and a
+    real GpuSessionService whose collaborators are *separate* mocks from the worker's —
+    so a webhook that wrongly validates shows up as a refund/destroy on these mocks."""
+
+    def __init__(
+        self,
+        provisioning_session_factory: async_sessionmaker[AsyncSession],
+        *,
+        session_id: UUID,
+        token: str,
+    ) -> None:
+        self.vastai, self.cloudflare, self.billing = AsyncMock(), AsyncMock(), AsyncMock()
+        self._webhook = ProvisioningWebhookService(
+            gpu_session_service=_make_gpu_session_service(
+                provisioning_session_factory,
+                vastai=self.vastai,
+                cloudflare=self.cloudflare,
+                billing=self.billing,
+            ),
+            session_factory=provisioning_session_factory,
+            settings=_RetrySettings(),  # type: ignore[arg-type]
+        )
+        self._session_id = session_id
+        self._token = token
+        self.statuses: list[int] = []
+
+    async def deliver(self) -> None:
+        self.statuses.append(
+            await self._webhook.handle_failure(
+                session_id=self._session_id, token=self._token, payload=_webhook_payload()
+            )
+        )
+
+    def delivering(self, result: object) -> object:
+        """A mock side_effect: deliver the stale webhook mid-await, then return ``result``."""
+
+        async def _call(*_args: object, **_kwargs: object) -> object:
+            await self.deliver()
+            return result
+
+        return _call
+
+    def assert_never_acted(self) -> None:
+        self.vastai.destroy_instance.assert_not_awaited()
+        self.cloudflare.delete_session_tunnel.assert_not_awaited()
+        self.billing.refund.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "window",
+    ["destroy_instance", "search_offers", "get_tunnel_token", "resolve"],
+)
+async def test_stale_webhook_during_any_retry_await_is_rejected_and_retry_recovers(
+    provisioning_session_factory: async_sessionmaker[AsyncSession], window: str
+) -> None:
+    """Z1: the old node's token is dead from the moment the retry path is entered.
+
+    X2 rotated only ahead of provision_vastai_instance, so a webhook arriving during the
+    old-instance destroy, search_offers, get_tunnel_token or the script resolve still
+    validated against the old hash — including under fail_pre_active_session's locked
+    revalidation, which compares against the same stale value — and terminal-failed +
+    refunded a session the retry was about to recover. Here the webhook lands at each of
+    those awaits in turn: every one must be a 401 (gpu_session.callback.stale_token — the
+    session exists, so 401 is only reachable through the token check) and the retry must
+    run to completion.
+    """
+    old_token = f"old-node-token-{window}"
+    gpu_session = await _seed_retryable_session(provisioning_session_factory, old_token=old_token)
+    stale = _StaleNodeWebhook(
+        provisioning_session_factory, session_id=gpu_session.id, token=old_token
+    )
+
+    offers = [VastAIOffer(id=42, gpu_name="RTX_4090", dph_total=0.5, machine_id=77)]
+    vastai, cloudflare, script_service = (
+        AsyncMock(),
+        AsyncMock(),
+        _make_provisioning_script_service(),
+    )
+    resolved = script_service.resolve.return_value
+    vastai.create_instance.return_value = _NEW_INSTANCE_ID
+    # Each awaited collaborator returns its normal result; the selected one delivers the
+    # stale webhook first, i.e. while that call is "in flight".
+    for name, mock, result in (
+        ("destroy_instance", vastai.destroy_instance, None),
+        ("search_offers", vastai.search_offers, offers),
+        ("get_tunnel_token", cloudflare.get_tunnel_token, "fresh-tunnel-token"),
+        ("resolve", script_service.resolve, resolved),
+    ):
+        if name == window:
+            mock.side_effect = stale.delivering(result)
+        else:
+            mock.return_value = result
+
+    worker = _make_retry_worker(
+        provisioning_session_factory,
+        settings=_RetrySettings,
+        vastai=vastai,
+        cloudflare=cloudflare,
+        script_service=script_service,
+        billing=AsyncMock(),
+    )
+
+    await worker._retry_or_fail(gpu_session, reason=_REASON_PENDING_TIMEOUT)
+
+    assert stale.statuses == [401]
+    stale.assert_never_acted()
+    vastai.create_instance.assert_awaited_once()
+    node_token = vastai.create_instance.await_args.kwargs["env"]["ACS_APEX_CALLBACK_TOKEN"]
+    async with provisioning_session_factory() as db:
+        recovered = await db.get(GpuSession, gpu_session.id)
+    assert recovered is not None
+    assert recovered.status == GpuSessionStatus.pending
+    assert recovered.provision_attempt == 2
+    assert recovered.vastai_instance_id == _NEW_INSTANCE_ID
+    # Rotated: the row holds the replacement node's token hash, not the abandoned node's.
+    assert recovered.callback_token_hash == hashlib.sha256(node_token.encode()).hexdigest()
+    assert recovered.callback_token_hash != hashlib.sha256(old_token.encode()).hexdigest()
+
+
+async def test_terminal_retry_rotates_the_hash_and_fails_and_refunds_exactly_once(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Z1: rotation is unconditional — it runs before the retry-vs-terminal decision, so
+    under the default provisioning_recreation_attempts=1 the hash is rotated even though
+    the session is failed. The old node's late webhook (delivered mid-destroy, before
+    _mark_failed) is a 401, and the worker's own _mark_failed is the sole failure/refund."""
+    old_token = "old-node-token-terminal"
+    gpu_session = await _seed_retryable_session(provisioning_session_factory, old_token=old_token)
+    stale = _StaleNodeWebhook(
+        provisioning_session_factory, session_id=gpu_session.id, token=old_token
+    )
+    vastai, cloudflare, billing = AsyncMock(), AsyncMock(), AsyncMock()
+    vastai.destroy_instance.side_effect = stale.delivering(None)
+    worker = _make_retry_worker(
+        provisioning_session_factory,
+        settings=_TerminalRetrySettings,
+        vastai=vastai,
+        cloudflare=cloudflare,
+        script_service=_make_provisioning_script_service(),
+        billing=billing,
+    )
+
+    await worker._retry_or_fail(gpu_session, reason="provisioning_stalled")
+    # A second late delivery, after the terminal transition, is also rejected.
+    await stale.deliver()
+
+    # Delivered at each destroy_instance (the retry path's, then _mark_failed's own) plus
+    # the explicit late one above — every delivery is stale, none may validate.
+    assert len(stale.statuses) >= 2
+    assert set(stale.statuses) == {401}
+    stale.assert_never_acted()
+    billing.refund.assert_awaited_once()
+    vastai.search_offers.assert_not_awaited()
+    vastai.create_instance.assert_not_awaited()
+    async with provisioning_session_factory() as db:
+        failed = await db.get(GpuSession, gpu_session.id)
+    assert failed is not None
+    assert failed.status == GpuSessionStatus.failed
+    assert failed.provision_attempt == 2
+    assert failed.callback_token_hash != hashlib.sha256(old_token.encode()).hexdigest()
+
+
+async def test_retry_on_a_session_stopped_before_entry_does_nothing(
+    provisioning_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Z1: the user stopped the session before _retry_or_fail ran → abandoned at the top:
+    no attempt increment, no rotation, no destroy, nothing created."""
+    old_token = "old-node-token-stopped"
+    gpu_session = await _seed_retryable_session(provisioning_session_factory, old_token=old_token)
+    async with provisioning_session_factory() as db, db.begin():
+        await GpuSessionRepository(db).update_status(gpu_session.id, GpuSessionStatus.stopped)
+
+    vastai, cloudflare, billing = AsyncMock(), AsyncMock(), AsyncMock()
+    worker = _make_retry_worker(
+        provisioning_session_factory,
+        settings=_RetrySettings,
+        vastai=vastai,
+        cloudflare=cloudflare,
+        script_service=_make_provisioning_script_service(),
+        billing=billing,
+    )
+
+    # The caller's in-memory row is stale ('pending'); the locked re-read is the authority.
+    await worker._retry_or_fail(gpu_session, reason=_REASON_PENDING_TIMEOUT)
+
+    vastai.destroy_instance.assert_not_awaited()
+    vastai.search_offers.assert_not_awaited()
+    vastai.create_instance.assert_not_awaited()
+    cloudflare.get_tunnel_token.assert_not_awaited()
+    billing.refund.assert_not_awaited()
+    async with provisioning_session_factory() as db:
+        untouched = await db.get(GpuSession, gpu_session.id)
+    assert untouched is not None
+    assert untouched.status == GpuSessionStatus.stopped
+    assert untouched.provision_attempt == 1
+    assert untouched.callback_token_hash == hashlib.sha256(old_token.encode()).hexdigest()

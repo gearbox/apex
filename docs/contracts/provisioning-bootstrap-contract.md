@@ -294,38 +294,58 @@ but not the other.
 **Retry/re-provision note:** each provisioning retry (`GpuProvisioningWorker._retry_or_fail`)
 mints a fresh callback token for the new instance and rebuilds this env from
 scratch, so the new `PROVISIONING_SCRIPT`/`PROVISIONER_WEBHOOK_URL` carry the
-new token and the old instance's URLs stop validating (401) immediately.
+new token and the old instance's URLs stop validating (401) immediately — see
+the rotation-window section below for exactly when.
 
-### Callback token rotation window (X2, round-5 remediation)
+### Callback token rotation window (X2 round-5, moved to retry entry by Z1 round-7)
 
-"Immediately" above means exactly that: the new hash is persisted in its own
-short transaction right after minting, **before** `build_acs_env` and
-`provision_vastai_instance` (offer search already happened earlier in the
-retry; instance creation via the Vast.ai API is the slow, tens-of-seconds
-external call this ordering protects). Earlier, the hash was only written
-alongside `update_instance()` at the very end of the retry — for the whole
-recreation window in between, the session's stored hash still belonged to the
-node being replaced, so a delayed failure webhook from that old node would
-validate successfully (the S2 locked-revalidation check above doesn't help
-here: the stale hash *is* the current hash at that point) and
-`fail_pre_active_session` would tear down and refund a session that was mid-
-recovery, having rented a second GPU for nothing.
+"Immediately" above means: **the moment `_retry_or_fail` is entered**, before
+any external await. The fresh token/hash is minted as the first thing the
+method does, and persisted in one short transaction together with
+`increment_provision_attempt` (`get_by_id(for_update=True)` → bail if the row
+is gone or `STOPPING_OR_TERMINAL` → `increment_provision_attempt` →
+`update_callback_token_hash` → commit). Only after that commit does the retry
+path destroy the old instance, record the node cooldown, evaluate the
+attempts-exhausted branch, search offers, fetch the tunnel token, re-resolve
+the bootstrap script, and create the replacement instance. The freshly minted
+token is carried down to `build_acs_env` as a local, and `update_instance` at
+the end still writes the same hash (so the two writes cannot diverge under a
+future reorder). There is exactly **one** call to `update_callback_token_hash`
+in `provisioning_worker.py`, and a unit test pins that.
 
-Rotating first closes the window entirely: from the moment the transaction
-commits, the session's stored hash corresponds to a token no live node holds
-until the new node's first callback arrives. Every callback in that window —
-from the node being abandoned — is correctly rejected with `401`, logged as
-`gpu_session.callback.stale_token` at the three bearer-auth call sites
-(`ProvisioningWebhookService.handle_failure`, `OperationEventService`,
+History — why it moved. X2 (round 5) first rotated ahead of
+`provision_vastai_instance`, but that left the old node's hash current across
+the old-instance destroy, the cooldown write, `search_offers` (slow),
+`get_tunnel_token` and the script `resolve`. A delayed failure webhook from the
+node being abandoned that landed in any of those awaits validated against the
+still-current hash — including under `fail_pre_active_session`'s S2 locked
+revalidation, which compares against the same stale value — and terminal-failed
+and refunded a session the retry was about to recover. Z1 (round 7) closed it by
+rotating on entry.
+
+**Rotation is unconditional, and that is deliberate.** It happens *before* the
+retry-vs-terminal decision, so it also runs when the path goes terminal via
+`_mark_failed` — including every call under the default
+`provisioning_recreation_attempts=1`. That is harmless: the session is being
+failed anyway, and a late callback from the old node is correctly rejected as
+`gpu_session.callback.stale_token`. Do not move rotation back behind the
+decision; that reopens the window.
+
+From the commit, the session's stored hash corresponds to a token no live node
+holds until the new node's first callback arrives. Every callback in that
+window — from the node being abandoned — is correctly rejected with `401`,
+logged as `gpu_session.callback.stale_token` at the three bearer-auth call
+sites (`ProvisioningWebhookService.handle_failure`, `OperationEventService`,
 `ProvisioningScriptService.serve`) rather than the generic
 `*.rejected`/`invalid_token` event used for an unknown session — **expect
 these 401s during a retry's recreation window; they are the fix working, not
 an auth regression to chase.** If the retry itself then fails before a new
 instance is created, the session goes terminal via `_mark_failed` anyway and
-the orphaned hash (matching no live node) is harmless. If the session is
-concurrently stopped between rotation and instance creation, the retry bails
-before minting anything billable — see
-`gpu_session.provision.retry_abandoned_before_rotation`.
+the orphaned hash (matching no live node) is harmless. If the session was
+stopped (or is otherwise `STOPPING_OR_TERMINAL`) before `_retry_or_fail` runs,
+the retry is abandoned at the very top — no attempt increment, no rotation, no
+destroy of the old instance (whoever moved the session owns that teardown),
+nothing created — and logs `gpu_session.provision.retry_abandoned_before_rotation`.
 
 **SECURITY:** every value above except `ACS_PROVISION_SCRIPT_SHA256` carries
 the per-session callback token in its query string. Never log a full env dict,
@@ -347,6 +367,11 @@ string containing `token=`/`session=` — logs should carry `session_id`,
 - `docs/PROVISIONING.md` in `gearbox/aisha`: the template no longer sets
   `PROVISIONING_SCRIPT`; the release "tag pinning" step now means bumping
   `Settings.provisioning_script_ref` in apex.
+- **Vast template state.** The `PROVISIONING_SCRIPT` variable was removed from the
+  Vast template in the Vast console (not in this repo). Template hash after the
+  change: 6bc3287dc4d18759ab2d09f33a6c2e31. Date changed: 2026.09.21.
+  Until V1 is verified on staging (see "Staging rollout verification"), this is
+  a recorded operator action, not a verified fact about what a node receives.
 - The aisha bootstrap script should echo `ACS_PROVISION_SCRIPT_SHA256` back in
   its `acs.provision.ready` telemetry so apex can detect drift between what it
   served and what actually ran. Tracked as a separate aisha-side task — this

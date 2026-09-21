@@ -846,7 +846,46 @@ class GpuProvisioningWorker(PeriodicWorker):
         no autonomous recreation. The user starts a new session if they want to try again.
         This prevents 'sessions waking up at midnight and burning credits' after the user
         has given up.
+
+        The callback token is rotated on entry, in the same transaction as the attempt
+        increment, before any external await (Z1, round-7 remediation).
         """
+        # Z1, round-7 remediation: rotate the callback token the moment the retry path
+        # is entered, in the same short transaction as the attempt increment. X2 (round
+        # 5) moved rotation ahead of provision_vastai_instance, but the recreation
+        # window opens much earlier: the old node's hash stayed current across the
+        # old-instance destroy, the cooldown write, search_offers, get_tunnel_token and
+        # the script resolve. A delayed failure webhook from the node being abandoned
+        # would validate against that still-current hash — including under
+        # fail_pre_active_session's S2 locked revalidation, which compares against the
+        # same stale value — and terminal-fail + refund a session this retry is about
+        # to recover. Rotating first means every callback carrying the old token from
+        # here on is rejected as gpu_session.callback.stale_token.
+        #
+        # Rotation is UNCONDITIONAL, and that is deliberate: it also runs when this
+        # path goes terminal below (_mark_failed), including every call under the
+        # default provisioning_recreation_attempts=1. That is harmless — the session is
+        # being failed anyway, and a late callback from the old node is correctly
+        # rejected as stale. Do not "optimize" rotation back behind the retry-vs-
+        # terminal decision: that reopens the window.
+        fresh_callback_token = secrets.token_urlsafe(48)
+        fresh_callback_token_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
+
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionRepository(db)
+            current = await repo.get_by_id(session.id, for_update=True)
+            if current is None or current.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
+                # Stopped/failed concurrently: whoever moved it owns the old
+                # instance's teardown — nothing to increment, rotate or destroy.
+                logger.info(
+                    "gpu_session.provision.retry_abandoned_before_rotation",
+                    session_id=str(session.id),
+                    observed_status=current.status if current is not None else None,
+                )
+                return
+            new_attempt = await repo.increment_provision_attempt(session.id)
+            await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
+
         # Step 1: destroy the failed instance best-effort
         if session.vastai_instance_id is not None:
             try:
@@ -866,11 +905,6 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._cooldown.record_failure(session.vastai_machine_id, reason=reason)
         else:
             logger.debug("gpu_session.node_cooldown.no_machine_id", session_id=str(session.id))
-
-        # Step 2: atomically increment attempt counter
-        async with self._session_factory() as db, db.begin():
-            repo = GpuSessionRepository(db)
-            new_attempt = await repo.increment_provision_attempt(session.id)
 
         # Attempts are 1-indexed: attempt=1 is the original; attempt=2 would be the
         # first recreation. With provisioning_recreation_attempts=1 (default), the
@@ -972,37 +1006,9 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._mark_failed(session, "retry_script_resolve_failed")
             return
 
-        # Generate a fresh callback token so the destroyed node's leaked token is dead.
-        fresh_callback_token = secrets.token_urlsafe(48)
-        fresh_callback_token_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
+        # The token was already rotated on entry (Z1) — fresh_callback_token is carried
+        # down from there so the env below matches the hash already persisted.
         bootstrap_operation_id = new_id()
-
-        # X2, round-5 remediation: persist the new hash NOW, in its own short
-        # transaction, before the slow external calls below (build_acs_env is
-        # local/fast, but provision_vastai_instance issues real Vast.ai API
-        # calls that can take tens of seconds). Previously the hash was only
-        # written alongside update_instance() at the end of this function,
-        # which left the OLD node's token as the session's current hash for
-        # the whole recreation window — a delayed failure webhook from the
-        # node this retry is replacing would validate successfully during
-        # that window (the S2 locked-revalidation fix doesn't help here: the
-        # stale hash *is* the current hash) and fail_pre_active_session would
-        # tear down and refund the session mid-recovery. Rotating first closes
-        # that window entirely: every callback carrying the old token from
-        # this point on is, correctly, from the node being abandoned and must
-        # be rejected (see gpu_session.callback.stale_token at the validation
-        # sites) — see docs/contracts/provisioning-bootstrap-contract.md.
-        async with self._session_factory() as db, db.begin():
-            repo = GpuSessionRepository(db)
-            current = await repo.get_by_id(session.id, for_update=True)
-            if current is None or current.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
-                logger.info(
-                    "gpu_session.provision.retry_abandoned_before_rotation",
-                    session_id=str(session.id),
-                    observed_status=current.status if current is not None else None,
-                )
-                return
-            await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
 
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
         # civitai_api_token, ACS_GITHUB_TOKEN, and (D3) PROVISIONING_SCRIPT /
@@ -1103,6 +1109,8 @@ class GpuProvisioningWorker(PeriodicWorker):
                     vastai_gpu_name=selected_offer.gpu_name,
                     vastai_machine_id=selected_offer.machine_id,
                     provisioning_started_at=now,
+                    # Redundant with the rotation on entry, on purpose: the two writes
+                    # carry the same value, so they can't diverge under a future reorder.
                     callback_token_hash=fresh_callback_token_hash,
                 )
                 await repo.update_status(session.id, GpuSessionStatus.pending)

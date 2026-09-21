@@ -7,6 +7,8 @@ from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from src.api.services.gpu_session.billing_reconciler_worker import (
     BillingReconcilerWorker,
     compute_next_attempt_at,
@@ -318,7 +320,7 @@ class TestSweep:
 
     async def test_grace_period_skips_freshly_stopped_sessions(self) -> None:
         """Repository query receives grace_cutoff = now - grace_minutes."""
-        worker, mocks = _make_worker(
+        worker, _mocks = _make_worker(
             settings=_make_settings(billing_reconciler_grace_period_minutes=3)
         )
 
@@ -336,26 +338,28 @@ class TestSweep:
             await worker.run_once()
 
         expected_cutoff = fixed_now - timedelta(minutes=3)
+        # Z2: finalization queries ceil(budget / 2) — the budget is shared across passes.
         mock_repo.list_pending_billing_finalization.assert_called_once_with(
             grace_cutoff=expected_cutoff,
-            limit=mocks["settings"].billing_reconciler_max_per_sweep,
+            limit=25,
             now=fixed_now,
         )
 
     async def test_max_per_sweep_caps_query_limit(self) -> None:
-        """Repository query receives limit=billing_reconciler_max_per_sweep."""
+        """Finalization queries ceil(budget / 2); refunds get the rest (Z2)."""
         worker, _mocks = _make_worker(settings=_make_settings(billing_reconciler_max_per_sweep=7))
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
             mock_repo.list_pending_billing_finalization.return_value = []
+            mock_repo.list_pending_refund_reconciliation.return_value = []
 
             await worker.run_once()
 
         mock_repo.list_pending_billing_finalization.assert_called_once()
         _, call_kwargs = mock_repo.list_pending_billing_finalization.call_args
-        assert call_kwargs["limit"] == 7
+        assert call_kwargs["limit"] == 4
 
     async def test_both_sweeps_pass_now_through_for_backoff_filtering(self) -> None:
         """X1: both sweeps pass `now` to their query so a session past its
@@ -409,6 +413,117 @@ class TestSweep:
 
     # Tick-error recovery (a failing run_once must not kill the loop) is
     # covered generically by test_periodic_worker.py::TestTickErrorLogged.
+
+
+# ---------------------------------------------------------------------------
+# TestSharedSweepBudget — one billing_reconciler_max_per_sweep across both passes (Z2)
+# ---------------------------------------------------------------------------
+
+
+def _limited_backlog(rows: list[GpuSession]) -> AsyncMock:
+    """A repository query that honours ``limit`` like the real ORDER BY ... LIMIT."""
+
+    async def query(*, grace_cutoff: datetime, limit: int, now: datetime) -> list[GpuSession]:  # noqa: ARG001
+        return rows[:limit]
+
+    return AsyncMock(side_effect=query)
+
+
+class TestSharedSweepBudget:
+    async def _run(
+        self, *, budget: int, finalization_backlog: int, refund_backlog: int
+    ) -> tuple[AsyncMock, AsyncMock, dict[str, Any]]:
+        worker, mocks = _make_worker(
+            settings=_make_settings(billing_reconciler_max_per_sweep=budget)
+        )
+        mocks["gpu_session_service"].finalize_billing_for_session.return_value = True
+        mocks["gpu_session_service"].reconcile_pending_refund.return_value = True
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_pending_billing_finalization = _limited_backlog(
+                [_make_gpu_session() for _ in range(finalization_backlog)]
+            )
+            mock_repo.list_pending_refund_reconciliation = _limited_backlog(
+                [_make_gpu_session() for _ in range(refund_backlog)]
+            )
+
+            await worker.run_once()
+
+        return (
+            mock_repo.list_pending_billing_finalization,
+            mock_repo.list_pending_refund_reconciliation,
+            mocks,
+        )
+
+    @pytest.mark.parametrize(
+        ("budget", "finalized", "refunded"), [(2, 1, 1), (7, 4, 3), (50, 25, 25)]
+    )
+    async def test_both_backlogs_larger_than_budget_process_exactly_budget(
+        self, budget: int, finalized: int, refunded: int
+    ) -> None:
+        """Total across both passes == budget, split ceil / floor — not 2x budget."""
+        _, _, mocks = await self._run(
+            budget=budget, finalization_backlog=budget * 3, refund_backlog=budget * 3
+        )
+
+        service = mocks["gpu_session_service"]
+        assert service.finalize_billing_for_session.await_count == finalized
+        assert service.reconcile_pending_refund.await_count == refunded
+        assert finalized + refunded == budget
+
+    async def test_empty_finalization_backlog_gives_refunds_the_full_budget(self) -> None:
+        finalization_query, refund_query, mocks = await self._run(
+            budget=7, finalization_backlog=0, refund_backlog=20
+        )
+
+        assert refund_query.call_args.kwargs["limit"] == 7
+        assert finalization_query.call_args.kwargs["limit"] == 4
+        assert mocks["gpu_session_service"].reconcile_pending_refund.await_count == 7
+
+    async def test_small_finalization_backlog_hands_its_remainder_to_refunds(self) -> None:
+        """Finalization < ceil(budget / 2) → the refund pass inherits the unused part."""
+        _, refund_query, mocks = await self._run(
+            budget=10, finalization_backlog=2, refund_backlog=20
+        )
+
+        assert refund_query.call_args.kwargs["limit"] == 8  # 10 - 2, more than floor(10 / 2)
+        assert mocks["gpu_session_service"].finalize_billing_for_session.await_count == 2
+        assert mocks["gpu_session_service"].reconcile_pending_refund.await_count == 8
+
+    async def test_finalization_backlog_cannot_starve_refunds(self) -> None:
+        """The half-reservation: a persistent finalization backlog leaves refunds >= floor(b/2)."""
+        _, refund_query, _ = await self._run(budget=9, finalization_backlog=100, refund_backlog=100)
+
+        assert refund_query.call_args.kwargs["limit"] == 4  # floor(9 / 2)
+
+    async def test_done_events_log_the_budget_split(self) -> None:
+        worker, mocks = _make_worker(settings=_make_settings(billing_reconciler_max_per_sweep=7))
+        mocks["gpu_session_service"].finalize_billing_for_session.return_value = True
+        mocks["gpu_session_service"].reconcile_pending_refund.return_value = True
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.billing_reconciler_worker.logger") as mock_logger,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.list_pending_billing_finalization = _limited_backlog(
+                [_make_gpu_session() for _ in range(9)]
+            )
+            mock_repo.list_pending_refund_reconciliation = _limited_backlog(
+                [_make_gpu_session() for _ in range(9)]
+            )
+
+            await worker.run_once()
+
+        events = {call.args[0]: call.kwargs for call in mock_logger.info.call_args_list}
+        finalization_done = events["billing_reconciler.finalization_sweep.done"]
+        refund_done = events["billing_reconciler.refund_sweep.done"]
+        assert (finalization_done["budget"], finalization_done["limit"]) == (7, 4)
+        assert (refund_done["budget"], refund_done["limit"]) == (7, 3)
+        assert refund_done["finalization_candidates"] == 4
 
 
 # ---------------------------------------------------------------------------

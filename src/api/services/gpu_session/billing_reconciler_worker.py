@@ -36,6 +36,7 @@ protecting — without ever making the row unreachable.
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -111,32 +112,58 @@ class BillingReconcilerWorker(PeriodicWorker):
         The two candidate sets are disjoint by construction — finalization only
         ever matches status='stopped', refund reconciliation only ever matches
         status='failed' — so a session is never double-processed in one sweep.
+
+        **One shared budget (Z2, round-7 remediation).** ``billing_reconciler_max_per_sweep``
+        caps the sessions processed per *sweep*, not per pass — giving each pass the full
+        value let one sweep do up to twice the documented cap, and a failed finalization
+        can sleep between its two in-line attempts, so the doubling landed directly on
+        wall-clock time. Finalization queries ``ceil(budget / 2)``; refund reconciliation
+        queries ``budget - finalization_candidates``, so it always gets at least
+        ``floor(budget / 2)`` and inherits whatever finalization didn't use. A plain
+        "finalization first, refunds get the remainder" would let a persistent
+        finalization backlog starve refunds entirely — and refunds are money owed to
+        users — which is why half is reserved. The setting's ``ge=2`` floor exists for
+        the same reason: at 1 the refund pass would get ``1 - 1 = 0`` whenever
+        finalization had a candidate.
         """
         started = time.monotonic()
         grace_cutoff = datetime.now(UTC) - timedelta(
             minutes=self._settings.billing_reconciler_grace_period_minutes
         )
 
-        await self._sweep_finalization(grace_cutoff)
-        await self._sweep_refund_reconciliation(grace_cutoff)
+        budget = self._settings.billing_reconciler_max_per_sweep
+        finalization_limit = math.ceil(budget / 2)
+        finalization_candidates = await self._sweep_finalization(
+            grace_cutoff, budget=budget, limit=finalization_limit
+        )
+        await self._sweep_refund_reconciliation(
+            grace_cutoff,
+            budget=budget,
+            limit=budget - finalization_candidates,
+            finalization_candidates=finalization_candidates,
+        )
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.debug("billing_reconciler.sweep.done", duration_ms=elapsed_ms)
 
-    async def _sweep_finalization(self, grace_cutoff: datetime) -> None:
-        """Retry billing_finalized_at IS NULL / status='stopped' sessions."""
+    async def _sweep_finalization(self, grace_cutoff: datetime, *, budget: int, limit: int) -> int:
+        """Retry billing_finalized_at IS NULL / status='stopped' sessions.
+
+        Returns the number of candidates fetched (0 when none) — ``run_once`` hands the
+        unused part of the shared budget to the refund pass.
+        """
         # 1. Pull candidates in one short transaction.
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
             candidates = await repo.list_pending_billing_finalization(
                 grace_cutoff=grace_cutoff,
-                limit=self._settings.billing_reconciler_max_per_sweep,
+                limit=limit,
                 now=datetime.now(UTC),
             )
 
         if not candidates:
             logger.debug("billing_reconciler.finalization_sweep.no_candidates")
-            return
+            return 0
 
         reconciled = 0
         still_failing = 0
@@ -156,18 +183,28 @@ class BillingReconcilerWorker(PeriodicWorker):
         logger.info(
             "billing_reconciler.finalization_sweep.done",
             candidates=len(candidates),
+            budget=budget,
+            limit=limit,
             reconciled=reconciled,
             still_failing=still_failing,
             quarantined=quarantined,
         )
+        return len(candidates)
 
-    async def _sweep_refund_reconciliation(self, grace_cutoff: datetime) -> None:
+    async def _sweep_refund_reconciliation(
+        self,
+        grace_cutoff: datetime,
+        *,
+        budget: int,
+        limit: int,
+        finalization_candidates: int,
+    ) -> None:
         """Retry the base-reservation refund for 'failed' pre-active sessions (S3)."""
         async with self._session_factory() as db:
             repo = GpuSessionRepository(db)
             candidates = await repo.list_pending_refund_reconciliation(
                 grace_cutoff=grace_cutoff,
-                limit=self._settings.billing_reconciler_max_per_sweep,
+                limit=limit,
                 now=datetime.now(UTC),
             )
 
@@ -191,6 +228,9 @@ class BillingReconcilerWorker(PeriodicWorker):
         logger.info(
             "billing_reconciler.refund_sweep.done",
             candidates=len(candidates),
+            budget=budget,
+            limit=limit,
+            finalization_candidates=finalization_candidates,
             reconciled=reconciled,
             still_failing=still_failing,
             quarantined=quarantined,

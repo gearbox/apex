@@ -218,3 +218,18 @@ class TestPricingTiersValidAccepted:
             billing_pricing_tiers={10: 0, 50: 0, 100: 0},
         )
         assert settings.billing_pricing_tiers == {10: 0, 50: 0, 100: 0}
+
+
+class TestBillingReconcilerMaxPerSweep:
+    """Z2: the budget is shared across two passes, so 1 would starve the refund pass."""
+
+    def test_one_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="billing_reconciler_max_per_sweep"):
+            hermetic_settings(jwt_secret_key=_JWT_SECRET, billing_reconciler_max_per_sweep=1)
+
+    def test_two_accepted(self) -> None:
+        settings = hermetic_settings(jwt_secret_key=_JWT_SECRET, billing_reconciler_max_per_sweep=2)
+        assert settings.billing_reconciler_max_per_sweep == 2
+
+    def test_default_accepted(self) -> None:
+        assert hermetic_settings(jwt_secret_key=_JWT_SECRET).billing_reconciler_max_per_sweep == 50

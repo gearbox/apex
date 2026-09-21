@@ -558,11 +558,14 @@ class Settings(BaseSettings):
     )
     billing_reconciler_max_per_sweep: int = Field(
         default=50,
-        ge=1,
+        ge=2,
         le=500,
         description=(
-            "Maximum sessions processed per sweep. Caps wall-clock time of "
-            "any single sweep so a backlog can't starve the worker loop."
+            "Maximum sessions processed per sweep, shared across the finalization "
+            "and refund-reconciliation passes (finalization takes ceil(N/2), refunds "
+            "the rest). Caps wall-clock time of any single sweep so a backlog can't "
+            "starve the worker loop. Minimum 2: at 1 the refund pass would get "
+            "1 - 1 = 0 whenever finalization has a candidate, starving refunds."
         ),
     )
 
