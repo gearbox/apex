@@ -27,6 +27,7 @@ import msgspec
 import structlog
 
 from src.api.services.jobs.sweep import JobSweepFailure
+from src.api.services.provisioning_script import ProvisioningScriptError
 from src.api.services.vastai.exceptions import InstanceNotFoundError
 from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
@@ -35,6 +36,8 @@ from src.core.enums import (
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
+    ProbeOutcome,
+    ScriptVariant,
 )
 from src.core.uid import new_id
 from src.db.repositories.gpu_session import GpuSessionRepository
@@ -46,6 +49,7 @@ from src.workers.base import PeriodicWorker
 from ._env_builder import build_acs_env
 from ._events import publish_deployment_event, publish_operation_event, publish_status_event
 from ._provisioning import make_onstart_cmd, provision_vastai_instance
+from .failure_reasons import bounded_failure_reason
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -61,6 +65,7 @@ if TYPE_CHECKING:
     from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.jobs.sweep import JobSweepService
     from src.api.services.ops_event_bus import OpsEventBus
+    from src.api.services.provisioning_script import ProvisioningScriptService
     from src.api.services.vastai.client import VastAIClient
     from src.api.services.vastai.schemas import VastAIInstance
     from src.core.config import Settings
@@ -75,6 +80,7 @@ _PROBE_TIMEOUT_SECONDS = 10.0
 # and every call site share a single source of truth (no typo risk, grep-friendly).
 _REASON_PROVISIONING_TIMEOUT = "provisioning_timeout"
 _REASON_PENDING_TIMEOUT = "pending_timeout"
+_REASON_BUNDLE_NOT_DEPLOYED = "bundle_not_deployed"
 _REASON_PENDING_TIMEOUT_AFTER_ERRORS = "pending_timeout_after_errors"
 # Retryable: stall = no callbacks for stall_timeout; node_reported_failure = node said it failed.
 # Both are eligible for recreation (unlike provisioning_timeout which stays terminal).
@@ -158,6 +164,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         http_client: httpx.AsyncClient,
         settings: Settings,
         cooldown_store: NodeCooldownStore,
+        provisioning_script_service: ProvisioningScriptService,
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
@@ -179,6 +186,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         self._http = http_client
         self._settings = settings
         self._cooldown = cooldown_store
+        self._provisioning_script = provisioning_script_service
         self._billing_service = billing_service
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
@@ -384,12 +392,34 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._retry_or_fail(session, reason=_REASON_NODE_REPORTED_FAILURE)
             return
 
-        reachable = await self._probe_comfyui(
+        outcome = await self._probe_comfyui(
             session, readiness_marker_node_class=readiness_marker_node_class
         )
-        if reachable:
+        if outcome == ProbeOutcome.ready:
             await self._mark_active(session)
-        elif operation is not None and operation.status == OperationStatus.succeeded:
+            return
+
+        if outcome == ProbeOutcome.contract_failed:
+            # D11: fail-fast applies ONLY to this initial-provisioning path — never
+            # to resume (_advance_resuming) or additive-deployment attach.
+            new_count = await self._record_contract_failure(session)
+            if new_count >= self._settings.gpu_provision_terminal_grace_probes:
+                logger.warning(
+                    "gpu_session.provision.contract_failed_exhausted",
+                    session_id=str(session.id),
+                    consecutive_failures=new_count,
+                )
+                await self._mark_failed(
+                    session,
+                    f"{_REASON_BUNDLE_NOT_DEPLOYED}: "
+                    f"contract check failed {new_count} consecutive probes",
+                )
+            return
+
+        # not_ready: any non-contract_failed outcome resets the counter — only
+        # CONSECUTIVE contract failures terminate the session.
+        await self._reset_contract_failure_counter_if_needed(session)
+        if operation is not None and operation.status == OperationStatus.succeeded:
             # Node reported terminal-ready but our authoritative probe disagrees:
             # strong signal of a provisioning defect (e.g. wrong/absent checkpoint).
             logger.warning(
@@ -465,12 +495,15 @@ class GpuProvisioningWorker(PeriodicWorker):
             if deployment.readiness_marker_node_class is not None
         }
         registered_node_classes: set[str] | None = set() if markers else None
-        reachable = await self._probe_comfyui(
+        # D11: resume never fail-fasts on contract_failed — a marker/checkpoint that
+        # hasn't appeared yet is treated exactly like "not reachable" here, same as
+        # before ProbeOutcome existed, and the resume timeout is the only backstop.
+        outcome = await self._probe_comfyui(
             session,
             readiness_marker_node_class=readiness_marker_node_class,
             registered_node_classes=registered_node_classes,
         )
-        if not reachable:
+        if outcome != ProbeOutcome.ready:
             return
 
         if registered_node_classes is not None and (
@@ -570,22 +603,50 @@ class GpuProvisioningWorker(PeriodicWorker):
                 return deployment.readiness_marker_node_class
         return deployments[0].readiness_marker_node_class if deployments else None
 
+    async def _record_contract_failure(self, session: GpuSession) -> int:
+        """Atomically bump consecutive_contract_failures; returns the new value."""
+        async with self._session_factory() as db, db.begin():
+            return await GpuSessionRepository(db).increment_consecutive_contract_failures(
+                session.id
+            )
+
+    async def _reset_contract_failure_counter_if_needed(self, session: GpuSession) -> None:
+        """Zero the counter after a non-contract_failed probe outcome.
+
+        Skips the write entirely when the in-memory row (loaded at the top of this
+        sweep tick) already shows 0 — the common case — so a healthy session isn't
+        re-written every 15s for no reason.
+        """
+        if session.consecutive_contract_failures == 0:
+            return
+        async with self._session_factory() as db, db.begin():
+            await GpuSessionRepository(db).reset_consecutive_contract_failures(session.id)
+
     async def _probe_comfyui(
         self,
         session: GpuSession,
         *,
         readiness_marker_node_class: str | None,
         registered_node_classes: set[str] | None = None,
-    ) -> bool:
+    ) -> ProbeOutcome:
         """Probe ComfyUI for readiness via the CF tunnel.
 
-        Returns True only when all applicable conditions hold:
+        Returns ProbeOutcome.ready only when all applicable conditions hold:
         1. HTTP 200 from /object_info.
         2. Checkpoint presence (when bundle declares exactly one checkpoint):
            the declared filename must appear in ComfyUI's available list.
         3. Node-class marker (when configured): the marker class must be registered.
         4. Degradation backstop: if neither check is applicable, log a WARNING
-           and return True on the 200 (unverifiable bundle, gap made loud).
+           and return ready on the 200 (unverifiable bundle, gap made loud).
+
+        Returns ProbeOutcome.contract_failed ONLY for the two branches where the
+        node is reachable (HTTP 200) but its declared checkpoint or readiness
+        marker is absent — a bare bool previously collapsed this into the same
+        "not ready yet" value as a transient/unreachable probe, which is why a
+        node that can never satisfy its bundle contract could sit in
+        'provisioning' for the full timeout window (2026-09-13 staging incident).
+        Every other non-ready branch (unreachable, non-200, apex-side lookup
+        failure, malformed /object_info body) stays ProbeOutcome.not_ready.
 
         When ``registered_node_classes`` is supplied, also records every class
         returned by /object_info without making another request. Resume uses
@@ -597,7 +658,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 "gpu_session.provision.probe_no_hostname",
                 session_id=str(session.id),
             )
-            return False
+            return ProbeOutcome.not_ready
 
         url = f"https://{session.tunnel_hostname}/object_info"
         start = time.monotonic()
@@ -610,7 +671,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 hostname=session.tunnel_hostname,
                 error_class=exc.__class__.__name__,
             )
-            return False
+            return ProbeOutcome.not_ready
         latency_ms = int((time.monotonic() - start) * 1000)
 
         if resp.status_code != 200:
@@ -620,20 +681,22 @@ class GpuProvisioningWorker(PeriodicWorker):
                 status_code=resp.status_code,
                 reachable=False,
             )
-            return False
+            return ProbeOutcome.not_ready
 
         # Determine which checks are applicable before parsing JSON.
         expected = self._bundles.get_model_filenames(
             session.bundle_name, session.bundle_version, _READINESS_MODEL_TYPE
         )
         if expected is None:
+            # Apex-side lookup failure (bad bundle index state), not a node-side
+            # problem — stays not_ready, never contract_failed.
             logger.warning(
                 "gpu_session.provision.probe_checkpoint_lookup_failed",
                 session_id=str(session.id),
                 bundle_name=session.bundle_name,
                 bundle_version=session.bundle_version,
             )
-            return False
+            return ProbeOutcome.not_ready
         checkpoint_check_applicable = len(expected) == 1
         marker = readiness_marker_node_class
         marker_check_applicable = marker is not None
@@ -658,7 +721,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                     bundle_version=session.bundle_version,
                     hostname=session.tunnel_hostname,
                 )
-                return True
+                return ProbeOutcome.ready
 
         # At least one check is applicable — parse the JSON body.
         try:
@@ -669,7 +732,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 session_id=str(session.id),
                 error=str(exc),
             )
-            return not primary_check_applicable
+            return ProbeOutcome.not_ready if primary_check_applicable else ProbeOutcome.ready
 
         if not isinstance(parsed, dict):
             logger.warning(
@@ -677,7 +740,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 session_id=str(session.id),
                 response_type=type(parsed).__name__,
             )
-            return not primary_check_applicable
+            return ProbeOutcome.not_ready if primary_check_applicable else ProbeOutcome.ready
 
         if registered_node_classes is not None:
             registered_node_classes.update(
@@ -712,13 +775,15 @@ class GpuProvisioningWorker(PeriodicWorker):
                                 shape_ok = False
 
             if not shape_ok:
+                # apex-side/node-shape ambiguity, not a confirmed absent checkpoint —
+                # stays not_ready (declined to touch, per Change 4's scope).
                 logger.warning(
                     "gpu_session.provision.probe_object_info_shape",
                     session_id=str(session.id),
                     bundle_name=session.bundle_name,
                     expected_checkpoint=expected[0],
                 )
-                return False
+                return ProbeOutcome.not_ready
 
             matched, exact = _match_checkpoint(expected[0], available)
             if not matched:
@@ -730,7 +795,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                     available_count=len(available),
                     available_sample=available[:5],
                 )
-                return False
+                return ProbeOutcome.contract_failed
             if not exact:
                 # Readiness passes on basename, but the bundle must declare the
                 # exposed subpath for its model-input application to use it.
@@ -753,7 +818,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                     total_classes_registered=len(class_names),
                     sample_classes=class_names[:5],
                 )
-                return False
+                return ProbeOutcome.contract_failed
             logger.info(
                 "gpu_session.provision.probe_marker_found",
                 session_id=str(session.id),
@@ -768,7 +833,7 @@ class GpuProvisioningWorker(PeriodicWorker):
             checkpoint_verified=checkpoint_check_applicable,
             marker_verified=marker_check_applicable,
         )
-        return True
+        return ProbeOutcome.ready
 
     # ------------------------------------------------------------------
     # Retry logic
@@ -781,7 +846,46 @@ class GpuProvisioningWorker(PeriodicWorker):
         no autonomous recreation. The user starts a new session if they want to try again.
         This prevents 'sessions waking up at midnight and burning credits' after the user
         has given up.
+
+        The callback token is rotated on entry, in the same transaction as the attempt
+        increment, before any external await (Z1, round-7 remediation).
         """
+        # Z1, round-7 remediation: rotate the callback token the moment the retry path
+        # is entered, in the same short transaction as the attempt increment. X2 (round
+        # 5) moved rotation ahead of provision_vastai_instance, but the recreation
+        # window opens much earlier: the old node's hash stayed current across the
+        # old-instance destroy, the cooldown write, search_offers, get_tunnel_token and
+        # the script resolve. A delayed failure webhook from the node being abandoned
+        # would validate against that still-current hash — including under
+        # fail_pre_active_session's S2 locked revalidation, which compares against the
+        # same stale value — and terminal-fail + refund a session this retry is about
+        # to recover. Rotating first means every callback carrying the old token from
+        # here on is rejected as gpu_session.callback.stale_token.
+        #
+        # Rotation is UNCONDITIONAL, and that is deliberate: it also runs when this
+        # path goes terminal below (_mark_failed), including every call under the
+        # default provisioning_recreation_attempts=1. That is harmless — the session is
+        # being failed anyway, and a late callback from the old node is correctly
+        # rejected as stale. Do not "optimize" rotation back behind the retry-vs-
+        # terminal decision: that reopens the window.
+        fresh_callback_token = secrets.token_urlsafe(48)
+        fresh_callback_token_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
+
+        async with self._session_factory() as db, db.begin():
+            repo = GpuSessionRepository(db)
+            current = await repo.get_by_id(session.id, for_update=True)
+            if current is None or current.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
+                # Stopped/failed concurrently: whoever moved it owns the old
+                # instance's teardown — nothing to increment, rotate or destroy.
+                logger.info(
+                    "gpu_session.provision.retry_abandoned_before_rotation",
+                    session_id=str(session.id),
+                    observed_status=current.status if current is not None else None,
+                )
+                return
+            new_attempt = await repo.increment_provision_attempt(session.id)
+            await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
+
         # Step 1: destroy the failed instance best-effort
         if session.vastai_instance_id is not None:
             try:
@@ -801,11 +905,6 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._cooldown.record_failure(session.vastai_machine_id, reason=reason)
         else:
             logger.debug("gpu_session.node_cooldown.no_machine_id", session_id=str(session.id))
-
-        # Step 2: atomically increment attempt counter
-        async with self._session_factory() as db, db.begin():
-            repo = GpuSessionRepository(db)
-            new_attempt = await repo.increment_provision_attempt(session.id)
 
         # Attempts are 1-indexed: attempt=1 is the original; attempt=2 would be the
         # first recreation. With provisioning_recreation_attempts=1 (default), the
@@ -875,33 +974,72 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._mark_failed(session, "retry_get_token_failed")
             return
 
-        if not self._settings.ai_bundles_github_token:
+        if not self._settings.github_content_token:
             logger.error(
                 "gpu_session.provision.retry_config_error",
                 session_id=str(session.id),
-                reason="ai_bundles_github_token is empty; CLI clone will fail",
+                reason="github_content_token is empty; CLI clone will fail",
             )
-            await self._mark_failed(session, "misconfigured: ai_bundles_github_token is empty")
+            await self._mark_failed(session, "misconfigured: github_content_token is empty")
+            return
+        if not self._settings.provisioning_script_ref:
+            logger.error(
+                "gpu_session.provision.retry_config_error",
+                session_id=str(session.id),
+                reason="provisioning_script_ref is empty",
+            )
+            await self._mark_failed(session, "misconfigured: provisioning_script_ref is empty")
             return
 
-        # Generate a fresh callback token so the destroyed node's leaked token is dead.
-        # The hash is written to the DB atomically with the new instance info below.
-        fresh_callback_token = secrets.token_urlsafe(48)
-        fresh_callback_token_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
+        # Re-resolve the bootstrap script (D6) — near-certain cache hit since the ref
+        # doesn't change per retry, but a stale/never-resolving ref must still fail the
+        # retry cleanly rather than hand the new node a script apex never verified.
+        try:
+            resolved_script = await self._provisioning_script.resolve(
+                ScriptVariant.comfyui, self._settings.provisioning_script_ref
+            )
+        except ProvisioningScriptError:
+            logger.exception(
+                "gpu_session.provision.retry_script_resolve_failed",
+                session_id=str(session.id),
+            )
+            await self._mark_failed(session, "retry_script_resolve_failed")
+            return
+
+        # The token was already rotated on entry (Z1) — fresh_callback_token is carried
+        # down from there so the env below matches the hash already persisted.
         bootstrap_operation_id = new_id()
 
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
-        # civitai_api_token, and ACS_GITHUB_TOKEN.
-        env = build_acs_env(
-            settings=self._settings,
-            session_id=session.id,
-            operation_id=bootstrap_operation_id,
-            bundle_name=session.bundle_name,
-            bundle_version=session.bundle_version,
-            comfyui_port=bundle.hardware.comfyui_port,
-            tunnel_token=tunnel_token,
-            callback_token=fresh_callback_token,
-        )
+        # civitai_api_token, ACS_GITHUB_TOKEN, and (D3) PROVISIONING_SCRIPT /
+        # PROVISIONER_WEBHOOK_URL, which carry the callback token in their query string.
+        # S7: guarded like the two config checks immediately above — build_acs_env
+        # raises a bare ValueError when apex_callback_url fails to normalize.
+        # Effectively unreachable today (the Settings validator catches an invalid
+        # apex_callback_url first), but ops can change env vars between an initial
+        # start and a retry without a restart, so this is defense in depth, not
+        # dead code — fail the retry cleanly via _mark_failed rather than let an
+        # unguarded ValueError escape run_once and poison the whole worker sweep.
+        try:
+            env = build_acs_env(
+                settings=self._settings,
+                session_id=session.id,
+                operation_id=bootstrap_operation_id,
+                bundle_name=session.bundle_name,
+                bundle_version=session.bundle_version,
+                comfyui_port=bundle.hardware.comfyui_port,
+                tunnel_token=tunnel_token,
+                callback_token=fresh_callback_token,
+                provision_script_sha256=resolved_script.sha256,
+            )
+        except ValueError:
+            logger.exception(
+                "gpu_session.provision.retry_config_error",
+                session_id=str(session.id),
+                reason="apex_callback_url invalid; build_acs_env raised",
+            )
+            await self._mark_failed(session, "misconfigured: apex_callback_url invalid")
+            return
 
         try:
             instance_id, selected_offer = await provision_vastai_instance(
@@ -945,8 +1083,6 @@ class GpuProvisioningWorker(PeriodicWorker):
                 # another transaction that needs that same lock.
                 retry_missing_primary = True
             else:
-                # Rotate the callback token so the old (destroyed) node's token is invalidated.
-                await repo.update_callback_token_hash(session.id, fresh_callback_token_hash)
                 await operation_repo.create(
                     id=bootstrap_operation_id,
                     session_id=session.id,
@@ -973,6 +1109,9 @@ class GpuProvisioningWorker(PeriodicWorker):
                     vastai_gpu_name=selected_offer.gpu_name,
                     vastai_machine_id=selected_offer.machine_id,
                     provisioning_started_at=now,
+                    # Redundant with the rotation on entry, on purpose: the two writes
+                    # carry the same value, so they can't diverge under a future reorder.
+                    callback_token_hash=fresh_callback_token_hash,
                 )
                 await repo.update_status(session.id, GpuSessionStatus.pending)
 
@@ -1004,8 +1143,18 @@ class GpuProvisioningWorker(PeriodicWorker):
         new_status: GpuSessionStatus,
         log_event: str,
         **extra_fields: object,
-    ) -> None:
+    ) -> bool:
         """Re-load under SELECT FOR UPDATE, validate status, then write new_status.
+
+        Returns True if the transition was actually applied, False if the row was
+        already gone or already in a stopping/terminal state (a no-op). Callers that
+        do something irreversible AFTER this call — most importantly _mark_failed's
+        refund — must gate that side effect on this return value: two racing callers
+        that both reach _transition(new_status=failed) on the same session (e.g. the
+        provisioner-failure webhook and this worker's own probe fail-fast, Change 3 vs
+        Change 4) are serialized by the SELECT FOR UPDATE below, and exactly one of
+        them observes True. Without this gate, the loser would still issue a second
+        refund even though it changed nothing.
 
         The other of the two D15 lifecycle-cascade chokepoints (the other is
         GpuSessionService._set_status): a transition to 'active' flips only the
@@ -1029,7 +1178,7 @@ class GpuProvisioningWorker(PeriodicWorker):
             repo = GpuSessionRepository(db)
             current = await repo.get_by_id(session.id, for_update=True)
             if current is None:
-                return
+                return False
             if current.status in STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES:
                 logger.info(
                     "gpu_session.provision.skip_transition_stale",
@@ -1037,7 +1186,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                     observed_status=current.status,
                     intended_status=new_status.value,
                 )
-                return
+                return False
             previous_status = str(current.status)
             await repo.update_status(session.id, new_status, **extra_fields)
             current.status = new_status
@@ -1084,6 +1233,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         )
         for operation in closed_operations:
             await publish_operation_event(self._event_bus, operation)
+        return True
 
     async def _mark_active(self, session: GpuSession) -> None:
         """Transition to active; set started_at if not already set (preserve for resuming)."""
@@ -1102,7 +1252,8 @@ class GpuProvisioningWorker(PeriodicWorker):
         )
 
     async def _mark_failed(self, session: GpuSession, reason: str) -> None:
-        """Destroy instance + delete tunnel (best-effort), refund billing, transition to failed."""
+        """Transition once, then tear down and refund only for the winning caller."""
+        reason = bounded_failure_reason(reason)
         # Sweep in-flight jobs before the status transition so the user-visible
         # state stays consistent: jobs go FAILED, then session goes FAILED.
         if self._job_sweep is not None:
@@ -1112,6 +1263,20 @@ class GpuProvisioningWorker(PeriodicWorker):
                 failure=JobSweepFailure(internal_reason=f"GPU session failed: {reason}"),
                 log_event="gpu_session.provision.job_sweep",
             )
+
+        transitioned = await self._transition(
+            session,
+            new_status=GpuSessionStatus.failed,
+            log_event="gpu_session.provision.failed",
+            error_message=reason,
+            # T5, round-3 remediation: stamp the terminal timestamp on 'failed'
+            # the same as _set_status does for 'stopped' — the billing
+            # reconciler's refund-reconciliation grace period (T5) is measured
+            # from this, not from created_at.
+            stopped_at=datetime.now(UTC),
+        )
+        if not transitioned:
+            return
 
         if session.vastai_instance_id is not None:
             try:
@@ -1133,20 +1298,17 @@ class GpuProvisioningWorker(PeriodicWorker):
                     session_id=str(session.id),
                 )
 
-        await self._transition(
-            session,
-            new_status=GpuSessionStatus.failed,
-            log_event="gpu_session.provision.failed",
-            error_message=reason[:500],
-        )
-
-        # Issue full refund of base reservation — session never became usable
+        # Issue full refund of base reservation — session never became usable. Gated on
+        # `transitioned`: a racing caller that already failed this session (e.g. the
+        # provisioner-failure webhook, Change 3) means this call changed nothing, so a
+        # refund here would be a second one for the same session (see _transition's
+        # docstring).
         if self._billing_service is not None:
             try:
                 async with self._session_factory() as db, db.begin():
                     refund_result = await self._billing_service.refund(
                         job_id=session.id,
-                        description=f"GPU session failed: {reason[:200]}",
+                        description=f"GPU session failed: {reason}",
                         session=db,
                         product_id=session.product_id,
                         user_id=session.user_id,
@@ -1158,6 +1320,10 @@ class GpuProvisioningWorker(PeriodicWorker):
                     session_id=str(session.id),
                 )
             except Exception:
+                # BillingReconcilerWorker retries this via
+                # GpuSessionRepository.list_pending_refund_reconciliation +
+                # GpuSessionService.reconcile_pending_refund (S3) — the session is
+                # now terminal 'failed' with no refund transaction recorded.
                 logger.exception(
                     "gpu_session.provision.refund_failed",
                     session_id=str(session.id),

@@ -14,6 +14,7 @@ from src.api.services.billing_errors import (
     InsufficientBalanceError,
     PriceNotFoundError,
     RefundNotEligibleError,
+    RefundNotEligibleReason,
 )
 from src.api.services.moderation import (
     ComfyUIModerationDetector,
@@ -197,10 +198,11 @@ class TestRefund:
             repo = MockRepo.return_value
             repo.get_debit_for_job = AsyncMock(return_value=None)
 
-            with pytest.raises(RefundNotEligibleError):
+            with pytest.raises(RefundNotEligibleError) as exc_info:
                 await billing_service.refund(
                     uuid4(), description="test", session=mock_session, product_id="vex"
                 )
+            assert exc_info.value.reason is RefundNotEligibleReason.NO_DEBIT_FOUND
 
     async def test_already_refunded(
         self, billing_service: BillingService, mock_session: AsyncMock
@@ -212,10 +214,28 @@ class TestRefund:
             repo.get_debit_for_job = AsyncMock(return_value=debit)
             repo.has_refund_for_job = AsyncMock(return_value=True)
 
-            with pytest.raises(RefundNotEligibleError):
+            with pytest.raises(RefundNotEligibleError) as exc_info:
                 await billing_service.refund(
                     uuid4(), description="test", session=mock_session, product_id="vex"
                 )
+            assert exc_info.value.reason is RefundNotEligibleReason.ALREADY_REFUNDED
+
+    async def test_account_not_found(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        debit = _make_transaction(amount=-10)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_debit_for_job = AsyncMock(return_value=debit)
+            repo.has_refund_for_job = AsyncMock(return_value=False)
+            repo.get_account_for_update = AsyncMock(return_value=None)
+
+            with pytest.raises(RefundNotEligibleError) as exc_info:
+                await billing_service.refund(
+                    uuid4(), description="test", session=mock_session, product_id="vex"
+                )
+            assert exc_info.value.reason is RefundNotEligibleReason.ACCOUNT_NOT_FOUND
 
 
 class TestPartialRefund:
@@ -258,7 +278,7 @@ class TestPartialRefund:
     ) -> None:
         """Amount must be > 0; zero or negative is a caller bug."""
         for bad_amount in (0, -1, -100):
-            with pytest.raises(RefundNotEligibleError, match="must be positive"):
+            with pytest.raises(RefundNotEligibleError, match="must be positive") as exc_info:
                 await billing_service.partial_refund(
                     uuid4(),
                     amount=bad_amount,
@@ -266,6 +286,7 @@ class TestPartialRefund:
                     session=mock_session,
                     product_id="vex",
                 )
+            assert exc_info.value.reason is RefundNotEligibleReason.INVALID_AMOUNT
 
     async def test_rejects_amount_exceeding_debit_on_first_call(
         self, billing_service: BillingService, mock_session: AsyncMock
@@ -278,7 +299,9 @@ class TestPartialRefund:
             repo.get_debit_for_job = AsyncMock(return_value=debit)
             repo.sum_refunds_for_job = AsyncMock(return_value=0)
 
-            with pytest.raises(RefundNotEligibleError, match="would exceed original debit"):
+            with pytest.raises(
+                RefundNotEligibleError, match="would exceed original debit"
+            ) as exc_info:
                 await billing_service.partial_refund(
                     uuid4(),
                     amount=501,
@@ -286,6 +309,7 @@ class TestPartialRefund:
                     session=mock_session,
                     product_id="vex",
                 )
+            assert exc_info.value.reason is RefundNotEligibleReason.EXCEEDS_ORIGINAL_DEBIT
 
     async def test_rejects_cumulative_refund_exceeding_original_debit(
         self, billing_service: BillingService, mock_session: AsyncMock
@@ -351,7 +375,9 @@ class TestPartialRefund:
             repo = MockRepo.return_value
             repo.get_debit_for_job = AsyncMock(return_value=None)
 
-            with pytest.raises(RefundNotEligibleError, match="No debit transaction found"):
+            with pytest.raises(
+                RefundNotEligibleError, match="No debit transaction found"
+            ) as exc_info:
                 await billing_service.partial_refund(
                     uuid4(),
                     amount=100,
@@ -359,6 +385,28 @@ class TestPartialRefund:
                     session=mock_session,
                     product_id="vex",
                 )
+            assert exc_info.value.reason is RefundNotEligibleReason.NO_DEBIT_FOUND
+
+    async def test_raises_when_account_not_found(
+        self, billing_service: BillingService, mock_session: AsyncMock
+    ) -> None:
+        debit = _make_transaction(amount=-500)
+
+        with patch("src.api.services.billing.BillingRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_debit_for_job = AsyncMock(return_value=debit)
+            repo.sum_refunds_for_job = AsyncMock(return_value=0)
+            repo.get_account_for_update = AsyncMock(return_value=None)
+
+            with pytest.raises(RefundNotEligibleError) as exc_info:
+                await billing_service.partial_refund(
+                    uuid4(),
+                    amount=100,
+                    description="test",
+                    session=mock_session,
+                    product_id="vex",
+                )
+            assert exc_info.value.reason is RefundNotEligibleReason.ACCOUNT_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------

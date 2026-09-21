@@ -11,9 +11,17 @@ The builder is a pure function — no mocks needed. Tests cover:
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from src.api.services.gpu_session._env_builder import build_acs_env
+import pytest
+from litestar import Litestar
+
+from src.api.routes.provisioning import ProvisioningController
+from src.api.services.gpu_session._env_builder import (
+    build_acs_env,
+    build_provisioning_callback_urls,
+)
 from src.core.config import Settings
 
 # Single source of truth — stays in sync with Settings automatically.
@@ -37,6 +45,10 @@ _EXPECTED_ACS_KEYS = {
     "ACS_APEX_OPERATION_ID",
     "ACS_APEX_CALLBACK_URL",
     "ACS_APEX_CALLBACK_TOKEN",
+    "PROVISIONING_SCRIPT",
+    "PROVISIONER_WEBHOOK_URL",
+    "PROVISIONER_FAILURE_ACTION",
+    "ACS_PROVISION_SCRIPT_SHA256",
     "ACS_HF_TOKEN",
     "ACS_CIVITAI_API_TOKEN",
     "ACS_COMFYUI_PORT",
@@ -47,12 +59,13 @@ _EXPECTED_ACS_KEYS = {
 
 def _make_settings(**overrides: object) -> MagicMock:
     s = MagicMock()
-    s.ai_bundles_github_token = "ghp_test_token"
+    s.github_content_token = "ghp_test_token"
     s.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     s.ai_bundles_branch = "master"
     s.aisha_repo_url = "https://github.com/gearbox/aisha.git"
     s.aisha_branch = "master"
-    s.apex_callback_url = "https://apex.example.com/callback"
+    s.apex_callback_url = "https://apex.example.com"
+    s.provisioning_script_ref = "v1.2.3"
     s.hf_token = "hf-test-token"
     s.civitai_api_token = "civitai-test-token"
     s.aisha_comfyui_host = "0.0.0.0"  # noqa: S104
@@ -76,6 +89,9 @@ def _build(**overrides: object) -> dict[str, str]:
         comfyui_port=overrides.pop("comfyui_port", _DEFAULT_COMFYUI_PORT),  # type: ignore[arg-type]
         tunnel_token=overrides.pop("tunnel_token", "tunnel-secret"),  # type: ignore[arg-type]
         callback_token=overrides.pop("callback_token", "cb-secret"),  # type: ignore[arg-type]
+        provision_script_sha256=overrides.pop(  # type: ignore[arg-type]
+            "provision_script_sha256", "a" * 64
+        ),
     )
 
 
@@ -91,7 +107,7 @@ def test_all_acs_keys_present() -> None:
 
 
 def test_acs_github_token_from_settings() -> None:
-    s = _make_settings(ai_bundles_github_token="ghp_my_pat")
+    s = _make_settings(github_content_token="ghp_my_pat")
     env = _build(settings=s)
     assert env["ACS_GITHUB_TOKEN"] == "ghp_my_pat"
 
@@ -172,3 +188,83 @@ def test_cf_tunnel_token_present_and_unprefixed() -> None:
     to ACS_CF_TUNNEL_TOKEN."""
     env = _build(tunnel_token="test-tunnel-secret")
     assert env["CF_TUNNEL_TOKEN"] == env["ACS_CF_TUNNEL_TOKEN"] == "test-tunnel-secret"
+
+
+def test_provisioning_script_url_contains_ref_session_and_token() -> None:
+    sid = uuid4()
+    s = _make_settings(
+        apex_callback_url="https://apex.example.com", provisioning_script_ref="v9.9.9"
+    )
+    env = _build(settings=s, session_id=sid, callback_token="tok-123")
+    expected = (
+        f"https://apex.example.com/v1/provisioning/scripts/comfyui/v9.9.9"
+        f"?session={sid}&token=tok-123"
+    )
+    assert env["PROVISIONING_SCRIPT"] == expected
+
+
+def test_provisioner_webhook_url_contains_session_and_token() -> None:
+    sid = uuid4()
+    s = _make_settings(apex_callback_url="https://apex.example.com")
+    env = _build(settings=s, session_id=sid, callback_token="tok-456")
+    assert env["PROVISIONER_WEBHOOK_URL"] == (
+        f"https://apex.example.com/v1/provisioning/webhook/{sid}?token=tok-456"
+    )
+
+
+def test_provisioner_failure_action_is_always_destroy() -> None:
+    env = _build()
+    assert env["PROVISIONER_FAILURE_ACTION"] == "destroy"
+
+
+def test_provision_script_sha256_passed_through() -> None:
+    env = _build(provision_script_sha256="b" * 64)
+    assert env["ACS_PROVISION_SCRIPT_SHA256"] == "b" * 64
+
+
+# ---------------------------------------------------------------------------
+# T3 (round-3 remediation): build_provisioning_callback_urls must never emit
+# an unroutable script URL, regardless of who validated the ref upstream.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildProvisioningCallbackUrlsRouteSafety:
+    @pytest.mark.parametrize(
+        "bad_ref", ["feature/bootstrap", "a?b", "a#b", "a%b", "a b", ".", ".."]
+    )
+    def test_unsafe_ref_raises(self, bad_ref: str) -> None:
+        with pytest.raises(ValueError, match=r"provision_script_dev_ref|route-safe|path segment"):
+            build_provisioning_callback_urls(
+                apex_callback_url="https://apex.example.com",
+                session_id=uuid4(),
+                callback_token="tok",
+                provision_script_ref=bad_ref,
+            )
+
+    def test_pinned_immutable_ref_is_never_checked_for_route_safety(self) -> None:
+        """A release tag/SHA always passes PROVISIONING_REF_PATTERN, so the
+        route-safety check is skipped for it entirely — it can never contain
+        a '/' by construction of the pattern anyway."""
+        script_url, _ = build_provisioning_callback_urls(
+            apex_callback_url="https://apex.example.com",
+            session_id=uuid4(),
+            callback_token="tok",
+            provision_script_ref="v1.2.3",
+        )
+        assert "/v1.2.3?" in script_url
+
+    def test_slash_free_dev_ref_round_trips_through_the_registered_route(self) -> None:
+        app = Litestar(route_handlers=[ProvisioningController])
+        route = next(r for r in app.routes if "/scripts/" in r.path)
+        expected_path = route.path.replace("{variant:str}", "comfyui").replace(
+            "{ref:str}", "bootstrap-test"
+        )
+
+        script_url, _ = build_provisioning_callback_urls(
+            apex_callback_url="https://apex.example.com",
+            session_id=uuid4(),
+            callback_token="tok",
+            provision_script_ref="bootstrap-test",
+        )
+
+        assert urlsplit(script_url).path == expected_path

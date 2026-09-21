@@ -616,6 +616,42 @@ STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES: frozenset[GpuSessionStatus] = (
 )
 
 
+class ProbeOutcome(StrEnum):
+    """Result of GpuProvisioningWorker._probe_comfyui — replaces a bare bool.
+
+    A bare bool collapsed "not ready yet" and "ready, but the bundle contract can
+    never be satisfied" into the same value, which is why a node whose declared
+    checkpoint (or readiness marker) never appears could sit in 'provisioning' for
+    the full timeout window (2026-09-13 staging incident) instead of failing fast.
+    """
+
+    ready = "ready"
+    not_ready = "not_ready"  # unreachable, non-200, or a transient/apex-side probe issue
+    contract_failed = "contract_failed"  # 200 + declared checkpoint or marker absent
+
+
+class ScriptVariant(StrEnum):
+    """Bootstrap-script flavors served by GET /v1/provisioning/scripts/{variant}/{ref}.
+
+    Each member maps to a hard-coded (repo, path) pair in
+    src/core/constants.py.SCRIPT_VARIANT_SOURCES — repo/path are never taken
+    from the request (D3). ``base`` is a reserved slot with no mapping yet.
+    """
+
+    comfyui = "comfyui"
+    base = "base"
+
+
+class ScriptServeOutcome(StrEnum):
+    """HTTP-mapping outcome of one provisioning-script request."""
+
+    ok = "ok"
+    bad_request = "bad_request"
+    unauthorized = "unauthorized"
+    not_found = "not_found"
+    unavailable = "unavailable"
+
+
 class DeploymentStatus(StrEnum):
     """Lifecycle states for one gpu_session_deployments row.
 

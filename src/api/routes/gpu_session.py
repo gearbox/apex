@@ -47,6 +47,7 @@ from src.api.services.gpu_session.exceptions import (
     GpuSessionError,
     InvalidSessionStateError,
     LastDeploymentRequiresForceError,
+    ProvisioningUnavailableError,
     RetainBundlesUnresolvableError,
     SessionAlreadyExistsError,
     SessionHasInFlightJobsError,
@@ -150,6 +151,8 @@ class GpuSessionController(Controller):
             return _error(HTTP_409_CONFLICT, "session_already_exists", str(exc))
         except InsufficientBalanceError as exc:
             return _error(HTTP_402_PAYMENT_REQUIRED, "insufficient_balance", str(exc))
+        except ProvisioningUnavailableError as exc:
+            return _error(HTTP_503_SERVICE_UNAVAILABLE, "provisioning_unavailable", str(exc))
         except NoCapacityError as exc:
             return _error(HTTP_503_SERVICE_UNAVAILABLE, "no_gpu_capacity", str(exc))
         except VastAIError:

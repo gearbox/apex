@@ -65,6 +65,8 @@ from src.api.services.payments import GatewayRegistry, PaymentService
 from src.api.services.payments.nowpayments_gateway import NowPaymentsGateway
 from src.api.services.payments.stripe_gateway import StripeGateway
 from src.api.services.pricing import PricingService
+from src.api.services.provisioning_script import ProvisioningScriptService
+from src.api.services.provisioning_webhook import ProvisioningWebhookService
 from src.api.services.push import PushService, PywebpushSender
 from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings, StorageError
@@ -146,6 +148,9 @@ class ServiceContainer:
     # (not GPU-stack-gated; the claim endpoint must 204 cleanly even without Vast.ai/CF)
     operation_event_service: OperationEventService | None = None
     gpu_session_command_service: GpuSessionCommandService | None = None
+    # Bootstrap script delivery + provisioner failure webhook (D3)
+    provisioning_script_service: ProvisioningScriptService | None = None
+    provisioning_webhook_service: ProvisioningWebhookService | None = None
     # P4: deployment orchestration (attach/remove additional models on a session)
     gpu_session_deployment_service: GpuSessionDeploymentService | None = None
     deployment_orchestration_worker: DeploymentOrchestrationWorker | None = None
@@ -533,6 +538,30 @@ def get_gpu_session_command_service() -> GpuSessionCommandService:
     return _services.gpu_session_command_service
 
 
+def get_provisioning_script_service() -> ProvisioningScriptService:
+    """Provide ProvisioningScriptService singleton (503 if GPU stack not configured)."""
+    if _services.provisioning_script_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(detail="Provisioning script service not available")
+    return _services.provisioning_script_service
+
+
+def get_provisioning_webhook_service() -> ProvisioningWebhookService:
+    """Provide ProvisioningWebhookService singleton (503 if GPU stack not configured).
+
+    Deliberately depends on GpuSessionService (always constructed whenever the GPU
+    stack is configured, regardless of WORKER_MODE) rather than GpuProvisioningWorker
+    (only constructed when this process also runs workers) — the provisioner's
+    failure webhook can land on any apex replica, including an api_only one.
+    """
+    if _services.provisioning_webhook_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(detail="Provisioning webhook service not available")
+    return _services.provisioning_webhook_service
+
+
 def get_gpu_session_deployment_service() -> GpuSessionDeploymentService:
     """Provide GpuSessionDeploymentService singleton (503 if GPU stack not configured)."""
     if _services.gpu_session_deployment_service is None:
@@ -667,7 +696,7 @@ async def init_services(settings: Settings) -> JWTService:
     logger.info("db.pool_initialized")
 
     # The callback route supplies the request transaction to this pure writer.
-    _services.operation_event_service = OperationEventService()
+    _services.operation_event_service = OperationEventService(settings=settings)
     logger.info("operation_event_service.initialized")
 
     # Initialize the command queue service (DB + settings only, not GPU-stack-gated —
@@ -1004,7 +1033,7 @@ async def init_services(settings: Settings) -> JWTService:
         )
         _services.bundle_index = BundleIndexService(
             repo_url=settings.ai_bundles_repo_url,
-            github_token=settings.ai_bundles_github_token,
+            github_token=settings.github_content_token,
             branch=settings.ai_bundles_branch,
             sync_interval_minutes=settings.ai_bundles_sync_interval_minutes,
             default_comfyui_port=settings.comfyui_port,
@@ -1031,8 +1060,17 @@ async def init_services(settings: Settings) -> JWTService:
             from src.core.redis import get_redis_client
 
             cooldown_store: NodeCooldownStore = RedisNodeCooldownStore(get_redis_client(), settings)
+            script_cache_redis = get_redis_client()
         else:
             cooldown_store = NullNodeCooldownStore()
+            script_cache_redis = None
+
+        _services.provisioning_script_service = ProvisioningScriptService(
+            http=_services.gpu_session_http_client,
+            redis=script_cache_redis,
+            settings=settings,
+            session_factory=_services.db_manager.session_factory,
+        )
 
         _services.gpu_session_service = GpuSessionService(
             vastai_client=vastai_client,
@@ -1042,9 +1080,15 @@ async def init_services(settings: Settings) -> JWTService:
             settings=settings,
             billing_service=billing_service_for_worker,
             cooldown_store=cooldown_store,
+            provisioning_script_service=_services.provisioning_script_service,
             event_bus=_services.event_bus,
             job_sweep_service=job_sweep_service,
             ops_event_bus=_services.ops_event_bus,
+        )
+        _services.provisioning_webhook_service = ProvisioningWebhookService(
+            gpu_session_service=_services.gpu_session_service,
+            session_factory=_services.db_manager.session_factory,
+            settings=settings,
         )
 
         if _services.gpu_session_command_service is None:
@@ -1068,6 +1112,7 @@ async def init_services(settings: Settings) -> JWTService:
                 http_client=_services.gpu_session_http_client,
                 settings=settings,
                 cooldown_store=cooldown_store,
+                provisioning_script_service=_services.provisioning_script_service,
                 billing_service=billing_service_for_worker,
                 event_bus=_services.event_bus,
                 job_sweep_service=job_sweep_service,
@@ -1558,6 +1603,10 @@ dependencies = {
     "operation_event_service": Provide(get_operation_event_service, sync_to_thread=False),
     # Internal command queue claim (node bearer auth validated in handler)
     "gpu_session_command_service": Provide(get_gpu_session_command_service, sync_to_thread=False),
+    # Bootstrap script delivery + provisioner failure webhook (D3 — no guard,
+    # per-session token validated in the service)
+    "provisioning_script_service": Provide(get_provisioning_script_service, sync_to_thread=False),
+    "provisioning_webhook_service": Provide(get_provisioning_webhook_service, sync_to_thread=False),
     # P4: attach/remove additional model deployments on a session
     "gpu_session_deployment_service": Provide(
         get_gpu_session_deployment_service, sync_to_thread=False

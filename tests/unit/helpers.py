@@ -6,6 +6,8 @@ plain functions imported directly by the tests that need them.
 
 from __future__ import annotations
 
+from typing import Any
+
 from src.api.services.workflow.capabilities import derive_capabilities
 from src.api.services.workflow.contract import (
     BoundWorkflow,
@@ -14,12 +16,31 @@ from src.api.services.workflow.contract import (
     WorkflowMediaInput,
     WorkflowRole,
 )
+from src.core.config import Settings
 from src.core.enums import MediaKind, MediaSlot, Resolution, Sampler, Scheduler
 from src.core.generation_config import (
     BundleGenerationConfig,
     GenerationConstraints,
     GenerationDefaults,
 )
+
+
+def hermetic_settings(**overrides: Any) -> Settings:
+    """Construct Settings ignoring any local ``.env`` file (S4 remediation).
+
+    ``Settings.model_config`` sets ``env_file=".env"``, so a bare ``Settings(...)``
+    call in a test silently inherits whatever a developer's shell has in a local
+    ``.env`` file (commonly created via ``cp .env.example .env``) — e.g.
+    ``.env.example`` sets a non-empty ``NOWPAYMENTS_IPN_CALLBACK_URL``, which
+    flips ``test_unset_accepted``'s meaning on a machine with that file present.
+    Passing ``_env_file=None`` makes construction depend only on explicit
+    overrides and real process env vars (via ``monkeypatch.setenv``), never on
+    developer disk state. Use this in every config test instead of a bare
+    ``Settings(...)``.
+    """
+    # pydantic's pyright plugin synthesizes __init__ purely from model fields,
+    # so it doesn't see BaseSettings' own hand-written _env_file kwarg.
+    return Settings(_env_file=None, **overrides)  # pyright: ignore[reportCallIssue]
 
 
 def aisha_video_capabilities() -> BundleCapabilities:

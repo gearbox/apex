@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import exists, or_, select, update
 
-from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus
+from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, GpuSessionStatus, TransactionType
+from src.db.models.billing import TokenTransaction
 from src.db.models.gpu_session import GpuSession
 
 if TYPE_CHECKING:
@@ -217,6 +218,32 @@ class GpuSessionRepository:
         await self._session.flush()
         return result.scalar_one()
 
+    async def increment_consecutive_contract_failures(self, session_id: UUID) -> int:
+        """Atomic increment of consecutive_contract_failures; returns the new value.
+
+        Only GpuProvisioningWorker._advance_provisioning writes this column, and only
+        one worker instance holds the leader lease at a time, so a plain atomic UPDATE
+        (no row lock) is sufficient — mirrors increment_provision_attempt.
+        """
+        result = await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(consecutive_contract_failures=GpuSession.consecutive_contract_failures + 1)
+            .returning(GpuSession.consecutive_contract_failures)
+        )
+        await self._session.flush()
+        new_count = result.scalar_one_or_none()
+        return new_count if new_count is not None else 0
+
+    async def reset_consecutive_contract_failures(self, session_id: UUID) -> None:
+        """Zero the counter after any non-contract_failed probe outcome."""
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(consecutive_contract_failures=0)
+        )
+        await self._session.flush()
+
     async def update_instance(
         self,
         session_id: UUID,
@@ -226,6 +253,7 @@ class GpuSessionRepository:
         vastai_cost_per_hour_micros: int,
         vastai_gpu_name: str,
         provisioning_started_at: datetime,
+        callback_token_hash: str,
         vastai_machine_id: int | None = None,
     ) -> None:
         """Swap instance info on a session after a retry; status unchanged (stays 'pending').
@@ -237,6 +265,7 @@ class GpuSessionRepository:
             vastai_cost_per_hour_micros: New hourly cost.
             vastai_gpu_name: New GPU model name.
             provisioning_started_at: Reset timestamp (restarts the timeout window).
+            callback_token_hash: Fresh callback token digest for the replacement node.
             vastai_machine_id: New Vast.ai physical machine id.
         """
         await self._session.execute(
@@ -249,6 +278,8 @@ class GpuSessionRepository:
                 vastai_gpu_name=vastai_gpu_name,
                 vastai_machine_id=vastai_machine_id,
                 provisioning_started_at=provisioning_started_at,
+                callback_token_hash=callback_token_hash,
+                consecutive_contract_failures=0,
             )
         )
         await self._session.flush()
@@ -267,6 +298,7 @@ class GpuSessionRepository:
         *,
         grace_cutoff: datetime,
         limit: int,
+        now: datetime,
     ) -> Sequence[GpuSession]:
         """List stopped sessions whose billing has not been finalized.
 
@@ -274,39 +306,162 @@ class GpuSessionRepository:
         - status = 'stopped' (terminal — the only status _finalize_billing applies to)
         - billing_finalized_at IS NULL (not yet successfully finalized)
         - stopped_at < grace_cutoff (skip in-flight in-line retries)
+        - billing_reconciliation_next_attempt_at IS NULL OR <= now (X1, round-5
+          remediation): a session that has failed reconciliation before is
+          paced by exponential backoff rather than excluded outright (as
+          round-3's T7 quarantine-threshold predicate did — that made
+          "quarantined" mean "never reconciled again", contradicting the
+          documented contract that billing_finalized_at stays NULL so the
+          worker keeps retrying once the underlying issue is fixed). A row
+          past its backoff window is selectable again the moment the outage
+          clears; a chronically failing row still costs at most one attempt
+          per backoff period instead of one per sweep, which is what keeps it
+          from flooding ops alerts or head-of-line-blocking healthy
+          candidates (see BillingReconcilerWorker for the backoff schedule).
 
         Ordered oldest-first so the longest-stuck sessions reconcile first
         on each sweep. Bounded by ``limit`` to cap per-sweep work.
         """
+        conditions = [
+            GpuSession.status == GpuSessionStatus.stopped,
+            GpuSession.billing_finalized_at.is_(None),
+            # NULL stopped_at skips the grace period — include unconditionally
+            # (stopped sessions should always have stopped_at, but be defensive).
+            or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
+            or_(
+                GpuSession.billing_reconciliation_next_attempt_at.is_(None),
+                GpuSession.billing_reconciliation_next_attempt_at <= now,
+            ),
+        ]
         result = await self._session.execute(
-            select(GpuSession)
-            .where(
-                GpuSession.status == GpuSessionStatus.stopped,
-                GpuSession.billing_finalized_at.is_(None),
-                # NULL stopped_at skips the grace period — include unconditionally
-                # (stopped sessions should always have stopped_at, but be defensive).
-                or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
-            )
-            .order_by(GpuSession.stopped_at.asc())
-            .limit(limit)
+            select(GpuSession).where(*conditions).order_by(GpuSession.stopped_at.asc()).limit(limit)
+        )
+        return result.scalars().all()
+
+    async def list_pending_refund_reconciliation(
+        self,
+        *,
+        grace_cutoff: datetime,
+        limit: int,
+        now: datetime,
+    ) -> Sequence[GpuSession]:
+        """List failed-before-active sessions whose base reservation may be unrefunded.
+
+        S3 remediation: ``fail_pre_active_session`` and
+        ``GpuProvisioningWorker._mark_failed`` both swallow a refund failure with
+        ``logger.exception`` and continue — the session is left terminally 'failed'
+        with the reservation still debited. Neither path is covered by
+        ``list_pending_billing_finalization`` (that query only ever matches
+        ``status == 'stopped'``), so without this query the debit is lost forever.
+
+        Filters:
+        - status = 'failed' (the only terminal status these two callers produce)
+        - started_at IS NULL (never became active — mirrors fail_pre_active_session's
+          own guard: an automated failure must never refund a session Apex's
+          authoritative probe already accepted as working)
+        - account_id IS NOT NULL (nothing was ever reserved otherwise)
+        - stopped_at < grace_cutoff (skip the in-line retry window; T5, round-3
+          remediation — measured from the *terminal* timestamp, same as
+          list_pending_billing_finalization, not from created_at. A session can
+          legitimately run for up to gpu_provision_timeout_seconds before
+          failing, which can exceed the grace period at the defaults, so the
+          creation time is not a safe proxy for "this failure just happened" —
+          it undercounts how long ago the in-line refund attempt actually ran.
+          Both ``fail_pre_active_session`` and ``_mark_failed`` stamp
+          ``stopped_at`` on the transition to 'failed', same as on 'stopped'.)
+        - a DEBIT transaction exists for this session id (T4, round-3
+          remediation): without this, a session whose ``account_id`` was set but
+          that failed before the reservation debit was ever written matches
+          forever — ``refund()`` raises ``RefundNotEligibleError("No debit
+          transaction found")`` every sweep, which ``reconcile_pending_refund``
+          treats as success (logged ``already_refunded``, which is also the
+          wrong event name for this case) without ever removing the row from
+          the candidate set. Because the query orders oldest-first, these
+          permanent candidates are also the ones most likely to fill the
+          ``limit`` and head-of-line-block genuinely stuck refunds.
+        - no REFUND transaction exists yet for this session id (mirrors
+          BillingRepository.has_refund_for_job) — the actual termination condition:
+          once BillingService.refund succeeds, the session stops matching and is
+          never re-selected.
+        - billing_reconciliation_next_attempt_at IS NULL OR <= now (X1, round-5
+          remediation) — see list_pending_billing_finalization's matching
+          note; this sweep reuses the same counter/backoff schedule.
+
+        Ordered oldest-``stopped_at``-first (U7, round-4 — previously ordered by
+        ``created_at`` while filtering on ``stopped_at``; harmless but
+        inconsistent, now ordered by the same column it filters on) so the
+        longest-stuck sessions reconcile first. Bounded by ``limit`` to cap
+        per-sweep work — mirrors list_pending_billing_finalization.
+
+        Deploy note (not a code concern): historical 'failed' sessions that
+        predate the ``stopped_at`` stamping added in T5 have a NULL
+        ``stopped_at`` and, per the ``or_`` clause above, bypass the grace
+        period entirely — they become eligible on the first sweep after
+        deploy. Count them first (``status='failed' AND started_at IS NULL
+        AND account_id IS NOT NULL`` with a DEBIT and no REFUND) so the
+        resulting refund burst is a deliberate decision paced by
+        ``billing_reconciler_max_per_sweep``, not a surprise.
+        """
+        has_debit = select(TokenTransaction.id).where(
+            TokenTransaction.job_id == GpuSession.id,
+            TokenTransaction.transaction_type == TransactionType.DEBIT.value,
+        )
+        has_refund = select(TokenTransaction.id).where(
+            TokenTransaction.job_id == GpuSession.id,
+            TokenTransaction.transaction_type == TransactionType.REFUND.value,
+        )
+        conditions = [
+            GpuSession.status == GpuSessionStatus.failed,
+            GpuSession.started_at.is_(None),
+            GpuSession.account_id.is_not(None),
+            or_(GpuSession.stopped_at.is_(None), GpuSession.stopped_at < grace_cutoff),
+            exists(has_debit),
+            ~exists(has_refund),
+            or_(
+                GpuSession.billing_reconciliation_next_attempt_at.is_(None),
+                GpuSession.billing_reconciliation_next_attempt_at <= now,
+            ),
+        ]
+        result = await self._session.execute(
+            select(GpuSession).where(*conditions).order_by(GpuSession.stopped_at.asc()).limit(limit)
         )
         return result.scalars().all()
 
     async def increment_billing_finalization_attempts(self, session_id: UUID) -> int:
-        """Bump the attempt counter and return the new value.
+        """Atomically bump and return the authoritative new attempt count.
 
-        Called by the reconciler after each failed sweep to track repeat
-        failures for quarantine alerting.
+        The reconciler derives its exponential-backoff timestamp from this
+        returned post-increment value, then stores it in the same transaction.
+        Keeping those two writes separate avoids deriving a delay from a stale
+        in-memory model when another worker has updated the row (Y2, round-6).
         """
         result = await self._session.execute(
             update(GpuSession)
             .where(GpuSession.id == session_id)
-            .values(billing_finalization_attempts=GpuSession.billing_finalization_attempts + 1)
+            .values(
+                billing_finalization_attempts=GpuSession.billing_finalization_attempts + 1,
+            )
             .returning(GpuSession.billing_finalization_attempts)
         )
         new_count = result.scalar_one()
         await self._session.flush()
         return new_count
+
+    async def set_billing_reconciliation_next_attempt_at(
+        self, session_id: UUID, *, next_attempt_at: datetime
+    ) -> None:
+        """Store the next eligible reconciliation time for a failed attempt.
+
+        Called immediately after increment_billing_finalization_attempts in
+        the same transaction, after the worker has calculated backoff from the
+        count returned by that atomic update.
+        """
+        await self._session.execute(
+            update(GpuSession)
+            .where(GpuSession.id == session_id)
+            .values(billing_reconciliation_next_attempt_at=next_attempt_at)
+        )
+        await self._session.flush()
 
     async def mark_billing_finalized(self, session_id: UUID, finalized_at: datetime) -> None:
         """Stamp ``billing_finalized_at`` to mark a session as billing-complete.

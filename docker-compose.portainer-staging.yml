@@ -205,8 +205,12 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       CIVITAI_API_TOKEN: ${CIVITAI_API_TOKEN:-}
 
-      # --- Apex callback URL (phase-2; must be the public staging URL) ---
+      # --- Apex callback URL (must be the public staging URL) ---
       APEX_CALLBACK_URL: ${APEX_CALLBACK_URL:?APEX_CALLBACK_URL is required (e.g. https://staging.your-domain.com)}
+
+      # --- Bootstrap script delivery (D3) ---
+      PROVISIONING_SCRIPT_REF: ${PROVISIONING_SCRIPT_REF:?PROVISIONING_SCRIPT_REF is required (a gearbox/aisha release tag or commit SHA)}
+      PROVISIONING_SCRIPT_DEV_REF: ${PROVISIONING_SCRIPT_DEV_REF:-}
 
       # --- Aisha poller (background worker for ComfyUI job state) ---
       AISHA_POLLER_ENABLED: ${AISHA_POLLER_ENABLED:-true}

@@ -1,14 +1,19 @@
 """Application configuration using pydantic-settings."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from annotated_types import Le
-from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.core.constants import MAX_EXTRACT_TIMESTAMPS, MAX_PREVIEW_FRAME_COUNT
+from src.core.constants import (
+    MAX_EXTRACT_TIMESTAMPS,
+    MAX_PREVIEW_FRAME_COUNT,
+    PROVISIONING_REF_PATTERN,
+    validate_dev_ref_is_route_safe,
+)
 from src.core.enums import WorkerMode
 from src.core.topup_pricing import build_tiers
 
@@ -34,6 +39,38 @@ _INSECURE_JWT_DEFAULTS: frozenset[str] = frozenset(
     }
 )
 _MIN_JWT_SECRET_BYTES = 32
+
+
+def _empty_string_to_none(value: object) -> object:
+    """Make an environment variable set to whitespace behave as an unset optional value."""
+    return None if isinstance(value, str) and not value.strip() else value
+
+
+OptionalNonBlankStr = Annotated[str | None, BeforeValidator(_empty_string_to_none)]
+
+
+def normalize_apex_callback_url(value: str) -> str | None:
+    """Return a normalized absolute callback origin, or ``None`` when invalid."""
+    normalized_url = value.rstrip("/")
+    parsed = urlparse(normalized_url)
+    try:
+        port_is_valid = parsed.port is None or isinstance(parsed.port, int)
+    except ValueError:
+        port_is_valid = False
+    if (
+        not normalized_url
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not port_is_valid
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return normalized_url
 
 
 class Settings(BaseSettings):
@@ -114,9 +151,20 @@ class Settings(BaseSettings):
     )
 
     # --- GPU Session Provisioning (ai-bundles) ---
-    ai_bundles_github_token: str = Field(
+    github_content_token: str = Field(
         default="",
-        description="GitHub PAT for cloning the private ai-bundles repository",
+        validation_alias="AI_BUNDLES_GITHUB_TOKEN",
+        description=(
+            "GitHub PAT read by ProvisioningScriptService to fetch the bootstrap script "
+            "from the private gearbox/aisha repo, AND by BundleIndexService to clone the "
+            "private gearbox/ai-bundles repo. Requires read access to BOTH repos — an "
+            "ai-bundles-only-scoped token clones bundles fine but 404s on every session "
+            "start (S5: the field/env name predates the aisha-repo caller and named it "
+            "for ai-bundles alone, which no longer describes what it reads). The env var "
+            "name AI_BUNDLES_GITHUB_TOKEN is kept via validation_alias so no deployment's "
+            "env needs to change; this field name is the seam a future GitHub App "
+            "credential migration will replace."
+        ),
     )
     ai_bundles_repo_url: str = Field(
         default="https://github.com/gearbox/ai-bundles.git",
@@ -302,6 +350,19 @@ class Settings(BaseSettings):
             "the offer walk."
         ),
     )
+    gpu_provision_terminal_grace_probes: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Consecutive ProbeOutcome.contract_failed results (declared checkpoint or "
+            "readiness marker absent from a reachable, HTTP-200 ComfyUI) tolerated during "
+            "the initial provisioning path before the session is failed as "
+            "'bundle_not_deployed', refunded, and destroyed. At the default poll interval "
+            "this is ~50s. Any non-contract_failed probe outcome resets the counter. Never "
+            "applies to resume or additive-deployment attach (D11)."
+        ),
+    )
     node_cooldown_base_minutes: int = Field(
         default=30,
         ge=1,
@@ -462,18 +523,49 @@ class Settings(BaseSettings):
         le=100,
         description=(
             "After this many failed reconciliation attempts, the worker logs "
-            "at ERROR with a quarantine flag for ops alerting. The session "
-            "row is NOT mutated — billing_finalized_at stays NULL so the "
-            "worker keeps retrying after the underlying issue is fixed."
+            "at ERROR once (on crossing the threshold) with a quarantine flag "
+            "for ops alerting; subsequent failures log at WARNING instead so "
+            "the alert channel isn't re-triggered every sweep forever. The "
+            "session row is NOT excluded from future sweeps and "
+            "billing_finalized_at is NOT mutated — the row stays retryable, "
+            "paced by billing_reconciler_backoff_base_minutes/"
+            "billing_reconciler_backoff_cap_hours rather than re-attempted "
+            "every sweep, so a persistently failing row can't starve the "
+            "sweep budget while it waits to be retried again."
+        ),
+    )
+    billing_reconciler_backoff_base_minutes: int = Field(
+        default=5,
+        ge=1,
+        le=120,
+        description=(
+            "Base delay for the billing reconciler's per-session exponential "
+            "backoff: after the Nth failed attempt, the next retry is not "
+            "attempted before min(base * 2**(N-1), cap) has elapsed. Keeps a "
+            "transient failure retrying quickly while a chronic one backs off."
+        ),
+    )
+    billing_reconciler_backoff_cap_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description=(
+            "Upper bound on the billing reconciler's per-session exponential "
+            "backoff delay — a session that has failed many times in a row is "
+            "retried at most this often, rather than the delay growing "
+            "unbounded."
         ),
     )
     billing_reconciler_max_per_sweep: int = Field(
         default=50,
-        ge=1,
+        ge=2,
         le=500,
         description=(
-            "Maximum sessions processed per sweep. Caps wall-clock time of "
-            "any single sweep so a backlog can't starve the worker loop."
+            "Maximum sessions processed per sweep, shared across the finalization "
+            "and refund-reconciliation passes (finalization takes ceil(N/2), refunds "
+            "the rest). Caps wall-clock time of any single sweep so a backlog can't "
+            "starve the worker loop. Minimum 2: at 1 the refund pass would get "
+            "1 - 1 = 0 whenever finalization has a candidate, starving refunds."
         ),
     )
 
@@ -528,10 +620,68 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Phase 2 Callback (pre-wired) ---
+    # --- Node -> Apex callbacks ---
     apex_callback_url: str = Field(
         default="",
-        description="Public URL for GPU node → Apex callbacks (Phase 2, unused in Phase 1)",
+        description=(
+            "Externally reachable base URL for GPU node -> Apex callbacks "
+            "(e.g. https://staging.your-domain.com). Forwarded to nodes as "
+            "ACS_APEX_CALLBACK_URL and used as the base for the per-session "
+            "PROVISIONING_SCRIPT and PROVISIONER_WEBHOOK_URL env vars (D3) — the "
+            "provisioner has no other way to reach apex, so this must be the real "
+            "public origin, not an internal/service-mesh address."
+        ),
+    )
+
+    # --- Bootstrap script delivery (D3) ---
+    provisioning_script_ref: str = Field(
+        default="",
+        description=(
+            "Apex-owned pin for the Vast.ai bootstrap script fetched from the private "
+            "gearbox/aisha repo (D2 — the Vast template no longer sets PROVISIONING_SCRIPT "
+            "itself). Must match PROVISIONING_REF_PATTERN in src/core/constants.py (a "
+            "vX.Y.Z tag or a full 40-hex commit SHA) unless it equals "
+            "provisioning_script_dev_ref. Required for GPU sessions to start — empty is "
+            "treated as a config-validation failure (503 provisioning_unavailable), the "
+            "same fail-closed posture as an empty github_content_token."
+        ),
+    )
+    provisioning_script_dev_ref: OptionalNonBlankStr = Field(
+        default=None,
+        description=(
+            "Single additional ref (typically a branch name) accepted by "
+            "GET /v1/provisioning/scripts/{variant}/{ref} outside production, for testing "
+            "an unreleased bootstrap script. Ignored (never accepted) when "
+            "settings.environment == 'production', regardless of this value."
+        ),
+    )
+    provisioning_script_cache_ttl_seconds: int = Field(
+        default=86400,
+        ge=60,
+        le=604800,
+        description=(
+            "Redis cache TTL for a resolved bootstrap script fetched by an immutable ref "
+            "(tag or commit SHA). Long, because such a ref can never resolve to different "
+            "content. Failed fetches are never cached (D5) regardless of this setting."
+        ),
+    )
+    provisioning_script_dev_cache_ttl_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+        description=(
+            "Redis cache TTL when the resolved ref is provisioning_script_dev_ref (a "
+            "mutable branch, not a tag/SHA) — short, so pushing a fix during testing is "
+            "visible to the next node within seconds rather than a day."
+        ),
+    )
+    rate_limit_provisioning_script: str = Field(
+        default="120/minute",
+        description=(
+            "Per-IP rate limit for GET /v1/provisioning/scripts/{variant}/{ref}. Generous "
+            "because a legitimate node fetches once per boot/retry, but the endpoint is "
+            "unauthenticated-until-token-check and reachable from the open internet."
+        ),
     )
 
     # Grok video polling settings
@@ -1194,7 +1344,7 @@ class Settings(BaseSettings):
         default="https://api.nowpayments.io",
         description="NowPayments API base URL; override to use the sandbox.",
     )
-    nowpayments_ipn_callback_url: str | None = Field(
+    nowpayments_ipn_callback_url: OptionalNonBlankStr = Field(
         default=None,
         description=(
             "Absolute public URL of this environment's NowPayments IPN endpoint, e.g. "
@@ -1408,6 +1558,52 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def validate_provisioning_bootstrap_settings(self) -> "Settings":
+        """Validate the script ref and callback origin independently (S6).
+
+        The two checks below are gated on separate conditions, not on each
+        other: the ref check runs whenever a ref is configured, and the URL
+        check runs whenever the GPU provisioning stack looks configured at
+        all (a ref OR a callback URL is set) — never only when the *other*
+        field happens to be set too. Previously the URL check was nested
+        inside `if ref:`, so `apex_callback_url` alone — set with no
+        `provisioning_script_ref` (a real, reachable misconfiguration; that
+        field is used by every node callback, not just bootstrap-script
+        delivery) — went completely unvalidated and unnormalized at startup,
+        surfacing only much later via the runtime check in
+        `GpuSessionService.start_session`. Local dev, where both fields
+        legitimately default to empty, still skips both checks.
+        """
+        if self.provisioning_script_dev_ref is not None:
+            validate_dev_ref_is_route_safe(self.provisioning_script_dev_ref)
+
+        ref = self.provisioning_script_ref
+        if ref:
+            is_immutable = bool(PROVISIONING_REF_PATTERN.fullmatch(ref))
+            is_allowed_dev_ref = (
+                self.environment != "production"
+                and self.provisioning_script_dev_ref is not None
+                and ref == self.provisioning_script_dev_ref
+            )
+            if not is_immutable and not is_allowed_dev_ref:
+                raise ValueError(
+                    "provisioning_script_ref must be a release tag/full commit SHA, or equal "
+                    "provisioning_script_dev_ref outside production"
+                )
+
+        gpu_stack_configured = bool(ref) or bool(self.apex_callback_url)
+        if gpu_stack_configured:
+            normalized_url = normalize_apex_callback_url(self.apex_callback_url)
+            if normalized_url is None:
+                raise ValueError(
+                    "apex_callback_url must be a non-empty absolute http(s) origin without a "
+                    "path, query, fragment, or userinfo"
+                )
+            self.apex_callback_url = normalized_url
+
+        return self
 
     @model_validator(mode="after")
     def validate_credit_warning_thresholds(self) -> "Settings":

@@ -23,6 +23,7 @@ from src.api.services.gpu_session.provisioning_worker import (
     _classify_terminal_state,
     _match_checkpoint,
 )
+from src.api.services.provisioning_script import ProvisioningScriptService, ResolvedScript
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import InstanceNotFoundError, VastAIError
 from src.api.services.vastai.schemas import VastAIInstance, VastAIOffer
@@ -34,6 +35,7 @@ from src.core.enums import (
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
+    ProbeOutcome,
 )
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
@@ -146,6 +148,7 @@ def _make_gpu_session(**kwargs: Any) -> GpuSession:
     session.stale_notified = False
     session.bootstrap_operation_id = None
     session.last_progress_at = None
+    session.consecutive_contract_failures = 0
     for k, v in kwargs.items():
         setattr(session, k, v)
     return session
@@ -163,11 +166,13 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.provisioning_recreation_attempts = 1
     settings.vastai_offer_search_limit = 20
     settings.gpu_provision_worker_concurrency = 10
-    settings.apex_callback_url = "https://apex.example.com/callback"
+    settings.gpu_provision_terminal_grace_probes = 3
+    settings.apex_callback_url = "https://apex.example.com"
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
     settings.aisha_cf_tunnel_domain = "gpu-domain.com"
-    settings.ai_bundles_github_token = "ghp_test_token"
+    settings.github_content_token = "ghp_test_token"
+    settings.provisioning_script_ref = "v1.0.0"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
     settings.aisha_repo_url = "https://github.com/gearbox/aisha.git"
@@ -198,6 +203,10 @@ def _make_mock_session_factory() -> tuple[MagicMock, MagicMock]:
 
 def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any]]:
     mock_factory, mock_db = _make_mock_session_factory()
+    provisioning_script_service = AsyncMock(spec=ProvisioningScriptService)
+    provisioning_script_service.resolve.return_value = ResolvedScript(
+        content="#!/bin/sh\necho hi\n", sha256="a" * 64, cache_hit=True
+    )
     mocks: dict[str, Any] = {
         "session_factory": mock_factory,
         "mock_db": mock_db,
@@ -207,6 +216,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "http_client": AsyncMock(spec=httpx.AsyncClient),
         "settings": _make_settings(),
         "cooldown_store": NullNodeCooldownStore(),
+        "provisioning_script_service": provisioning_script_service,
         "billing_service": None,
         "event_bus": None,
         "job_sweep_service": None,
@@ -220,6 +230,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         http_client=mocks["http_client"],
         settings=mocks["settings"],
         cooldown_store=mocks["cooldown_store"],
+        provisioning_script_service=mocks["provisioning_script_service"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
@@ -600,11 +611,13 @@ class TestAdvanceProvisioning:
             call.args[0] for call in mocks["vastai_client"].destroy_instance.await_args_list
         ]
         mock_repo.update_instance.assert_not_awaited()
-        mock_repo.update_status.assert_awaited_with(
-            session.id,
-            GpuSessionStatus.failed,
-            error_message="retry_missing_primary: session has no primary deployment",
+        mock_repo.update_status.assert_awaited_once()
+        call = mock_repo.update_status.await_args
+        assert call.args == (session.id, GpuSessionStatus.failed)
+        assert call.kwargs["error_message"] == (
+            "retry_missing_primary: session has no primary deployment"
         )
+        assert "stopped_at" in call.kwargs
 
     async def test_retry_exhausted_marks_failed(self) -> None:
         # provisioning_recreation_attempts=2 → new_attempt=3 >= 2+1=3 → exhausted
@@ -667,9 +680,11 @@ class TestAdvanceProvisioning:
         # Fresh token generated per retry — must be a non-empty string
         fresh_callback_token = env["ACS_APEX_CALLBACK_TOKEN"]
         assert isinstance(fresh_callback_token, str) and len(fresh_callback_token) > 0
-        # The hash written to DB must match the fresh token in the env
+        # The hash written atomically with the replacement instance must match
+        # the fresh token in the env, and resets that node's contract grace.
         expected_hash = hashlib.sha256(fresh_callback_token.encode()).hexdigest()
-        mock_repo.update_callback_token_hash.assert_called_once_with(session.id, expected_hash)
+        update_instance_kwargs = mock_repo.update_instance.await_args.kwargs
+        assert update_instance_kwargs["callback_token_hash"] == expected_hash
         assert "ACS_HF_TOKEN" in env
         assert "ACS_CIVITAI_API_TOKEN" in env
         # New contract keys
@@ -690,12 +705,199 @@ class TestAdvanceProvisioning:
             session.id, operation_kwargs["id"]
         )
 
+    async def test_retry_rotates_callback_token_hash_before_any_external_await(self) -> None:
+        """Z1, round-7 remediation: rotation is the FIRST thing the retry path does.
+
+        X2 only put it ahead of create_instance; the old node's hash stayed current
+        across the old-instance destroy, the cooldown write, search_offers,
+        get_tunnel_token and the script resolve. Every one of those must come after
+        the (single) rotation — and after the attempt increment it shares a
+        transaction with.
+        """
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3),
+            cooldown_store=cooldown,
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        manager = MagicMock()
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+            manager.attach_mock(mock_repo.increment_provision_attempt, "increment")
+            manager.attach_mock(mock_repo.update_callback_token_hash, "rotate_hash")
+            manager.attach_mock(mocks["vastai_client"].destroy_instance, "destroy_instance")
+            manager.attach_mock(cooldown.record_failure, "record_failure")
+            manager.attach_mock(mocks["vastai_client"].search_offers, "search_offers")
+            manager.attach_mock(mocks["cf_client"].get_tunnel_token, "get_tunnel_token")
+            manager.attach_mock(mocks["provisioning_script_service"].resolve, "resolve")
+            manager.attach_mock(mocks["vastai_client"].create_instance, "create_instance")
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        mock_repo.update_callback_token_hash.assert_awaited_once()
+        call_names = [call[0] for call in manager.mock_calls]
+        assert call_names.index("increment") < call_names.index("rotate_hash")
+        for later in (
+            "destroy_instance",
+            "record_failure",
+            "search_offers",
+            "get_tunnel_token",
+            "resolve",
+            "create_instance",
+        ):
+            assert call_names.index("rotate_hash") < call_names.index(later), later
+
+    async def test_retry_env_token_matches_the_hash_persisted_on_entry(self) -> None:
+        """Z1: the token minted on entry is the one carried down to build_acs_env, and the
+        end-of-retry update_instance re-writes the same hash (the X2 rule), so the
+        row's hash and the node's token can't diverge."""
+        import hashlib
+
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        env_token = mocks["vastai_client"].create_instance.call_args.kwargs["env"][
+            "ACS_APEX_CALLBACK_TOKEN"
+        ]
+        expected_hash = hashlib.sha256(env_token.encode()).hexdigest()
+        mock_repo.update_callback_token_hash.assert_awaited_once_with(session.id, expected_hash)
+        assert mock_repo.update_instance.await_args.kwargs["callback_token_hash"] == expected_hash
+
+    @pytest.mark.parametrize(
+        ("reason", "attempts_after_increment"),
+        [
+            # Attempts exhausted under the default provisioning_recreation_attempts=1.
+            ("provisioning_stalled", 2),
+            # provisioning_timeout is terminal regardless of the attempt budget.
+            (_REASON_PROVISIONING_TIMEOUT, 2),
+        ],
+    )
+    async def test_terminal_branch_still_rotates_the_token(
+        self, reason: str, attempts_after_increment: int
+    ) -> None:
+        """Z1: rotation is unconditional — it precedes the retry-vs-terminal decision, so a
+        session about to be failed has its old node's token killed too. Harmless (the
+        session is being failed anyway) and it keeps the window closed; pinning it here
+        stops someone "optimizing" rotation back behind the decision."""
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=1), cooldown_store=cooldown
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        manager = MagicMock()
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = attempts_after_increment
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+            manager.attach_mock(mock_repo.update_callback_token_hash, "rotate_hash")
+            manager.attach_mock(mocks["vastai_client"].destroy_instance, "destroy_instance")
+
+            await worker._retry_or_fail(session, reason=reason)
+
+        mock_repo.update_callback_token_hash.assert_awaited_once()
+        call_names = [call[0] for call in manager.mock_calls]
+        assert call_names.index("rotate_hash") < call_names.index("destroy_instance")
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.update_status.assert_awaited_once()
+        assert mock_repo.update_status.await_args.args[1] == GpuSessionStatus.failed
+
+    async def test_retry_abandons_before_rotation_when_session_already_terminal(self) -> None:
+        """Z1: a session stopped/failed before the retry path runs is abandoned at the top —
+        no attempt increment, no rotation, no destroy of the old instance (whoever moved
+        the session owns that teardown), no cooldown write, nothing created."""
+        cooldown = AsyncMock(spec=NodeCooldownStore)
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3), cooldown_store=cooldown
+        )
+        session = _make_gpu_session(status=GpuSessionStatus.pending, vastai_machine_id=555)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "new-token"
+
+        with (
+            patch(_REPO_PATH) as MockRepo,
+            patch("src.api.services.gpu_session.provisioning_worker.logger") as mock_logger,
+        ):
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.stopped)
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        mock_repo.get_by_id.assert_awaited_once_with(session.id, for_update=True)
+        mock_repo.increment_provision_attempt.assert_not_awaited()
+        mock_repo.update_callback_token_hash.assert_not_awaited()
+        mocks["vastai_client"].destroy_instance.assert_not_awaited()
+        cooldown.record_failure.assert_not_awaited()
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.update_instance.assert_not_awaited()
+        mock_repo.update_status.assert_not_awaited()
+        mock_logger.info.assert_any_call(
+            "gpu_session.provision.retry_abandoned_before_rotation",
+            session_id=str(session.id),
+            observed_status=GpuSessionStatus.stopped,
+        )
+
+    async def test_retry_abandons_before_rotation_when_session_row_is_gone(self) -> None:
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = None
+
+            await worker._retry_or_fail(session, reason=_REASON_PENDING_TIMEOUT)
+
+        mock_repo.increment_provision_attempt.assert_not_awaited()
+        mock_repo.update_callback_token_hash.assert_not_awaited()
+        mocks["vastai_client"].destroy_instance.assert_not_awaited()
+
+    def test_exactly_one_callback_token_rotation_call_site(self) -> None:
+        """Z1 grep guard: rotation lives only at the top of _retry_or_fail. A second call
+        site is how the window reopens (X2 put one mid-function, after four awaits)."""
+        import inspect
+
+        from src.api.services.gpu_session import provisioning_worker
+
+        source = inspect.getsource(provisioning_worker)
+        assert source.count("update_callback_token_hash") == 1
+
     async def test_retry_fails_fast_on_empty_github_token(self) -> None:
-        """If ai_bundles_github_token is empty, mark session failed before create_instance."""
+        """If github_content_token is empty, mark session failed before create_instance."""
         # provisioning_recreation_attempts=3 so new_attempt=2 allows recreation to proceed
         # far enough to hit the github_token check
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
-        mocks["settings"].ai_bundles_github_token = ""
+        mocks["settings"].github_content_token = ""
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
@@ -720,6 +922,39 @@ class TestAdvanceProvisioning:
         # No instance creation attempted
         mocks["vastai_client"].create_instance.assert_not_called()
         # Session must be marked failed
+        mock_repo.update_status.assert_called()
+        failed_call = mock_repo.update_status.call_args_list[-1]
+        assert failed_call[0][1] == GpuSessionStatus.failed
+
+    async def test_retry_fails_fast_when_build_acs_env_raises(self) -> None:
+        """S7: build_acs_env's bare ValueError (invalid apex_callback_url) must be
+        guarded like the two config checks immediately above it — never let it
+        escape unguarded and poison the whole worker sweep."""
+        worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
+        mocks["settings"].apex_callback_url = ""
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            bundle_name="wan_2.2_i2v",
+            bundle_version="260105-01",
+            callback_token_hash="some-existing-hash",
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        bundle = _make_bundle_mapping()
+        mocks["bundle_index"].resolve_bundle_override.return_value = bundle
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "fetched-tunnel-token"
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            reloaded = _make_gpu_session(status=GpuSessionStatus.pending)
+            mock_repo.get_by_id.return_value = reloaded
+
+            await worker._retry_or_fail(session, reason="timeout")
+
+        # No instance creation attempted — the guard must fire before create_instance.
+        mocks["vastai_client"].create_instance.assert_not_called()
         mock_repo.update_status.assert_called()
         failed_call = mock_repo.update_status.call_args_list[-1]
         assert failed_call[0][1] == GpuSessionStatus.failed
@@ -956,7 +1191,9 @@ class TestAdvanceResuming:
         sibling.readiness_marker_node_class = "SiblingMarker"
         sibling.status = DeploymentStatus.active
         mock_deployment_repo.list_for_session.return_value = [sibling]
-        worker._probe_comfyui = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        worker._probe_comfyui = AsyncMock(  # type: ignore[method-assign]
+            return_value=ProbeOutcome.not_ready
+        )
 
         with capture_logs() as logs:
             await worker._advance_resuming(session)
@@ -1415,6 +1652,45 @@ class TestMarkFailed:
         # update_status(session_id, status, **extras) — second positional is status
         assert update_args[1] == GpuSessionStatus.failed
         assert update_kwargs.get("error_message") == "test failure"
+
+    async def test_stamps_stopped_at_on_the_failed_transition(self) -> None:
+        """T5, round-3 remediation: the billing reconciler's refund-reconciliation
+        grace period is measured from this timestamp, not created_at — a
+        session that fails without it would be immediately (mis)eligible."""
+        worker, _mocks = _make_worker()
+        session = _make_gpu_session(status=GpuSessionStatus.pending)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await worker._mark_failed(session, reason="test failure")
+
+        update_kwargs = mock_repo.update_status.await_args.kwargs
+        assert isinstance(update_kwargs.get("stopped_at"), datetime)
+
+    async def test_losing_terminal_race_does_not_teardown_or_refund(self) -> None:
+        billing = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            vastai_instance_id=12345,
+            cf_tunnel_id="tun-abc",
+            cf_dns_record_id="dns-abc",
+        )
+        terminal = _make_gpu_session(id=session.id, status=GpuSessionStatus.failed)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = terminal
+
+            await worker._mark_failed(session, reason="racing failure")
+
+        mocks["vastai_client"].destroy_instance.assert_not_awaited()
+        mocks["cf_client"].delete_session_tunnel.assert_not_awaited()
+        billing.refund.assert_not_awaited()
 
     async def test_skips_destroy_when_instance_id_missing(self) -> None:
         worker, mocks = _make_worker()
@@ -2210,7 +2486,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
 
     async def test_marker_present_class_missing_returns_false(self) -> None:
         worker, mocks = _make_worker()
@@ -2222,7 +2498,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
 
     async def test_no_checkpoint_no_marker_logs_unverifiable_and_returns_true(self) -> None:
         """Zero-checkpoint bundle + no marker → probe_unverifiable at WARNING, returns True."""
@@ -2237,7 +2513,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
         unverifiable_logs = [
             log for log in logs if log.get("event") == "gpu_session.provision.probe_unverifiable"
         ]
@@ -2259,7 +2535,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
         assert any(
             log.get("event") == "gpu_session.provision.probe_checkpoint_lookup_failed"
             for log in logs
@@ -2277,7 +2553,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_non_dict_json_returns_false(self) -> None:
         import json
@@ -2293,7 +2569,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_non_200_returns_false(self) -> None:
         worker, mocks = _make_worker()
@@ -2306,7 +2582,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_httpx_error_returns_false(self) -> None:
         worker, mocks = _make_worker()
@@ -2316,7 +2592,7 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
 
     async def test_logs_first_five_classes_when_more_present(self) -> None:
         from structlog.testing import capture_logs
@@ -2330,7 +2606,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
         missing_logs = [
             log for log in logs if log.get("event") == "gpu_session.provision.probe_marker_missing"
         ]
@@ -2362,7 +2638,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
         assert all(
             log.get("event") != "gpu_session.provision.probe_checkpoint_path_mismatch"
             for log in logs
@@ -2384,7 +2660,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
         mismatch_logs = [
             log
             for log in logs
@@ -2411,7 +2687,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
         missing_logs = [
             log
             for log in logs
@@ -2439,7 +2715,7 @@ class TestProbeComfyui:
         with capture_logs() as logs:
             result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.not_ready
         shape_logs = [
             log
             for log in logs
@@ -2461,10 +2737,10 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is True
+        assert result == ProbeOutcome.ready
 
     async def test_checkpoint_present_but_marker_missing_returns_false(self) -> None:
-        """Checkpoint passes, but marker class absent → False."""
+        """Checkpoint passes, but marker class absent → contract_failed."""
         worker, mocks = _make_worker()
         mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
         marker = "WanVideoSampler"
@@ -2476,7 +2752,173 @@ class TestProbeComfyui:
 
         result = await worker._probe_comfyui(session, readiness_marker_node_class=marker)
 
-        assert result is False
+        assert result == ProbeOutcome.contract_failed
+
+
+# ---------------------------------------------------------------------------
+# TestProbeFailFast — Change 4: consecutive contract_failed grace-probe counter
+# ---------------------------------------------------------------------------
+
+
+class TestProbeFailFast:
+    async def test_three_consecutive_checkpoint_missing_fails_refunds_destroys(self) -> None:
+        billing_mock = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing_mock)
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+            available_checkpoints=["v1-5-pruned-emaonly.safetensors"]
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_consecutive_contract_failures.side_effect = [1, 2, 3]
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            for _ in range(3):
+                await worker._advance_provisioning(session)
+
+        assert mock_repo.increment_consecutive_contract_failures.await_count == 3
+        mock_repo.reset_consecutive_contract_failures.assert_not_awaited()
+        mocks["vastai_client"].destroy_instance.assert_awaited_once()
+        billing_mock.refund.assert_awaited_once()
+        failed_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
+        ]
+        assert failed_calls, "session must be transitioned to failed"
+        assert "bundle_not_deployed" in failed_calls[0].kwargs.get("error_message", "")
+
+    async def test_three_consecutive_marker_missing_fails_the_same_way(
+        self, mock_deployment_repo: AsyncMock
+    ) -> None:
+        billing_mock = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing_mock)
+        mocks["bundle_index"].get_model_filenames.return_value = []  # unverifiable checkpoint side
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["http_client"].get.return_value = _make_object_info_response(["SomeOtherNode"])
+        deployment = MagicMock()
+        deployment.is_primary = True
+        deployment.readiness_marker_node_class = "RequiredMarker"
+        mock_deployment_repo.list_for_session.return_value = [deployment]
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_consecutive_contract_failures.side_effect = [1, 2, 3]
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            for _ in range(3):
+                await worker._advance_provisioning(session)
+
+        assert mock_repo.increment_consecutive_contract_failures.await_count == 3
+        mocks["vastai_client"].destroy_instance.assert_awaited_once()
+        billing_mock.refund.assert_awaited_once()
+
+    async def test_two_contract_failures_then_ready_activates_without_failing(self) -> None:
+        """A recovery probe (e.g. late filesystem move) must not be penalized once it's ready."""
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_consecutive_contract_failures.side_effect = [1, 2]
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning
+            )
+
+            mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+                available_checkpoints=["v1-5-pruned-emaonly.safetensors"]
+            )
+            await worker._advance_provisioning(session)
+            await worker._advance_provisioning(session)
+
+            mocks["http_client"].get.return_value = _make_object_info_with_checkpoint(
+                available_checkpoints=["Qwen.safetensors"]
+            )
+            await worker._advance_provisioning(session)
+
+        assert mock_repo.increment_consecutive_contract_failures.await_count == 2
+        active_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.active
+        ]
+        assert active_calls, "session must reach active on the recovering probe"
+        failed_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
+        ]
+        assert not failed_calls
+
+    async def test_not_ready_after_prior_failures_resets_the_counter(self) -> None:
+        """Any non-contract_failed outcome resets the counter — here the node simply
+        becomes briefly unreachable between two contract_failed probes."""
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        # Simulates a row reloaded after a prior sweep already recorded 2 failures.
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning, consecutive_contract_failures=2
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["http_client"].get.side_effect = httpx.ConnectError("refused")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            await worker._advance_provisioning(session)
+
+        mock_repo.increment_consecutive_contract_failures.assert_not_awaited()
+        mock_repo.reset_consecutive_contract_failures.assert_awaited_once_with(session.id)
+
+    async def test_repeated_object_info_shape_error_never_fails_the_session(self) -> None:
+        """probe_object_info_shape stays not_ready forever — apex-side ambiguity, not a
+        confirmed absent checkpoint (declined to touch, Change 4's scope)."""
+        import json
+
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_model_filenames.return_value = ["Qwen.safetensors"]
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning)
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.content = json.dumps({"CheckpointLoaderSimple": {}}).encode()
+        mocks["http_client"].get.return_value = resp
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            for _ in range(5):
+                await worker._advance_provisioning(session)
+
+        mock_repo.increment_consecutive_contract_failures.assert_not_awaited()
+        mock_repo.update_status.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

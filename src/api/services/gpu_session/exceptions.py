@@ -14,6 +14,18 @@ class GpuSessionError(Exception):
     """Base class for GPU session service errors."""
 
 
+class ProvisioningUnavailableError(GpuSessionError):
+    """Config validation or bootstrap-script resolution failed before start_session
+    created any external resource (D6): no tunnel, no Vast.ai instance, no session row,
+    no billing hold. Maps to 503 `provisioning_unavailable` at the route.
+
+    Raised for both an empty github_content_token and any
+    ProvisioningScriptError (ref-not-found or upstream-unavailable) from
+    ProvisioningScriptService.resolve() — from start_session's perspective both are
+    the same outcome: apex cannot hand a working node a script it can fetch.
+    """
+
+
 class SessionAlreadyExistsError(GpuSessionError):
     """A live deployment already exists for this (user, product, model_type).
 

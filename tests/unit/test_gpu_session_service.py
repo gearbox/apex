@@ -31,6 +31,12 @@ from src.api.services.gpu_session import (
     billable_minutes_for_active_seconds,
     compute_session_durations,
 )
+from src.api.services.gpu_session.exceptions import ProvisioningUnavailableError
+from src.api.services.provisioning_script import (
+    ProvisioningScriptService,
+    ProvisioningScriptUnavailableError,
+    ResolvedScript,
+)
 from src.api.services.vastai.client import VastAIClient
 from src.api.services.vastai.exceptions import NoCapacityError, OfferTakenError, VastAIError
 from src.api.services.vastai.schemas import VastAIOffer
@@ -42,6 +48,7 @@ from src.core.enums import (
     GpuSessionStatus,
     ModelType,
     OperationKind,
+    ScriptVariant,
 )
 from src.db.models.gpu_session import GpuSession
 from src.db.models.gpu_session_command import GpuSessionCommand
@@ -224,11 +231,12 @@ def _make_settings(
     settings.provisioning_recreation_attempts = recreation_attempts
     settings.vastai_destroy_retry_attempts = destroy_retry_attempts
     settings.vastai_offer_search_limit = 20
-    settings.apex_callback_url = "https://apex.example.com/callback"
+    settings.apex_callback_url = "https://apex.example.com"
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
     settings.gpu_session_tokens_per_minute = 100
-    settings.ai_bundles_github_token = "ghp_test_token"
+    settings.github_content_token = "ghp_test_token"
+    settings.provisioning_script_ref = "v1.0.0"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
     settings.aisha_repo_url = "https://github.com/gearbox/aisha.git"
@@ -260,6 +268,10 @@ def _make_service(
     **overrides: Any,
 ) -> tuple[GpuSessionService, dict[str, Any]]:
     mock_factory, mock_session = _make_mock_session_factory()
+    provisioning_script_service = AsyncMock(spec=ProvisioningScriptService)
+    provisioning_script_service.resolve.return_value = ResolvedScript(
+        content="#!/bin/sh\necho hi\n", sha256="a" * 64, cache_hit=True
+    )
     mocks: dict[str, Any] = {
         "vastai_client": AsyncMock(spec=VastAIClient),
         "cf_client": AsyncMock(spec=CloudflareTunnelClient),
@@ -269,6 +281,7 @@ def _make_service(
         "settings": _make_settings(),
         "billing_service": _make_billing_mock(),
         "cooldown_store": NullNodeCooldownStore(),
+        "provisioning_script_service": provisioning_script_service,
         "account_id": uuid4(),
         "event_bus": None,
         "job_sweep_service": None,
@@ -281,6 +294,7 @@ def _make_service(
         settings=mocks["settings"],
         billing_service=mocks["billing_service"],
         cooldown_store=mocks["cooldown_store"],
+        provisioning_script_service=mocks["provisioning_script_service"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
     )
@@ -1105,19 +1119,18 @@ class TestStartSession:
         assert result is expected_session
 
     async def test_start_session_fails_fast_on_empty_github_token(self) -> None:
-        """If ai_bundles_github_token is empty, raise before offer search; clean up tunnel."""
-        from src.api.services.vastai.exceptions import NoCapacityError
-
+        """Config validation now runs BEFORE tunnel creation (D6) — a regression test
+        for the old ordering bug where a misconfigured deploy leaked a tunnel on
+        every attempt (2026-09-13 staging incident's root cause)."""
         service, mocks = _make_service()
-        mocks["settings"].ai_bundles_github_token = ""
+        mocks["settings"].github_content_token = ""
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
-        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
 
-            with pytest.raises(NoCapacityError, match="ai_bundles_github_token"):
+            with pytest.raises(ProvisioningUnavailableError, match="github_content_token"):
                 await service.start_session(
                     user_id=uuid4(),
                     product_id="vex",
@@ -1125,13 +1138,107 @@ class TestStartSession:
                     account_id=mocks["account_id"],
                 )
 
-        # Tunnel must have been cleaned up
-        mocks["cf_client"].delete_session_tunnel.assert_called_once_with(
-            _TUNNEL_RESULT[0], _TUNNEL_RESULT[2]
-        )
+        # No tunnel was ever created — nothing to clean up.
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
         # No Vast.ai API calls
         mocks["vastai_client"].search_offers.assert_not_called()
         mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.create.assert_not_called()
+
+    async def test_start_session_fails_fast_on_empty_provisioning_script_ref(self) -> None:
+        service, mocks = _make_service()
+        mocks["settings"].provisioning_script_ref = ""
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with pytest.raises(ProvisioningUnavailableError, match="provisioning_script_ref"):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                )
+
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.create.assert_not_called()
+
+    async def test_start_session_fails_fast_on_invalid_callback_url(self) -> None:
+        service, mocks = _make_service()
+        mocks["settings"].apex_callback_url = "https://apex.example.com/callback"
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with pytest.raises(ProvisioningUnavailableError, match="apex_callback_url"):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                )
+
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.create.assert_not_called()
+
+    async def test_start_session_fails_when_script_resolve_raises(self) -> None:
+        """D6: script resolution is verified before any external/billable resource."""
+        service, mocks = _make_service()
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        script_service = mocks["provisioning_script_service"]
+        script_service.resolve.side_effect = ProvisioningScriptUnavailableError("github is down")
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with pytest.raises(ProvisioningUnavailableError):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                )
+
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.create.assert_not_called()
+
+    async def test_start_session_resolves_script_with_pinned_ref(self) -> None:
+        service, mocks = _make_service()
+        mocks["settings"].provisioning_script_ref = "v3.4.5"
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.return_value = _TUNNEL_RESULT
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 99999
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+            )
+
+        mocks["provisioning_script_service"].resolve.assert_awaited_once_with(
+            ScriptVariant.comfyui, "v3.4.5"
+        )
+        env = mocks["vastai_client"].create_instance.call_args.kwargs["env"]
+        assert env["ACS_PROVISION_SCRIPT_SHA256"] == "a" * 64
 
 
 # ---------------------------------------------------------------------------
@@ -3622,3 +3729,215 @@ class TestStartSessionReadinessMarkerAndTemplateHash:
         assert call_kwargs.get("template_hash_id") == "abc123templatehash"
         assert "image" not in call_kwargs
         assert "onstart_cmd" not in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# fail_pre_active_session tests (Change 3 — provisioner failure webhook, D8/D9)
+# ---------------------------------------------------------------------------
+
+
+class TestFailPreActiveSession:
+    async def test_not_found_returns_none(self) -> None:
+        service, mocks = _make_service()
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = None
+
+            result = await service.fail_pre_active_session(uuid4(), reason="node said so")
+
+        assert result is None
+        mocks["billing_service"].refund.assert_not_called()
+
+    async def test_already_terminal_is_idempotent_noop(self) -> None:
+        service, mocks = _make_service()
+        session = _make_gpu_session(status=GpuSessionStatus.failed)
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(session.id, reason="node said so")
+
+        assert result is session
+        mocks["billing_service"].refund.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+
+    async def test_already_active_is_a_noop_and_never_kills_a_working_session(self) -> None:
+        """A late/automated failure signal must never retroactively kill an active session."""
+        service, mocks = _make_service()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.active, started_at=datetime.now(UTC) - timedelta(minutes=5)
+        )
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(session.id, reason="node said so")
+
+        assert result is None
+        mocks["billing_service"].refund.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mock_repo.update_status.assert_not_called()
+
+    async def test_valid_call_tears_down_refunds_and_marks_failed(self) -> None:
+        event_bus = AsyncMock()
+        service, mocks = _make_service(event_bus=event_bus)
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=555,
+            cf_tunnel_id="tunnel-1",
+            cf_dns_record_id="dns-1",
+        )
+        session.account_id = uuid4()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(
+                session.id, reason="node_provision_script_failed"
+            )
+
+        assert result is session
+        mocks["vastai_client"].destroy_instance.assert_awaited_once_with(555)
+        mocks["cf_client"].delete_session_tunnel.assert_awaited_once_with("tunnel-1", "dns-1")
+        mocks["billing_service"].refund.assert_awaited_once()
+        failed_calls = [
+            c
+            for c in mock_repo.update_status.call_args_list
+            if len(c[0]) > 1 and c[0][1] == GpuSessionStatus.failed
+        ]
+        assert failed_calls
+        assert failed_calls[0].kwargs["error_message"] == "node_provision_script_failed"
+        # T5, round-3 remediation: stopped_at is the terminal timestamp the
+        # billing reconciler's grace-period check is measured from.
+        assert isinstance(failed_calls[0].kwargs.get("stopped_at"), datetime)
+        assert mocks["billing_service"].refund.await_args.kwargs["description"] == (
+            "GPU session failed: node_provision_script_failed"
+        )
+        status_event = event_bus.publish.await_args.kwargs["payload"]
+        assert status_event.error_message == "node_provision_script_failed"
+
+    async def test_expected_callback_token_none_is_unaffected(self) -> None:
+        """The worker's own callers (no token held) must skip the new check
+        entirely — behaviour identical to before the S2 remediation."""
+        service, mocks = _make_service()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=555,
+            cf_tunnel_id="tunnel-1",
+            cf_dns_record_id="dns-1",
+        )
+        session.account_id = uuid4()
+        session.callback_token_hash = hashlib.sha256(b"whatever").hexdigest()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(
+                session.id, reason="node_provision_script_failed"
+            )
+
+        assert result is session
+        mocks["billing_service"].refund.assert_awaited_once()
+
+    async def test_matching_expected_callback_token_transitions_normally(self) -> None:
+        service, mocks = _make_service()
+        token = "current-token"
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=555,
+            cf_tunnel_id="tunnel-1",
+            cf_dns_record_id="dns-1",
+            callback_token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        )
+        session.account_id = uuid4()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(
+                session.id,
+                reason="node_provision_script_failed",
+                expected_callback_token=token,
+            )
+
+        assert result is session
+        mocks["vastai_client"].destroy_instance.assert_awaited_once_with(555)
+        mocks["billing_service"].refund.assert_awaited_once()
+
+    async def test_rotated_expected_callback_token_is_rejected_under_the_lock(self) -> None:
+        """S2: a token that no longer matches the *locked* row's hash must not
+        tear down or refund — the row may since be a concurrent retry's
+        replacement node, not the one that presented this token."""
+        service, mocks = _make_service()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            started_at=None,
+            vastai_instance_id=555,
+            cf_tunnel_id="tunnel-1",
+            cf_dns_record_id="dns-1",
+            callback_token_hash=hashlib.sha256(b"rotated-token").hexdigest(),
+        )
+        session.account_id = uuid4()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            result = await service.fail_pre_active_session(
+                session.id,
+                reason="node_provision_script_failed",
+                expected_callback_token="stale-token",
+            )
+
+        assert result is None
+        mocks["vastai_client"].destroy_instance.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mocks["billing_service"].refund.assert_not_called()
+        mock_repo.update_status.assert_not_called()
+
+    async def test_no_account_id_skips_refund(self) -> None:
+        service, mocks = _make_service()
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning, started_at=None, account_id=None
+        )
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.return_value = session
+
+            await service.fail_pre_active_session(session.id, reason="node said so")
+
+        mocks["billing_service"].refund.assert_not_called()
+
+    async def test_racing_with_itself_only_refunds_once(self) -> None:
+        """Two calls for the same session: the second observes the row already
+        terminal under lock and must not refund again (D9's terminal-once contract)."""
+        service, mocks = _make_service()
+        session = _make_gpu_session(status=GpuSessionStatus.provisioning, started_at=None)
+        session.account_id = uuid4()
+        terminal_session = _make_gpu_session(
+            id=session.id, status=GpuSessionStatus.failed, started_at=None
+        )
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.get_by_id.side_effect = [session, terminal_session]
+
+            await service.fail_pre_active_session(session.id, reason="first caller")
+            await service.fail_pre_active_session(session.id, reason="second caller")
+
+        mocks["billing_service"].refund.assert_awaited_once()
