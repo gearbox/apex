@@ -100,7 +100,7 @@ class AishaMediaHandler(Protocol):
         client: ComfyUIClient,
         job_id: UUID,
         gpu_session_id: UUID,
-        resolved_input: tuple[bytes, str] | None = None,
+        resolved_inputs: Sequence[tuple[bytes, str]] | None = None,
     ) -> dict[MediaSlot, list[str]]:
         """Upload resolved source media and return filenames keyed by slot."""
         ...  # pragma: no cover - Protocol method body, never executed
@@ -188,62 +188,74 @@ class AishaImageGenerationHandler:
             )
         return value
 
-    async def _resolve_input_image(
+    async def _resolve_input_images(
         self,
         source_media: Sequence[ResolvedSourceMedia],
-    ) -> tuple[bytes, str] | None:
-        """Download and normalize one resolved source image for ComfyUI."""
+    ) -> list[tuple[bytes, str]]:
+        """Download and normalize every resolved source image for ComfyUI.
+
+        Images come back ordered by ``source.position`` (D9): reference slots are
+        positional, so the first image is ``image1`` and prompts that say "the
+        person in image 2" must mean the same thing on every run. Every image is
+        resolved before the caller uploads or bills anything, so a failure on any
+        one of them rejects the whole request with nothing to clean up.
+        """
         if not source_media:
-            return None
-        if len(source_media) != 1:
-            raise FeatureNotSupportedError("Aisha accepts exactly one source media asset")
+            return []
         if self._r2 is None:
             raise ProviderResponseError(
                 "Image-to-image is unavailable on this deployment. "
                 "Please contact support if this persists."
             )
 
-        source = source_media[0]
-        image_bytes = await self._r2.download(source.storage_key)
-        filename = source.storage_key.rsplit("/", 1)[-1]
-        try:
-            normalized = await ensure_comfyui_input(
-                image_bytes, max_megapixels=self._max_input_megapixels
-            )
-        except ImageTooLargeError as e:
-            logger.warning(
-                "aisha.input_too_large",
-                sniffed=sniff_format(image_bytes).value,
-                size_bytes=len(image_bytes),
-                megapixels=e.megapixels,
-                limit=e.limit,
-                source_position=source.position,
-            )
-            raise ValueError("Input image exceeds maximum pixel count") from e
-        except ImageNormalizationError as e:
-            logger.warning(
-                "aisha.input_normalization_failed",
-                sniffed=sniff_format(image_bytes).value,
-                size_bytes=len(image_bytes),
-                source_position=source.position,
-                error=str(e),
-            )
-            raise ValueError("Input image is not decodable") from e
+        resolved: list[tuple[bytes, str]] = []
+        for source in sorted(source_media, key=lambda item: item.position):
+            image_bytes = await self._r2.download(source.storage_key)
+            filename = source.storage_key.rsplit("/", 1)[-1]
+            try:
+                normalized = await ensure_comfyui_input(
+                    image_bytes, max_megapixels=self._max_input_megapixels
+                )
+            except ImageTooLargeError as e:
+                logger.warning(
+                    "aisha.input_too_large",
+                    sniffed=sniff_format(image_bytes).value,
+                    size_bytes=len(image_bytes),
+                    megapixels=e.megapixels,
+                    limit=e.limit,
+                    source_position=source.position,
+                )
+                raise ValueError("Input image exceeds maximum pixel count") from e
+            except ImageNormalizationError as e:
+                logger.warning(
+                    "aisha.input_normalization_failed",
+                    sniffed=sniff_format(image_bytes).value,
+                    size_bytes=len(image_bytes),
+                    source_position=source.position,
+                    error=str(e),
+                )
+                raise ValueError("Input image is not decodable") from e
 
-        stem = filename.rsplit(".", 1)[0]
-        return normalized.data, f"{stem}.{normalized.format.value}"
+            stem = filename.rsplit(".", 1)[0]
+            resolved.append((normalized.data, f"{stem}.{normalized.format.value}"))
+        return resolved
 
     @staticmethod
     async def _resolve_effective_aspect_ratio(
         request: UnifiedGenerationRequest,
-        i2i_input: tuple[bytes, str] | None,
+        i2i_inputs: Sequence[tuple[bytes, str]],
     ) -> AspectRatio | tuple[int, int]:
-        """Resolve an explicit aspect, source aspect, or the 1:1 image default."""
+        """Resolve an explicit aspect, the first source's aspect, or the 1:1 default.
+
+        With several source images the **first** one (``image1``, lowest
+        ``position``) is the primary reference and sets the output aspect; the
+        others are conditioning only (D9).
+        """
         if request.aspect_ratio is not None:
             return request.aspect_ratio
-        if i2i_input is not None:
+        if i2i_inputs:
             try:
-                src_w, src_h = await read_image_dimensions(i2i_input[0])
+                src_w, src_h = await read_image_dimensions(i2i_inputs[0][0])
             except ImageNormalizationError as e:
                 raise ValueError("Input image is not decodable") from e
             gcd = math.gcd(src_w, src_h)
@@ -257,37 +269,49 @@ class AishaImageGenerationHandler:
         client: ComfyUIClient,
         job_id: UUID,
         gpu_session_id: UUID,
-        resolved_input: tuple[bytes, str] | None = None,
+        resolved_inputs: Sequence[tuple[bytes, str]] | None = None,
     ) -> dict[MediaSlot, list[str]]:
-        """Upload source media and return the declared reference-slot mapping."""
+        """Upload source media and return the declared reference-slot mapping.
+
+        Uploads are sequential: at most a handful of images, and it keeps failure
+        attribution simple. The returned filenames are in the resolved order, which
+        is the order the workflow applier binds them to ``image1``, ``image2``, ….
+        """
         if not source_media:
             return {}
-        i2i_input = resolved_input
-        if i2i_input is None:
-            i2i_input = await self._resolve_input_image(source_media)
-        # Unreachable: source_media is non-empty here, and _resolve_input_image
-        # only returns None for empty input. Kept as a type-narrowing guard for mypy.
-        if i2i_input is None:  # pragma: no cover
+        inputs = (
+            resolved_inputs
+            if resolved_inputs is not None
+            else await self._resolve_input_images(source_media)
+        )
+        if not inputs:
             return {}
 
-        image_bytes, source_filename = i2i_input
-        safe_source = _sanitize_filename(source_filename)
-        stem, _, ext = safe_source.rpartition(".")
-        comfyui_filename = f"input_{stem or safe_source}_{str(job_id)[:8]}.{ext or 'png'}"
-        upload_result = await client.upload_image(
-            image_data=image_bytes,
-            filename=comfyui_filename,
-        )
-        stored_filename = upload_result.get("name", comfyui_filename)
-        logger.info(
-            "aisha.i2i.image_uploaded",
-            job_id=str(job_id),
-            gpu_session_id=str(gpu_session_id),
-            requested_name=comfyui_filename,
-            stored_name=stored_filename,
-            bytes=len(image_bytes),
-        )
-        return {MediaSlot.REFERENCE: [stored_filename]}
+        filenames: list[str] = []
+        for index, (image_bytes, source_filename) in enumerate(inputs):
+            safe_source = _sanitize_filename(source_filename)
+            stem, _, ext = safe_source.rpartition(".")
+            # The index keeps two sources with the same basename (or the same asset
+            # supplied twice) from colliding inside one job's ComfyUI input folder.
+            comfyui_filename = (
+                f"input_{index}_{stem or safe_source}_{str(job_id)[:8]}.{ext or 'png'}"
+            )
+            upload_result = await client.upload_image(
+                image_data=image_bytes,
+                filename=comfyui_filename,
+            )
+            stored_filename = upload_result.get("name", comfyui_filename)
+            logger.info(
+                "aisha.i2i.image_uploaded",
+                job_id=str(job_id),
+                gpu_session_id=str(gpu_session_id),
+                index=index,
+                requested_name=comfyui_filename,
+                stored_name=stored_filename,
+                bytes=len(image_bytes),
+            )
+            filenames.append(stored_filename)
+        return {MediaSlot.REFERENCE: filenames}
 
     async def submit(
         self,
@@ -333,8 +357,8 @@ class AishaImageGenerationHandler:
         gpu_session, deployment = routing
 
         # Resolve the source before billing so invalid input cannot leave a debit.
-        i2i_input = await self._resolve_input_image(source_media)
-        effective_aspect = await self._resolve_effective_aspect_ratio(request, i2i_input)
+        i2i_inputs = await self._resolve_input_images(source_media)
+        effective_aspect = await self._resolve_effective_aspect_ratio(request, i2i_inputs)
         # Model identity for generation comes from the deployment, not the
         # session — see D18. gpu_session.bundle_name/bundle_version are the
         # provisioning-time record only.
@@ -476,7 +500,7 @@ class AishaImageGenerationHandler:
                 client=client,
                 job_id=job_id,
                 gpu_session_id=gpu_session.id,
-                resolved_input=i2i_input,
+                resolved_inputs=i2i_inputs,
             )
             try:
                 bundle_dir = self._bundle_index.get_bundle_path(deployment.bundle_name)

@@ -35,6 +35,7 @@ from src.api.services.job_state_transition import (
     JobStateTransitionService,
 )
 from src.api.services.storage import R2StorageService, StorageType
+from src.api.utils.redaction import redact_secrets
 from src.core.enums import JobStatus
 from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
@@ -59,6 +60,15 @@ _CONTENT_TYPES: dict[str, str] = {
     "jpeg": "image/jpeg",
     "webp": "image/webp",
 }
+
+# Bound on the ComfyUI-supplied detail persisted to ``error_message``. Node text
+# is untrusted (S1 boundary rule): it is redacted, then capped, before storage.
+_MAX_EXECUTION_ERROR_DETAIL_CHARS = 500
+_EXECUTION_ERROR_FALLBACK = "ComfyUI reported status error without an execution_error message"
+_NO_COLLECTABLE_OUTPUTS_MESSAGE = (
+    "ComfyUI finished without a collectable output image "
+    "(no history entry of type 'output'); the workflow did not save its result."
+)
 
 
 @dataclasses.dataclass
@@ -273,23 +283,27 @@ class AishaJobPoller(PeriodicWorker):
         product_id: str,
         ts: JobStateTransitionService,
     ) -> None:
-        if "outputs" not in history_entry:
-            # History entry exists but no outputs — check for error flag.
-            status_info = history_entry.get("status", {})
-            if isinstance(status_info, dict) and status_info.get("status_str") == "error":
-                messages = status_info.get("messages", [["Error", "Unknown"]])
-                _, _ = await ts.transition_to_failed(
-                    job.id,
-                    error_message=f"ComfyUI reported error: {messages!r}"[:500],
-                    public_error_message=AishaFailure.PROVIDER_EXECUTION_FAILED.public_message,
-                    failure_code=AishaFailure.PROVIDER_EXECUTION_FAILED.value,
-                    refund=True,
-                    product_id=product_id,
-                )
-                return
+        """Classify a ComfyUI history entry and drive exactly one outcome.
 
-            # Neither outputs nor explicit error — apply same age-based timeout
-            # as the queue path. Below threshold: log debug and let next tick retry.
+        A job is never completed with zero outputs: zero outputs is either a
+        terminal failure (refunded) or a bounded retry, never a success.
+        ``status.status_str`` is the authority on execution failure —
+        ComfyUI writes an ``outputs`` key (an empty dict) even when the run
+        errored, so the shape of ``outputs`` says nothing about success.
+        """
+        status_info = history_entry.get("status")
+        if not isinstance(status_info, dict):
+            status_info = {}
+
+        # 1. Execution error — checked first, whether or not ``outputs`` exists.
+        if status_info.get("status_str") == "error":
+            await self._fail_execution_error(
+                job=job, status_info=status_info, product_id=product_id, ts=ts
+            )
+            return
+
+        # 2. Not finished yet — same age-based timeout as the queue path.
+        if "outputs" not in history_entry:
             if self._is_job_past_timeout(job):
                 logger.warning(
                     "aisha_job_poller.history_without_outputs_timeout",
@@ -315,7 +329,22 @@ class AishaJobPoller(PeriodicWorker):
                 )
             return
 
+        # 3. Finished without error, but the workflow saved nothing collectable
+        # (e.g. only a PreviewImage fired). A bundle contract violation — not
+        # transient, so fail now rather than wait out the timeout.
         image_infos = self._collect_image_infos(history_entry)
+        if not image_infos:
+            logger.error("aisha_job_poller.no_collectable_outputs", job_id=str(job.id))
+            _, _ = await ts.transition_to_failed(
+                job.id,
+                error_message=_NO_COLLECTABLE_OUTPUTS_MESSAGE,
+                public_error_message=AishaFailure.PROVIDER_EXECUTION_FAILED.public_message,
+                failure_code=AishaFailure.PROVIDER_EXECUTION_FAILED.value,
+                refund=True,
+                product_id=product_id,
+            )
+            return
+
         outputs: list[GenerationOutputData] = []
         expires_at = JobStateTransitionService.make_output_expires_at(self._config.retention_days)
 
@@ -329,11 +358,104 @@ class AishaJobPoller(PeriodicWorker):
             )
             outputs.extend(results)
 
+        # 4. ComfyUI succeeded but every download/upload failed. History
+        # persists across ticks, so leave the job in flight and retry; the age
+        # timeout bounds the case where ComfyUI restarts and drops its history.
+        if not outputs:
+            logger.warning(
+                "aisha_job_poller.output_download_failed",
+                job_id=str(job.id),
+                image_count=len(image_infos),
+            )
+            if self._is_job_past_timeout(job):
+                _, _ = await ts.transition_to_failed(
+                    job.id,
+                    error_message=(
+                        "ComfyUI produced output images but none could be downloaded "
+                        "and stored; job exceeded age timeout."
+                    ),
+                    public_error_message=AishaFailure.PROVIDER_TIMEOUT.public_message,
+                    failure_code=AishaFailure.PROVIDER_TIMEOUT.value,
+                    refund=True,
+                    product_id=product_id,
+                )
+            return
+
+        # 5. At least one output.
         await ts.transition_to_completed(
             job.id,
             outputs=outputs,
             product_id=product_id,
         )
+
+    async def _fail_execution_error(
+        self,
+        *,
+        job: GenerationJob,
+        status_info: dict[str, Any],
+        product_id: str,
+        ts: JobStateTransitionService,
+    ) -> None:
+        """Fail and refund a job ComfyUI reported as errored."""
+        detail, node_type, exception_type = self._describe_execution_error(status_info)
+        logger.error(
+            "aisha_job_poller.execution_error",
+            job_id=str(job.id),
+            node_type=node_type,
+            exception_type=exception_type,
+        )
+        _, _ = await ts.transition_to_failed(
+            job.id,
+            error_message=detail,
+            public_error_message=AishaFailure.PROVIDER_EXECUTION_FAILED.public_message,
+            failure_code=AishaFailure.PROVIDER_EXECUTION_FAILED.value,
+            refund=True,
+            product_id=product_id,
+        )
+
+    @staticmethod
+    def _describe_execution_error(
+        status_info: dict[str, Any],
+    ) -> tuple[str, str | None, str | None]:
+        """Build a redacted diagnostic from ComfyUI's ``execution_error`` message.
+
+        Only ``node_type``, ``exception_type`` and ``exception_message`` are
+        read; every other field of the message carries Python object reprs and
+        local paths and is deliberately ignored.
+
+        Returns:
+            ``(detail, node_type, exception_type)`` — ``detail`` is safe to
+            persist; the other two are for the alertable log line.
+        """
+        messages = status_info.get("messages")
+        payload: dict[str, Any] | None = None
+        if isinstance(messages, list):
+            for entry in messages:
+                if (
+                    isinstance(entry, list | tuple)
+                    and len(entry) > 1
+                    and entry[0] == "execution_error"
+                    and isinstance(entry[1], dict)
+                ):
+                    payload = entry[1]
+                    break
+        if payload is None:
+            return _EXECUTION_ERROR_FALLBACK, None, None
+
+        def field(key: str) -> str:
+            value = payload.get(key)
+            return (
+                str(value)[:_MAX_EXECUTION_ERROR_DETAIL_CHARS] if value is not None else "unknown"
+            )
+
+        node_type = field("node_type")
+        exception_type = field("exception_type")
+        detail = redact_secrets(
+            f"ComfyUI execution error in {node_type}: {exception_type}: "
+            f"{field('exception_message')}",
+            max_length=_MAX_EXECUTION_ERROR_DETAIL_CHARS,
+        )
+        return detail, node_type, exception_type
 
     async def _handle_queue_state(
         self,
@@ -523,9 +645,17 @@ class AishaJobPoller(PeriodicWorker):
 
     @staticmethod
     def _collect_image_infos(history_entry: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the saved (``type == "output"``) images named in a history entry.
+
+        An entry with no filename cannot be downloaded, ever. It is excluded here
+        so it is classified as "nothing collectable" rather than retried as a
+        transient download failure until the age timeout.
+        """
         images: list[dict[str, Any]] = []
         for _node_id, node_output in history_entry.get("outputs", {}).items():
             images.extend(
-                img for img in node_output.get("images", []) if img.get("type") == "output"
+                img
+                for img in node_output.get("images", [])
+                if img.get("type") == "output" and img.get("filename")
             )
         return images

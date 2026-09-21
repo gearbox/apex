@@ -10,8 +10,10 @@ and is not duplicated here — raising any exception triggers the same code path
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import re
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -27,6 +29,7 @@ from src.api.services.generation.service import FeatureNotSupportedError, Provid
 from src.api.services.generation.source_media import ResolvedSourceMedia
 from src.api.services.gpu_session.exceptions import NoActiveSessionError
 from src.api.services.image_normalization import ImageTooLargeError
+from src.api.services.workflow.applier import apply as apply_bound_workflow
 from src.core.enums import (
     AspectRatio,
     GenerationType,
@@ -45,6 +48,11 @@ from src.core.generation_config import (
 )
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.resolution import resolve_dimensions
+from tests.unit.helpers import (
+    QWEN_ENCODER_NODE,
+    QWEN_LOAD_IMAGE_NODES,
+    qwen_rapid_aio_bound_workflow,
+)
 
 
 def _make_request() -> UnifiedGenerationRequest:
@@ -683,7 +691,7 @@ class TestAishaImageHandlerFailurePaths:
             ),
             pytest.raises(ValueError, match="exceeds maximum pixel count"),
         ):
-            await handler._resolve_input_image([source])
+            await handler._resolve_input_images([source])
 
     async def test_submit_raises_when_gpu_sessions_are_not_configured(self) -> None:
         handler = AishaImageGenerationHandler(
@@ -842,13 +850,13 @@ class TestAishaProviderI2IBridge:
         r2.download.assert_awaited_once_with("users/abc/uploads/cat.png")
 
         # ComfyUI received the bytes with the agreed filename template:
-        # f"input_{stem}_{job_id_short}.{ext}" — extension is terminal.
+        # f"input_{index}_{stem}_{job_id_short}.{ext}" — extension is terminal.
         mock_client.upload_image.assert_awaited_once()
         upload_kwargs = mock_client.upload_image.await_args.kwargs
         assert upload_kwargs["image_data"] == png_bytes
         # source_filename stem in template; suffix is the 8-char job_id prefix
         # followed by the terminal extension.
-        assert upload_kwargs["filename"].startswith("input_cat_")
+        assert upload_kwargs["filename"].startswith("input_0_cat_")
         assert upload_kwargs["filename"].endswith(".png")
         # 8 hex chars between the stem and the extension.
         job_part = upload_kwargs["filename"].rsplit("_", 1)[1].split(".")[0]
@@ -930,7 +938,7 @@ class TestAishaProviderI2IBridge:
         # Filename derived from storage_key tail (not original_filename).
         # Extension is normalized to "jpeg" (MediaFormat.JPEG) and kept terminal.
         upload_kwargs = mock_client.upload_image.await_args.kwargs
-        assert upload_kwargs["filename"].startswith("input_result_001_")
+        assert upload_kwargs["filename"].startswith("input_0_result_001_")
         assert upload_kwargs["filename"].endswith(".jpeg")
 
         # Workflow wired with the ComfyUI-returned name via the reference slot.
@@ -938,62 +946,6 @@ class TestAishaProviderI2IBridge:
         assert apply_kwargs["media_filenames"] == {
             MediaSlot.REFERENCE: ["input_result_001.jpg_aaaaaaaa"]
         }
-
-    async def test_i2i_multiple_sources_raise_before_billing(self) -> None:
-        """Provider-level cardinality checks run before billing or job creation."""
-        workflow = MagicMock()
-        workflow.load_workflow.return_value = {"3": {"inputs": {}}}
-        workflow.validate_workflow = MagicMock()
-        workflow.apply_parameters.return_value = {"3": {}}
-
-        gpu_session_service = AsyncMock()
-        gpu_session_service.get_active_session_for_model = AsyncMock(
-            return_value=_routing(_make_active_gpu_session())
-        )
-        r2 = AsyncMock()
-        provider = AishaGenerationProvider(
-            workflow_service=workflow,
-            gpu_session_service=gpu_session_service,
-            bundle_index=MagicMock(),
-            r2_storage=r2,
-            tunnel_domain="gpu.test",
-        )
-
-        billing = AsyncMock()
-        billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
-        session = AsyncMock()
-        db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
-
-        with patch("src.api.services.generation.aisha.handlers.JobRepository") as MockJobRepo:
-            MockJobRepo.return_value.create = AsyncMock(return_value=db_job)
-
-            with pytest.raises(FeatureNotSupportedError, match="exactly one"):
-                await provider.submit(
-                    _make_i2i_request_with_user_image(uuid4()),
-                    user_id=uuid4(),
-                    session=session,
-                    billing_service=billing,
-                    account_id=uuid4(),
-                    token_cost=50,
-                    product_id="vex",
-                    source_media=[
-                        _make_resolved_source_image(
-                            uuid4(),
-                            source=LibraryAssetSource.UPLOAD,
-                            storage_key="uploads/one.png",
-                        ),
-                        _make_resolved_source_image(
-                            uuid4(),
-                            source=LibraryAssetSource.UPLOAD,
-                            storage_key="uploads/two.png",
-                        ),
-                    ],
-                )
-
-        # The cardinality check runs before any R2 access.
-        r2.download.assert_not_called()
-        billing.check_and_reserve.assert_not_called()
-        MockJobRepo.return_value.create.assert_not_called()
 
     async def test_i2i_without_r2_dependency_raises_provider_response_error(self) -> None:
         """Defensive: if a deployment forgets to wire R2, I2I requests get a
@@ -1152,7 +1104,7 @@ class TestAishaProviderI2IBridge:
         assert upload_kwargs["image_data"][:8] == b"\x89PNG\r\n\x1a\n"
         assert webp_bytes[:4] == b"RIFF"  # sanity: source really was WebP
         # Filename carries a terminal .png extension.
-        assert re.match(r"^input_.+_[0-9a-f]{8}\.png$", upload_kwargs["filename"])
+        assert re.match(r"^input_0_.+_[0-9a-f]{8}\.png$", upload_kwargs["filename"])
 
     async def test_i2i_comfyui_filename_has_terminal_extension(self) -> None:
         """Regression for the ``input_photo.png_1a2b3c4d`` bug: the job-id
@@ -1415,7 +1367,7 @@ class TestResolveEffectiveAspectRatio:
             n=1,
         )
         result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
-            request, (_png_bytes(size=(1600, 900)), "source.png")
+            request, [(_png_bytes(size=(1600, 900)), "source.png")]
         )
         assert result == AspectRatio.RATIO_9_16
 
@@ -1426,7 +1378,7 @@ class TestResolveEffectiveAspectRatio:
             model=ModelType.AISHA_IMAGE,
             n=1,
         )
-        result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(request, None)
+        result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(request, [])
         assert result is AspectRatio.RATIO_1_1
 
     async def test_resolve_effective_aspect_ratio_derives_source_fraction(self) -> None:
@@ -1437,7 +1389,7 @@ class TestResolveEffectiveAspectRatio:
             n=1,
         )
         result = await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
-            request, (_png_bytes(size=(1600, 900)), "source.png")
+            request, [(_png_bytes(size=(1600, 900)), "source.png")]
         )
         assert result == (16, 9)
 
@@ -1450,7 +1402,7 @@ class TestResolveEffectiveAspectRatio:
         )
         with pytest.raises(ValueError, match="not decodable"):
             await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
-                request, (b"garbage bytes, not an image", "broken.png")
+                request, [(b"garbage bytes, not an image", "broken.png")]
             )
 
 
@@ -1507,23 +1459,6 @@ class TestSanitizeFilename:
 
 class TestAishaProviderI2IDefensive:
     """Provider-level defenses against misuse and hostile input."""
-
-    async def test_multiple_sources_raise_feature_not_supported(self) -> None:
-        """The provider defensively limits direct callers to one source asset."""
-        provider, _ = _make_provider_with_mocks()
-        sources = [
-            _make_resolved_source_image(
-                uuid4(), source=LibraryAssetSource.UPLOAD, storage_key="uploads/one.png"
-            ),
-            _make_resolved_source_image(
-                uuid4(), source=LibraryAssetSource.UPLOAD, storage_key="uploads/two.png"
-            ),
-        ]
-
-        with pytest.raises(FeatureNotSupportedError, match="exactly one"):
-            handler = provider._handlers[MediaKind.IMAGE]
-            assert isinstance(handler, AishaImageGenerationHandler)
-            await handler._resolve_input_image(sources)
 
     async def test_filename_with_path_components_is_sanitized(self) -> None:
         """End-to-end: a user image whose original_filename contains path
@@ -1997,3 +1932,319 @@ class TestAishaProviderClampLogging:
         clamp_events = [e for e in cap if e["event"] == "generation.resolution.clamped"]
         assert clamp_events, "expected a generation.resolution.clamped log event"
         assert clamp_events[0]["aspect_ratio"] == AspectRatio.RATIO_1_1.value
+
+
+# ---------------------------------------------------------------------------
+# Multi-image i2i: request order -> image1, image2, ... through the real applier
+# ---------------------------------------------------------------------------
+
+
+def _source_at(
+    position: int, storage_key: str, asset_id: UUID | None = None
+) -> ResolvedSourceMedia:
+    return dataclasses.replace(
+        _make_resolved_source_image(
+            asset_id or uuid4(), source=LibraryAssetSource.UPLOAD, storage_key=storage_key
+        ),
+        position=position,
+    )
+
+
+def _i2i_request(count: int, *, aspect: AspectRatio | None = None) -> UnifiedGenerationRequest:
+    return UnifiedGenerationRequest(
+        prompt="the person in image 2 wearing the jacket from image 1",
+        generation_type=GenerationType.I2I,
+        model=ModelType.AISHA_IMAGE,
+        aspect_ratio=aspect,
+        n=1,
+        source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}") for _ in range(count)],
+    )
+
+
+class _I2IRun:
+    """Everything observable after one ``submit``: uploads, R2 reads, the queued graph."""
+
+    def __init__(self) -> None:
+        self.workflow = MagicMock()
+        self.r2 = AsyncMock()
+        self.client = AsyncMock()
+        self.billing = AsyncMock()
+        self.job_repo_create = AsyncMock()
+
+    @property
+    def uploaded_names(self) -> list[str]:
+        return [c.kwargs["filename"] for c in self.client.upload_image.await_args_list]
+
+    @property
+    def graph(self) -> dict[str, Any]:
+        return self.client.queue_prompt.await_args.args[0]
+
+
+async def _submit_i2i(
+    sources: list[ResolvedSourceMedia],
+    *,
+    images: dict[str, bytes] | None = None,
+    reference_slots: int = 2,
+    aspect: AspectRatio | None = None,
+    expect: type[Exception] | None = None,
+) -> _I2IRun:
+    """Submit an i2i request through the real applier over a ``qwen.rapid.aio``-shaped graph."""
+    run = _I2IRun()
+    bound = qwen_rapid_aio_bound_workflow(reference_slots)
+    run.workflow.load.return_value = bound
+    run.workflow.apply.side_effect = (
+        lambda bound_, *, request, media_filenames, filename_prefix, **_: apply_bound_workflow(
+            bound_,
+            request,
+            media_filenames=media_filenames,
+            filename_prefix=filename_prefix,
+            model_filenames=lambda _type: None,
+        )
+    )
+    default_png = _png_bytes()
+    run.r2.download = AsyncMock(side_effect=lambda key: (images or {}).get(key, default_png))
+    # ComfyUI echoes back a stored name derived from the requested one.
+    run.client.upload_image = AsyncMock(
+        side_effect=lambda *, image_data, filename: {"name": f"stored_{filename}"}  # noqa: ARG005
+    )
+    run.client.queue_prompt = AsyncMock(return_value={"prompt_id": "queued-1"})
+    run.billing.check_and_reserve = AsyncMock(return_value=MagicMock(id=uuid4()))
+
+    gpu_session_service = AsyncMock()
+    gpu_session_service.get_active_session_for_model = AsyncMock(
+        return_value=_routing(_make_active_gpu_session())
+    )
+    provider = AishaGenerationProvider(
+        workflow_service=run.workflow,
+        gpu_session_service=gpu_session_service,
+        r2_storage=run.r2,
+        tunnel_domain="gpu.test",
+        bundle_index=_make_bundle_index_mock(),
+    )
+    db_job = MagicMock(status=JobStatus.PENDING, error_message=None)
+    kwargs: dict[str, Any] = {
+        "user_id": uuid4(),
+        "session": AsyncMock(),
+        "billing_service": run.billing,
+        "account_id": uuid4(),
+        "token_cost": 50,
+        "product_id": "vex",
+        "source_media": sources,
+    }
+    with (
+        patch("src.api.services.generation.aisha.handlers.JobRepository") as job_repo,
+        patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as comfy,
+    ):
+        job_repo.return_value.create = run.job_repo_create
+        run.job_repo_create.return_value = db_job
+        comfy.return_value = run.client
+        request = _i2i_request(len(sources), aspect=aspect)
+        if expect is not None:
+            with pytest.raises(expect):
+                await provider.submit(request, **kwargs)
+        else:
+            await provider.submit(request, **kwargs)
+    return run
+
+
+def _referenced_nodes(graph: dict[str, Any]) -> set[str]:
+    """Node ids that some other node's input links to."""
+    return {
+        value[0]
+        for node in graph.values()
+        for value in node["inputs"].values()
+        if isinstance(value, list) and value and isinstance(value[0], str)
+    }
+
+
+class TestAishaMultiImageI2I:
+    async def test_two_sources_upload_twice_and_link_image1_and_image2_in_request_order(
+        self,
+    ) -> None:
+        run = await _submit_i2i(
+            [
+                _source_at(0, "users/u/uploads/alpha.png"),
+                _source_at(1, "users/u/uploads/beta.png"),
+            ]
+        )
+
+        names = run.uploaded_names
+        assert len(names) == 2
+        assert len(set(names)) == 2, "each reference needs its own uploaded filename"
+        assert names[0].startswith("input_0_alpha_")
+        assert names[1].startswith("input_1_beta_")
+
+        graph = run.graph
+        encoder_inputs = graph[QWEN_ENCODER_NODE]["inputs"]
+        first_loader, second_loader = QWEN_LOAD_IMAGE_NODES
+        assert encoder_inputs["image1"] == [first_loader, 0]
+        assert encoder_inputs["image2"] == [second_loader, 0]
+        # The name ComfyUI stored (not the requested one) reaches each LoadImage.
+        assert graph[first_loader]["inputs"]["image"] == f"stored_{names[0]}"
+        assert graph[second_loader]["inputs"]["image"] == f"stored_{names[1]}"
+
+    async def test_sources_out_of_position_order_are_bound_in_position_order(self) -> None:
+        # Supplied second-then-first; ``position`` says which is image1.
+        run = await _submit_i2i(
+            [
+                _source_at(1, "users/u/uploads/second.png"),
+                _source_at(0, "users/u/uploads/first.png"),
+            ]
+        )
+
+        names = run.uploaded_names
+        assert names[0].startswith("input_0_first_")
+        assert names[1].startswith("input_1_second_")
+        graph = run.graph
+        first_loader, second_loader = QWEN_LOAD_IMAGE_NODES
+        assert graph[first_loader]["inputs"]["image"] == f"stored_{names[0]}"
+        assert graph[second_loader]["inputs"]["image"] == f"stored_{names[1]}"
+
+    async def test_sources_with_the_same_basename_get_distinct_filenames(self) -> None:
+        run = await _submit_i2i(
+            [
+                _source_at(0, "users/one/uploads/photo.png"),
+                _source_at(1, "users/two/uploads/photo.png"),
+            ]
+        )
+
+        names = run.uploaded_names
+        assert len(set(names)) == 2
+        assert names[0].startswith("input_0_photo_")
+        assert names[1].startswith("input_1_photo_")
+
+    async def test_the_same_asset_supplied_twice_does_not_collide(self) -> None:
+        asset_id = uuid4()
+        run = await _submit_i2i(
+            [
+                _source_at(0, "users/u/uploads/dup.png", asset_id),
+                _source_at(1, "users/u/uploads/dup.png", asset_id),
+            ]
+        )
+
+        assert len(set(run.uploaded_names)) == 2
+
+    async def test_one_source_against_the_two_slot_bundle_links_only_image1(self) -> None:
+        run = await _submit_i2i([_source_at(0, "users/u/uploads/solo.png")])
+
+        graph = run.graph
+        first_loader, second_loader = QWEN_LOAD_IMAGE_NODES
+        encoder_inputs = graph[QWEN_ENCODER_NODE]["inputs"]
+        assert encoder_inputs["image1"] == [first_loader, 0]
+        assert "image2" not in encoder_inputs
+        # Node 8 stays in the graph but nothing consumes it: ComfyUI never runs it.
+        assert second_loader in graph
+        assert second_loader not in _referenced_nodes(graph)
+        assert first_loader in _referenced_nodes(graph)
+        assert len(run.uploaded_names) == 1
+
+    async def test_aspect_ratio_follows_the_first_image_when_the_two_differ(self) -> None:
+        landscape = _png_bytes(size=(1600, 900))
+        portrait = _png_bytes(size=(900, 1600))
+        landscape_first = await _submit_i2i(
+            [
+                _source_at(0, "users/u/uploads/land.png"),
+                _source_at(1, "users/u/uploads/port.png"),
+            ],
+            images={"users/u/uploads/land.png": landscape, "users/u/uploads/port.png": portrait},
+        )
+        portrait_first = await _submit_i2i(
+            [
+                _source_at(0, "users/u/uploads/port.png"),
+                _source_at(1, "users/u/uploads/land.png"),
+            ],
+            images={"users/u/uploads/land.png": landscape, "users/u/uploads/port.png": portrait},
+        )
+
+        wide = landscape_first.workflow.apply.call_args.kwargs["request"]
+        tall = portrait_first.workflow.apply.call_args.kwargs["request"]
+        assert wide.width > wide.height
+        assert tall.height > tall.width
+
+    async def test_effective_aspect_reads_the_first_image_only(self) -> None:
+        request = _i2i_request(2)
+        landscape = (_png_bytes(size=(1600, 900)), "a.png")
+        portrait = (_png_bytes(size=(900, 1600)), "b.png")
+
+        assert await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
+            request, [landscape, portrait]
+        ) == (16, 9)
+        assert await AishaImageGenerationHandler._resolve_effective_aspect_ratio(
+            request, [portrait, landscape]
+        ) == (9, 16)
+
+    async def test_normalization_failure_on_the_second_image_queues_nothing(self) -> None:
+        run = await _submit_i2i(
+            [
+                _source_at(0, "users/u/uploads/good.png"),
+                _source_at(1, "users/u/uploads/broken.png"),
+            ],
+            images={"users/u/uploads/broken.png": b"this is not an image, just text"},
+            expect=ValueError,
+        )
+
+        # Every image is resolved before anything is uploaded, billed or queued.
+        run.client.upload_image.assert_not_awaited()
+        run.client.queue_prompt.assert_not_awaited()
+        run.billing.check_and_reserve.assert_not_awaited()
+        run.job_repo_create.assert_not_awaited()
+
+    async def test_normalization_failure_reports_the_existing_error(self) -> None:
+        r2 = AsyncMock()
+        r2.download = AsyncMock(side_effect=[_png_bytes(), b"not an image"])
+        handler = AishaImageGenerationHandler(
+            workflow_service=MagicMock(),
+            gpu_session_service=None,
+            bundle_index=MagicMock(),
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            tunnel_hostname_allowed_prefix=None,
+            max_input_megapixels=100.0,
+        )
+
+        with pytest.raises(ValueError, match="Input image is not decodable"):
+            await handler._resolve_input_images(
+                [_source_at(0, "users/u/uploads/a.png"), _source_at(1, "users/u/uploads/b.png")]
+            )
+
+    async def test_resolution_is_in_position_order_and_stable_for_equal_positions(self) -> None:
+        r2 = AsyncMock()
+        r2.download = AsyncMock(return_value=_png_bytes())
+        handler = AishaImageGenerationHandler(
+            workflow_service=MagicMock(),
+            gpu_session_service=None,
+            bundle_index=MagicMock(),
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+            tunnel_hostname_allowed_prefix=None,
+            max_input_megapixels=100.0,
+        )
+
+        resolved = await handler._resolve_input_images(
+            [
+                _source_at(2, "users/u/uploads/c.png"),
+                _source_at(0, "users/u/uploads/a1.png"),
+                _source_at(0, "users/u/uploads/a2.png"),
+            ]
+        )
+
+        assert [name for _, name in resolved] == ["a1.png", "a2.png", "c.png"]
+
+    async def test_no_sources_resolves_to_nothing_and_uploads_nothing(self) -> None:
+        handler = AishaImageGenerationHandler(
+            workflow_service=MagicMock(),
+            gpu_session_service=None,
+            bundle_index=MagicMock(),
+            r2_storage=AsyncMock(),
+            tunnel_domain="gpu.test",
+            tunnel_hostname_allowed_prefix=None,
+            max_input_megapixels=100.0,
+        )
+        client = AsyncMock()
+
+        assert await handler._resolve_input_images([]) == []
+        assert (
+            await handler.prepare_inputs([], client=client, job_id=uuid4(), gpu_session_id=uuid4())
+            == {}
+        )
+        client.upload_image.assert_not_awaited()

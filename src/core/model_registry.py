@@ -217,8 +217,10 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
         max_concurrent_outputs=4,
         generation_modes={
             GenerationType.T2I: GenerationModeMeta(),
+            # Provider limit is TextEncodeQwenImageEditPlus's image inputs (image1-image3);
+            # a bundle narrows it to its declared reference slots via resolve_generation_modes.
             GenerationType.I2I: GenerationModeMeta(
-                SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.IMAGE}))
+                SourceMediaConstraints(min=1, max=3, media_types=frozenset({MediaKind.IMAGE}))
             ),
         },
         image=ImageMeta(

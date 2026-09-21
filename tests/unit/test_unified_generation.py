@@ -11,6 +11,7 @@ import msgspec
 import pytest
 
 from src.api.schemas.unified_generation import SourceMediaReference, UnifiedGenerationRequest
+from src.api.services.generation.aisha_provider import AishaGenerationProvider
 from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.provider_failures import (
     ProviderFailure,
@@ -46,6 +47,7 @@ from src.core.generation_mode import GenerationModeMeta
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.model_registry import get_model_meta
 from src.core.product_registry import VEX_CONFIG
+from tests.unit.helpers import bundle_generation_config, qwen_rapid_aio_capabilities
 
 # ---------------------------------------------------------------------------
 # Schema validation tests
@@ -443,6 +445,53 @@ class TestGenerationServiceValidation:
                 .generation_modes[request.generation_type]
                 .source_media,
             )
+
+    async def test_three_sources_against_the_two_slot_bundle_fail_before_any_io(self) -> None:
+        """Registry 3 ∩ qwen.rapid.aio's 2 slots: image 3 is a 422 with no R2/ComfyUI work."""
+        r2 = AsyncMock()
+        bundle_index = MagicMock()
+        bundle_index.resolve_bundle.return_value = SimpleNamespace(
+            bundle_name="qwen.rapid.aio",
+            bundle_version="260101-01",
+            capabilities=qwen_rapid_aio_capabilities(2),
+        )
+        bundle_index.get_generation_config.return_value = bundle_generation_config()
+        provider = AishaGenerationProvider(
+            workflow_service=MagicMock(),
+            gpu_session_service=AsyncMock(),
+            bundle_index=bundle_index,
+            r2_storage=r2,
+            tunnel_domain="gpu.test",
+        )
+        service = _make_service({Provider.AISHA: provider}, bundle_index=bundle_index)
+        request = UnifiedGenerationRequest(
+            prompt="Edit",
+            generation_type=GenerationType.I2I,
+            model=ModelType.AISHA_IMAGE,
+            source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}") for _ in range(3)],
+        )
+        resolve = AsyncMock()
+        users = MagicMock()
+        users.return_value.get_user = AsyncMock(
+            return_value=SimpleNamespace(age_verified_at=datetime.now(UTC))
+        )
+
+        with (
+            patch.object(SourceMediaResolver, "resolve", new=resolve),
+            patch("src.api.services.generation.service.UserRepository", new=users),
+            patch("src.api.services.generation.aisha.handlers.ComfyUIClient") as comfy,
+            pytest.raises(SourceMediaValidationError, match="requires between 1 and 2"),
+        ):
+            await service.generate(
+                request,
+                user_id=uuid4(),
+                session=AsyncMock(),
+                product_config=VEX_CONFIG,
+            )
+
+        resolve.assert_not_awaited()  # no DB asset resolution
+        r2.download.assert_not_called()  # no R2 download
+        comfy.assert_not_called()  # no ComfyUI client, hence no upload or queued prompt
 
     @pytest.mark.parametrize("source_count", [0, 5])
     async def test_invalid_source_count_does_not_resolve_assets(self, source_count: int) -> None:

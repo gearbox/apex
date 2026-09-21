@@ -68,7 +68,8 @@ _EXPECTED_MODE_CONTRACTS: Mapping[
     },
     ModelType.AISHA_IMAGE: {
         GenerationType.T2I: None,
-        GenerationType.I2I: (1, 1, frozenset({MediaKind.IMAGE}), ()),
+        # Provider limit = TextEncodeQwenImageEditPlus image1-image3; bundles narrow it.
+        GenerationType.I2I: (1, 3, frozenset({MediaKind.IMAGE}), ()),
     },
     ModelType.AISHA_IMAGE_LITE: {
         GenerationType.T2I: None,

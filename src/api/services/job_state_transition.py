@@ -174,7 +174,17 @@ class JobStateTransitionService:
         """QUEUED|RUNNING → COMPLETED. Persists outputs in the same transaction.
 
         Idempotent: no-op if already COMPLETED or terminal.
+
+        Raises:
+            ValueError: If ``outputs`` is empty. A job with nothing to show is a
+                failure or a retry, never a success — completing it bills the
+                user for an imageless result. The caller must fail-and-refund.
         """
+        if not outputs:
+            raise ValueError(
+                f"Refusing to complete job {job_id} with no outputs; "
+                "an imageless job must be failed and refunded instead"
+            )
         job, _ = await self._transition_to_completed(
             job_id,
             outputs=outputs,
