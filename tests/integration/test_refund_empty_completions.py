@@ -432,6 +432,29 @@ class TestBackfill:
         assert (await _reload(db_session, reviewed)).status == JobStatus.FAILED
         assert (await _reload(db_session, other)).status == JobStatus.COMPLETED
 
+    async def test_explicit_ids_process_valid_jobs_and_report_jobs_with_outputs(
+        self, db_session: AsyncSession, seed: _Seed, product_id: str
+    ) -> None:
+        """A reviewed log-id list is safe even if one candidate is now stale."""
+        empty_a = await seed.job()
+        empty_b = await seed.job()
+        has_output = await seed.job(with_output=True)
+
+        report = await _run(
+            db_session,
+            product_id,
+            apply=True,
+            job_ids=[empty_a.id, has_output.id, empty_b.id],
+        )
+
+        assert report.refunded == 2
+        assert [(skip.job_id, skip.outcome) for skip in report.skipped] == [
+            (has_output.id, _Outcome.NO_LONGER_EMPTY)
+        ]
+        assert (await _reload(db_session, empty_a)).status == JobStatus.FAILED
+        assert (await _reload(db_session, empty_b)).status == JobStatus.FAILED
+        assert (await _reload(db_session, has_output)).status == JobStatus.COMPLETED
+
     async def test_since_and_limit_narrow_the_selection(
         self, db_session: AsyncSession, seed: _Seed, product_id: str
     ) -> None:
@@ -501,6 +524,8 @@ class TestMarkEmptyCompletionFailed:
         self, db_session: AsyncSession, seed: _Seed
     ) -> None:
         job = await seed.job()
+        job.completed_at = datetime.now(UTC)
+        await db_session.flush()
 
         changed = await JobRepository(db_session).mark_empty_completion_failed(
             job.id,
@@ -517,6 +542,7 @@ class TestMarkEmptyCompletionFailed:
         assert reloaded.public_error_message == (
             "The generation engine could not complete the request."
         )
+        assert reloaded.completed_at is None
 
     @pytest.mark.parametrize(
         "status",

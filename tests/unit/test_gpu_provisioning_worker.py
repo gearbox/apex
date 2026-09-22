@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -21,6 +23,7 @@ from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PROVISIONING_TIMEOUT,
     GpuProvisioningWorker,
     _classify_terminal_state,
+    _combo_options,
     _match_checkpoint,
 )
 from src.api.services.provisioning_script import ProvisioningScriptService, ResolvedScript
@@ -51,6 +54,7 @@ _DEPLOYMENT_REPO_PATH = (
     "src.api.services.gpu_session.provisioning_worker.GpuSessionDeploymentRepository"
 )
 _COMMAND_REPO_PATH = "src.api.services.gpu_session.provisioning_worker.GpuSessionCommandRepository"
+_FIXTURES_DIR = Path(__file__).parents[1] / "fixtures"
 
 
 @pytest.fixture(autouse=True)
@@ -2447,6 +2451,20 @@ def _make_object_info_response(classes: list[str]) -> MagicMock:
     return resp
 
 
+def _object_info_fixture(filename: str) -> dict[str, Any]:
+    """Load a captured ComfyUI v0.32.0 single-node /object_info response."""
+    return cast(
+        "dict[str, Any]", json.loads((_FIXTURES_DIR / filename).read_text(encoding="utf-8"))
+    )
+
+
+def _make_object_info_response_from_body(body: dict[str, Any]) -> MagicMock:
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.content = json.dumps(body).encode()
+    return resp
+
+
 def _make_object_info_with_checkpoint(
     available_checkpoints: list[str],
     extra_classes: list[str] | None = None,
@@ -2644,6 +2662,86 @@ class TestProbeComfyui:
             for log in logs
         ), "exact match must not fire probe_checkpoint_path_mismatch"
 
+    async def test_diffusion_model_present_no_marker_returns_ready(self) -> None:
+        """zit.cyberrealistic uses UNETLoader, not CheckpointLoaderSimple."""
+        worker, mocks = _make_worker()
+        expected = "cyberrealisticZImage_v70.safetensors"
+        mocks["bundle_index"].get_model_filenames.side_effect = lambda _name, _version, kind: {
+            "checkpoints": [],
+            "diffusion_models": [expected],
+        }[kind]
+        session = _make_gpu_session(bundle_name="zit.cyberrealistic")
+        mocks["http_client"].get.return_value = _make_object_info_response_from_body(
+            _object_info_fixture("comfyui-v0.32.0-object-info-unet-loader.json")
+        )
+
+        result = await worker._probe_comfyui(session, readiness_marker_node_class=None)
+
+        assert result is ProbeOutcome.ready
+        assert [
+            call.args[2] for call in mocks["bundle_index"].get_model_filenames.call_args_list
+        ] == [
+            "checkpoints",
+            "diffusion_models",
+        ]
+
+    async def test_diffusion_model_absent_returns_contract_failed(self) -> None:
+        from structlog.testing import capture_logs
+
+        worker, mocks = _make_worker()
+        expected = "cyberrealisticZImage_v70.safetensors"
+        mocks["bundle_index"].get_model_filenames.side_effect = lambda _name, _version, kind: {
+            "checkpoints": [],
+            "diffusion_models": [expected],
+        }[kind]
+        body = _object_info_fixture("comfyui-v0.32.0-object-info-unet-loader.json")
+        body["UNETLoader"]["input"]["required"]["unet_name"][0] = ["sd3_medium.safetensors"]
+        mocks["http_client"].get.return_value = _make_object_info_response_from_body(body)
+
+        with capture_logs() as logs:
+            result = await worker._probe_comfyui(
+                _make_gpu_session(bundle_name="zit.cyberrealistic"),
+                readiness_marker_node_class=None,
+            )
+
+        assert result is ProbeOutcome.contract_failed
+        [event] = [
+            event
+            for event in logs
+            if event["event"] == "gpu_session.provision.probe_checkpoint_missing"
+        ]
+        assert event["model_type"] == "diffusion_models"
+        assert event["loader_class"] == "UNETLoader"
+
+    async def test_checkpoint_loader_wins_when_both_model_types_have_one_file(self) -> None:
+        worker, mocks = _make_worker()
+        checkpoint = "Qwen-Rapid-AIO-NSFW-v19.safetensors"
+        mocks["bundle_index"].get_model_filenames.side_effect = lambda _name, _version, kind: {
+            "checkpoints": [checkpoint],
+            "diffusion_models": ["cyberrealisticZImage_v70.safetensors"],
+        }[kind]
+        mocks["http_client"].get.return_value = _make_object_info_with_checkpoint([checkpoint])
+
+        result = await worker._probe_comfyui(_make_gpu_session(), readiness_marker_node_class=None)
+
+        assert result is ProbeOutcome.ready
+        mocks["bundle_index"].get_model_filenames.assert_called_once_with(
+            "wan_2.2_i2v", "260105-01", "checkpoints"
+        )
+
+    async def test_multiple_diffusion_models_do_not_become_a_contract_failure(self) -> None:
+        """Multiple declared model files retain the legacy skipped-check behavior."""
+        worker, mocks = _make_worker()
+        mocks["bundle_index"].get_model_filenames.side_effect = lambda _name, _version, kind: {
+            "checkpoints": [],
+            "diffusion_models": ["first.safetensors", "second.safetensors"],
+        }[kind]
+        mocks["http_client"].get.return_value = _make_object_info_response(["KSampler"])
+
+        result = await worker._probe_comfyui(_make_gpu_session(), readiness_marker_node_class=None)
+
+        assert result is ProbeOutcome.ready
+
     async def test_checkpoint_subfolder_returns_true_and_warns(self) -> None:
         """Checkpoint exposed as 'sub/Model.safetensors', bundle declares 'Model.safetensors'
         → True (basename match), but probe_checkpoint_path_mismatch WARNING is logged."""
@@ -2797,6 +2895,46 @@ class TestProbeFailFast:
         assert failed_calls, "session must be transitioned to failed"
         assert "bundle_not_deployed" in failed_calls[0].kwargs.get("error_message", "")
 
+    async def test_three_consecutive_diffusion_model_failures_fail_the_zit_bundle(self) -> None:
+        billing_mock = AsyncMock()
+        worker, mocks = _make_worker(billing_service=billing_mock)
+        expected = "cyberrealisticZImage_v70.safetensors"
+        mocks["bundle_index"].get_model_filenames.side_effect = lambda _name, _version, kind: {
+            "checkpoints": [],
+            "diffusion_models": [expected],
+        }[kind]
+        session = _make_gpu_session(
+            status=GpuSessionStatus.provisioning,
+            bundle_name="zit.cyberrealistic",
+        )
+        mocks["vastai_client"].get_instance.return_value = VastAIInstance(
+            id=12345, actual_status="running", cur_state="running"
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        body = _object_info_fixture("comfyui-v0.32.0-object-info-unet-loader.json")
+        body["UNETLoader"]["input"]["required"]["unet_name"][0] = []
+        mocks["http_client"].get.return_value = _make_object_info_response_from_body(body)
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_consecutive_contract_failures.side_effect = [1, 2, 3]
+            mock_repo.get_by_id.return_value = _make_gpu_session(
+                status=GpuSessionStatus.provisioning,
+                bundle_name="zit.cyberrealistic",
+            )
+
+            for _ in range(3):
+                await worker._advance_provisioning(session)
+
+        failed_calls = [
+            call
+            for call in mock_repo.update_status.call_args_list
+            if len(call.args) > 1 and call.args[1] == GpuSessionStatus.failed
+        ]
+        assert failed_calls, "zit must fail fast when its diffusion model never appears"
+        assert "bundle_not_deployed" in failed_calls[0].kwargs.get("error_message", "")
+
     async def test_three_consecutive_marker_missing_fails_the_same_way(
         self, mock_deployment_repo: AsyncMock
     ) -> None:
@@ -2946,6 +3084,47 @@ class TestMatchCheckpoint:
         matched, exact = _match_checkpoint("model.safetensors", [])
         assert matched is False
         assert exact is False
+
+
+# ---------------------------------------------------------------------------
+# TestComboOptions — both ComfyUI schema generations are accepted
+# ---------------------------------------------------------------------------
+
+
+class TestComboOptions:
+    def test_legacy_checkpoint_loader_fixture(self) -> None:
+        parsed = _object_info_fixture("comfyui-v0.32.0-object-info-checkpoint-loader-simple.json")
+
+        assert _combo_options(parsed, "CheckpointLoaderSimple", "ckpt_name") == []
+
+    def test_legacy_unet_loader_fixture(self) -> None:
+        parsed = _object_info_fixture("comfyui-v0.32.0-object-info-unet-loader.json")
+
+        assert _combo_options(parsed, "UNETLoader", "unet_name") == [
+            "cyberrealisticZImage_v70.safetensors"
+        ]
+
+    def test_synthetic_v3_combo(self) -> None:
+        parsed = {
+            "Loader": {
+                "input": {"required": {"model_name": ["COMBO", {"options": ["model.safetensors"]}]}}
+            }
+        }
+
+        assert _combo_options(parsed, "Loader", "model_name") == ["model.safetensors"]
+
+    @pytest.mark.parametrize(
+        "parsed",
+        [
+            {},
+            {"Loader": {}},
+            {"Loader": {"input": {"required": {"model_name": []}}}},
+            {"Loader": {"input": {"required": {"model_name": ["COMBO", {}]}}}},
+            {"Loader": {"input": {"required": {"model_name": [["ok", 1], {}]}}}},
+        ],
+    )
+    def test_malformed_shapes_return_none(self, parsed: dict[str, Any]) -> None:
+        assert _combo_options(parsed, "Loader", "model_name") is None
 
 
 # ---------------------------------------------------------------------------

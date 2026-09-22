@@ -749,6 +749,20 @@ class TestExecutionErrorClassification:
         assert event["exception_type"] == "ImportError"
         assert event["log_level"] == "error"
 
+    async def test_execution_error_log_fields_are_redacted(self) -> None:
+        poller = _make_poller()
+        entry = _evidence_history()
+        payload = entry["status"]["messages"][2][1]
+        payload["node_type"] = "CustomNode token=NODE_SECRET"
+        payload["exception_type"] = "ImportError api_key=TYPE_SECRET"
+
+        with structlog.testing.capture_logs() as logs:
+            await _run_history(poller, _make_job(), entry)
+
+        [event] = [event for event in logs if event["event"] == "aisha_job_poller.execution_error"]
+        assert "NODE_SECRET" not in event["node_type"]
+        assert "TYPE_SECRET" not in event["exception_type"]
+
 
 class TestNothingCollectable:
     async def test_only_temp_images_fails_immediately_and_refunds(self) -> None:

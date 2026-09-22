@@ -424,8 +424,9 @@ class AishaJobPoller(PeriodicWorker):
         local paths and is deliberately ignored.
 
         Returns:
-            ``(detail, node_type, exception_type)`` — ``detail`` is safe to
-            persist; the other two are for the alertable log line.
+            ``(detail, node_type, exception_type)`` — every returned string is
+            redacted and bounded, so both persisted detail and alertable log
+            fields remain safe for node-supplied payloads.
         """
         messages = status_info.get("messages")
         payload: dict[str, Any] | None = None
@@ -444,8 +445,9 @@ class AishaJobPoller(PeriodicWorker):
 
         def field(key: str) -> str:
             value = payload.get(key)
-            return (
-                str(value)[:_MAX_EXECUTION_ERROR_DETAIL_CHARS] if value is not None else "unknown"
+            return redact_secrets(
+                str(value) if value is not None else "unknown",
+                max_length=_MAX_EXECUTION_ERROR_DETAIL_CHARS,
             )
 
         node_type = field("node_type")

@@ -1,0 +1,41 @@
+{
+  "CheckpointLoaderSimple": {
+    "input": {
+      "required": {
+        "ckpt_name": [
+          [],
+          {
+            "tooltip": "The name of the checkpoint (model) to load."
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "required": ["ckpt_name"]
+    },
+    "is_input_list": false,
+    "output": ["MODEL", "CLIP", "VAE"],
+    "output_is_list": [false, false, false],
+    "output_name": ["MODEL", "CLIP", "VAE"],
+    "name": "CheckpointLoaderSimple",
+    "display_name": "Load Checkpoint",
+    "description": "Loads a diffusion model checkpoint, diffusion models are used to denoise latents.",
+    "python_module": "nodes",
+    "category": "model/loaders",
+    "output_node": false,
+    "has_intermediate_output": false,
+    "output_tooltips": [
+      "The model used for denoising latents.",
+      "The CLIP model used for encoding text prompts.",
+      "The VAE model used for encoding and decoding images to and from latent space."
+    ],
+    "search_aliases": [
+      "load model",
+      "checkpoint",
+      "model loader",
+      "load checkpoint",
+      "ckpt",
+      "model"
+    ]
+  }
+}

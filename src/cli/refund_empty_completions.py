@@ -8,17 +8,22 @@ status to ``failed``.
 
 Usage:
     python -m src.cli.refund_empty_completions run [--product vex] [--since 2026-01-01]
-           [--job-id UUID ...] [--limit N] [--apply]
+           [--job-id UUID ...] [--job-ids-file PATH] [--limit N] [--apply]
 
 Dry-run by default: without ``--apply`` it prints what it would do and changes
 nothing. Re-runnable: a corrected job is no longer ``completed``, so a second
 ``--apply`` finds nothing to do.
 
-⚠️ Review the dry-run before applying. Selection is "Aisha, ``completed``, not
-soft-deleted, zero output rows". A job whose owner later deleted all of its
-outputs matches too — the database cannot tell it from a defective completion.
-Cross-check against ``job.transition.completed output_count=0`` log lines and
-narrow with ``--job-id`` / ``--since`` when in doubt.
+⚠️ The unfiltered dry-run lists *candidates*, not known defects. Selection is
+"Aisha, ``completed``, not soft-deleted, zero output rows". A job whose owner
+later deleted all of its outputs matches too — the database cannot tell it from
+a defective completion. Therefore ``--apply`` requires explicit job ids.
+
+Source those ids by querying the log store for ``job.transition.completed``
+events where ``output_count=0`` for an Aisha job, then feed the extracted
+``job_id`` values through ``--job-ids-file`` (or repeat ``--job-id``). That
+event was emitted at completion, before an owner could delete any output. Log
+retention bounds the historical range this remediation can safely cover.
 """
 
 from __future__ import annotations
@@ -27,8 +32,9 @@ import asyncio
 import dataclasses
 import enum
 from datetime import UTC, datetime
+from pathlib import Path  # noqa: TC003 - Typer resolves the option annotation at runtime
 from typing import TYPE_CHECKING, Annotated
-from uuid import UUID  # noqa: TC003 - Typer resolves the --job-id annotation at runtime
+from uuid import UUID
 
 import structlog
 import typer
@@ -63,6 +69,31 @@ _ERROR_MESSAGE = (
     "outputs (ComfyUI execution error reported as success)."
 )
 _REFUND_DESCRIPTION = "Job produced no output — tokens refunded"
+
+
+def _read_job_ids_file(path: Path) -> list[UUID]:
+    """Read one UUID per line, ignoring blank lines and ``#`` comments.
+
+    This runs in the synchronous Typer entrypoint, before database setup, so a
+    malformed review file cannot result in a partial backfill.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not read --job-ids-file {path}: {exc}") from exc
+
+    job_ids: list[UUID] = []
+    for line_number, line in enumerate(lines, start=1):
+        value = line.split("#", maxsplit=1)[0].strip()
+        if not value:
+            continue
+        try:
+            job_ids.append(UUID(value))
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"Invalid UUID in --job-ids-file {path} on line {line_number}: {value!r}"
+            ) from exc
+    return job_ids
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +224,23 @@ async def run_refund(
     if not apply:
         return report
 
+    # The repository deliberately omits requested ids that acquired outputs or
+    # otherwise no longer satisfy the completed-and-empty predicate. Surface
+    # those ids explicitly rather than making a reviewed log id disappear from
+    # the apply report; the predicate remains the authority and nothing is
+    # refunded for an omitted row.
+    if job_ids is not None:
+        found_ids = {row.job_id for row in rows}
+        for job_id in dict.fromkeys(job_ids):
+            if job_id not in found_ids:
+                report.skipped.append(
+                    _Skip(
+                        job_id,
+                        _Outcome.NO_LONGER_EMPTY,
+                        "job has outputs or is no longer completed",
+                    )
+                )
+
     for row in rows:
         outcome, event, detail = await _settle_one(session, billing, row)
         match outcome:
@@ -219,7 +267,7 @@ async def run_refund(
 
 
 def _print_report(report: RefundReport) -> None:
-    title = "Empty completions" + ("" if report.apply else " (dry-run — nothing changed)")
+    title = "Empty-completion candidates" + ("" if report.apply else " (dry-run — nothing changed)")
     table = Table(title=title)
     table.add_column("Job", style="bold")
     table.add_column("Product")
@@ -243,9 +291,10 @@ def _print_report(report: RefundReport) -> None:
 
     if not report.apply:
         console.print(
-            "[yellow]Dry-run. Re-run with --apply to refund and mark these jobs failed. "
-            "A job whose owner deleted its outputs looks identical to a defective one — "
-            "review the list (or pass --job-id) first.[/yellow]"
+            "[yellow]Candidate warning: this list includes jobs whose owners later deleted "
+            "their images. Do not refund candidates wholesale. Query "
+            "job.transition.completed events with output_count=0, then pass the reviewed ids "
+            "with --job-id or --job-ids-file.[/yellow]"
         )
         return
 
@@ -337,6 +386,13 @@ def run(
             help="Restrict to this job (repeatable) — apply a reviewed subset only",
         ),
     ] = None,
+    job_ids_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--job-ids-file",
+            help="File containing one reviewed job UUID per line (# comments and blank lines ignored)",
+        ),
+    ] = None,
     limit: Annotated[
         int | None,
         typer.Option("--limit", min=1, help="Max jobs to process (for incremental runs)"),
@@ -349,8 +405,27 @@ def run(
     """Refund Aisha jobs that were completed with no outputs (dry-run unless --apply)."""
     if since is not None and since.tzinfo is None:
         since = since.replace(tzinfo=UTC)
+
+    reviewed_job_ids = list(job_id or [])
+    if job_ids_file is not None:
+        reviewed_job_ids.extend(_read_job_ids_file(job_ids_file))
+    # Stable de-duplication prevents a repeated id from looking like a second
+    # reviewed candidate while preserving the operator's file/argument order.
+    reviewed_job_ids = list(dict.fromkeys(reviewed_job_ids))
+    if apply and not reviewed_job_ids:
+        raise typer.BadParameter(
+            "--apply requires explicit reviewed ids via --job-id or --job-ids-file; "
+            "the unfiltered candidate list can include owner-deleted images."
+        )
+
     asyncio.run(
-        _run_impl(product=product, since=since, job_ids=job_id or None, limit=limit, apply=apply)
+        _run_impl(
+            product=product,
+            since=since,
+            job_ids=reviewed_job_ids or None,
+            limit=limit,
+            apply=apply,
+        )
     )
 
 

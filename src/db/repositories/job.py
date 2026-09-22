@@ -565,6 +565,10 @@ class JobRepository(BaseRepository[GenerationJob]):
         that has a result. Deliberately not on ``JobStateTransitionService``,
         whose terminal states stay terminal for every other caller.
 
+        The correction also clears ``completed_at``. That timestamp is exposed
+        to job and library clients as completion metadata, so retaining it on a
+        failed job could make a corrected failure look successful.
+
         Does not commit and does not touch billing — the caller pairs it with
         ``BillingService.refund`` in one transaction.
 
@@ -590,6 +594,7 @@ class JobRepository(BaseRepository[GenerationJob]):
                 )
                 .values(
                     status=JobStatus.FAILED,
+                    completed_at=None,
                     failure_code=failure_code[:100],
                     error_message=error_message[:2000],
                     public_error_message=(

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -21,6 +21,9 @@ from typer.testing import CliRunner
 
 from src.cli import refund_empty_completions as cli
 from src.db.repositories.job import EmptyCompletion
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 runner = CliRunner()
 
@@ -69,11 +72,49 @@ class TestCommandSurface:
 
         assert _kwargs(run_impl)["apply"] is False
 
-    def test_apply_flag_is_explicit(self) -> None:
+    def test_apply_requires_reviewed_ids_before_database_setup(self) -> None:
         with patch.object(cli, "_run_impl", new=AsyncMock()) as run_impl:
-            runner.invoke(cli.app, ["run", "--apply"])
+            result = runner.invoke(cli.app, ["run", "--apply"])
 
+        assert result.exit_code != 0
+        assert "requires explicit reviewed ids" in result.output
+        # Validation happens in Typer's synchronous entrypoint, before
+        # _run_impl can create a database connection or issue a refund.
+        run_impl.assert_not_awaited()
+
+    def test_apply_with_repeated_job_ids_is_allowed(self) -> None:
+        job_a, job_b = uuid4(), uuid4()
+        with patch.object(cli, "_run_impl", new=AsyncMock()) as run_impl:
+            result = runner.invoke(
+                cli.app,
+                ["run", "--apply", "--job-id", str(job_a), "--job-id", str(job_b)],
+            )
+
+        assert result.exit_code == 0, result.output
         assert _kwargs(run_impl)["apply"] is True
+        assert _kwargs(run_impl)["job_ids"] == [job_a, job_b]
+
+    def test_job_ids_file_is_parsed_before_apply(self, tmp_path: Path) -> None:
+        job_a, job_b = uuid4(), uuid4()
+        job_ids_file = tmp_path / "reviewed-job-ids.txt"
+        job_ids_file.write_text(f"# sourced from completion logs\n{job_a}\n\n{job_b} # verified\n")
+
+        with patch.object(cli, "_run_impl", new=AsyncMock()) as run_impl:
+            result = runner.invoke(cli.app, ["run", "--apply", "--job-ids-file", str(job_ids_file)])
+
+        assert result.exit_code == 0, result.output
+        assert _kwargs(run_impl)["job_ids"] == [job_a, job_b]
+
+    def test_malformed_job_ids_file_fails_before_processing(self, tmp_path: Path) -> None:
+        job_ids_file = tmp_path / "reviewed-job-ids.txt"
+        job_ids_file.write_text(f"{uuid4()}\nnot-a-uuid\n")
+
+        with patch.object(cli, "_run_impl", new=AsyncMock()) as run_impl:
+            result = runner.invoke(cli.app, ["run", "--apply", "--job-ids-file", str(job_ids_file)])
+
+        assert result.exit_code != 0
+        assert "line 2" in result.output
+        run_impl.assert_not_awaited()
 
     def test_filters_are_normalised(self) -> None:
         job_a, job_b = uuid4(), uuid4()
@@ -136,8 +177,10 @@ class TestReportRendering:
             assert str(row.job_id) in text
         assert "Jobs: 2" in text
         assert "Total debit: 50 tokens" in text
-        # The user-deleted-outputs caveat travels with every dry-run.
-        assert "--job-id" in text
+        assert "candidates" in text
+        # The user-deleted-outputs caveat travels with every unfiltered dry-run.
+        assert "owners later deleted" in text
+        assert "--job-ids-file" in text
         assert "Refunded:" not in text
 
     def test_job_without_a_debit_is_shown_as_such(self) -> None:
