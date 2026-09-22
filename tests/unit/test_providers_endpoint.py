@@ -37,7 +37,7 @@ from src.core.enums import (
 )
 from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
 from src.core.model_registry import get_model_meta
-from tests.unit.helpers import aisha_video_capabilities
+from tests.unit.helpers import aisha_video_capabilities, qwen_rapid_aio_capabilities
 
 
 class TestProvidersResponseSchema:
@@ -302,6 +302,31 @@ class TestModelInfoSchema:
         )
 
         assert list(info.generation_modes) == [GenerationType.I2I.value]
+
+    @pytest.mark.parametrize(
+        ("capabilities", "advertised_max"),
+        [
+            # qwen.rapid.aio declares two reference slots: registry 3 ∩ bundle 2.
+            (qwen_rapid_aio_capabilities(2), 2),
+            (qwen_rapid_aio_capabilities(1), 1),
+            # No bundle narrowing: the provider limit (TextEncodeQwenImageEditPlus) shows.
+            (None, 3),
+        ],
+    )
+    def test_aisha_image_i2i_max_is_the_bundle_narrowed_reference_limit(
+        self, capabilities: BundleCapabilities | None, advertised_max: int
+    ) -> None:
+        info = _build_model_info(
+            ModelType.AISHA_IMAGE,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=capabilities,
+        )
+
+        source_media = info.generation_modes[GenerationType.I2I.value].source_media
+        assert source_media is not None
+        assert (source_media.min, source_media.max) == (1, advertised_max)
+        assert source_media.roles is None  # reference slots are positional, not role-addressed
 
     def test_empty_resolved_modes_disable_the_model(self) -> None:
         """An enabled model with no executable mode must not be actionable."""

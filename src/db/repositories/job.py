@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import dataclasses
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import CursorResult, and_, exists, func, select, update
+from sqlalchemy.orm import aliased, selectinload
 
-from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
+from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider, TransactionType
+from src.db.models.billing import TokenTransaction
 from src.db.models.gpu_session import GpuSession
-from src.db.models.storage import GenerationJob
+from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
@@ -18,6 +20,18 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class EmptyCompletion:
+    """A completed Aisha job that has no output rows, with its debit if any."""
+
+    job_id: UUID
+    user_id: UUID
+    product_id: str
+    created_at: datetime
+    account_id: UUID | None
+    debit_amount: int | None
 
 
 class JobRepository(BaseRepository[GenerationJob]):
@@ -453,3 +467,141 @@ class JobRepository(BaseRepository[GenerationJob]):
             .where(GenerationJob.is_deleted.is_(False))
         )
         return result.scalars().all()
+
+    async def list_empty_completions(
+        self,
+        *,
+        product_id: str | None = None,
+        since: datetime | None = None,
+        job_ids: Sequence[UUID] | None = None,
+        limit: int | None = None,
+    ) -> Sequence[EmptyCompletion]:
+        """List Aisha jobs marked ``completed`` that have no ``generation_outputs`` row.
+
+        Used by the empty-completion refund backfill. ``is_deleted`` jobs are
+        excluded: the retention sweeper deletes expired output rows and
+        soft-deletes the job, so a soft-deleted completed job with no outputs is
+        the normal end of a job's life, not a defect.
+
+        Note a job whose owner later deleted all of its outputs is also
+        ``completed`` with no outputs and is *not* soft-deleted — the database
+        cannot tell it from a defective completion, so callers must let a human
+        review the result (or pass ``job_ids``) before acting on it.
+
+        Args:
+            product_id: Restrict to one product.
+            since: Restrict to jobs created at or after this instant.
+            job_ids: Restrict to exactly these jobs (still subject to every
+                other predicate).
+            limit: Maximum rows to return.
+
+        Returns:
+            Rows ordered by ``created_at ASC, id ASC``. ``account_id`` and
+            ``debit_amount`` (absolute tokens) are ``None`` for a job with no
+            debit ledger row.
+        """
+        debit = aliased(TokenTransaction)
+        stmt = (
+            select(
+                GenerationJob.id,
+                GenerationJob.user_id,
+                GenerationJob.product_id,
+                GenerationJob.created_at,
+                debit.account_id,
+                func.abs(debit.amount),
+            )
+            .outerjoin(
+                debit,
+                and_(
+                    debit.job_id == GenerationJob.id,
+                    debit.transaction_type == TransactionType.DEBIT.value,
+                ),
+            )
+            .where(
+                GenerationJob.provider == Provider.AISHA,
+                GenerationJob.status == JobStatus.COMPLETED,
+                GenerationJob.is_deleted.is_(False),
+                ~exists(
+                    select(GenerationOutput.id).where(GenerationOutput.job_id == GenerationJob.id)
+                ),
+            )
+            .order_by(GenerationJob.created_at.asc(), GenerationJob.id.asc())
+        )
+        if product_id is not None:
+            stmt = stmt.where(GenerationJob.product_id == product_id)
+        if since is not None:
+            stmt = stmt.where(GenerationJob.created_at >= since)
+        if job_ids is not None:
+            stmt = stmt.where(GenerationJob.id.in_(job_ids))
+        if limit is not None:
+            stmt = stmt.limit(limit)
+
+        result = await self._session.execute(stmt)
+        return [
+            EmptyCompletion(
+                job_id=row[0],
+                user_id=row[1],
+                product_id=row[2],
+                created_at=row[3],
+                account_id=row[4],
+                debit_amount=int(row[5]) if row[5] is not None else None,
+            )
+            for row in result.all()
+        ]
+
+    async def mark_empty_completion_failed(
+        self,
+        job_id: UUID,
+        *,
+        failure_code: str,
+        error_message: str,
+        public_error_message: str | None = None,
+    ) -> bool:
+        """COMPLETED → FAILED, only when the job has zero outputs. Returns whether it changed.
+
+        A dedicated method rather than a general ``COMPLETED → FAILED``
+        transition (D6): the ``WHERE status = 'completed' AND NOT EXISTS
+        (outputs)`` predicate is the guard, so this cannot be pointed at a job
+        that has a result. Deliberately not on ``JobStateTransitionService``,
+        whose terminal states stay terminal for every other caller.
+
+        The correction also clears ``completed_at``. That timestamp is exposed
+        to job and library clients as completion metadata, so retaining it on a
+        failed job could make a corrected failure look successful.
+
+        Does not commit and does not touch billing — the caller pairs it with
+        ``BillingService.refund`` in one transaction.
+
+        Args:
+            job_id: Job to correct.
+            failure_code: Stable machine-readable failure category.
+            error_message: Internal diagnostic. Never shown to users.
+            public_error_message: User-facing text; when omitted the row falls
+                back to the fixed legacy failed-job message.
+
+        Returns:
+            True if this call changed the row; False if the job is not
+            ``completed`` or has outputs (row untouched).
+        """
+        result = cast(
+            "CursorResult[Any]",
+            await self._session.execute(
+                update(GenerationJob)
+                .where(
+                    GenerationJob.id == job_id,
+                    GenerationJob.status == JobStatus.COMPLETED,
+                    ~exists(select(GenerationOutput.id).where(GenerationOutput.job_id == job_id)),
+                )
+                .values(
+                    status=JobStatus.FAILED,
+                    completed_at=None,
+                    failure_code=failure_code[:100],
+                    error_message=error_message[:2000],
+                    public_error_message=(
+                        public_error_message[:2000] if public_error_message is not None else None
+                    ),
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return result.rowcount == 1

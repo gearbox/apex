@@ -11,6 +11,7 @@ from src.api.services.generation.source_media import SourceMediaValidationError
 from src.api.services.workflow.contract import BundleCapabilities
 from src.core.enums import GenerationType, MediaKind, MediaSlot, ModelType
 from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
+from tests.unit.helpers import qwen_rapid_aio_capabilities
 
 
 def _capabilities(
@@ -28,11 +29,11 @@ def _capabilities(
 
 
 def test_bundle_contract_wider_than_provider_is_clamped_to_provider() -> None:
-    """A two-reference bundle cannot advertise more than Aisha can execute."""
+    """A bundle declaring more references than the provider can execute is clamped."""
     capabilities = _capabilities(
         {
             GenerationType.I2I: GenerationModeMeta(
-                SourceMediaConstraints(1, 2, frozenset({MediaKind.IMAGE}))
+                SourceMediaConstraints(1, 4, frozenset({MediaKind.IMAGE}))
             )
         }
     )
@@ -41,7 +42,18 @@ def test_bundle_contract_wider_than_provider_is_clamped_to_provider() -> None:
 
     contract = modes[GenerationType.I2I].source_media
     assert contract is not None
-    assert (contract.min, contract.max) == (1, 1)
+    assert (contract.min, contract.max) == (1, 3)
+
+
+def test_two_slot_bundle_narrows_the_aisha_image_provider_limit_to_two() -> None:
+    """Registry 3 ∩ qwen.rapid.aio's two reference slots = 2."""
+    modes = resolve_generation_modes(
+        ModelType.AISHA_IMAGE, capabilities=qwen_rapid_aio_capabilities(2)
+    )
+
+    contract = modes[GenerationType.I2I].source_media
+    assert contract is not None
+    assert (contract.min, contract.max) == (1, 2)
 
 
 def test_bundle_contract_narrows_provider_contract() -> None:
@@ -122,31 +134,29 @@ def test_mismatched_source_media_nullness_drops_a_mode() -> None:
     assert resolve_generation_modes(ModelType.GROK_IMAGINE_IMAGE, capabilities=capabilities) == {}
 
 
-def test_advertised_aisha_contract_rejects_two_assets_before_submission() -> None:
-    capabilities = _capabilities(
-        {
-            GenerationType.I2I: GenerationModeMeta(
-                SourceMediaConstraints(1, 2, frozenset({MediaKind.IMAGE}))
-            )
-        }
-    )
-    contract = resolve_generation_modes(ModelType.AISHA_IMAGE, capabilities=capabilities)[
-        GenerationType.I2I
-    ].source_media
-    request = UnifiedGenerationRequest(
+def _aisha_i2i_request(source_count: int) -> UnifiedGenerationRequest:
+    return UnifiedGenerationRequest(
         prompt="Edit",
         generation_type=GenerationType.I2I,
         model=ModelType.AISHA_IMAGE,
         source_media=[
-            SourceMediaReference(asset_ref="upload:00000000-0000-0000-0000-000000000001"),
-            SourceMediaReference(asset_ref="upload:00000000-0000-0000-0000-000000000002"),
+            SourceMediaReference(asset_ref=f"upload:00000000-0000-0000-0000-00000000000{i + 1}")
+            for i in range(source_count)
         ],
     )
 
+
+def test_advertised_aisha_contract_accepts_two_assets_and_rejects_three() -> None:
+    contract = resolve_generation_modes(
+        ModelType.AISHA_IMAGE, capabilities=qwen_rapid_aio_capabilities(2)
+    )[GenerationType.I2I].source_media
     assert contract is not None
-    assert contract.max == 1
-    with pytest.raises(SourceMediaValidationError, match="requires between"):
-        GenerationService._validate_source_cardinality(request, contract)
+    assert contract.max == 2
+
+    GenerationService._validate_source_cardinality(_aisha_i2i_request(1), contract)
+    GenerationService._validate_source_cardinality(_aisha_i2i_request(2), contract)
+    with pytest.raises(SourceMediaValidationError, match="requires between 1 and 2"):
+        GenerationService._validate_source_cardinality(_aisha_i2i_request(3), contract)
 
 
 def test_registry_modes_are_used_without_bundle_capabilities() -> None:

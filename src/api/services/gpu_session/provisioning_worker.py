@@ -20,7 +20,7 @@ import secrets
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 import msgspec
@@ -86,7 +86,11 @@ _REASON_PENDING_TIMEOUT_AFTER_ERRORS = "pending_timeout_after_errors"
 # Both are eligible for recreation (unlike provisioning_timeout which stays terminal).
 _REASON_PROVISIONING_STALLED = "provisioning_stalled"
 _REASON_NODE_REPORTED_FAILURE = "node_reported_failure"
-_READINESS_MODEL_TYPE = "checkpoints"
+_READINESS_MODEL_LOADERS: Final[tuple[tuple[str, str, str], ...]] = (
+    # (bundle model_type, loader node class, COMBO input name)
+    ("checkpoints", "CheckpointLoaderSimple", "ckpt_name"),
+    ("diffusion_models", "UNETLoader", "unet_name"),
+)
 
 # Vast.ai actual_status values that mean the container is dead and will never reach 'running'.
 # Sourced from Vast.ai docs: https://docs.vast.ai/sdk/python/quickstart — "if actual_status
@@ -116,6 +120,41 @@ def _match_checkpoint(expected: str, available: list[str]) -> tuple[bool, bool]:
     if any(PurePosixPath(a).name == exp_base for a in available):
         return True, False
     return False, False
+
+
+def _combo_options(parsed: dict[str, Any], node_class: str, input_name: str) -> list[str] | None:
+    """Return a loader input's COMBO options, or ``None`` for an unknown shape.
+
+    ComfyUI's legacy schema represents a combo as ``[[options], metadata]``.
+    Its V3 schema represents the same input as ``["COMBO", {"options":
+    [options]}]``. The readiness probe needs only a list of model filenames,
+    but must decline to make a deployment decision when either response shape
+    is incomplete or unexpected.
+    """
+    node_info = parsed.get(node_class)
+    if not isinstance(node_info, dict):
+        return None
+    inputs = node_info.get("input")
+    if not isinstance(inputs, dict):
+        return None
+    required = inputs.get("required")
+    if not isinstance(required, dict):
+        return None
+    entry = required.get(input_name)
+    if not isinstance(entry, list):
+        return None
+
+    options: Any
+    if len(entry) >= 2 and entry[0] == "COMBO" and isinstance(entry[1], dict):
+        options = entry[1].get("options")
+    elif entry and isinstance(entry[0], list):
+        options = entry[0]
+    else:
+        return None
+
+    if not isinstance(options, list) or not all(isinstance(option, str) for option in options):
+        return None
+    return options
 
 
 def _classify_terminal_state(instance: VastAIInstance) -> str | None:
@@ -633,8 +672,9 @@ class GpuProvisioningWorker(PeriodicWorker):
 
         Returns ProbeOutcome.ready only when all applicable conditions hold:
         1. HTTP 200 from /object_info.
-        2. Checkpoint presence (when bundle declares exactly one checkpoint):
-           the declared filename must appear in ComfyUI's available list.
+        2. Model presence (when the bundle declares exactly one file for a
+           supported loader): the declared filename must appear in ComfyUI's
+           available list.
         3. Node-class marker (when configured): the marker class must be registered.
         4. Degradation backstop: if neither check is applicable, log a WARNING
            and return ready on the 200 (unverifiable bundle, gap made loud).
@@ -683,32 +723,60 @@ class GpuProvisioningWorker(PeriodicWorker):
             )
             return ProbeOutcome.not_ready
 
-        # Determine which checks are applicable before parsing JSON.
-        expected = self._bundles.get_model_filenames(
-            session.bundle_name, session.bundle_version, _READINESS_MODEL_TYPE
-        )
-        if expected is None:
-            # Apex-side lookup failure (bad bundle index state), not a node-side
-            # problem — stays not_ready, never contract_failed.
-            logger.warning(
-                "gpu_session.provision.probe_checkpoint_lookup_failed",
-                session_id=str(session.id),
-                bundle_name=session.bundle_name,
-                bundle_version=session.bundle_version,
+        # Select the first loader whose model type declares exactly one file.
+        # The order is intentional: if both are present, checkpoints retain the
+        # historical precedence. A lookup failure is ambiguous rather than a
+        # confirmed contract failure, so it preserves the old not_ready result.
+        expected: list[str] | None = None
+        model_type: str | None = None
+        loader_class: str | None = None
+        input_name: str | None = None
+        skipped_model_type = _READINESS_MODEL_LOADERS[0][0]
+        skipped_loader_class = _READINESS_MODEL_LOADERS[0][1]
+        skipped_declared_count = 0
+        for (
+            candidate_model_type,
+            candidate_loader_class,
+            candidate_input_name,
+        ) in _READINESS_MODEL_LOADERS:
+            filenames = self._bundles.get_model_filenames(
+                session.bundle_name, session.bundle_version, candidate_model_type
             )
-            return ProbeOutcome.not_ready
-        checkpoint_check_applicable = len(expected) == 1
+            if filenames is None:
+                logger.warning(
+                    "gpu_session.provision.probe_checkpoint_lookup_failed",
+                    session_id=str(session.id),
+                    bundle_name=session.bundle_name,
+                    bundle_version=session.bundle_version,
+                    model_type=candidate_model_type,
+                    loader_class=candidate_loader_class,
+                )
+                return ProbeOutcome.not_ready
+            if len(filenames) == 1:
+                expected = filenames
+                model_type = candidate_model_type
+                loader_class = candidate_loader_class
+                input_name = candidate_input_name
+                break
+            if filenames:
+                skipped_model_type = candidate_model_type
+                skipped_loader_class = candidate_loader_class
+                skipped_declared_count = len(filenames)
+
+        model_check_applicable = expected is not None
         marker = readiness_marker_node_class
         marker_check_applicable = marker is not None
-        primary_check_applicable = checkpoint_check_applicable or marker_check_applicable
+        primary_check_applicable = model_check_applicable or marker_check_applicable
 
-        if not checkpoint_check_applicable:
+        if not model_check_applicable:
             logger.info(
                 "gpu_session.provision.probe_checkpoint_check_skipped",
                 session_id=str(session.id),
                 bundle_name=session.bundle_name,
                 bundle_version=session.bundle_version,
-                declared_count=len(expected),
+                declared_count=skipped_declared_count,
+                model_type=skipped_model_type,
+                loader_class=skipped_loader_class,
             )
             # Degradation backstop: nothing concrete to verify → return on 200 alone.
             # A resume may still need the response body to verify sibling markers,
@@ -747,34 +815,21 @@ class GpuProvisioningWorker(PeriodicWorker):
                 class_name for class_name in parsed if isinstance(class_name, str)
             )
 
-        # Step 2: checkpoint presence (single-checkpoint bundles only).
-        if checkpoint_check_applicable:
-            # Defensively extract available list; /object_info shape:
-            # parsed["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
-            # is the list of filenames available to ComfyUI.
-            shape_ok = True
-            available: list[Any] = []
-            ckpt_info = parsed.get("CheckpointLoaderSimple")
-            if not isinstance(ckpt_info, dict):
-                shape_ok = False
-            else:
-                inputs = ckpt_info.get("input")
-                if not isinstance(inputs, dict):
-                    shape_ok = False
-                else:
-                    required = inputs.get("required")
-                    if not isinstance(required, dict):
-                        shape_ok = False
-                    else:
-                        ckpt_name_entry = required.get("ckpt_name")
-                        if not isinstance(ckpt_name_entry, list) or len(ckpt_name_entry) < 1:
-                            shape_ok = False
-                        else:
-                            available = ckpt_name_entry[0]
-                            if not isinstance(available, list):
-                                shape_ok = False
+        # Step 2: declared-model presence (single-file bundles only).
+        if expected is not None:
+            # These values are assigned together with expected above. Keep the
+            # invariant guarded so a future table edit cannot make malformed
+            # node data look valid.
+            if model_type is None or loader_class is None or input_name is None:
+                logger.error(
+                    "gpu_session.provision.probe_model_loader_selection_invalid",
+                    session_id=str(session.id),
+                    bundle_name=session.bundle_name,
+                )
+                return ProbeOutcome.not_ready
+            available = _combo_options(parsed, loader_class, input_name)
 
-            if not shape_ok:
+            if available is None:
                 # apex-side/node-shape ambiguity, not a confirmed absent checkpoint —
                 # stays not_ready (declined to touch, per Change 4's scope).
                 logger.warning(
@@ -782,6 +837,8 @@ class GpuProvisioningWorker(PeriodicWorker):
                     session_id=str(session.id),
                     bundle_name=session.bundle_name,
                     expected_checkpoint=expected[0],
+                    model_type=model_type,
+                    loader_class=loader_class,
                 )
                 return ProbeOutcome.not_ready
 
@@ -794,6 +851,8 @@ class GpuProvisioningWorker(PeriodicWorker):
                     expected=expected[0],
                     available_count=len(available),
                     available_sample=available[:5],
+                    model_type=model_type,
+                    loader_class=loader_class,
                 )
                 return ProbeOutcome.contract_failed
             if not exact:
@@ -805,6 +864,8 @@ class GpuProvisioningWorker(PeriodicWorker):
                     bundle_name=session.bundle_name,
                     expected=expected[0],
                     available_sample=available[:5],
+                    model_type=model_type,
+                    loader_class=loader_class,
                 )
 
         # Step 3: node-class marker (when configured).
@@ -830,8 +891,10 @@ class GpuProvisioningWorker(PeriodicWorker):
             "gpu_session.provision.probe_ready",
             session_id=str(session.id),
             latency_ms=latency_ms,
-            checkpoint_verified=checkpoint_check_applicable,
+            checkpoint_verified=model_check_applicable,
             marker_verified=marker_check_applicable,
+            model_type=model_type,
+            loader_class=loader_class,
         )
         return ProbeOutcome.ready
 

@@ -151,9 +151,28 @@ class TestTransitionToCompleted:
         job = _make_job(JobStatus.COMPLETED.value)
         svc, session, _ = _make_service(job)
 
-        await svc.transition_to_completed(job.id, outputs=[], product_id="vex")
+        await svc.transition_to_completed(job.id, outputs=[self._make_output()], product_id="vex")
 
         session.execute.assert_not_awaited()
+
+    async def test_empty_outputs_are_refused(self) -> None:
+        """An imageless completion is the billing bug this guard exists to stop."""
+        job = _make_job(JobStatus.RUNNING.value)
+        svc, session, _ = _make_service(job)
+
+        with pytest.raises(ValueError, match="no outputs"):
+            await svc.transition_to_completed(job.id, outputs=[], product_id="vex")
+
+        session.execute.assert_not_awaited()
+        session.commit.assert_not_awaited()
+
+    async def test_empty_outputs_are_refused_even_for_a_terminal_job(self) -> None:
+        """The guard is a contract check, not state-dependent: fail loudly always."""
+        job = _make_job(JobStatus.COMPLETED.value)
+        svc, _, _ = _make_service(job)
+
+        with pytest.raises(ValueError, match="no outputs"):
+            await svc.transition_to_completed(job.id, outputs=[], product_id="vex")
 
     async def test_publishes_event_after_commit(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
@@ -161,7 +180,9 @@ class TestTransitionToCompleted:
         svc, _, _ = _make_service(job, event_bus=bus)
 
         with patch.object(svc._output_repo, "create", new_callable=AsyncMock):
-            await svc.transition_to_completed(job.id, outputs=[], product_id="vex")
+            await svc.transition_to_completed(
+                job.id, outputs=[self._make_output()], product_id="vex"
+            )
 
         bus.publish.assert_awaited_once()
 
@@ -172,7 +193,9 @@ class TestTransitionToCompleted:
         svc, _, _ = _make_service(job, event_bus=bus)
 
         with patch.object(svc._output_repo, "create", new_callable=AsyncMock):
-            await svc.transition_to_completed(job.id, outputs=[], product_id="vex")
+            await svc.transition_to_completed(
+                job.id, outputs=[self._make_output()], product_id="vex"
+            )
 
 
 # ---------------------------------------------------------------------------
