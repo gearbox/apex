@@ -104,7 +104,7 @@ class TestUploadVideoAccepted:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"fake mp4 bytes",
+                data=b"private-metadata-canary",
                 filename="clip.mp4",
                 content_type="video/mp4",
             )
@@ -115,6 +115,7 @@ class TestUploadVideoAccepted:
         assert create_kwargs["width"] == 1280
         assert create_kwargs["height"] == 720
         assert create_kwargs["format"] == "mp4"
+        assert storage.upload.await_args.kwargs["data"] == b"prepared-video"
 
     async def test_upload_video_non_latin_filename_succeeds(self) -> None:
         """Issue B regression: a non-latin filename must not reach R2 metadata

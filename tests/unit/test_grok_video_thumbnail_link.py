@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import shutil
+import subprocess
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -12,6 +17,11 @@ from src.api.services.media_ingest import PreparedVideo
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet, PdqHash
 from src.core.thumbnails import ThumbnailSpec
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from src.api.services.media_ingest import MediaIngestService
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +80,7 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
         media_ingestor=media_ingestor,
     )
 
-    video_data = b"\x00\x01video"
+    video_data = b"\x00\x01video-private-metadata-canary"
     http_mock = AsyncMock()
     response_mock = MagicMock()
     response_mock.raise_for_status = MagicMock()
@@ -110,6 +120,7 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
 
     # One original plus sm and md derivatives, later persisted atomically.
     assert len(materialized.outputs) == 3
+    assert storage.put_raw.await_args_list[0].args[1] == b"prepared-video"
     video_create, sm_create, md_create = materialized.outputs
 
     # Video output
@@ -132,6 +143,69 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
     assert md_create.thumbnail_max_edge == 512
     assert md_create.width == 400
     assert md_create.height == 225
+
+
+async def test_grok_video_storage_receives_remuxed_bytes_without_descriptive_tags(
+    tmp_path: Path,
+    media_ingestor: MediaIngestService,
+) -> None:
+    from src.api.services.grok.job_service import GrokJobService
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        if os.environ.get("CI"):
+            pytest.fail("ffmpeg is required for video ingest tests in CI")
+        pytest.skip("ffmpeg is unavailable locally")
+    source = tmp_path / "private.mp4"
+    await asyncio.to_thread(
+        subprocess.run,
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10",
+            "-t",
+            "2",
+            "-c:v",
+            "mpeg4",
+            "-metadata",
+            "title=private-metadata-canary",
+            "-metadata",
+            "comment=private-metadata-canary",
+            "-metadata",
+            "location=+12.34+56.78/",
+            "-metadata:s:v:0",
+            "handler_name=private-metadata-canary",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    storage = MagicMock()
+    storage.build_storage_key.return_value = "test/grok/private.mp4"
+    storage.put_raw = AsyncMock()
+    service = GrokJobService(MagicMock(), storage, media_ingestor=media_ingestor)
+    response = MagicMock(content=source.read_bytes())
+    response.raise_for_status = MagicMock()
+    service._http_client = MagicMock(get=AsyncMock(return_value=response))
+    with patch(
+        "src.api.services.grok.job_service.extract_video_thumbnail",
+        new=AsyncMock(return_value=None),
+    ):
+        materialized = await service._materialize_video_result(
+            user_id=uuid4(),
+            job_id=uuid4(),
+            result=MagicMock(url="https://provider.invalid/private.mp4"),
+            product_id="vex",
+        )
+    stored = storage.put_raw.await_args.args[1]
+    assert b"private-metadata-canary" not in stored
+    assert len(materialized.outputs) == 1
+    hash_set = materialized.outputs[0].hash_set
+    assert hash_set is not None
+    assert len(hash_set.samples) == 2
 
 
 async def test_no_poster_frames_when_extract_fails() -> None:

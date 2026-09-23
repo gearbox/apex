@@ -92,7 +92,7 @@ def _make_service() -> tuple[GrokJobService, MagicMock]:
         media_ingestor=media_ingestor,
     )
 
-    image_data = b"\xff\xd8\xff\xe0jpeg"
+    image_data = b"\xff\xd8\xff\xe0jpeg-private-metadata-canary"
     http_mock = AsyncMock()
     response_mock = MagicMock()
     response_mock.raise_for_status = MagicMock()
@@ -154,6 +154,7 @@ async def test_store_image_result_creates_sm_and_md_thumbnails(ledger_mock: Magi
     assert parent_create["width"] == 1024
     assert parent_create["height"] == 576
     ledger_mock.return_value.register_output.assert_awaited_once()
+    assert put_raw_mock.await_args_list[0].args[1] == b"prepared-jpeg"
 
     assert sm_create["is_thumbnail"] is True
     assert sm_create["parent_output_id"] == output_id

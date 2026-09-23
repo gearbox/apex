@@ -190,7 +190,7 @@ class TestDownloadAndUploadThumbnails:
         poller = _make_poller(r2=r2)
         job = _make_job()
         client = AsyncMock()
-        client.get_image = AsyncMock(return_value=_FAKE_PNG)
+        client.get_image = AsyncMock(return_value=_FAKE_PNG + b"private-metadata-canary")
 
         expires_at = datetime.now(UTC) + timedelta(days=7)
         img_info = {"filename": "out.png", "subfolder": "", "type": "output"}
@@ -213,7 +213,8 @@ class TestDownloadAndUploadThumbnails:
                 expires_at=expires_at,
             )
 
-        assert len(results) == 3
+        assert len(results.outputs) == 3
+        assert r2.upload.await_args_list[0].kwargs["data"] == _FAKE_PNG
         full = results.outputs[0]
         sm_thumb = results.outputs[1]
         md_thumb = results.outputs[2]
@@ -263,7 +264,7 @@ class TestDownloadAndUploadThumbnails:
                 expires_at=expires_at,
             )
 
-        assert len(results) == 1
+        assert len(results.outputs) == 1
         assert results.outputs[0].is_thumbnail is False
 
     async def test_skips_thumb_when_r2_upload_fails(self) -> None:
@@ -307,7 +308,7 @@ class TestDownloadAndUploadThumbnails:
             )
 
         # sm skipped (upload error), md succeeded → full + md
-        assert len(results) == 2
+        assert len(results.outputs) == 2
         assert results.outputs[0].is_thumbnail is False
         assert results.outputs[1].thumbnail_max_edge == 512
 
@@ -359,6 +360,6 @@ class TestDownloadAndUploadThumbnails:
                 expires_at=datetime.now(UTC) + timedelta(days=7),
             )
 
-        assert len(results) == 2
+        assert len(results.outputs) == 2
         assert results.outputs[0].output_index == 3
         assert results.outputs[1].output_index == 3

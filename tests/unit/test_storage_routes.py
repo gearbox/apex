@@ -17,7 +17,7 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-    HTTP_502_BAD_GATEWAY,
+    HTTP_503_SERVICE_UNAVAILABLE,
 )
 
 from src.api.schemas.media import MediaObject, MediaOriginal
@@ -245,8 +245,8 @@ class TestUploadImageHandler:
 
         assert response.status_code == HTTP_201_CREATED
 
-    async def test_storage_error_returns_502_upstream_error(self) -> None:
-        """D-B3: UserContentStorageError maps to 502, not 500 and not 400 —
+    async def test_storage_error_returns_503_upstream_error(self) -> None:
+        """D-B3: UserContentStorageError maps to 503, not 500 and not 400 —
         an R2 outage is not the client's fault. The message must not echo
         the underlying storage exception text."""
         from src.api.routes.storage import StorageController
@@ -263,7 +263,7 @@ class TestUploadImageHandler:
             data=_upload_form(),
         )
 
-        assert response.status_code == HTTP_502_BAD_GATEWAY
+        assert response.status_code == HTTP_503_SERVICE_UNAVAILABLE
         assert response.content.error == "upstream_error"
         assert response.content.message == "Storage backend unavailable"
         assert "StorageUploadError" not in response.content.message

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.services.frames import ffmpeg as frame_ffmpeg
-from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions  # noqa: F401
+from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.media_ingest import ImageIngestPolicy, MediaIngestor
 from src.api.services.storage import StorageType
@@ -72,7 +72,7 @@ class FrameExtractionWorker(PeriodicWorker):
         r2_storage: R2StorageService,
         settings: Settings,
         *,
-        media_ingestor: MediaIngestor | None = None,
+        media_ingestor: MediaIngestor,
         redis_enabled: bool = False,
         redis_client_factory: Callable[[], Redis],
     ) -> None:
@@ -84,16 +84,6 @@ class FrameExtractionWorker(PeriodicWorker):
         )
         self._db_manager = db_manager
         self._storage = r2_storage
-        if media_ingestor is None:
-            from src.api.services.media_ingest.service import MediaIngestService
-
-            # Normal application startup injects the shared process service.
-            # Keep direct construction usable for narrow worker maintenance
-            # tests that provide only the legacy settings subset.
-            media_ingestor = MediaIngestService(
-                max_image_megapixels=100.0,
-                max_input_bytes=20 * 1024 * 1024,
-            )
         self._media_ingestor = media_ingestor
         self._ffmpeg_timeout = settings.frame_extract_ffmpeg_timeout_seconds
         self._preview_max_edge = settings.frame_preview_max_edge

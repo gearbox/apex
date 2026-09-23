@@ -22,7 +22,7 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-    HTTP_502_BAD_GATEWAY,
+    HTTP_503_SERVICE_UNAVAILABLE,
 )
 
 from src.api.dependencies.auth import get_current_user_id
@@ -194,9 +194,9 @@ class StorageController(Controller):
                 content=ErrorEnvelope(
                     error="upstream_error",
                     message="Storage backend unavailable",
-                    status_code=HTTP_502_BAD_GATEWAY,
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
-                status_code=HTTP_502_BAD_GATEWAY,
+                status_code=HTTP_503_SERVICE_UNAVAILABLE,
             )
         except UserContentError as e:
             logger.exception("storage.upload_failed", error=str(e))

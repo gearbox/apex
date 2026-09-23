@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from src.api.schemas.media import MediaObject, MediaOriginal
 from src.api.schemas.user_content import ImageAccess, UploadedImage
+from src.api.services.media_ingest import MediaProcessingError
 from src.api.services.storage import StorageError, StorageNotFoundError, StorageValidationError
 from src.api.services.user_content import (
     UserContentNotFoundError,
@@ -24,8 +25,10 @@ from src.api.services.user_content import (
     sanitize_display_filename,
 )
 from src.core.enums import MediaFormat, OutputMediaType
+from tests.media_ingest_support import make_media_ingestor
 
 _CANONICAL_FILENAME_RE = re.compile(r"^[0-9a-f-]{36}\.(png|jpeg|webp)$")
+
 
 pytestmark = pytest.mark.unit
 
@@ -114,6 +117,7 @@ def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentSe
         session=session,
         product_id="vex",
         max_input_megapixels=max_input_megapixels,
+        media_ingestor=make_media_ingestor(max_image_megapixels=max_input_megapixels),
     )
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
@@ -127,6 +131,38 @@ def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentSe
 
 
 class TestUploadImage:
+    async def test_storage_receives_only_sanitized_image_bytes(self) -> None:
+        service, storage = _make_service()
+        storage.upload = AsyncMock(return_value=_make_upload_result())
+        service._image_repo.create = AsyncMock(return_value=_make_db_image())
+        pnginfo = PngImagePlugin.PngInfo()
+        pnginfo.add_text("Comment", "private-metadata-canary")
+        source = io.BytesIO()
+        Image.new("RGB", (16, 12), (255, 0, 0)).save(source, format="PNG", pnginfo=pnginfo)
+        with patch("src.api.services.user_content.make_image_thumbnails", return_value=[]):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=source.getvalue(),
+                filename="photo.png",
+                content_type="image/png",
+            )
+        stored = storage.upload.await_args.kwargs["data"]
+        assert b"private-metadata-canary" not in stored
+
+    async def test_ingest_operational_failure_is_storage_error(self) -> None:
+        service, storage = _make_service()
+        service._media_ingestor.prepare_image = AsyncMock(
+            side_effect=MediaProcessingError("capacity exhausted")
+        )
+        with pytest.raises(UserContentStorageError, match="temporarily unavailable"):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=_png_bytes(),
+                filename="photo.png",
+                content_type="image/png",
+            )
+        storage.upload.assert_not_awaited()
+
     async def test_happy_path_returns_uploaded_image(self) -> None:
         service, storage = _make_service()
 
@@ -137,7 +173,6 @@ class TestUploadImage:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(
@@ -195,7 +230,6 @@ class TestUploadImage:
         )
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[thumb]),
         ):
             result = await service.upload_image(
@@ -219,7 +253,6 @@ class TestUploadImage:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch(
                 "src.api.services.user_content.make_image_thumbnails",
                 side_effect=Exception("thumbnail crash"),
@@ -240,7 +273,6 @@ class TestUploadImage:
         storage.upload = AsyncMock(side_effect=StorageValidationError("too big"))
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
             pytest.raises(UserContentValidationError),
         ):
@@ -256,7 +288,6 @@ class TestUploadImage:
         storage.upload = AsyncMock(side_effect=StorageError("R2 outage"))
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
             pytest.raises(UserContentStorageError),
         ):
@@ -300,7 +331,6 @@ class TestUploadImageFilenameSafety:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(
@@ -327,7 +357,6 @@ class TestUploadImageFilenameSafety:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             await service.upload_image(
@@ -360,7 +389,6 @@ class TestUploadImageFilenameSafety:
         )
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[thumb]),
         ):
             await service.upload_image(
@@ -395,7 +423,6 @@ class TestUploadImageFilenameSafety:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             await service.upload_image(
@@ -484,7 +511,6 @@ class TestUploadImageNormalization:
         png_bytes = _png_bytes()
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(

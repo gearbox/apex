@@ -15,9 +15,11 @@ from PIL import Image
 
 from src.api.services.generation.aisha_failures import AishaFailure
 from src.api.services.job_state_transition import JobStateTransitionService
+from src.api.services.media_ingest import InvalidMediaError, MediaProcessingError
 from src.api.services.storage import UploadResult
 from src.core.enums import JobStatus
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
+from tests.media_ingest_support import make_media_ingestor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,6 +53,7 @@ def _make_poller(**kwargs: object) -> AishaJobPoller:
         r2_storage=None,
         config=_make_config(**kwargs),
         redis_client_factory=MagicMock(),
+        media_ingestor=make_media_ingestor(),
     )
 
 
@@ -95,6 +98,7 @@ class TestConstructor:
                 r2_storage=None,
                 config=_make_config(tunnel_allowed_suffix=""),
                 redis_client_factory=MagicMock(),
+                media_ingestor=make_media_ingestor(),
             )
 
     def test_raises_on_whitespace_only_suffix(self) -> None:
@@ -107,6 +111,7 @@ class TestConstructor:
                 r2_storage=None,
                 config=_make_config(tunnel_allowed_suffix="   "),
                 redis_client_factory=MagicMock(),
+                media_ingestor=make_media_ingestor(),
             )
 
     def test_normalizes_suffix_without_leading_dot(self) -> None:
@@ -779,6 +784,61 @@ class TestOutputDownloadFailure:
             id=uuid4(), storage_key="users/u/outputs/j/f.png"
         )
         return poller
+
+    async def test_all_invalid_provider_images_fail_immediately_and_refund(self) -> None:
+        poller = self._poller_with_r2()
+        poller._media_ingestor.prepare_image = AsyncMock(
+            side_effect=InvalidMediaError("invalid image")
+        )
+        client = AsyncMock()
+        client.get_image.return_value = _png_bytes()
+        with structlog.testing.capture_logs() as logs:
+            _, ts = await _run_history(
+                poller, _make_job(), _output_history("a.png", "b.png"), client=client
+            )
+        ts.transition_to_completed.assert_not_awaited()
+        ts.transition_to_failed.assert_awaited_once()
+        assert ts.transition_to_failed.call_args.kwargs["refund"] is True
+        assert client.get_image.await_count == 2
+        invalid_logs = [
+            event for event in logs if event["event"] == "aisha_job_poller.invalid_provider_image"
+        ]
+        assert len(invalid_logs) == 2
+        assert all(event["log_level"] == "error" for event in invalid_logs)
+
+    async def test_one_invalid_provider_image_keeps_valid_output(self) -> None:
+        poller = self._poller_with_r2()
+        original = poller._media_ingestor.prepare_image
+        calls = 0
+
+        async def one_invalid(data: bytes, *, policy: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise InvalidMediaError("invalid image")
+            return await original(data, policy=policy)  # type: ignore[arg-type]
+
+        poller._media_ingestor.prepare_image = one_invalid  # type: ignore[method-assign]
+        client = AsyncMock()
+        client.get_image.return_value = _png_bytes()
+        _, ts = await _run_history(
+            poller, _make_job(), _output_history("a.png", "b.png"), client=client
+        )
+        ts.transition_to_failed.assert_not_awaited()
+        ts.transition_to_completed.assert_awaited_once()
+        outputs = ts.transition_to_completed.call_args.kwargs["outputs"]
+        assert len([output for output in outputs if not output.is_thumbnail]) == 1
+
+    async def test_ingest_processing_failure_keeps_job_in_flight(self) -> None:
+        poller = self._poller_with_r2()
+        poller._media_ingestor.prepare_image = AsyncMock(
+            side_effect=MediaProcessingError("capacity exhausted")
+        )
+        client = AsyncMock()
+        client.get_image.return_value = _png_bytes()
+        _, ts = await _run_history(poller, _make_job(), _output_history("a.png"), client=client)
+        ts.transition_to_failed.assert_not_awaited()
+        ts.transition_to_completed.assert_not_awaited()
 
     async def test_every_download_failing_leaves_job_running_without_refund(self) -> None:
         poller = self._poller_with_r2(job_age_timeout_seconds=1800)

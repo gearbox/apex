@@ -20,8 +20,11 @@ from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.services.content_retention import ContentRetentionService
+from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.storage.r2 import R2StorageService, R2StorageSettings
 from src.core.enums import GenerationType, JobStatus
+from src.core.media_hash import HashSample, HashSet, PdqHash
+from src.db.models.media_hash import MediaHash
 from src.db.models.storage import (
     GenerationJob,
     GenerationMaterializationAttempt,
@@ -286,6 +289,43 @@ async def test_end_to_end_sweep_removes_rows_thumbnails_and_r2_objects(
     assert await db_session.get(GenerationOutput, output_thumb.id) is None
     assert await db_session.get(UserImage, upload.id) is None
     assert await db_session.get(UserImage, upload_thumb.id) is None
+
+
+async def test_retention_preserves_hash_ledger_and_job_lineage(
+    retention_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    user = await _create_user(retention_session_factory)
+    job = await _create_job(retention_session_factory, user=user)
+    output, _ = await _create_output(
+        retention_session_factory, user=user, job=job, expires_at=_past()
+    )
+    async with retention_session_factory() as session:
+        stored_output = await session.get(GenerationOutput, output.id)
+        assert stored_output is not None
+        await MediaHashLedger(session).register_output(
+            stored_output,
+            HashSet(
+                profile_id="pdq-image-rgb-white-v1",
+                sampling_profile="still-v1",
+                samples=(HashSample(pdq=PdqHash(bits=b"\x01" * 32, quality=80), sample_index=0),),
+            ),
+        )
+        await session.commit()
+
+    service = ContentRetentionService(
+        session_factory=retention_session_factory,
+        storage=FakeR2Storage(),  # type: ignore[arg-type]
+        batch_size=500,
+        max_batches_per_run=20,
+    )
+    await service.sweep()
+    async with retention_session_factory() as session:
+        assert await session.get(GenerationOutput, output.id) is None
+        row = (
+            await session.execute(select(MediaHash).where(MediaHash.source_id == output.id))
+        ).scalar_one()
+        assert row.job_id == job.id
+        assert row.user_id == user.id
 
 
 async def test_sweep_nulls_lineage_fks_on_downstream_jobs(

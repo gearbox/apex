@@ -12,7 +12,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageOps
+import structlog
+from PIL import Image, ImageOps, JpegImagePlugin
 
 from src.api.services.image_normalization import (
     ImageNormalizationError,
@@ -34,7 +35,11 @@ from src.api.services.media_ingest.types import (
     PreparedImage,
     PreparedVideo,
 )
-from src.api.services.media_tools import MediaToolError, run_media_command
+from src.api.services.media_tools import (
+    MediaToolError,
+    MediaToolExitError,
+    run_media_command,
+)
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet
 
@@ -44,6 +49,11 @@ _FFMPEG = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
 _FFPROBE = shutil.which("ffprobe") or "/usr/bin/ffprobe"
 _ORIENTATION_TAG = 0x0112
 _PTS_RE = re.compile(r"pts_time:([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
+_DURATION_TAG_RE = re.compile(r"^(\d{2,}):(\d{2}):(\d{2})\.(\d{9})$")
+_MP4_BRANDS = {b"isom", b"mp41", b"mp42", b"avc1", b"dash", b"M4V ", b"MSNV"} | {
+    f"iso{n}".encode() for n in range(2, 10)
+}
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,18 +117,36 @@ class MediaIngestService:
 
         task = asyncio.create_task(self._prepare_image(data, policy))
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
         except asyncio.CancelledError:
             # ``to_thread`` work cannot be cancelled safely. Keep its slot
             # occupied until it has finished so cancelled callers cannot
             # over-admit expensive image decode/native hashing work.
-            task.add_done_callback(lambda _task: self._image_slots.release())
+            task.add_done_callback(self._cancelled_image_done)
             raise
         except Exception:
             self._image_slots.release()
             raise
         else:
             self._image_slots.release()
+            return result
+
+    def _cancelled_image_done(self, task: asyncio.Task[PreparedImage]) -> None:
+        self._image_slots.release()
+        self._log_cancelled_task_failure(task)
+
+    def _cancelled_video_done(self, task: asyncio.Task[PreparedVideo]) -> None:
+        self._video_slots.release()
+        self._log_cancelled_task_failure(task)
+
+    @staticmethod
+    def _log_cancelled_task_failure(task: asyncio.Task[object]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.exception("media_ingest.cancelled_task_failed", error=str(exc))
 
     async def _prepare_image(self, data: bytes, policy: ImageIngestPolicy) -> PreparedImage:
         normalized = await self._normalize_for_policy(data, policy)
@@ -141,17 +169,18 @@ class MediaIngestService:
 
         task = asyncio.create_task(self._prepare_video(data, max_duration_seconds))
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
         except asyncio.CancelledError:
             # The worker keeps the temporary directory and capacity slot until
             # ffmpeg has been reaped; releasing here would over-admit work.
-            task.add_done_callback(lambda _task: self._video_slots.release())
+            task.add_done_callback(self._cancelled_video_done)
             raise
         except Exception:
             self._video_slots.release()
             raise
         else:
             self._video_slots.release()
+            return result
 
     async def _normalize_for_policy(
         self, data: bytes, policy: ImageIngestPolicy
@@ -236,9 +265,16 @@ class MediaIngestService:
             with Image.open(io.BytesIO(data)) as image:
                 orientation = image.getexif().get(_ORIENTATION_TAG, 1)
         except Exception as exc:
-            raise InvalidMediaError("image orientation metadata is malformed") from exc
-        if not isinstance(orientation, int) or orientation not in range(1, 9):
-            raise InvalidMediaError("image EXIF orientation is invalid")
+            logger.warning("media_ingest.orientation_ignored", raw_type=type(exc).__name__)
+            return 1
+        if type(orientation) is not int or orientation not in range(2, 9):
+            if type(orientation) is not int or orientation != 1:
+                logger.warning(
+                    "media_ingest.orientation_ignored",
+                    raw_type=type(orientation).__name__,
+                    raw_value=orientation if type(orientation) is int else None,
+                )
+            return 1
         return orientation
 
     @staticmethod
@@ -265,6 +301,9 @@ class MediaIngestService:
                 elif image_format is MediaFormat.JPEG:
                     if image.mode not in {"RGB", "L"}:
                         image = image.convert("RGB")
+                    sampling = JpegImagePlugin.get_sampling(source)
+                    if sampling >= 0:
+                        save_options["subsampling"] = sampling
                     image.save(output, format="JPEG", quality=95, **save_options)
                 elif image_format is MediaFormat.WEBP:
                     image.save(
@@ -311,7 +350,10 @@ class MediaIngestService:
             output_path = temp_dir / f"prepared.{source_probe.format.value}"
             await self._remux(input_path, output_path, source_probe, deadline)
             prepared_probe = await self._probe_video(output_path, deadline)
-            samples = await self._sample_video(output_path, prepared_probe, temp_dir, deadline)
+            self._validate_remux_duration(source_probe.duration_ms, prepared_probe.duration_ms)
+            samples, sampling_profile = await self._sample_video(
+                output_path, prepared_probe, temp_dir, deadline
+            )
             prepared_bytes = await asyncio.to_thread(output_path.read_bytes)
             self._validate_prepared_video_size(prepared_bytes)
             return PreparedVideo(
@@ -321,8 +363,8 @@ class MediaIngestService:
                 height=prepared_probe.height,
                 duration_ms=prepared_probe.duration_ms,
                 hash_set=HashSet(
-                    profile_id=f"pdq-video-rgb-white-v1-edge-{self._video_max_edge}",
-                    sampling_profile="uniform-pts-v1",
+                    profile_id=f"pdq-video-rgb-white-v2-edge-{self._video_max_edge}",
+                    sampling_profile=sampling_profile,
                     samples=tuple(samples),
                 ),
             )
@@ -344,27 +386,57 @@ class MediaIngestService:
         if maximum_seconds is not None and duration_ms > round(maximum_seconds * 1000):
             raise InvalidMediaError("video duration exceeds the configured limit")
 
+    @staticmethod
+    def _validate_remux_duration(source_ms: int, prepared_ms: int) -> None:
+        if source_ms - prepared_ms > 250:
+            # Some demuxers only warn for a file cut mid-cluster and ffmpeg
+            # still exits zero. The prepared timeline exposes that loss.
+            logger.error(
+                "media_ingest.video_duration_lost",
+                stage="prepared_probe",
+                source_duration_ms=source_ms,
+                prepared_duration_ms=prepared_ms,
+            )
+            raise InvalidMediaError("video is not decodable")
+
     def _validate_prepared_video_size(self, data: bytes) -> None:
         if len(data) > self._max_input_bytes:
             raise InvalidMediaError("prepared video exceeds the configured byte limit")
 
+    async def _run_stage(self, stage: str, args: list[str], deadline: float) -> bytes:
+        try:
+            result = await run_media_command(args, timeout_seconds=self._remaining(deadline))
+        except MediaToolExitError as exc:
+            if exc.returncode > 0:
+                logger.exception(
+                    "media_ingest.video_not_decodable",
+                    stage=stage,
+                    stderr_excerpt=exc.stderr_excerpt.strip(),
+                )
+                raise InvalidMediaError("video is not decodable") from exc
+            raise
+        return result.stdout
+
     async def _probe_video(self, path: Path, deadline: float) -> _VideoProbe:
-        container = self._detect_container(await asyncio.to_thread(path.read_bytes))
-        result = await run_media_command(
+        result = await self._run_stage(
+            "probe",
             [
                 _FFPROBE,
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=index,codec_type,codec_name,width,height,duration,duration_ts,time_base,disposition",
+                "stream=index,codec_type,codec_name,width,height,duration,duration_ts,time_base,disposition:stream_tags=DURATION:format=duration,format_name",
                 "-of",
                 "json",
                 str(path),
             ],
-            timeout_seconds=self._remaining(deadline),
+            deadline,
         )
         try:
-            decoded = json.loads(result.stdout)
+            decoded = json.loads(result)
+            with path.open("rb") as source:
+                header = source.read(65_536)
+            container = self._detect_container(header, decoded["format"]["format_name"])
             streams = decoded["streams"]
             visual = next(
                 stream
@@ -375,7 +447,7 @@ class MediaIngestService:
             audio = next(
                 (stream for stream in streams if stream.get("codec_type") == "audio"), None
             )
-            duration_seconds = self._stream_duration_seconds(visual)
+            duration_seconds = self._stream_duration_seconds(visual, decoded["format"])
             width, height = int(visual["width"]), int(visual["height"])
             self._validate_probe_values(duration_seconds, width, height, visual.get("codec_name"))
             self._validate_video_pixel_limit(width, height)
@@ -391,21 +463,49 @@ class MediaIngestService:
             raise InvalidMediaError("video has no usable visual stream") from exc
 
     @staticmethod
-    def _stream_duration_seconds(stream: dict[str, object]) -> float:
+    def _stream_duration_seconds(stream: dict[str, object], container: dict[str, object]) -> float:
         """Use only the selected visual stream timeline, never audio duration."""
-        duration = stream.get("duration")
-        if isinstance(duration, (str, int, float)) and duration != "N/A":
-            return float(duration)
+
+        def valid(value: object) -> float | None:
+            try:
+                number = float(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) and number > 0 else None
+
+        format_duration = valid(container.get("duration"))
+        candidates: list[float | None] = [valid(stream.get("duration"))]
         duration_ts = stream.get("duration_ts")
         time_base = stream.get("time_base")
-        if (
-            not isinstance(duration_ts, (str, int))
-            or duration_ts == "N/A"
-            or not isinstance(time_base, str)
-        ):
-            raise ValueError("visual stream duration is unavailable")
-        numerator, denominator = time_base.split("/", 1)
-        return float(int(duration_ts) * int(numerator) / int(denominator))
+        timeline: float | None = None
+        if isinstance(time_base, str) and isinstance(duration_ts, (str, int)):
+            try:
+                numerator, denominator = time_base.split("/", 1)
+                timeline = valid(int(duration_ts) * int(numerator) / int(denominator))
+            except (ValueError, ZeroDivisionError):
+                pass
+        candidates.append(timeline)
+        tags = stream.get("tags")
+        tag = tags.get("DURATION") if isinstance(tags, dict) else None
+        tagged: float | None = None
+        if isinstance(tag, str) and (match := _DURATION_TAG_RE.fullmatch(tag)):
+            hours, minutes, seconds, fraction = match.groups()
+            if int(minutes) < 60 and int(seconds) < 60:
+                tagged = valid(
+                    int(hours) * 3600
+                    + int(minutes) * 60
+                    + int(seconds)
+                    + int(fraction) / 1_000_000_000
+                )
+        candidates.append(tagged)
+        for candidate in candidates:
+            if candidate is not None:
+                if format_duration is not None and candidate > format_duration + 1:
+                    raise InvalidMediaError("visual stream duration exceeds container duration")
+                return candidate
+        if format_duration is not None:
+            return format_duration
+        raise ValueError("visual stream duration is unavailable")
 
     @staticmethod
     def _validate_probe_values(
@@ -426,20 +526,56 @@ class MediaIngestService:
             raise ValueError("video frame exceeds configured pixel limit")
 
     @staticmethod
-    def _detect_container(data: bytes) -> MediaFormat:
-        if len(data) >= 12 and data[4:8] == b"ftyp":
-            brand = data[8:12]
-            if brand == b"qt  ":
+    def _detect_container(data: bytes, format_name: str) -> MediaFormat:
+        if "mov,mp4" in format_name:
+            if len(data) < 12 or data[4:8] != b"ftyp":
                 return MediaFormat.MOV
-            if brand in {b"isom", b"iso2", b"mp41", b"mp42", b"avc1", b"M4V ", b"MSNV"}:
+            box_size = int.from_bytes(data[:4], "big")
+            if box_size < 16 or box_size > len(data):
+                raise UnsupportedMediaError("invalid ISO-BMFF brand box")
+            major = data[8:12]
+            if major == b"qt  ":
+                return MediaFormat.MOV
+            brands = {major} | {data[i : i + 4] for i in range(16, box_size, 4)}
+            if brands & _MP4_BRANDS:
                 return MediaFormat.MP4
             raise UnsupportedMediaError("unsupported ISO-BMFF video brand")
-        if data.startswith(b"\x1aE\xdf\xa3"):
-            header = data[:4096].lower()
-            if b"webm" in header:
+        if "matroska,webm" in format_name and data.startswith(b"\x1aE\xdf\xa3"):
+            if MediaIngestService._ebml_doctype(data[:4096]) == b"webm":
                 return MediaFormat.WEBM
             raise UnsupportedMediaError("Matroska is not accepted as WebM")
         raise UnsupportedMediaError("unsupported video container")
+
+    @staticmethod
+    def _ebml_doctype(data: bytes) -> bytes | None:
+        """Read the actual EBML header DocType within a bounded sniff."""
+
+        def vint(offset: int, *, identifier: bool = False) -> tuple[int, int]:
+            if offset >= len(data) or data[offset] == 0:
+                raise ValueError("invalid EBML variable integer")
+            first = data[offset]
+            width = 9 - first.bit_length()
+            if width > 8 or offset + width > len(data):
+                raise ValueError("truncated EBML variable integer")
+            value = first if identifier else first & ((1 << (8 - width)) - 1)
+            for octet in data[offset + 1 : offset + width]:
+                value = (value << 8) | octet
+            return value, offset + width
+
+        try:
+            size, position = vint(4)
+            end = min(position + size, len(data))
+            while position < end:
+                element_id, position = vint(position, identifier=True)
+                element_size, position = vint(position)
+                if position + element_size > end:
+                    return None
+                if element_id == 0x4282:
+                    return data[position : position + element_size]
+                position += element_size
+        except ValueError:
+            pass
+        return None
 
     async def _remux(
         self, source: Path, destination: Path, probe: _VideoProbe, deadline: float
@@ -471,24 +607,34 @@ class MediaIngestService:
         if probe.format in {MediaFormat.MP4, MediaFormat.MOV}:
             args.extend(["-movflags", "+faststart"])
         args.extend(["-f", probe.format.value, str(destination)])
-        await run_media_command(args, timeout_seconds=self._remaining(deadline))
+        await self._run_stage("remux", args, deadline)
 
     async def _sample_video(
         self, path: Path, probe: _VideoProbe, temp_dir: Path, deadline: float
-    ) -> list[HashSample]:
+    ) -> tuple[list[HashSample], str]:
         interval = max(1.0, probe.duration_ms / 1000 / self._video_max_frames)
+        keyframes_only = interval > 1.0
         frame_pattern = temp_dir / "sample-%03d.png"
         # ``prev_selected_t`` gives a sequential, actual-PTS cadence.  ``showinfo``
         # follows selection, so its PTS records pair one-for-one with frame files.
         select = f"select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,{interval:.6f})"
         scale = (
-            f"scale='min(iw*dar/ih*ih,{self._video_max_edge})':'min(ih,{self._video_max_edge})'"
-            ":force_original_aspect_ratio=decrease,setsar=1"
+            "scale=iw*sar:ih,setsar=1,"
+            f"scale='min(iw,{self._video_max_edge})':'min(ih,{self._video_max_edge})'"
+            ":force_original_aspect_ratio=decrease"
         )
-        result = await run_media_command(
+        args = [
+            _FFMPEG,
+            "-y",
+            "-hide_banner",
+            "-nostats",
+            "-loglevel",
+            "info",
+        ]
+        if keyframes_only:
+            args.extend(["-skip_frame", "nokey"])
+        args.extend(
             [
-                _FFMPEG,
-                "-y",
                 "-i",
                 str(path),
                 "-map",
@@ -500,12 +646,25 @@ class MediaIngestService:
                 "-frames:v",
                 str(self._video_max_frames),
                 str(frame_pattern),
-            ],
-            timeout_seconds=self._remaining(deadline),
+            ]
         )
+        try:
+            result = await run_media_command(args, timeout_seconds=self._remaining(deadline))
+        except MediaToolExitError as exc:
+            if exc.returncode > 0:
+                logger.exception(
+                    "media_ingest.video_not_decodable",
+                    stage="sampling",
+                    stderr_excerpt=exc.stderr_excerpt.strip(),
+                )
+                raise InvalidMediaError("video is not decodable") from exc
+            raise
         files = await asyncio.to_thread(lambda: sorted(temp_dir.glob("sample-*.png")))
         timestamps = [
-            float(value) for value in _PTS_RE.findall(result.stderr.decode("utf-8", "replace"))
+            float(match.group(1))
+            for line in result.stderr.decode("utf-8", "replace").splitlines()
+            if "Parsed_showinfo" in line
+            if (match := _PTS_RE.search(line)) is not None
         ]
         if not files:
             raise InvalidMediaError("video decoded no frames")
@@ -522,4 +681,5 @@ class MediaIngestService:
                     frame_timestamp_ms=normalized_ms,
                 )
             )
-        return samples
+        profile = "uniform-pts-keyframes-v1" if keyframes_only else "uniform-pts-v1"
+        return samples, profile

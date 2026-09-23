@@ -27,10 +27,13 @@ from src.api.services.grok import (
 )
 from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import JobStatus, Provider, VideoPollStatus
+from tests.media_ingest_support import make_media_ingestor
 
 
 def _make_service() -> GrokJobService:
-    return GrokJobService(grok_client=AsyncMock(), storage=MagicMock())
+    return GrokJobService(
+        grok_client=AsyncMock(), storage=MagicMock(), media_ingestor=make_media_ingestor()
+    )
 
 
 def _make_job(*, status: str = JobStatus.RUNNING.value) -> MagicMock:
@@ -55,7 +58,12 @@ def _patched_job_repository(job: object) -> tuple[Any, AsyncMock]:
 
 
 def test_video_job_with_missing_started_at_uses_created_at_for_ttl() -> None:
-    service = GrokJobService(grok_client=AsyncMock(), storage=MagicMock(), max_poll_time=60)
+    service = GrokJobService(
+        grok_client=AsyncMock(),
+        storage=MagicMock(),
+        max_poll_time=60,
+        media_ingestor=make_media_ingestor(),
+    )
     job = _make_job()
     job.started_at = None
     job.created_at = datetime.now(UTC) - timedelta(seconds=61)

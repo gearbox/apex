@@ -44,7 +44,7 @@ from src.api.services.grok import (
 from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.job_state_transition import GenerationOutputData, JobStateTransitionService
 from src.api.services.media_hash_ledger import MediaHashLedger
-from src.api.services.media_ingest import ImageIngestPolicy, MediaIngestor
+from src.api.services.media_ingest import ImageIngestPolicy, InvalidMediaError, MediaIngestor
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
@@ -147,7 +147,7 @@ class GrokJobService:
         ops_event_bus: OpsEventBus | None = None,
         max_poll_time: int = 600,
         finalization_lease_seconds: int = 120,
-        media_ingestor: MediaIngestor | None = None,
+        media_ingestor: MediaIngestor,
         billing_policy: ProviderBillingPolicyRegistry | None = None,
     ) -> None:
         """Initialize Grok job service.
@@ -165,13 +165,6 @@ class GrokJobService:
         self._ops_event_bus = ops_event_bus
         self._max_poll_time = max_poll_time
         self._finalization_lease_seconds = finalization_lease_seconds
-        if media_ingestor is None:
-            from src.api.services.media_ingest.service import MediaIngestService
-
-            media_ingestor = MediaIngestService(
-                max_image_megapixels=100.0,
-                max_input_bytes=20 * 1024 * 1024,
-            )
         self._media_ingestor = media_ingestor
         self._billing_policy = billing_policy or DEFAULT_PROVIDER_BILLING_POLICIES
         self._http_client: httpx.AsyncClient | None = None
@@ -1159,6 +1152,42 @@ class GrokJobService:
             else:
                 await self._release_video_finalization_claim(session, job_id, claim_token)
             return await self._refresh_authoritative_job(session, job_id)
+        except InvalidMediaError:
+            await session.rollback()
+            if materialized is not None:
+                await self._reconcile_materialization_attempt(
+                    session,
+                    job_id=job_id,
+                    product_id=product_id,
+                    materialized=materialized,
+                )
+                raise
+            logger.exception("grok.video_output_invalid", job_id=str(job_id))
+            # The ordinary failure transition deliberately cannot preempt a
+            # live finalization claim. Relinquish our own claim before using
+            # that existing settlement path.
+            await self._release_video_finalization_claim(session, job_id, claim_token)
+            failure = apply_provider_billing_policy(
+                ProviderFailure(
+                    kind=ProviderFailureKind.OUTPUT_NOT_DELIVERED,
+                    provider=Provider.GROK,
+                    sanitized_message=ProviderFailure.safe_message_for_kind(
+                        ProviderFailureKind.OUTPUT_NOT_DELIVERED
+                    ),
+                    provider_request_accepted=True,
+                ),
+                registry=self._billing_policy,
+            )
+            return await self.settle_video_poll_outcome(
+                session,
+                job_id=job_id,
+                outcome=VideoPollOutcome(
+                    status=VideoPollStatus.FAILED,
+                    error_message=failure.sanitized_message,
+                    failure=failure,
+                ),
+                product_id=product_id,
+            )
         except Exception:
             # ``commit()`` can raise after PostgreSQL has committed, and a
             # post-commit refresh can fail too.  Re-read in a new transaction

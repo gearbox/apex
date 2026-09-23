@@ -24,7 +24,7 @@ from src.api.services.image_normalization import (
     ImageTooLargeError,
     sniff_format,
 )
-from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions  # noqa: F401
+from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.media import build_upload_media
 from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.media_ingest import (
@@ -116,7 +116,7 @@ class UserContentService:
         max_input_megapixels: float = 100.0,
         video_max_seconds: int = 300,
         ffmpeg_timeout_seconds: float = 30.0,
-        media_ingestor: MediaIngestor | None = None,
+        media_ingestor: MediaIngestor,
     ) -> None:
         """Initialize user content service.
 
@@ -130,8 +130,7 @@ class UserContentService:
                 decompression-bomb uploads.
             video_max_seconds: Preparation-time rejection cap for uploaded
                 video duration.
-            ffmpeg_timeout_seconds: Per-stage timeout used by the direct
-                construction compatibility ingestor.
+            ffmpeg_timeout_seconds: Timeout for legacy thumbnail extraction.
         """
         self._storage = storage
         self._session = session
@@ -143,17 +142,6 @@ class UserContentService:
         self._max_input_megapixels = max_input_megapixels
         self._video_max_seconds = video_max_seconds
         self._ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
-        if media_ingestor is None:
-            # Compatibility for direct service construction in maintenance
-            # scripts/tests. Application composition supplies one shared
-            # process-local instance.
-            from src.api.services.media_ingest.service import MediaIngestService
-
-            media_ingestor = MediaIngestService(
-                max_image_megapixels=max_input_megapixels,
-                max_input_bytes=20 * 1024 * 1024,
-                stage_timeout_seconds=ffmpeg_timeout_seconds,
-            )
         self._media_ingestor = media_ingestor
 
     # -------------------------------------------------------------------------
@@ -228,6 +216,11 @@ class UserContentService:
                 error=str(e),
             )
             raise UserContentValidationError("File is not a decodable image") from e
+        except MediaProcessingError as e:
+            logger.warning(
+                "user_content.upload_image_preparation_unavailable", user_id=str(user_id)
+            )
+            raise UserContentStorageError("image preparation is temporarily unavailable") from e
 
         if prepared.converted:
             logger.info(

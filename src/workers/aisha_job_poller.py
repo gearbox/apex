@@ -47,7 +47,7 @@ from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -77,12 +77,6 @@ class ArtifactDownloadOutcome:
     outputs: tuple[GenerationOutputData, ...] = ()
     deterministic_invalid: bool = False
     retryable_failure: bool = False
-
-    def __iter__(self) -> Iterator[GenerationOutputData]:
-        return iter(self.outputs)
-
-    def __len__(self) -> int:
-        return len(self.outputs)
 
 
 @dataclasses.dataclass
@@ -116,7 +110,7 @@ class AishaJobPoller(PeriodicWorker):
         r2_storage: R2StorageService | None,
         config: AishaPollerConfig,
         ops_event_bus: OpsEventBus | None = None,
-        media_ingestor: MediaIngestor | None = None,
+        media_ingestor: MediaIngestor,
         redis_enabled: bool = False,
         redis_client_factory: Callable[[], Redis],
     ) -> None:
@@ -132,13 +126,6 @@ class AishaJobPoller(PeriodicWorker):
         self._ops_event_bus = ops_event_bus
         self._r2 = r2_storage
         self._config = config
-        if media_ingestor is None:
-            from src.api.services.media_ingest.service import MediaIngestService
-
-            media_ingestor = MediaIngestService(
-                max_image_megapixels=100.0,
-                max_input_bytes=20 * 1024 * 1024,
-            )
         self._media_ingestor = media_ingestor
 
         if suffix := (config.tunnel_allowed_suffix or "").strip():
@@ -609,7 +596,7 @@ class AishaJobPoller(PeriodicWorker):
                 data, policy=ImageIngestPolicy.PROVIDER
             )
         except InvalidMediaError:
-            logger.warning(
+            logger.exception(
                 "aisha_job_poller.invalid_provider_image",
                 job_id=str(job.id),
                 filename=filename,

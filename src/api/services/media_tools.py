@@ -23,8 +23,37 @@ class MediaToolError(RuntimeError):
     """A media executable is absent, failed, or exceeded its deadline."""
 
 
+class MediaToolNotFoundError(MediaToolError):
+    """The requested executable is unavailable."""
+
+
+class MediaToolTimeoutError(MediaToolError):
+    """The process exceeded its deadline."""
+
+
+class MediaToolExitError(MediaToolError):
+    """The process exited unsuccessfully."""
+
+    def __init__(self, executable: str, returncode: int, stderr_excerpt: str) -> None:
+        self.returncode = returncode
+        self.stderr_excerpt = stderr_excerpt
+        super().__init__(f"{executable} exited {returncode}: {stderr_excerpt}")
+
+
+def _successful_result(
+    stdout: bytes, stderr: bytes, *, executable: str, stderr_capture_limit: int
+) -> ProcessResult:
+    if len(stderr) > stderr_capture_limit:
+        raise MediaToolError(f"{executable} exceeded stderr capture limit")
+    return ProcessResult(stdout=stdout, stderr=stderr)
+
+
 def run_media_command_sync(
-    args: Sequence[str], *, timeout_seconds: float, stderr_limit: int = 4_096
+    args: Sequence[str],
+    *,
+    timeout_seconds: float,
+    stderr_limit: int = 4_096,
+    stderr_capture_limit: int = 1_048_576,
 ) -> ProcessResult:
     """Synchronous counterpart for legacy thread-worker media facades."""
     if timeout_seconds <= 0:
@@ -37,17 +66,26 @@ def run_media_command_sync(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise MediaToolError(f"{args[0]} timed out after {timeout_seconds}s") from exc
+        raise MediaToolTimeoutError(f"{args[0]} timed out after {timeout_seconds}s") from exc
     except FileNotFoundError as exc:
-        raise MediaToolError(f"media executable not found: {args[0]}") from exc
+        raise MediaToolNotFoundError(f"media executable not found: {args[0]}") from exc
     if process.returncode != 0:
         message = process.stderr[:stderr_limit].decode("utf-8", errors="replace")
-        raise MediaToolError(f"{args[0]} exited {process.returncode}: {message}")
-    return ProcessResult(stdout=process.stdout, stderr=process.stderr[:stderr_limit])
+        raise MediaToolExitError(args[0], process.returncode, message)
+    return _successful_result(
+        process.stdout,
+        process.stderr,
+        executable=args[0],
+        stderr_capture_limit=stderr_capture_limit,
+    )
 
 
 async def run_media_command(
-    args: Sequence[str], *, timeout_seconds: float, stderr_limit: int = 4_096
+    args: Sequence[str],
+    *,
+    timeout_seconds: float,
+    stderr_limit: int = 4_096,
+    stderr_capture_limit: int = 1_048_576,
 ) -> ProcessResult:
     """Run a command and ensure cancelled/timed-out children are reaped."""
     if timeout_seconds <= 0:
@@ -59,15 +97,19 @@ async def run_media_command(
             stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
-        raise MediaToolError(f"media executable not found: {args[0]}") from exc
+        raise MediaToolNotFoundError(f"media executable not found: {args[0]}") from exc
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
-    except (TimeoutError, asyncio.CancelledError):
+    except (TimeoutError, asyncio.CancelledError) as exc:
         if process.returncode is None:
             process.kill()
         await process.wait()
+        if isinstance(exc, TimeoutError):
+            raise MediaToolTimeoutError(f"{args[0]} timed out after {timeout_seconds}s") from exc
         raise
-    if process.returncode != 0:
+    if process.returncode is not None and process.returncode != 0:
         message = stderr[:stderr_limit].decode("utf-8", errors="replace")
-        raise MediaToolError(f"{args[0]} exited {process.returncode}: {message}")
-    return ProcessResult(stdout=stdout, stderr=stderr[:stderr_limit])
+        raise MediaToolExitError(args[0], process.returncode, message)
+    return _successful_result(
+        stdout, stderr, executable=args[0], stderr_capture_limit=stderr_capture_limit
+    )
