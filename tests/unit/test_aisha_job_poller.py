@@ -189,43 +189,6 @@ class TestCollectImageInfos:
 
 
 # ---------------------------------------------------------------------------
-# _infer_image_format_and_content_type
-# ---------------------------------------------------------------------------
-
-
-class TestInferImageFormatAndContentType:
-    def test_png(self) -> None:
-        ext, ct = AishaJobPoller._infer_image_format_and_content_type("output_0.png")
-        assert ext == "png"
-        assert ct == "image/png"
-
-    def test_jpeg(self) -> None:
-        ext, ct = AishaJobPoller._infer_image_format_and_content_type("photo.jpeg")
-        assert ext == "jpeg"
-        assert ct == "image/jpeg"
-
-    def test_jpg(self) -> None:
-        ext, ct = AishaJobPoller._infer_image_format_and_content_type("photo.jpg")
-        assert ext == "jpg"
-        assert ct == "image/jpeg"
-
-    def test_webp(self) -> None:
-        ext, ct = AishaJobPoller._infer_image_format_and_content_type("img.webp")
-        assert ext == "webp"
-        assert ct == "image/webp"
-
-    def test_unknown_extension_defaults_to_png(self) -> None:
-        ext, ct = AishaJobPoller._infer_image_format_and_content_type("file.bmp")
-        assert ext == "bmp"
-        assert ct == "image/png"
-
-    def test_no_extension_defaults_to_png(self) -> None:
-        ext, ct = AishaJobPoller._infer_image_format_and_content_type("noext")
-        assert ext == "png"
-        assert ct == "image/png"
-
-
-# ---------------------------------------------------------------------------
 # _is_job_past_timeout
 # ---------------------------------------------------------------------------
 

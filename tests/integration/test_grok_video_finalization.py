@@ -28,6 +28,7 @@ from src.api.services.job_state_transition import (
     JobStateTransitionService,
 )
 from src.core.enums import GenerationType, JobStatus, Provider, TransactionType
+from src.core.media_hash import HashSample, HashSet, PdqHash
 from src.core.uid import new_id
 from src.db.models.billing import TokenAccount, TokenTransaction
 from src.db.models.storage import GenerationJob, GenerationOutput
@@ -145,6 +146,17 @@ def _materialized_video(job_id: UUID) -> _MaterializedVideo:
                 format="mp4",
                 output_index=0,
                 expires_at=datetime.now(UTC) + timedelta(days=7),
+                hash_set=HashSet(
+                    profile_id="pdq-video-rgb-white-v1-edge-512",
+                    sampling_profile="uniform-pts-v1",
+                    samples=(
+                        HashSample(
+                            pdq=PdqHash(bits=b"\x00" * 32, quality=100),
+                            sample_index=0,
+                            frame_timestamp_ms=0,
+                        ),
+                    ),
+                ),
             )
         ],
         storage_keys=[],

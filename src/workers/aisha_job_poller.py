@@ -29,10 +29,16 @@ from src.api.services.generation.tunnel_validation import (
     InvalidTunnelHostnameError,
     validate_tunnel_hostname,
 )
-from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions
+from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.job_state_transition import (
     GenerationOutputData,
     JobStateTransitionService,
+)
+from src.api.services.media_ingest import (
+    ImageIngestPolicy,
+    InvalidMediaError,
+    MediaIngestor,
+    MediaProcessingError,
 )
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.utils.redaction import redact_secrets
@@ -41,7 +47,7 @@ from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -54,13 +60,6 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-_CONTENT_TYPES: dict[str, str] = {
-    "png": "image/png",
-    "jpg": "image/jpeg",
-    "jpeg": "image/jpeg",
-    "webp": "image/webp",
-}
-
 # Bound on the ComfyUI-supplied detail persisted to ``error_message``. Node text
 # is untrusted (S1 boundary rule): it is redacted, then capped, before storage.
 _MAX_EXECUTION_ERROR_DETAIL_CHARS = 500
@@ -69,6 +68,21 @@ _NO_COLLECTABLE_OUTPUTS_MESSAGE = (
     "ComfyUI finished without a collectable output image "
     "(no history entry of type 'output'); the workflow did not save its result."
 )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ArtifactDownloadOutcome:
+    """Per-provider-artifact result used to preserve retry semantics."""
+
+    outputs: tuple[GenerationOutputData, ...] = ()
+    deterministic_invalid: bool = False
+    retryable_failure: bool = False
+
+    def __iter__(self) -> Iterator[GenerationOutputData]:
+        return iter(self.outputs)
+
+    def __len__(self) -> int:
+        return len(self.outputs)
 
 
 @dataclasses.dataclass
@@ -102,6 +116,7 @@ class AishaJobPoller(PeriodicWorker):
         r2_storage: R2StorageService | None,
         config: AishaPollerConfig,
         ops_event_bus: OpsEventBus | None = None,
+        media_ingestor: MediaIngestor | None = None,
         redis_enabled: bool = False,
         redis_client_factory: Callable[[], Redis],
     ) -> None:
@@ -117,6 +132,14 @@ class AishaJobPoller(PeriodicWorker):
         self._ops_event_bus = ops_event_bus
         self._r2 = r2_storage
         self._config = config
+        if media_ingestor is None:
+            from src.api.services.media_ingest.service import MediaIngestService
+
+            media_ingestor = MediaIngestService(
+                max_image_megapixels=100.0,
+                max_input_bytes=20 * 1024 * 1024,
+            )
+        self._media_ingestor = media_ingestor
 
         if suffix := (config.tunnel_allowed_suffix or "").strip():
             self._allowed_tunnel_suffix = suffix if suffix.startswith(".") else f".{suffix}"
@@ -346,17 +369,23 @@ class AishaJobPoller(PeriodicWorker):
             return
 
         outputs: list[GenerationOutputData] = []
+        saw_retryable_failure = False
+        all_deterministically_invalid = True
         expires_at = JobStateTransitionService.make_output_expires_at(self._config.retention_days)
 
         for idx, img_info in enumerate(image_infos):
-            results = await self._download_and_upload(
+            outcome = await self._download_and_upload(
                 client=client,
                 job=job,
                 img_info=img_info,
                 output_index=idx,
                 expires_at=expires_at,
             )
-            outputs.extend(results)
+            outputs.extend(outcome.outputs)
+            saw_retryable_failure = saw_retryable_failure or outcome.retryable_failure
+            all_deterministically_invalid = (
+                all_deterministically_invalid and outcome.deterministic_invalid
+            )
 
         # 4. ComfyUI succeeded but every download/upload failed. History
         # persists across ticks, so leave the job in flight and retry; the age
@@ -367,7 +396,16 @@ class AishaJobPoller(PeriodicWorker):
                 job_id=str(job.id),
                 image_count=len(image_infos),
             )
-            if self._is_job_past_timeout(job):
+            if all_deterministically_invalid and not saw_retryable_failure:
+                _, _ = await ts.transition_to_failed(
+                    job.id,
+                    error_message="ComfyUI produced only unsupported or malformed media outputs.",
+                    public_error_message=AishaFailure.PROVIDER_EXECUTION_FAILED.public_message,
+                    failure_code=AishaFailure.PROVIDER_EXECUTION_FAILED.value,
+                    refund=True,
+                    product_id=product_id,
+                )
+            elif self._is_job_past_timeout(job):
                 _, _ = await ts.transition_to_failed(
                     job.id,
                     error_message=(
@@ -538,19 +576,19 @@ class AishaJobPoller(PeriodicWorker):
         img_info: dict[str, Any],
         output_index: int,
         expires_at: datetime,
-    ) -> list[GenerationOutputData]:
+    ) -> ArtifactDownloadOutcome:
         if self._r2 is None:
             logger.warning(
                 "aisha_job_poller.r2_not_configured",
                 job_id=str(job.id),
             )
-            return []
+            return ArtifactDownloadOutcome(retryable_failure=True)
 
         filename: str = img_info.get("filename", "")
         subfolder: str = img_info.get("subfolder", "")
         img_type: str = img_info.get("type", "output")
         if not filename:
-            return []
+            return ArtifactDownloadOutcome(deterministic_invalid=True)
 
         try:
             data = await client.get_image(
@@ -564,18 +602,28 @@ class AishaJobPoller(PeriodicWorker):
                 job_id=str(job.id),
                 filename=filename,
             )
-            return []
+            return ArtifactDownloadOutcome(retryable_failure=True)
 
-        ext, content_type = self._infer_image_format_and_content_type(filename)
-
-        # Read dimensions before upload (bytes still in RAM)
-        dims = await read_dimensions(data)
+        try:
+            prepared = await self._media_ingestor.prepare_image(
+                data, policy=ImageIngestPolicy.PROVIDER
+            )
+        except InvalidMediaError:
+            logger.warning(
+                "aisha_job_poller.invalid_provider_image",
+                job_id=str(job.id),
+                filename=filename,
+            )
+            return ArtifactDownloadOutcome(deterministic_invalid=True)
+        except MediaProcessingError:
+            logger.warning("aisha_job_poller.ingest_operational_failure", job_id=str(job.id))
+            return ArtifactDownloadOutcome(retryable_failure=True)
 
         try:
             result = await self._r2.upload(
                 user_id=job.user_id,
-                data=data,
-                content_type=content_type,
+                data=prepared.data,
+                content_type=prepared.content_type,
                 storage_type=StorageType.OUTPUT,
                 job_id=job.id,
             )
@@ -585,22 +633,23 @@ class AishaJobPoller(PeriodicWorker):
                 job_id=str(job.id),
                 filename=filename,
             )
-            return []
+            return ArtifactDownloadOutcome(retryable_failure=True)
 
         full = GenerationOutputData(
             id=result.id,
             storage_key=result.storage_key,
-            content_type=content_type,
-            size_bytes=len(data),
-            format=ext,
+            content_type=prepared.content_type,
+            size_bytes=len(prepared.data),
+            format=prepared.format.value,
             output_index=output_index,
             expires_at=expires_at,
-            width=dims.width if dims else None,
-            height=dims.height if dims else None,
+            width=prepared.width,
+            height=prepared.height,
+            hash_set=prepared.hash_set,
         )
 
         # Generate sm + md WEBP thumbnails — non-fatal per-size
-        thumbnails = await make_image_thumbnails(data)
+        thumbnails = await make_image_thumbnails(prepared.data)
         results: list[GenerationOutputData] = [full]
 
         for generated in thumbnails:
@@ -637,13 +686,7 @@ class AishaJobPoller(PeriodicWorker):
                 )
             )
 
-        return results
-
-    @staticmethod
-    def _infer_image_format_and_content_type(filename: str) -> tuple[str, str]:
-        """Return (format, content_type) inferred from filename. Defaults to png."""
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
-        return ext, _CONTENT_TYPES.get(ext, "image/png")
+        return ArtifactDownloadOutcome(outputs=tuple(results))
 
     @staticmethod
     def _collect_image_infos(history_entry: dict[str, Any]) -> list[dict[str, Any]]:

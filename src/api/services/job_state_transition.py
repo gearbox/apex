@@ -31,8 +31,10 @@ from src.api.services.generation.public_errors import (
     LEGACY_FAILED_JOB_MESSAGE,
     public_error_for_job,
 )
+from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.ops_event_bus import OpsEventBus
 from src.core.enums import JobStatus
+from src.core.media_hash import HashSet
 from src.db.models.storage import GenerationJob, GenerationMaterializationAttempt
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
@@ -70,6 +72,9 @@ class GenerationOutputData:
     width: int | None = None
     height: int | None = None
     duration_ms: int | None = None
+    # Required on every original. Thumbnails are derivatives and intentionally
+    # carry no persistent perceptual hash.
+    hash_set: HashSet | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +236,7 @@ class JobStateTransitionService:
         old_status = str(job.status)
         if old_status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
             return job, False
+        self._validate_output_batch(outputs, job=job, product_id=product_id)
 
         conditions: list[ColumnElement[bool]] = [
             GenerationJob.id == job_id,
@@ -265,11 +271,12 @@ class JobStateTransitionService:
             await self._session.refresh(job)
             return job, False
 
-        # Persist outputs in same transaction — parents before children so the
-        # self-FK on parent_output_id is satisfiable within a single transaction.
-        sorted_outputs = sorted(outputs, key=lambda o: 1 if o.is_thumbnail else 0)
-        for out in sorted_outputs:
-            await self._output_repo.create(
+        # Parents and their mandatory ledger rows are flushed before any
+        # best-effort derivative path. ``begin_nested`` itself flushes, so it
+        # must never be the scope that catches a ledger failure.
+        ledger = MediaHashLedger(self._session)
+        for out in (item for item in outputs if not item.is_thumbnail):
+            parent = await self._output_repo.create(
                 id=out.id,
                 user_id=job.user_id,
                 job_id=job_id,
@@ -287,6 +294,40 @@ class JobStateTransitionService:
                 height=out.height,
                 duration_ms=out.duration_ms,
             )
+            if out.hash_set is None:  # defensive; _validate_output_batch checked this
+                raise ValueError("original outputs require a hash set")
+            await ledger.register_output(parent, out.hash_set)
+        await self._session.flush()
+
+        for out in (item for item in outputs if item.is_thumbnail):
+            try:
+                # Mandatory parent and ledger rows have already flushed, so
+                # an optional derivative cannot poison their transaction.
+                async with self._session.begin_nested():
+                    await self._output_repo.create(
+                        id=out.id,
+                        user_id=job.user_id,
+                        job_id=job_id,
+                        storage_key=out.storage_key,
+                        content_type=out.content_type,
+                        size_bytes=out.size_bytes,
+                        format=out.format,
+                        output_index=out.output_index,
+                        expires_at=out.expires_at,
+                        product_id=product_id,
+                        is_thumbnail=True,
+                        parent_output_id=out.parent_output_id,
+                        thumbnail_max_edge=out.thumbnail_max_edge,
+                        width=out.width,
+                        height=out.height,
+                        duration_ms=out.duration_ms,
+                    )
+            except Exception:
+                logger.warning(
+                    "job.transition.thumbnail_persist_failed",
+                    job_id=str(job_id),
+                    thumbnail_id=str(out.id),
+                )
 
         if materialization_attempt_id is not None:
             # This update shares the output/job commit.  A completed job can
@@ -309,6 +350,30 @@ class JobStateTransitionService:
             output_count=len(outputs),
         )
         return job, True
+
+    @staticmethod
+    def _validate_output_batch(
+        outputs: list[GenerationOutputData], *, job: GenerationJob, product_id: str
+    ) -> None:
+        """Reject an incomplete batch before the status compare-and-swap."""
+        if job.product_id != product_id:
+            raise ValueError("output product does not match the authoritative job")
+        parents = [output for output in outputs if not output.is_thumbnail]
+        if not parents:
+            raise ValueError("completion requires at least one original output")
+        parent_ids = {output.id for output in parents}
+        if len(parent_ids) != len(parents):
+            raise ValueError("completion output IDs must be unique")
+        for output in parents:
+            if not isinstance(output.hash_set, HashSet):
+                raise TypeError("every original output requires a valid hash set")
+        for output in outputs:
+            if not output.is_thumbnail:
+                continue
+            if output.hash_set is not None:
+                raise ValueError("thumbnails must not carry a hash set")
+            if output.parent_output_id not in parent_ids:
+                raise ValueError("thumbnail must reference an original in the same batch")
 
     async def transition_to_failed(
         self,

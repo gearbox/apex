@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -10,7 +11,13 @@ import pytest
 from src.api.services.grok import GrokImageResult
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.image_thumbnail import GeneratedThumbnail, ThumbnailResult
+from src.api.services.media_ingest import PreparedImage
+from src.core.enums import MediaFormat
+from src.core.media_hash import HashSample, HashSet, PdqHash
 from src.core.thumbnails import ThumbnailSpec
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 pytestmark = pytest.mark.unit
 
@@ -30,6 +37,30 @@ def _make_thumbnails() -> list[GeneratedThumbnail]:
     ]
 
 
+def _prepared_image() -> PreparedImage:
+    return PreparedImage(
+        data=b"prepared-jpeg",
+        format=MediaFormat.JPEG,
+        width=1024,
+        height=576,
+        hash_set=HashSet(
+            profile_id="pdq-image-rgb-white-v1",
+            sampling_profile="still-v1",
+            samples=(HashSample(pdq=PdqHash(bits=b"\x00" * 32, quality=100), sample_index=0),),
+        ),
+        orientation_baked=False,
+        converted=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def ledger_mock() -> Iterator[MagicMock]:
+    """Stub the PDQ ledger; its staging behaviour is covered by its own tests."""
+    with patch("src.api.services.grok.job_service.MediaHashLedger") as ledger_cls:
+        ledger_cls.return_value.register_output = AsyncMock()
+        yield ledger_cls
+
+
 def _make_session() -> MagicMock:
     """Session mock whose begin_nested() behaves like a real SAVEPOINT context manager."""
     session = MagicMock()
@@ -41,6 +72,7 @@ def _make_session() -> MagicMock:
         return cm
 
     session.begin_nested = MagicMock(side_effect=_begin_nested)
+    session.flush = AsyncMock()
     return session
 
 
@@ -51,7 +83,14 @@ def _make_service() -> tuple[GrokJobService, MagicMock]:
     storage.put_raw = put_raw_mock
 
     grok_client = MagicMock()
-    svc = GrokJobService(grok_client=grok_client, storage=storage, retention_days=7)
+    media_ingestor = MagicMock()
+    media_ingestor.prepare_image = AsyncMock(return_value=_prepared_image())
+    svc = GrokJobService(
+        grok_client=grok_client,
+        storage=storage,
+        retention_days=7,
+        media_ingestor=media_ingestor,
+    )
 
     image_data = b"\xff\xd8\xff\xe0jpeg"
     http_mock = AsyncMock()
@@ -64,7 +103,7 @@ def _make_service() -> tuple[GrokJobService, MagicMock]:
     return svc, put_raw_mock
 
 
-async def test_store_image_result_creates_sm_and_md_thumbnails() -> None:
+async def test_store_image_result_creates_sm_and_md_thumbnails(ledger_mock: MagicMock) -> None:
     svc, put_raw_mock = _make_service()
 
     output_id = uuid4()
@@ -111,6 +150,10 @@ async def test_store_image_result_creates_sm_and_md_thumbnails() -> None:
     parent_create, sm_create, md_create = created
 
     assert "is_thumbnail" not in parent_create
+    assert parent_create["size_bytes"] == len(_prepared_image().data)
+    assert parent_create["width"] == 1024
+    assert parent_create["height"] == 576
+    ledger_mock.return_value.register_output.assert_awaited_once()
 
     assert sm_create["is_thumbnail"] is True
     assert sm_create["parent_output_id"] == output_id

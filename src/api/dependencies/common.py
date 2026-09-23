@@ -56,6 +56,7 @@ from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.library import LibraryService
 from src.api.services.library_project import LibraryProjectService
 from src.api.services.library_tag import LibraryTagService
+from src.api.services.media_ingest.factory import build_media_ingest_service
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.organization import OrganizationService
 from src.api.services.payment_currency_logos import LOGO_KEY_PREFIX, LogoCacheService
@@ -91,6 +92,7 @@ from src.workers.token_cleanup import TokenCleanupWorker
 
 if TYPE_CHECKING:
     from src.api.services.generation.base import GenerationProvider
+    from src.api.services.media_ingest import MediaIngestService
     from src.workers.base import PeriodicWorker
 
 logger = structlog.get_logger(__name__)
@@ -129,6 +131,7 @@ class ServiceContainer:
     token_cleanup_worker: TokenCleanupWorker | None = None
     content_retention_worker: ContentRetentionWorker | None = None
     frame_extraction_worker: FrameExtractionWorker | None = None
+    media_ingestor: MediaIngestService | None = None
     generation_service: GenerationService | None = None
     event_bus: EventBus | None = None
     sse_ticket_service: SSETicketService | None = None
@@ -239,6 +242,8 @@ def get_user_content(
     Returns:
         Configured UserContentService.
     """
+    if _services.media_ingestor is None:
+        raise RuntimeError("media ingest service is not initialized")
     return UserContentService(
         storage=r2_storage,
         session=session,
@@ -247,6 +252,7 @@ def get_user_content(
         max_input_megapixels=settings.image_max_input_megapixels,
         video_max_seconds=settings.frame_extract_max_video_seconds,
         ffmpeg_timeout_seconds=settings.frame_extract_ffmpeg_timeout_seconds,
+        media_ingestor=_services.media_ingestor,
     )
 
 
@@ -883,6 +889,10 @@ async def init_services(settings: Settings) -> JWTService:
             batch_size=settings.content_cleanup_batch_size,
         )
 
+    # Build exactly one bounded media ingest service per process. All original
+    # writers share its admission/concurrency limits.
+    _services.media_ingestor = build_media_ingest_service(settings)
+
     # Initialize and start the frame extraction worker (requires R2; not
     # gated behind any provider config flag — core capability).
     if workers_enabled and _services.r2_storage is not None:
@@ -890,6 +900,7 @@ async def init_services(settings: Settings) -> JWTService:
             db_manager=_services.db_manager,
             r2_storage=_services.r2_storage,
             settings=settings,
+            media_ingestor=_services.media_ingestor,
             redis_enabled=redis_enabled,
             redis_client_factory=get_operational_redis_client,
         )
@@ -910,6 +921,7 @@ async def init_services(settings: Settings) -> JWTService:
             ops_event_bus=_services.ops_event_bus,
             max_poll_time=settings.grok_video_max_poll_time,
             finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
+            media_ingestor=_services.media_ingestor,
             billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
                 settings.grok_moderation_billing_policy,
                 settings.grok_undelivered_output_billing_policy,
@@ -1003,6 +1015,7 @@ async def init_services(settings: Settings) -> JWTService:
             billing_service=get_billing_service(),
             r2_storage=_services.r2_storage,
             config=poller_config,
+            media_ingestor=_services.media_ingestor,
             ops_event_bus=_services.ops_event_bus,
             redis_enabled=redis_enabled,
             redis_client_factory=get_operational_redis_client,

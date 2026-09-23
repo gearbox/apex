@@ -110,6 +110,16 @@ def _check_pixel_cap(img: Image.Image, limit_mp: float) -> None:
         raise ImageTooLargeError(megapixels=megapixels, limit=limit_mp)
 
 
+def check_image_pixel_limit(img: Image.Image, *, max_megapixels: float) -> None:
+    """Public header-only pixel-limit check for media preparation callers.
+
+    The image must have been opened but need not be loaded.  Keeping this
+    small public boundary prevents other image consumers from importing the
+    normalization module's private helper or copying its security check.
+    """
+    _check_pixel_cap(img, max_megapixels)
+
+
 def _enforce_pixel_cap(img: Image.Image, limit_mp: float, *, sniffed: SniffedFormat) -> None:
     """``_check_pixel_cap`` plus the structured warning log on rejection."""
     try:

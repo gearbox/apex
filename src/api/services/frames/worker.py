@@ -22,8 +22,10 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.services.frames import ffmpeg as frame_ffmpeg
-from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions
-from src.api.services.storage import MediaFormat, StorageType
+from src.api.services.image_thumbnail import make_image_thumbnails, read_dimensions  # noqa: F401
+from src.api.services.media_hash_ledger import MediaHashLedger
+from src.api.services.media_ingest import ImageIngestPolicy, MediaIngestor
+from src.api.services.storage import StorageType
 from src.core.enums import FrameExtractionKind, MediaKind, media_kind_from_content_type
 from src.db.repositories.frame_extraction import FrameExtractionJobRepository
 from src.db.repositories.output import OutputRepository
@@ -70,6 +72,7 @@ class FrameExtractionWorker(PeriodicWorker):
         r2_storage: R2StorageService,
         settings: Settings,
         *,
+        media_ingestor: MediaIngestor | None = None,
         redis_enabled: bool = False,
         redis_client_factory: Callable[[], Redis],
     ) -> None:
@@ -81,6 +84,17 @@ class FrameExtractionWorker(PeriodicWorker):
         )
         self._db_manager = db_manager
         self._storage = r2_storage
+        if media_ingestor is None:
+            from src.api.services.media_ingest.service import MediaIngestService
+
+            # Normal application startup injects the shared process service.
+            # Keep direct construction usable for narrow worker maintenance
+            # tests that provide only the legacy settings subset.
+            media_ingestor = MediaIngestService(
+                max_image_megapixels=100.0,
+                max_input_bytes=20 * 1024 * 1024,
+            )
+        self._media_ingestor = media_ingestor
         self._ffmpeg_timeout = settings.frame_extract_ffmpeg_timeout_seconds
         self._preview_max_edge = settings.frame_preview_max_edge
         self._retention_days = settings.retention_days
@@ -217,12 +231,15 @@ class FrameExtractionWorker(PeriodicWorker):
         try:
             async with self._db_manager.session() as session:
                 image_repo = UserImageRepository(session)
+                ledger = MediaHashLedger(session)
                 for ts in timestamps:
                     upload_id = await self._extract_and_save_frame(
                         job,
                         video_path,
                         ts,
                         image_repo=image_repo,
+                        ledger=ledger,
+                        session=session,
                         expires_at=expires_at,
                         uploaded_keys=uploaded_keys,
                     )
@@ -249,6 +266,8 @@ class FrameExtractionWorker(PeriodicWorker):
         timestamp_ms: int,
         *,
         image_repo: UserImageRepository,
+        ledger: MediaHashLedger,
+        session: AsyncSession,
         expires_at: datetime,
         uploaded_keys: list[str],
     ) -> UUID:
@@ -258,36 +277,39 @@ class FrameExtractionWorker(PeriodicWorker):
             out_format="png",
             timeout_seconds=self._ffmpeg_timeout,
         )
+        prepared = await self._media_ingestor.prepare_image(
+            png_bytes, policy=ImageIngestPolicy.PROVIDER
+        )
         upload_result = await self._storage.upload(
             user_id=job.user_id,
-            data=png_bytes,
-            content_type=MediaFormat.PNG.content_type,
+            data=prepared.data,
+            content_type=prepared.content_type,
             storage_type=StorageType.UPLOAD,
         )
         uploaded_keys.append(upload_result.storage_key)
-
-        dims = await read_dimensions(png_bytes)
 
         db_image = await image_repo.create(
             id=upload_result.id,
             user_id=job.user_id,
             storage_key=upload_result.storage_key,
-            original_filename=f"{upload_result.id}.png",
-            content_type=MediaFormat.PNG.content_type,
-            size_bytes=len(png_bytes),
-            format=MediaFormat.PNG.value,
+            original_filename=f"{upload_result.id}.{prepared.format.value}",
+            content_type=prepared.content_type,
+            size_bytes=len(prepared.data),
+            format=prepared.format.value,
             expires_at=expires_at,
             product_id=job.product_id,
-            width=dims.width if dims is not None else None,
-            height=dims.height if dims is not None else None,
+            width=prepared.width,
+            height=prepared.height,
             source_output_id=job.source_output_id,
             source_upload_id=job.source_upload_id,
             source_timestamp_ms=timestamp_ms,
         )
+        await ledger.register_upload(db_image, prepared.hash_set)
+        await session.flush()
 
         # WEBP sm/md derivatives — non-fatal, mirrors UserContentService.upload_image.
         try:
-            thumbnails = await make_image_thumbnails(png_bytes)
+            thumbnails = await make_image_thumbnails(prepared.data)
             for generated in thumbnails:
                 thumb_result = await self._storage.upload(
                     user_id=job.user_id,
@@ -296,22 +318,23 @@ class FrameExtractionWorker(PeriodicWorker):
                     storage_type=StorageType.UPLOAD,
                 )
                 uploaded_keys.append(thumb_result.storage_key)
-                await image_repo.create(
-                    id=thumb_result.id,
-                    user_id=job.user_id,
-                    storage_key=thumb_result.storage_key,
-                    original_filename=f"{thumb_result.id}.{generated.result.format}",
-                    content_type=generated.result.content_type,
-                    size_bytes=len(generated.result.data),
-                    format=generated.result.format,
-                    expires_at=expires_at,
-                    product_id=job.product_id,
-                    is_thumbnail=True,
-                    parent_image_id=db_image.id,
-                    thumbnail_max_edge=generated.spec.max_edge,
-                    width=generated.result.width,
-                    height=generated.result.height,
-                )
+                async with session.begin_nested():
+                    await image_repo.create(
+                        id=thumb_result.id,
+                        user_id=job.user_id,
+                        storage_key=thumb_result.storage_key,
+                        original_filename=f"{thumb_result.id}.{generated.result.format}",
+                        content_type=generated.result.content_type,
+                        size_bytes=len(generated.result.data),
+                        format=generated.result.format,
+                        expires_at=expires_at,
+                        product_id=job.product_id,
+                        is_thumbnail=True,
+                        parent_image_id=db_image.id,
+                        thumbnail_max_edge=generated.spec.max_edge,
+                        width=generated.result.width,
+                        height=generated.result.height,
+                    )
         except Exception:
             logger.warning("frames.extract_thumbnail_generation_failed", image_id=str(db_image.id))
 

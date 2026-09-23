@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
+
+from src.api.services.media_tools import MediaToolError, ProcessResult, run_media_command_sync
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,8 +30,6 @@ logger = structlog.get_logger(__name__)
 
 FFMPEG_PATH = "/usr/bin/ffmpeg"
 FFPROBE_PATH = "/usr/bin/ffprobe"
-
-_STDERR_TRIM_BYTES = 500
 
 
 class FfmpegError(Exception):
@@ -51,37 +50,22 @@ class VideoProbe:
     codec: str
 
 
-def _trimmed_stderr(stderr: bytes) -> str:
-    return stderr[:_STDERR_TRIM_BYTES].decode("utf-8", errors="replace")
-
-
 def _run(
     args: list[str],
     *,
     timeout_seconds: float,
     error_cls: type[Exception],
-) -> subprocess.CompletedProcess[bytes]:
+) -> ProcessResult:
     """Run a subprocess, raising ``error_cls`` (chained) on any failure mode.
 
-    Wall-clock timeout is enforced by ``subprocess.run`` itself, not an outer
-    ``asyncio.wait_for`` — cancelling an awaited ``to_thread`` does not kill
-    the child process, so the timeout must live here.
+    The shared synchronous runner enforces its own wall-clock timeout, not an
+    outer ``asyncio.wait_for`` — cancelling an awaited ``to_thread`` does not
+    kill the child process, so the timeout must live in that runner.
     """
     try:
-        result = subprocess.run(  # noqa: S603
-            args,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise error_cls(f"{args[0]} timed out after {timeout_seconds}s") from e
-    except FileNotFoundError as e:
-        raise error_cls(f"{args[0]} not found") from e
-
-    if result.returncode != 0:
-        raise error_cls(f"{args[0]} exited {result.returncode}: {_trimmed_stderr(result.stderr)}")
-    return result
+        return run_media_command_sync(args, timeout_seconds=timeout_seconds, stderr_limit=500)
+    except MediaToolError as exc:
+        raise error_cls(str(exc)) from exc
 
 
 def _parse_probe_json(raw: bytes) -> VideoProbe:

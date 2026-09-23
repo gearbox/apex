@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.45.0"
+version = "0.46.0"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -43,6 +43,8 @@ dependencies = [
     "typer>=0.26.7",
     "pillow>=12.3.0",
     "pillow-heif>=1.4.0",
+    "numpy>=2.3.0",
+    "pdqhash==0.2.8",
     "pywebpush>=2.3.0",
 ]
 
@@ -170,6 +172,7 @@ module = [
     "typer",
     "typer.*",
     "pillow_heif.*",
+    "pdqhash.*",
     "pywebpush.*",
 ]
 ignore_missing_imports = true

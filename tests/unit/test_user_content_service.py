@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -12,7 +13,7 @@ import pytest
 from PIL import Image
 
 from src.api.schemas.media import MediaObject, MediaOriginal
-from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
+from src.api.schemas.user_content import ImageAccess, UploadedImage
 from src.api.services.storage import StorageError, StorageNotFoundError, StorageValidationError
 from src.api.services.user_content import (
     UserContentNotFoundError,
@@ -93,14 +94,21 @@ def _make_db_output(**overrides: object) -> MagicMock:
     out.output_index = 0
     out.created_at = datetime.now(UTC)
     out.expires_at = datetime.now(UTC) + timedelta(days=7)
-    for k, v in overrides.items():
-        setattr(out, k, v)
+    for key, value in overrides.items():
+        setattr(out, key, value)
     return out
 
 
 def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentService, AsyncMock]:
     storage = AsyncMock()
     session = AsyncMock()
+    session.add_all = MagicMock()
+
+    @asynccontextmanager
+    async def savepoint():
+        yield
+
+    session.begin_nested = MagicMock(side_effect=savepoint)
     service = UserContentService(
         storage=storage,
         session=session,
@@ -152,11 +160,7 @@ class TestUploadImage:
         db_image = _make_db_image(width=1024, height=768)
         service._image_repo.create = AsyncMock(return_value=db_image)
 
-        from src.api.services.image_thumbnail import ImageDimensions
-
-        dims = ImageDimensions(width=1024, height=768)
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=dims),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(
@@ -168,8 +172,8 @@ class TestUploadImage:
 
         assert isinstance(result, UploadedImage)
         create_kwargs = service._image_repo.create.call_args.kwargs
-        assert create_kwargs["width"] == 1024
-        assert create_kwargs["height"] == 768
+        assert create_kwargs["width"] == 16
+        assert create_kwargs["height"] == 12
 
     async def test_creates_thumbnails_when_generated(self) -> None:
         service, storage = _make_service()
@@ -661,53 +665,6 @@ class TestDeleteUpload:
 
         result = await service.delete_upload(uuid4(), user_id=uuid4())
         assert result is False
-
-
-# ---------------------------------------------------------------------------
-# store_output
-# ---------------------------------------------------------------------------
-
-
-class TestStoreOutput:
-    async def test_returns_generated_image(self) -> None:
-        service, storage = _make_service()
-
-        upload_result = _make_upload_result()
-        storage.upload = AsyncMock(return_value=upload_result)
-
-        db_out = _make_db_output()
-        service._output_repo.create = AsyncMock(return_value=db_out)
-
-        result = await service.store_output(
-            user_id=uuid4(),
-            job_id=uuid4(),
-            data=b"\x89PNG",
-            content_type="image/png",
-            output_index=0,
-        )
-
-        assert isinstance(result, GeneratedImage)
-        assert result.id == db_out.id
-
-    async def test_passes_input_image_id_to_repo(self) -> None:
-        service, storage = _make_service()
-        storage.upload = AsyncMock(return_value=_make_upload_result())
-
-        db_out = _make_db_output()
-        service._output_repo.create = AsyncMock(return_value=db_out)
-
-        input_id = uuid4()
-        await service.store_output(
-            user_id=uuid4(),
-            job_id=uuid4(),
-            data=b"\x89PNG",
-            content_type="image/png",
-            output_index=1,
-            input_image_id=input_id,
-        )
-
-        create_kwargs = service._output_repo.create.call_args.kwargs
-        assert create_kwargs["input_image_id"] == input_id
 
 
 # ---------------------------------------------------------------------------

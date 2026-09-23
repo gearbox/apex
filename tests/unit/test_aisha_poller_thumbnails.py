@@ -9,6 +9,9 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.image_thumbnail import GeneratedThumbnail, ThumbnailResult
+from src.api.services.media_ingest import PreparedImage
+from src.core.enums import MediaFormat
+from src.core.media_hash import HashSample, HashSet, PdqHash
 from src.core.thumbnails import ThumbnailSpec
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 
@@ -70,11 +73,29 @@ def _make_r2_upload_result(file_id: object = None) -> MagicMock:
     return result
 
 
+def _prepared_image() -> PreparedImage:
+    return PreparedImage(
+        data=_FAKE_PNG,
+        format=MediaFormat.PNG,
+        width=512,
+        height=512,
+        hash_set=HashSet(
+            profile_id="pdq-image-rgb-white-v1",
+            sampling_profile="still-v1",
+            samples=(HashSample(pdq=PdqHash(bits=b"\x00" * 32, quality=0), sample_index=0),),
+        ),
+        orientation_baked=False,
+        converted=False,
+    )
+
+
 def _make_poller(r2: MagicMock | None = None) -> AishaJobPoller:
     session_factory = MagicMock()
     session_factory.return_value = AsyncMock()
     session_factory.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
     session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+    media_ingestor = MagicMock()
+    media_ingestor.prepare_image = AsyncMock(return_value=_prepared_image())
     return AishaJobPoller(
         session_factory=session_factory,
         event_bus=None,
@@ -82,6 +103,7 @@ def _make_poller(r2: MagicMock | None = None) -> AishaJobPoller:
         r2_storage=r2,
         config=_make_config(),
         redis_client_factory=MagicMock(),
+        media_ingestor=media_ingestor,
     )
 
 
@@ -177,15 +199,7 @@ class TestDownloadAndUploadThumbnails:
             _make_generated_thumbnail(_SM_SPEC, width=100, height=100),
             _make_generated_thumbnail(_MD_SPEC, width=400, height=400),
         ]
-        dims_mock = MagicMock()
-        dims_mock.width = 512
-        dims_mock.height = 512
-
         with (
-            patch(
-                "src.workers.aisha_job_poller.read_dimensions",
-                new=AsyncMock(return_value=dims_mock),
-            ),
             patch(
                 "src.workers.aisha_job_poller.make_image_thumbnails",
                 new=AsyncMock(return_value=thumbnails),
@@ -200,9 +214,9 @@ class TestDownloadAndUploadThumbnails:
             )
 
         assert len(results) == 3
-        full = results[0]
-        sm_thumb = results[1]
-        md_thumb = results[2]
+        full = results.outputs[0]
+        sm_thumb = results.outputs[1]
+        md_thumb = results.outputs[2]
 
         assert full.is_thumbnail is False
         assert full.width == 512
@@ -237,10 +251,6 @@ class TestDownloadAndUploadThumbnails:
 
         with (
             patch(
-                "src.workers.aisha_job_poller.read_dimensions",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
                 "src.workers.aisha_job_poller.make_image_thumbnails",
                 new=AsyncMock(return_value=[]),
             ),
@@ -254,7 +264,7 @@ class TestDownloadAndUploadThumbnails:
             )
 
         assert len(results) == 1
-        assert results[0].is_thumbnail is False
+        assert results.outputs[0].is_thumbnail is False
 
     async def test_skips_thumb_when_r2_upload_fails(self) -> None:
         """If a thumb's R2 upload raises, that size is skipped; others succeed."""
@@ -284,10 +294,6 @@ class TestDownloadAndUploadThumbnails:
 
         with (
             patch(
-                "src.workers.aisha_job_poller.read_dimensions",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
                 "src.workers.aisha_job_poller.make_image_thumbnails",
                 new=AsyncMock(return_value=thumbnails),
             ),
@@ -302,8 +308,8 @@ class TestDownloadAndUploadThumbnails:
 
         # sm skipped (upload error), md succeeded → full + md
         assert len(results) == 2
-        assert results[0].is_thumbnail is False
-        assert results[1].thumbnail_max_edge == 512
+        assert results.outputs[0].is_thumbnail is False
+        assert results.outputs[1].thumbnail_max_edge == 512
 
     async def test_returns_empty_when_r2_not_configured(self) -> None:
         poller = _make_poller(r2=None)
@@ -318,7 +324,8 @@ class TestDownloadAndUploadThumbnails:
             output_index=0,
             expires_at=expires_at,
         )
-        assert results == []
+        assert results.outputs == ()
+        assert results.retryable_failure is True
 
     async def test_thumb_output_index_mirrors_parent(self) -> None:
         full_id = uuid4()
@@ -340,10 +347,6 @@ class TestDownloadAndUploadThumbnails:
 
         with (
             patch(
-                "src.workers.aisha_job_poller.read_dimensions",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
                 "src.workers.aisha_job_poller.make_image_thumbnails",
                 new=AsyncMock(return_value=thumbnails),
             ),
@@ -357,5 +360,5 @@ class TestDownloadAndUploadThumbnails:
             )
 
         assert len(results) == 2
-        assert results[0].output_index == 3
-        assert results[1].output_index == 3
+        assert results.outputs[0].output_index == 3
+        assert results.outputs[1].output_index == 3

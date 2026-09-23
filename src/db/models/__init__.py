@@ -23,6 +23,7 @@ from .gpu_session_operation import GpuSessionOperation
 from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
 from .library import LibraryAssetMetadata, LibraryAssetTag, LibraryProject, LibraryTag
+from .media_hash import MediaHash
 from .push_subscription import PushSubscription
 from .storage import (
     GenerationJob,
@@ -57,6 +58,7 @@ __all__ = [
     "LibraryAssetTag",
     "LibraryProject",
     "LibraryTag",
+    "MediaHash",
     "Organization",
     "OrganizationMember",
     "PasswordResetToken",
