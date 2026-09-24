@@ -22,6 +22,7 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    HTTP_502_BAD_GATEWAY,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 
@@ -45,6 +46,7 @@ from src.api.services.user_content import (
     UserContentService,
     UserContentStorageError,
     UserContentTooLargeError,
+    UserContentUnavailableError,
     UserContentValidationError,
 )
 
@@ -194,6 +196,16 @@ class StorageController(Controller):
                 content=ErrorEnvelope(
                     error="upstream_error",
                     message="Storage backend unavailable",
+                    status_code=HTTP_502_BAD_GATEWAY,
+                ),
+                status_code=HTTP_502_BAD_GATEWAY,
+            )
+        except UserContentUnavailableError as e:
+            logger.warning("storage.upload_media_unavailable", error=str(e))
+            return Response(
+                content=ErrorEnvelope(
+                    error="service_unavailable",
+                    message="Media processing is temporarily unavailable",
                     status_code=HTTP_503_SERVICE_UNAVAILABLE,
                 ),
                 status_code=HTTP_503_SERVICE_UNAVAILABLE,

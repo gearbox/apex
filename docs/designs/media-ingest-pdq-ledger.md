@@ -20,14 +20,26 @@ Video preparation probes before classifying the container. ISO-BMFF requires an
 MP4-compatible major or compatible brand, or a QuickTime major brand; WebM
 requires an EBML `webm` DocType. It retains one visual stream and at most one
 audio stream, removes global/stream metadata, then hashes sampled decoded
-frames from the remuxed output. Visual duration uses, in order, stream duration,
-duration ticks and time base, visual `DURATION` tag, then container duration.
-The container fallback may include a longer audio track, making the upload cap
-conservative. Stream durations over container duration plus one second are
-rejected. No audio stream duration is used.
+frames from the remuxed output. Visual duration uses, in order, stream duration
+(`stream`), duration ticks and time base (`timeline`), visual `DURATION` tag
+(`tag`), then container duration (`container`); each probe records which source
+it used (`DurationSource`). The container fallback may include a longer audio
+track, making the upload cap conservative. Stream durations over container
+duration plus one second are rejected. No audio stream duration is used.
+
+The source probe may resolve no duration at all (`unknown`): browser
+`MediaRecorder` WebM carries neither stream, tag, nor container duration. When
+the source duration is known, the duration cap is enforced before the remux as
+an early exit. The prepared-output probe must resolve a duration — the remux
+writes one — and the cap is enforced again on it; that check is authoritative,
+and `PreparedVideo.duration_ms` and sampling both use the prepared probe.
+
 If the prepared timeline is more than 250 ms shorter than the source timeline,
 the input is rejected. Matroska demuxing can warn about a truncated cluster
-while returning success, and the lost timeline reveals that truncation.
+while returning success, and the lost timeline reveals that truncation. The
+comparison only runs when both sides came from stream-level sources (`stream`,
+`timeline`, `tag`); a `container` or `unknown` side skips it, because a container
+duration can span a longer audio track and would flag a healthy file.
 
 `uniform-pts-v1` always includes the first decoded frame, uses actual selected
 PTS values, caps frames, converts sampling frames to square pixels, and stores
@@ -56,4 +68,17 @@ Positive ffprobe/ffmpeg exits during source probe, remux, prepared-output probe,
 or sampling mean deterministic undecodable input. Signal exits, executable
 absence, timeouts, and OS errors remain operational. A full disk can also make
 ffmpeg exit positively during remux; input writes normally fail first with an
-OS error, and stderr text is not used to classify it.
+OS error, and stderr text is not used to classify it. Error excerpts keep the
+tail of stderr (the fatal line comes last); ffmpeg runs with `-hide_banner`,
+and child processes get a null stdin. A user-caused undecodable input is logged
+at warning (`media_ingest.video_not_decodable`, no traceback); provider callers
+log their own error-level events for pipeline anomalies.
+
+`POST /v1/storage/upload` maps the two failure classes to distinct statuses:
+an object-storage (R2) failure is `502 upstream_error`, while ingest capacity
+exhaustion or an operational processing failure is `503 service_unavailable`
+("Media processing is temporarily unavailable"). Invalid media is `400
+validation_error`.
+
+The ledger derives `source_media_type` from the row's persisted `format`; an
+unknown or missing format raises instead of defaulting to image.

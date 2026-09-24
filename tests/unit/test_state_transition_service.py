@@ -49,6 +49,11 @@ def _image_hash_set() -> HashSet:
     )
 
 
+def _created_row() -> MagicMock:
+    """A created output row; the ledger requires a real persisted format."""
+    return MagicMock(format="webp")
+
+
 def _make_service(
     job: MagicMock,
     *,
@@ -164,7 +169,7 @@ class TestTransitionToCompleted:
         svc, session, _ = _make_service(job)
 
         with patch.object(
-            svc._output_repo, "create", new_callable=AsyncMock, return_value=MagicMock()
+            svc._output_repo, "create", new_callable=AsyncMock, return_value=_created_row()
         ) as mock_create:
             out = self._make_output()
             await svc.transition_to_completed(job.id, outputs=[out], product_id="vex")
@@ -238,7 +243,7 @@ class TestTransitionToCompleted:
             svc._output_repo,
             "create",
             new_callable=AsyncMock,
-            side_effect=[MagicMock(), RuntimeError("derivative insert failed")],
+            side_effect=[_created_row(), RuntimeError("derivative insert failed")],
         ):
             await svc.transition_to_completed(
                 job.id,
@@ -256,7 +261,7 @@ class TestTransitionToCompleted:
         svc, _, _ = _make_service(job, event_bus=bus)
 
         with patch.object(
-            svc._output_repo, "create", new_callable=AsyncMock, return_value=MagicMock()
+            svc._output_repo, "create", new_callable=AsyncMock, return_value=_created_row()
         ):
             await svc.transition_to_completed(
                 job.id, outputs=[self._make_output()], product_id="vex"
@@ -271,7 +276,7 @@ class TestTransitionToCompleted:
         svc, _, _ = _make_service(job, event_bus=bus)
 
         with patch.object(
-            svc._output_repo, "create", new_callable=AsyncMock, return_value=MagicMock()
+            svc._output_repo, "create", new_callable=AsyncMock, return_value=_created_row()
         ):
             await svc.transition_to_completed(
                 job.id, outputs=[self._make_output()], product_id="vex"

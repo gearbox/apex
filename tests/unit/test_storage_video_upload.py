@@ -9,8 +9,12 @@ from uuid import uuid4
 import pytest
 
 from src.api.schemas.user_content import UploadedImage
-from src.api.services.media_ingest import InvalidMediaError, PreparedVideo
-from src.api.services.user_content import UserContentService, UserContentValidationError
+from src.api.services.media_ingest import InvalidMediaError, MediaProcessingError, PreparedVideo
+from src.api.services.user_content import (
+    UserContentService,
+    UserContentUnavailableError,
+    UserContentValidationError,
+)
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet, PdqHash
 
@@ -36,6 +40,7 @@ def _make_db_video(**overrides: object) -> MagicMock:
     img.width = 1920
     img.height = 1080
     img.thumbnail_max_edge = None
+    img.format = "mp4"
     for k, v in overrides.items():
         setattr(img, k, v)
     return img
@@ -268,3 +273,18 @@ class TestUploadVideoRejected:
                 filename="fake.mp4",
                 content_type="video/mp4",
             )
+
+    async def test_upload_video_capacity_exhausted_is_unavailable(self) -> None:
+        service, storage = _make_service()
+        service._media_ingestor.prepare_video = AsyncMock(
+            side_effect=MediaProcessingError("video preparation capacity is exhausted")
+        )
+
+        with pytest.raises(UserContentUnavailableError, match="temporarily unavailable"):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=b"fake mp4 bytes",
+                filename="clip.mp4",
+                content_type="video/mp4",
+            )
+        storage.upload.assert_not_awaited()

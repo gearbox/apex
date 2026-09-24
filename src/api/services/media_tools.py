@@ -61,6 +61,7 @@ def run_media_command_sync(
     try:
         process = subprocess.run(  # noqa: S603 - command is assembled only from service constants
             args,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
@@ -70,7 +71,9 @@ def run_media_command_sync(
     except FileNotFoundError as exc:
         raise MediaToolNotFoundError(f"media executable not found: {args[0]}") from exc
     if process.returncode != 0:
-        message = process.stderr[:stderr_limit].decode("utf-8", errors="replace")
+        # The tail carries the fatal error; the head is banner/preamble.
+        stderr = process.stderr
+        message = stderr[-stderr_limit:].decode("utf-8", errors="replace")
         raise MediaToolExitError(args[0], process.returncode, message)
     return _successful_result(
         process.stdout,
@@ -93,6 +96,7 @@ async def run_media_command(
     try:
         process = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -108,7 +112,8 @@ async def run_media_command(
             raise MediaToolTimeoutError(f"{args[0]} timed out after {timeout_seconds}s") from exc
         raise
     if process.returncode is not None and process.returncode != 0:
-        message = stderr[:stderr_limit].decode("utf-8", errors="replace")
+        # The tail carries the fatal error; the head is banner/preamble.
+        message = stderr[-stderr_limit:].decode("utf-8", errors="replace")
         raise MediaToolExitError(args[0], process.returncode, message)
     return _successful_result(
         stdout, stderr, executable=args[0], stderr_capture_limit=stderr_capture_limit

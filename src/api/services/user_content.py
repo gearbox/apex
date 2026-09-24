@@ -99,6 +99,10 @@ class UserContentStorageError(UserContentError):
     """Raised when the storage backend fails for reasons unrelated to client input."""
 
 
+class UserContentUnavailableError(UserContentError):
+    """Raised when media preparation is out of capacity or failed operationally."""
+
+
 class UserContentService:
     """Service for managing user-uploaded and generated content.
 
@@ -220,7 +224,7 @@ class UserContentService:
             logger.warning(
                 "user_content.upload_image_preparation_unavailable", user_id=str(user_id)
             )
-            raise UserContentStorageError("image preparation is temporarily unavailable") from e
+            raise UserContentUnavailableError("image preparation is temporarily unavailable") from e
 
         if prepared.converted:
             logger.info(
@@ -348,7 +352,7 @@ class UserContentService:
         except InvalidMediaError as e:
             raise UserContentValidationError(str(e)) from e
         except MediaProcessingError as e:
-            raise UserContentStorageError("video preparation is temporarily unavailable") from e
+            raise UserContentUnavailableError("video preparation is temporarily unavailable") from e
 
         try:
             result = await self._storage.upload(

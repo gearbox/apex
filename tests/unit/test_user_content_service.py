@@ -21,6 +21,7 @@ from src.api.services.user_content import (
     UserContentService,
     UserContentStorageError,
     UserContentTooLargeError,
+    UserContentUnavailableError,
     UserContentValidationError,
     sanitize_display_filename,
 )
@@ -82,6 +83,7 @@ def _make_db_image(**overrides: object) -> MagicMock:
     img.width = 800
     img.height = 600
     img.thumbnail_max_edge = None
+    img.format = "png"
     for k, v in overrides.items():
         setattr(img, k, v)
     return img
@@ -149,12 +151,12 @@ class TestUploadImage:
         stored = storage.upload.await_args.kwargs["data"]
         assert b"private-metadata-canary" not in stored
 
-    async def test_ingest_operational_failure_is_storage_error(self) -> None:
+    async def test_ingest_operational_failure_is_unavailable_error(self) -> None:
         service, storage = _make_service()
         service._media_ingestor.prepare_image = AsyncMock(
             side_effect=MediaProcessingError("capacity exhausted")
         )
-        with pytest.raises(UserContentStorageError, match="temporarily unavailable"):
+        with pytest.raises(UserContentUnavailableError, match="temporarily unavailable"):
             await service.upload_image(
                 user_id=uuid4(),
                 data=_png_bytes(),

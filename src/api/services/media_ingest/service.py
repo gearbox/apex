@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import structlog
@@ -38,6 +39,7 @@ from src.api.services.media_ingest.types import (
 from src.api.services.media_tools import (
     MediaToolError,
     MediaToolExitError,
+    ProcessResult,
     run_media_command,
 )
 from src.core.enums import MediaFormat
@@ -56,12 +58,31 @@ _MP4_BRANDS = {b"isom", b"mp41", b"mp42", b"avc1", b"dash", b"M4V ", b"MSNV"} | 
 logger = structlog.get_logger(__name__)
 
 
+class DurationSource(StrEnum):
+    """Where a probed visual duration came from, in resolution order."""
+
+    STREAM = "stream"
+    TIMELINE = "timeline"
+    TAG = "tag"
+    CONTAINER = "container"
+    UNKNOWN = "unknown"
+
+
+# Only these describe the selected visual stream itself. A container duration
+# can span a longer audio track, so it is not comparable across a remux.
+_STREAM_LEVEL_SOURCES = frozenset(
+    {DurationSource.STREAM, DurationSource.TIMELINE, DurationSource.TAG}
+)
+_REMUX_DURATION_TOLERANCE_MS = 250
+
+
 @dataclass(frozen=True, slots=True)
 class _VideoProbe:
     format: MediaFormat
     width: int
     height: int
-    duration_ms: int
+    duration_ms: int | None
+    duration_source: DurationSource
     video_stream_index: int
     audio_stream_index: int | None
 
@@ -346,13 +367,17 @@ class MediaIngestService:
         try:
             await asyncio.to_thread(input_path.write_bytes, data)
             source_probe = await self._probe_video(input_path, deadline)
-            self._validate_video_duration(source_probe.duration_ms, max_duration_seconds)
+            # Browser MediaRecorder WebM carries no duration at all; the remux
+            # writes one, so the source cap is only an early exit when known.
+            if source_probe.duration_ms is not None:
+                self._validate_video_duration(source_probe.duration_ms, max_duration_seconds)
             output_path = temp_dir / f"prepared.{source_probe.format.value}"
             await self._remux(input_path, output_path, source_probe, deadline)
             prepared_probe = await self._probe_video(output_path, deadline)
-            self._validate_remux_duration(source_probe.duration_ms, prepared_probe.duration_ms)
+            prepared_duration_ms = self._prepared_duration_ms(prepared_probe, max_duration_seconds)
+            self._validate_remux_duration(source_probe, prepared_probe)
             samples, sampling_profile = await self._sample_video(
-                output_path, prepared_probe, temp_dir, deadline
+                output_path, prepared_duration_ms, prepared_probe, temp_dir, deadline
             )
             prepared_bytes = await asyncio.to_thread(output_path.read_bytes)
             self._validate_prepared_video_size(prepared_bytes)
@@ -361,7 +386,7 @@ class MediaIngestService:
                 format=prepared_probe.format,
                 width=prepared_probe.width,
                 height=prepared_probe.height,
-                duration_ms=prepared_probe.duration_ms,
+                duration_ms=prepared_duration_ms,
                 hash_set=HashSet(
                     profile_id=f"pdq-video-rgb-white-v2-edge-{self._video_max_edge}",
                     sampling_profile=sampling_profile,
@@ -386,16 +411,43 @@ class MediaIngestService:
         if maximum_seconds is not None and duration_ms > round(maximum_seconds * 1000):
             raise InvalidMediaError("video duration exceeds the configured limit")
 
+    @classmethod
+    def _prepared_duration_ms(cls, probe: _VideoProbe, maximum_seconds: float | None) -> int:
+        """Require a duration on the prepared output and apply the authoritative cap.
+
+        The remux writes a duration even when the source had none, and the
+        prepared file is what is stored and sampled.
+        """
+        if probe.duration_ms is None:
+            raise InvalidMediaError("video duration is unavailable")
+        cls._validate_video_duration(probe.duration_ms, maximum_seconds)
+        return probe.duration_ms
+
     @staticmethod
-    def _validate_remux_duration(source_ms: int, prepared_ms: int) -> None:
-        if source_ms - prepared_ms > 250:
-            # Some demuxers only warn for a file cut mid-cluster and ffmpeg
-            # still exits zero. The prepared timeline exposes that loss.
-            logger.error(
+    def _validate_remux_duration(source: _VideoProbe, prepared: _VideoProbe) -> None:
+        """Reject a remux that silently lost part of the visual timeline.
+
+        Some demuxers only warn for a file cut mid-cluster and ffmpeg still
+        exits zero; the prepared timeline exposes that loss. The comparison is
+        only meaningful when both sides describe the visual stream itself, so
+        container fallbacks (which may span a longer audio track) and unknown
+        durations skip it.
+        """
+        if (
+            source.duration_ms is None
+            or prepared.duration_ms is None
+            or source.duration_source not in _STREAM_LEVEL_SOURCES
+            or prepared.duration_source not in _STREAM_LEVEL_SOURCES
+        ):
+            return
+        if source.duration_ms - prepared.duration_ms > _REMUX_DURATION_TOLERANCE_MS:
+            logger.warning(
                 "media_ingest.video_duration_lost",
                 stage="prepared_probe",
-                source_duration_ms=source_ms,
-                prepared_duration_ms=prepared_ms,
+                source_duration_ms=source.duration_ms,
+                source_duration_source=source.duration_source.value,
+                prepared_duration_ms=prepared.duration_ms,
+                prepared_duration_source=prepared.duration_source.value,
             )
             raise InvalidMediaError("video is not decodable")
 
@@ -403,19 +455,21 @@ class MediaIngestService:
         if len(data) > self._max_input_bytes:
             raise InvalidMediaError("prepared video exceeds the configured byte limit")
 
-    async def _run_stage(self, stage: str, args: list[str], deadline: float) -> bytes:
+    async def _run_stage(self, stage: str, args: list[str], deadline: float) -> ProcessResult:
         try:
-            result = await run_media_command(args, timeout_seconds=self._remaining(deadline))
+            return await run_media_command(args, timeout_seconds=self._remaining(deadline))
         except MediaToolExitError as exc:
             if exc.returncode > 0:
-                logger.exception(
+                # A malformed upload is the user's input, not a service fault:
+                # warn without a traceback. Provider callers log their own
+                # error-level events for pipeline anomalies.
+                logger.warning(
                     "media_ingest.video_not_decodable",
                     stage=stage,
                     stderr_excerpt=exc.stderr_excerpt.strip(),
                 )
                 raise InvalidMediaError("video is not decodable") from exc
             raise
-        return result.stdout
 
     async def _probe_video(self, path: Path, deadline: float) -> _VideoProbe:
         result = await self._run_stage(
@@ -433,7 +487,7 @@ class MediaIngestService:
             deadline,
         )
         try:
-            decoded = json.loads(result)
+            decoded = json.loads(result.stdout)
             with path.open("rb") as source:
                 header = source.read(65_536)
             container = self._detect_container(header, decoded["format"]["format_name"])
@@ -447,15 +501,20 @@ class MediaIngestService:
             audio = next(
                 (stream for stream in streams if stream.get("codec_type") == "audio"), None
             )
-            duration_seconds = self._stream_duration_seconds(visual, decoded["format"])
+            duration_seconds, duration_source = self._stream_duration_seconds(
+                visual, decoded["format"]
+            )
             width, height = int(visual["width"]), int(visual["height"])
-            self._validate_probe_values(duration_seconds, width, height, visual.get("codec_name"))
+            self._validate_probe_values(width, height, visual.get("codec_name"))
             self._validate_video_pixel_limit(width, height)
             return _VideoProbe(
                 format=container,
                 width=width,
                 height=height,
-                duration_ms=round(duration_seconds * 1000),
+                duration_ms=(
+                    round(duration_seconds * 1000) if duration_seconds is not None else None
+                ),
+                duration_source=duration_source,
                 video_stream_index=int(visual["index"]),
                 audio_stream_index=int(audio["index"]) if audio is not None else None,
             )
@@ -463,8 +522,15 @@ class MediaIngestService:
             raise InvalidMediaError("video has no usable visual stream") from exc
 
     @staticmethod
-    def _stream_duration_seconds(stream: dict[str, object], container: dict[str, object]) -> float:
-        """Use only the selected visual stream timeline, never audio duration."""
+    def _stream_duration_seconds(
+        stream: dict[str, object], container: dict[str, object]
+    ) -> tuple[float | None, DurationSource]:
+        """Resolve the selected visual stream's duration and its provenance.
+
+        Never uses an audio stream's duration. Falls back to the container
+        duration, and reports ``UNKNOWN`` (``None``) when nothing is available;
+        callers decide whether an unknown duration is acceptable.
+        """
 
         def valid(value: object) -> float | None:
             try:
@@ -474,7 +540,9 @@ class MediaIngestService:
             return number if math.isfinite(number) and number > 0 else None
 
         format_duration = valid(container.get("duration"))
-        candidates: list[float | None] = [valid(stream.get("duration"))]
+        candidates: list[tuple[float | None, DurationSource]] = [
+            (valid(stream.get("duration")), DurationSource.STREAM)
+        ]
         duration_ts = stream.get("duration_ts")
         time_base = stream.get("time_base")
         timeline: float | None = None
@@ -484,7 +552,7 @@ class MediaIngestService:
                 timeline = valid(int(duration_ts) * int(numerator) / int(denominator))
             except (ValueError, ZeroDivisionError):
                 pass
-        candidates.append(timeline)
+        candidates.append((timeline, DurationSource.TIMELINE))
         tags = stream.get("tags")
         tag = tags.get("DURATION") if isinstance(tags, dict) else None
         tagged: float | None = None
@@ -497,26 +565,19 @@ class MediaIngestService:
                     + int(seconds)
                     + int(fraction) / 1_000_000_000
                 )
-        candidates.append(tagged)
-        for candidate in candidates:
+        candidates.append((tagged, DurationSource.TAG))
+        for candidate, source in candidates:
             if candidate is not None:
                 if format_duration is not None and candidate > format_duration + 1:
                     raise InvalidMediaError("visual stream duration exceeds container duration")
-                return candidate
+                return candidate, source
         if format_duration is not None:
-            return format_duration
-        raise ValueError("visual stream duration is unavailable")
+            return format_duration, DurationSource.CONTAINER
+        return None, DurationSource.UNKNOWN
 
     @staticmethod
-    def _validate_probe_values(
-        duration_seconds: float, width: int, height: int, codec: object
-    ) -> None:
-        if (
-            not math.isfinite(duration_seconds)
-            or duration_seconds <= 0
-            or width <= 0
-            or height <= 0
-        ):
+    def _validate_probe_values(width: int, height: int, codec: object) -> None:
+        if width <= 0 or height <= 0:
             raise ValueError("non-positive video metadata")
         if not codec:
             raise ValueError("missing video codec")
@@ -583,6 +644,10 @@ class MediaIngestService:
         args = [
             _FFMPEG,
             "-y",
+            "-hide_banner",
+            "-nostats",
+            "-loglevel",
+            "error",
             "-i",
             str(source),
             "-map",
@@ -610,9 +675,9 @@ class MediaIngestService:
         await self._run_stage("remux", args, deadline)
 
     async def _sample_video(
-        self, path: Path, probe: _VideoProbe, temp_dir: Path, deadline: float
+        self, path: Path, duration_ms: int, probe: _VideoProbe, temp_dir: Path, deadline: float
     ) -> tuple[list[HashSample], str]:
-        interval = max(1.0, probe.duration_ms / 1000 / self._video_max_frames)
+        interval = max(1.0, duration_ms / 1000 / self._video_max_frames)
         keyframes_only = interval > 1.0
         frame_pattern = temp_dir / "sample-%03d.png"
         # ``prev_selected_t`` gives a sequential, actual-PTS cadence.  ``showinfo``
@@ -648,17 +713,7 @@ class MediaIngestService:
                 str(frame_pattern),
             ]
         )
-        try:
-            result = await run_media_command(args, timeout_seconds=self._remaining(deadline))
-        except MediaToolExitError as exc:
-            if exc.returncode > 0:
-                logger.exception(
-                    "media_ingest.video_not_decodable",
-                    stage="sampling",
-                    stderr_excerpt=exc.stderr_excerpt.strip(),
-                )
-                raise InvalidMediaError("video is not decodable") from exc
-            raise
+        result = await self._run_stage("sampling", args, deadline)
         files = await asyncio.to_thread(lambda: sorted(temp_dir.glob("sample-*.png")))
         timestamps = [
             float(match.group(1))

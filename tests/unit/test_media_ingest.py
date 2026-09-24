@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 from PIL import Image, ImageChops, JpegImagePlugin, PngImagePlugin
+from structlog.testing import capture_logs
 
 from src.api.services.image_normalization import ImageTooLargeError
 from src.api.services.media_ingest import (
@@ -27,6 +28,7 @@ from src.api.services.media_ingest import (
 )
 from src.api.services.media_ingest.image_strip import strip_image_metadata
 from src.api.services.media_ingest.pdq import pdq_from_image_bytes
+from src.api.services.media_ingest.service import DurationSource, _VideoProbe
 from src.api.services.media_tools import (
     MediaToolExitError,
     MediaToolNotFoundError,
@@ -491,11 +493,190 @@ async def test_truncated_webm_cluster_is_invalid(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "tag,expected",
-    [("00:00:03.000000000", 3.0), ("garbage", 3.008), (None, 3.008)],
+    [
+        ("00:00:03.000000000", (3.0, DurationSource.TAG)),
+        ("garbage", (3.008, DurationSource.CONTAINER)),
+        (None, (3.008, DurationSource.CONTAINER)),
+    ],
 )
-def test_visual_duration_resolution(tag: str | None, expected: float) -> None:
+def test_visual_duration_resolution(
+    tag: str | None, expected: tuple[float, DurationSource]
+) -> None:
     stream: dict[str, object] = {"tags": {"DURATION": tag} if tag else {}}
     assert MediaIngestService._stream_duration_seconds(stream, {"duration": "3.008"}) == expected
+
+
+@pytest.mark.parametrize(
+    "stream,expected",
+    [
+        ({"duration": "2.5"}, (2.5, DurationSource.STREAM)),
+        ({"duration_ts": 2500, "time_base": "1/1000"}, (2.5, DurationSource.TIMELINE)),
+        ({"duration": "N/A", "tags": {}}, (None, DurationSource.UNKNOWN)),
+    ],
+)
+def test_visual_duration_provenance(
+    stream: dict[str, object], expected: tuple[float | None, DurationSource]
+) -> None:
+    assert MediaIngestService._stream_duration_seconds(stream, {}) == expected
+
+
+def _probe(duration_ms: int | None, source: DurationSource) -> _VideoProbe:
+    return _VideoProbe(
+        format=MediaFormat.WEBM,
+        width=64,
+        height=48,
+        duration_ms=duration_ms,
+        duration_source=source,
+        video_stream_index=0,
+        audio_stream_index=None,
+    )
+
+
+_STREAM_LEVEL = [DurationSource.STREAM, DurationSource.TIMELINE, DurationSource.TAG]
+
+
+@pytest.mark.parametrize("source_kind", _STREAM_LEVEL)
+@pytest.mark.parametrize("prepared_kind", _STREAM_LEVEL)
+def test_remux_duration_loss_between_stream_sources_is_invalid(
+    source_kind: DurationSource, prepared_kind: DurationSource
+) -> None:
+    with pytest.raises(InvalidMediaError, match="not decodable"):
+        MediaIngestService._validate_remux_duration(
+            _probe(4000, source_kind), _probe(3700, prepared_kind)
+        )
+    # Within tolerance is accepted.
+    MediaIngestService._validate_remux_duration(
+        _probe(4000, source_kind), _probe(3800, prepared_kind)
+    )
+
+
+@pytest.mark.parametrize(
+    "source,prepared",
+    [
+        (_probe(4000, DurationSource.CONTAINER), _probe(3000, DurationSource.STREAM)),
+        (_probe(4000, DurationSource.STREAM), _probe(3000, DurationSource.CONTAINER)),
+        (_probe(None, DurationSource.UNKNOWN), _probe(3000, DurationSource.TAG)),
+        (_probe(4000, DurationSource.TAG), _probe(None, DurationSource.UNKNOWN)),
+        (_probe(None, DurationSource.UNKNOWN), _probe(None, DurationSource.UNKNOWN)),
+    ],
+)
+def test_remux_duration_check_is_skipped_without_stream_level_sides(
+    source: _VideoProbe, prepared: _VideoProbe
+) -> None:
+    MediaIngestService._validate_remux_duration(source, prepared)
+
+
+def test_prepared_probe_duration_is_mandatory_and_capped() -> None:
+    with pytest.raises(InvalidMediaError, match="duration is unavailable"):
+        MediaIngestService._prepared_duration_ms(_probe(None, DurationSource.UNKNOWN), None)
+    with pytest.raises(InvalidMediaError, match="duration exceeds"):
+        MediaIngestService._prepared_duration_ms(_probe(3000, DurationSource.TAG), 2)
+    assert MediaIngestService._prepared_duration_ms(_probe(3000, DurationSource.TAG), None) == 3000
+
+
+async def _live_webm(
+    tmp_path: Path, *, video_seconds: int, audio_seconds: int | None = None
+) -> bytes:
+    """Mux like browser ``MediaRecorder``: no stream or container duration at all."""
+    source = tmp_path / "live.webm"
+    cmd = [
+        _require_ffmpeg(),
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=size=64x48:rate=12:duration={video_seconds}",
+    ]
+    if audio_seconds is not None:
+        cmd += [
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:sample_rate=48000:duration={audio_seconds}",
+        ]
+    cmd += ["-c:v", "libvpx"]
+    if audio_seconds is not None:
+        cmd += ["-c:a", "libopus"]
+    cmd += ["-live", "1", "-f", "webm", str(source)]
+    await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
+    probe = await asyncio.to_thread(
+        subprocess.run,
+        [
+            shutil.which("ffprobe") or "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=duration:stream_tags=DURATION:format=duration",
+            "-of",
+            "json",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    decoded = json.loads(probe.stdout)
+    # Guard the fixture shape itself: the regression is "no duration anywhere".
+    assert "duration" not in decoded["format"]
+    for stream in decoded["streams"]:
+        assert "duration" not in stream
+        assert "DURATION" not in (stream.get("tags") or {})
+    return source.read_bytes()
+
+
+async def test_live_webm_without_duration_metadata_is_prepared(tmp_path: Path) -> None:
+    data = await _live_webm(tmp_path, video_seconds=4)
+    prepared = await _service().prepare_video(data)
+    assert prepared.format is MediaFormat.WEBM
+    assert abs(prepared.duration_ms - 4000) <= 100
+    timestamps = [sample.frame_timestamp_ms or 0 for sample in prepared.hash_set.samples]
+    assert len(timestamps) == 4
+    assert [round(ts / 1000) for ts in timestamps] == [0, 1, 2, 3]
+
+
+async def test_live_webm_duration_is_visual_not_longer_audio(tmp_path: Path) -> None:
+    data = await _live_webm(tmp_path, video_seconds=3, audio_seconds=5)
+    prepared = await _service().prepare_video(data)
+    assert prepared.format is MediaFormat.WEBM
+    assert abs(prepared.duration_ms - 3000) <= 100
+
+
+async def test_live_webm_over_duration_cap_is_rejected_after_remux(tmp_path: Path) -> None:
+    data = await _live_webm(tmp_path, video_seconds=3)
+    service = _service()
+    remux = service._remux
+    remuxed: list[bool] = []
+
+    async def tracking_remux(*args: object, **kwargs: object) -> None:
+        await remux(*args, **kwargs)  # type: ignore[arg-type]
+        remuxed.append(True)
+
+    with (
+        patch.object(service, "_remux", side_effect=tracking_remux),
+        pytest.raises(InvalidMediaError, match="duration exceeds"),
+    ):
+        await service.prepare_video(data, max_duration_seconds=2)
+    # The source has no duration, so only the prepared-probe cap can fire.
+    assert remuxed == [True]
+
+
+async def test_failing_remux_logs_the_error_tail_not_the_banner(tmp_path: Path) -> None:
+    data = await _live_webm(tmp_path, video_seconds=2)
+    truncated = tmp_path / "truncated.webm"
+    truncated.write_bytes(data[:200])
+    service = _service()
+    deadline = asyncio.get_running_loop().time() + 30
+    with capture_logs() as logs, pytest.raises(InvalidMediaError, match="not decodable"):
+        await service._remux(
+            truncated,
+            tmp_path / "prepared.webm",
+            _probe(None, DurationSource.UNKNOWN),
+            deadline,
+        )
+    (event,) = [log for log in logs if log["event"] == "media_ingest.video_not_decodable"]
+    assert event["log_level"] == "warning"
+    assert event["stage"] == "remux"
+    assert "End of file" in event["stderr_excerpt"]
+    assert "configuration:" not in event["stderr_excerpt"]
 
 
 def test_visual_duration_over_container_is_invalid() -> None:

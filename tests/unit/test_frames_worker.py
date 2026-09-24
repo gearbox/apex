@@ -201,7 +201,7 @@ class TestWorkerExtract:
         output_repo = AsyncMock()
         output_repo.get = AsyncMock(return_value=output)
         image_repo = AsyncMock()
-        db_image = MagicMock(id=upload_result.id)
+        db_image = MagicMock(id=upload_result.id, format="png")
         image_repo.create = AsyncMock(return_value=db_image)
 
         probe_result = VideoProbe(duration_ms=10_000, width=640, height=480, codec="h264")
@@ -349,7 +349,7 @@ class TestWorkerExtract:
         output_repo = AsyncMock()
         output_repo.get = AsyncMock(return_value=output)
         image_repo = AsyncMock()
-        image_repo.create = AsyncMock(return_value=MagicMock(id=upload_result.id))
+        image_repo.create = AsyncMock(return_value=MagicMock(id=upload_result.id, format="png"))
 
         probe_result = VideoProbe(duration_ms=10_000, width=640, height=480, codec="h264")
 

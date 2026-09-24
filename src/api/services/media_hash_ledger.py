@@ -55,15 +55,10 @@ class MediaHashLedger:
     @staticmethod
     def _media_type(media_format: str) -> MediaHashMediaType:
         try:
-            return (
-                MediaHashMediaType.VIDEO
-                if MediaFormat(media_format).is_video
-                else MediaHashMediaType.IMAGE
-            )
-        except (TypeError, ValueError):
-            # A row supplied by a narrow mock can omit the format, but real
-            # repositories always persist one of MediaFormat's values.
-            return MediaHashMediaType.IMAGE
+            parsed = MediaFormat(media_format)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("unknown media format for ledger row") from exc
+        return MediaHashMediaType.VIDEO if parsed.is_video else MediaHashMediaType.IMAGE
 
     def _stage(
         self,
