@@ -68,7 +68,13 @@ Positive ffprobe/ffmpeg exits during source probe, remux, prepared-output probe,
 or sampling mean deterministic undecodable input. Signal exits, executable
 absence, timeouts, and OS errors remain operational. A full disk can also make
 ffmpeg exit positively during remux; input writes normally fail first with an
-OS error, and stderr text is not used to classify it. Error excerpts keep the
+OS error, and stderr text is not used to classify it. Creating the per-video
+temporary directory (ENOSPC, inode quota, EACCES, missing `TMPDIR`) and reading
+the container sniff header are inside the same classification: any `OSError`
+there becomes `MediaProcessingError`, never `InvalidMediaError` or a raw 500.
+Every blocking filesystem call (temp-dir create/remove, input write, header and
+output reads) and the per-frame PDQ decode/hash run via `asyncio.to_thread`;
+all video frames are hashed in one worker-thread call. Error excerpts keep the
 tail of stderr (the fatal line comes last); ffmpeg runs with `-hide_banner`,
 and child processes get a null stdin. A user-caused undecodable input is logged
 at warning (`media_ingest.video_not_decodable`, no traceback); provider callers

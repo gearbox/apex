@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import math
@@ -362,9 +363,12 @@ class MediaIngestService:
         self, data: bytes, max_duration_seconds: float | None
     ) -> PreparedVideo:
         deadline = asyncio.get_running_loop().time() + self._video_deadline_seconds
-        temp_dir = Path(tempfile.mkdtemp(prefix="apex-media-ingest-"))
-        input_path = temp_dir / "input.bin"
+        temp_dir: Path | None = None
         try:
+            # Inside the try so ENOSPC/EACCES/missing TMPDIR classify as an
+            # operational failure; off the loop because it is a blocking syscall.
+            temp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="apex-media-ingest-"))
+            input_path = temp_dir / "input.bin"
             await asyncio.to_thread(input_path.write_bytes, data)
             source_probe = await self._probe_video(input_path, deadline)
             # Browser MediaRecorder WebM carries no duration at all; the remux
@@ -398,7 +402,8 @@ class MediaIngestService:
         except (MediaToolError, TimeoutError, OSError) as exc:
             raise MediaProcessingError("video preparation failed operationally") from exc
         finally:
-            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            if temp_dir is not None:
+                await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
 
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - asyncio.get_running_loop().time()
@@ -486,10 +491,11 @@ class MediaIngestService:
             ],
             deadline,
         )
+        # Outside the parse ``try``: an ``OSError`` here is operational and must
+        # reach ``_prepare_video``'s handler, not become ``InvalidMediaError``.
+        header = await asyncio.to_thread(_read_header, path)
         try:
             decoded = json.loads(result.stdout)
-            with path.open("rb") as source:
-                header = source.read(65_536)
             container = self._detect_container(header, decoded["format"]["format_name"])
             streams = decoded["streams"]
             visual = next(
@@ -547,11 +553,9 @@ class MediaIngestService:
         time_base = stream.get("time_base")
         timeline: float | None = None
         if isinstance(time_base, str) and isinstance(duration_ts, (str, int)):
-            try:
+            with contextlib.suppress(ValueError, ZeroDivisionError):
                 numerator, denominator = time_base.split("/", 1)
                 timeline = valid(int(duration_ts) * int(numerator) / int(denominator))
-            except (ValueError, ZeroDivisionError):
-                pass
         candidates.append((timeline, DurationSource.TIMELINE))
         tags = stream.get("tags")
         tag = tags.get("DURATION") if isinstance(tags, dict) else None
@@ -623,7 +627,7 @@ class MediaIngestService:
                 value = (value << 8) | octet
             return value, offset + width
 
-        try:
+        with contextlib.suppress(ValueError):
             size, position = vint(4)
             end = min(position + size, len(data))
             while position < end:
@@ -634,8 +638,6 @@ class MediaIngestService:
                 if element_id == 0x4282:
                     return data[position : position + element_size]
                 position += element_size
-        except ValueError:
-            pass
         return None
 
     async def _remux(
@@ -725,16 +727,27 @@ class MediaIngestService:
             raise InvalidMediaError("video decoded no frames")
         if len(files) != len(timestamps):
             raise MediaProcessingError("video frame/PTS records did not match")
-        first = timestamps[0]
-        samples: list[HashSample] = []
-        for index, (frame_path, timestamp) in enumerate(zip(files, timestamps, strict=True)):
-            normalized_ms = max(0, round((timestamp - first) * 1000))
-            samples.append(
-                HashSample(
-                    pdq=pdq_from_image_bytes(await asyncio.to_thread(frame_path.read_bytes)),
-                    sample_index=index,
-                    frame_timestamp_ms=normalized_ms,
-                )
-            )
+        # One worker-thread call for every frame: native decode + hash stays off
+        # the loop without a thread hop per sample. The video slot bounds it.
+        samples = await asyncio.to_thread(_hash_frames_sync, files, timestamps)
         profile = "uniform-pts-keyframes-v1" if keyframes_only else "uniform-pts-v1"
         return samples, profile
+
+
+def _read_header(path: Path, limit: int = 65_536) -> bytes:
+    """Read the container sniff window; called via ``asyncio.to_thread``."""
+    with path.open("rb") as source:
+        return source.read(limit)
+
+
+def _hash_frames_sync(files: list[Path], timestamps: list[float]) -> list[HashSample]:
+    """Hash sampled frames with PTS offsets from the first frame; runs in a worker thread."""
+    first = timestamps[0]
+    return [
+        HashSample(
+            pdq=pdq_from_image_bytes(path.read_bytes()),
+            sample_index=index,
+            frame_timestamp_ms=max(0, round((timestamp - first) * 1000)),
+        )
+        for index, (path, timestamp) in enumerate(zip(files, timestamps, strict=True))
+    ]

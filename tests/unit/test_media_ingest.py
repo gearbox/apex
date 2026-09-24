@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import io
 import json
 import os
 import shutil
 import struct
 import subprocess
+import threading
 import zlib
 from itertools import pairwise
 from typing import TYPE_CHECKING
@@ -26,6 +28,7 @@ from src.api.services.media_ingest import (
     MediaProcessingError,
     UnsupportedMediaError,
 )
+from src.api.services.media_ingest import service as ingest_service
 from src.api.services.media_ingest.image_strip import strip_image_metadata
 from src.api.services.media_ingest.pdq import pdq_from_image_bytes
 from src.api.services.media_ingest.service import DurationSource, _VideoProbe
@@ -38,6 +41,8 @@ from src.core.enums import MediaFormat
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from src.core.media_hash import PdqHash
 
 pytestmark = pytest.mark.unit
 _FFMPEG = shutil.which("ffmpeg")
@@ -81,7 +86,8 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
 
 
 def _with_webp_chunk(data: bytes, kind: bytes, payload: bytes) -> bytes:
-    assert data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    assert data[:4] == b"RIFF"
+    assert data[8:12] == b"WEBP"
     chunk = (
         kind + struct.pack("<I", len(payload)) + payload + (b"\x00" if len(payload) % 2 else b"")
     )
@@ -180,7 +186,13 @@ class TestImagePreparation:
     async def test_all_descriptive_image_carriers_are_removed(self, image_format: str) -> None:
         canary = b"private-metadata-canary"
         source = _image_bytes(image_format)
-        if image_format == "PNG":
+        if image_format == "JPEG":
+            carriers = b"".join(
+                b"\xff" + bytes([marker]) + struct.pack(">H", len(canary) + 2) + canary
+                for marker in [0xE1, 0xEB, 0xED, 0xFE, 0xE2]
+            )
+            source = source[:2] + carriers + source[2:] + canary
+        elif image_format == "PNG":
             carriers = b"".join(
                 _png_chunk(kind, payload)
                 for kind, payload in [
@@ -192,12 +204,6 @@ class TestImagePreparation:
                 ]
             )
             source = source[:33] + carriers + source[33:]
-        elif image_format == "JPEG":
-            carriers = b"".join(
-                b"\xff" + bytes([marker]) + struct.pack(">H", len(canary) + 2) + canary
-                for marker in [0xE1, 0xEB, 0xED, 0xFE, 0xE2]
-            )
-            source = source[:2] + carriers + source[2:] + canary
         else:
             for kind in [b"EXIF", b"XMP ", b"JUNK"]:
                 source = _with_webp_chunk(source, kind, canary)
@@ -386,7 +392,8 @@ async def test_video_sampling_has_all_pts_records(
         assert stamps == list(range(0, duration * 1000, 1000))
         assert prepared.hash_set.sampling_profile == "uniform-pts-v1"
     else:
-        assert all(b - a >= 1990 for a, b in pairwise(stamps))
+        gaps = [b - a for a, b in pairwise(stamps)]
+        assert min(gaps) >= 1990, gaps
         assert prepared.hash_set.sampling_profile == "uniform-pts-keyframes-v1"
 
 
@@ -907,3 +914,83 @@ async def test_operational_probe_failures_remain_retryable(failure: Exception) -
         pytest.raises(MediaProcessingError),
     ):
         await _service().prepare_video(b"any bytes")
+
+
+async def test_temp_dir_creation_failure_is_operational() -> None:
+    """ENOSPC/EACCES from ``mkdtemp`` is retryable, and nothing is cleaned up."""
+    with (
+        patch(
+            "src.api.services.media_ingest.service.tempfile.mkdtemp",
+            side_effect=OSError(errno.ENOSPC, "No space left on device"),
+        ),
+        patch("src.api.services.media_ingest.service.shutil.rmtree") as rmtree,
+        pytest.raises(MediaProcessingError, match="failed operationally") as raised,
+    ):
+        await _service().prepare_video(b"any bytes")
+    assert isinstance(raised.value.__cause__, OSError)
+    rmtree.assert_not_called()
+
+
+async def test_header_read_failure_is_operational_not_invalid(tmp_path: Path) -> None:
+    source = tmp_path / "video.mp4"
+    await asyncio.to_thread(
+        subprocess.run,
+        [
+            _require_ffmpeg(),
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10",
+            "-t",
+            "1",
+            "-an",
+            "-c:v",
+            "mpeg4",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    with (
+        patch.object(ingest_service, "_read_header", side_effect=PermissionError("denied")),
+        pytest.raises(MediaProcessingError, match="failed operationally") as raised,
+    ):
+        await _service().prepare_video(source.read_bytes())
+    assert isinstance(raised.value.__cause__, PermissionError)
+
+
+async def test_video_frame_pdq_runs_off_the_event_loop(tmp_path: Path) -> None:
+    source = tmp_path / "video.mp4"
+    await asyncio.to_thread(
+        subprocess.run,
+        [
+            _require_ffmpeg(),
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10",
+            "-t",
+            "3",
+            "-an",
+            "-c:v",
+            "mpeg4",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    loop_thread = threading.get_ident()
+    callers: list[int] = []
+
+    def recording_pdq(data: bytes) -> PdqHash:
+        callers.append(threading.get_ident())
+        return pdq_from_image_bytes(data)
+
+    with patch.object(ingest_service, "pdq_from_image_bytes", side_effect=recording_pdq):
+        prepared = await _service().prepare_video(source.read_bytes())
+
+    assert len(callers) == len(prepared.hash_set.samples)
+    assert len(callers) == 3
+    assert loop_thread not in callers

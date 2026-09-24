@@ -152,10 +152,7 @@ def _valid_jfif(payload: bytes) -> bytes | None:
         return None
     x_thumb, y_thumb = payload[12], payload[13]
     expected = 14 + 3 * x_thumb * y_thumb
-    if len(payload) != expected:
-        return None
-    # Keep version, units and density but remove the embedded RGB thumbnail.
-    return payload[:12] + b"\x00\x00"
+    return None if len(payload) != expected else payload[:12] + b"\x00\x00"
 
 
 def _valid_icc(payload: bytes) -> tuple[int, int] | None:
@@ -339,18 +336,17 @@ def strip_webp(data: bytes) -> bytes:
         elif kind == b"ALPH" and not chunk_payload:
             raise InvalidMediaError("invalid empty WebP ALPH chunk")
         clean.append((kind, chunk_payload))
-    if not clean or not any(kind in {b"VP8 ", b"VP8L", b"ANMF"} for kind, _ in clean):
+    if not clean or all(kind not in {b"VP8 ", b"VP8L", b"ANMF"} for kind, _ in clean):
         raise InvalidMediaError("WebP has no image payload")
     if vp8x_index is not None:
         flags = bytearray(clean[vp8x_index][1])
         flags[0] &= ~0x0C  # EXIF and XMP are deliberately removed.
         clean[vp8x_index] = (b"VP8X", bytes(flags))
+        if saw_anim and not (clean[vp8x_index][1][0] & 0x02):
+            raise InvalidMediaError(
+                "WebP animation flag is missing or animation chunks are inconsistent"
+            )
     if saw_anim != saw_frame or (saw_anim and vp8x_index is None):
         raise InvalidMediaError("inconsistent WebP animation chunks")
-    if saw_anim:
-        if vp8x_index is None:  # pragma: no cover - guarded above for type narrowing
-            raise InvalidMediaError("inconsistent WebP animation chunks")
-        if not (clean[vp8x_index][1][0] & 0x02):
-            raise InvalidMediaError("WebP animation flag is missing")
     body = b"".join(_webp_chunk(kind, payload) for kind, payload in clean)
     return b"RIFF" + struct.pack("<I", len(body) + 4) + b"WEBP" + body

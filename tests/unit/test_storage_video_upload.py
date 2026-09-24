@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import errno
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from litestar.status_codes import HTTP_503_SERVICE_UNAVAILABLE
 
 from src.api.schemas.user_content import UploadedImage
-from src.api.services.media_ingest import InvalidMediaError, MediaProcessingError, PreparedVideo
+from src.api.services.media_ingest import (
+    InvalidMediaError,
+    MediaIngestService,
+    MediaProcessingError,
+    PreparedVideo,
+)
 from src.api.services.user_content import (
     UserContentService,
     UserContentUnavailableError,
@@ -287,4 +294,36 @@ class TestUploadVideoRejected:
                 filename="clip.mp4",
                 content_type="video/mp4",
             )
+        storage.upload.assert_not_awaited()
+
+
+class TestUploadVideoRoute:
+    async def test_temp_dir_failure_returns_503_service_unavailable(self) -> None:
+        """A full/unwritable temp dir is local unavailability (503), not a 500."""
+        from src.api.routes.storage import StorageController
+
+        service, storage = _make_service()
+        service._media_ingestor = MediaIngestService(
+            max_image_megapixels=10, max_input_bytes=2 * 1024 * 1024
+        )
+        upload_file = AsyncMock()
+        upload_file.content_type = "video/mp4"
+        upload_file.filename = "clip.mp4"
+        upload_file.read = AsyncMock(return_value=b"fake mp4 bytes")
+        form = MagicMock()
+        form.data = upload_file
+
+        with patch(
+            "src.api.services.media_ingest.service.tempfile.mkdtemp",
+            side_effect=OSError(errno.ENOSPC, "No space left on device"),
+        ):
+            response = await StorageController.upload_image.fn(
+                MagicMock(),
+                current_user_id=uuid4(),
+                user_content=service,
+                data=form,
+            )
+
+        assert response.status_code == HTTP_503_SERVICE_UNAVAILABLE
+        assert response.content.error == "service_unavailable"
         storage.upload.assert_not_awaited()
