@@ -1239,6 +1239,10 @@ Response: {
 }
 Status:   201 Created
 Errors:   400 (invalid_file_type | file_too_large | empty_file | validation_error)
+          413 (file_too_large — decoded image exceeds the pixel cap)
+          502 (upstream_error — object storage failed; message "Storage backend unavailable")
+          503 (service_unavailable — media processing out of capacity or failed
+               operationally; retryable; message "Media processing is temporarily unavailable")
 Note:     Returns image id used for I2I/I2V generation requests, or (for
           videos) as source_upload_id on POST /v1/frames/preview|extract (§9b).
           Thumbnail/poster generation is non-fatal; variants may be empty on failure.
@@ -3387,7 +3391,7 @@ The `error` code is always a stable snake_case string — treat it like an enum.
 | 409 | `conflict`, `refund_not_eligible`, `organization_balance_nonzero`, `no_active_gpu_session`, `session_already_exists`, `invalid_state`, `jobs_in_flight` | `balance`, `in_flight_count` |
 | 422 | `validation_error`, `moderation`, `provider_moderation_rejected` | `provider`, `policy` (Apex moderation only) |
 | 429 | `too_many_requests`, `rate_limited`, `provider_rate_limited` | `retry_after` (global rate limit only) |
-| 502 | `provider_malformed_response`, `provider_output_not_delivered` | — |
+| 502 | `upstream_error`, `provider_malformed_response`, `provider_output_not_delivered` | — |
 | 503 | `service_unavailable`, `no_gpu_capacity`, `provisioning_failed`, `provider_timeout`, `provider_unavailable`, `provider_execution_failed`, `generation_session_terminated`, `provider_authentication_failed`, `provider_unknown` | — |
 
 **Example responses:**

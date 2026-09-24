@@ -2,6 +2,7 @@ from .models import (
     Base,
     GenerationJob,
     GenerationOutput,
+    MediaHash,
     Organization,
     OrganizationMember,
     Payment,
@@ -15,6 +16,7 @@ from .models import (
 from .repositories import (
     BillingRepository,
     JobRepository,
+    MediaHashRepository,
     OutputRepository,
     UserImageRepository,
     UserRepository,
@@ -27,15 +29,14 @@ from .session import (
 )
 
 __all__ = [
-    # Models
     "Base",
-    # Repositories
     "BillingRepository",
-    # Session management
     "DatabaseManager",
     "GenerationJob",
     "GenerationOutput",
     "JobRepository",
+    "MediaHash",
+    "MediaHashRepository",
     "Organization",
     "OrganizationMember",
     "OutputRepository",

@@ -37,6 +37,16 @@ def settings() -> MagicMock:
     s.redis_operational_socket_connect_timeout_seconds = 0.5
     s.redis_operational_socket_timeout_seconds = 0.75
     s.redis_operational_max_connections = 20
+    s.max_upload_size_mb = 20
+    s.image_max_input_megapixels = 100.0
+    s.media_ingest_image_concurrency = 4
+    s.media_ingest_video_concurrency = 2
+    s.media_ingest_admission_wait_seconds = 10.0
+    s.media_ingest_stage_timeout_seconds = 30.0
+    s.media_ingest_video_deadline_seconds = 90.0
+    s.media_ingest_video_max_frames = 60
+    s.media_ingest_video_max_edge = 512
+    s.media_ingest_max_animation_frames = 100
     return s
 
 

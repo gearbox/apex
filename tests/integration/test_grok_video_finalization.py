@@ -18,6 +18,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.services.billing import BillingService
+from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.grok import GrokVideoResult
 from src.api.services.grok.job_service import (
     GrokJobService,
@@ -27,11 +28,15 @@ from src.api.services.job_state_transition import (
     GenerationOutputData,
     JobStateTransitionService,
 )
+from src.api.services.media_ingest import InvalidMediaError, MediaProcessingError
 from src.core.enums import GenerationType, JobStatus, Provider, TransactionType
+from src.core.media_hash import HashSample, HashSet, PdqHash
 from src.core.uid import new_id
 from src.db.models.billing import TokenAccount, TokenTransaction
+from src.db.models.media_hash import MediaHash
 from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.models.user import User
+from tests.media_ingest_support import make_media_ingestor
 
 pytestmark = pytest.mark.asyncio
 
@@ -145,6 +150,17 @@ def _materialized_video(job_id: UUID) -> _MaterializedVideo:
                 format="mp4",
                 output_index=0,
                 expires_at=datetime.now(UTC) + timedelta(days=7),
+                hash_set=HashSet(
+                    profile_id="pdq-video-rgb-white-v2-edge-512",
+                    sampling_profile="uniform-pts-v1",
+                    samples=(
+                        HashSample(
+                            pdq=PdqHash(bits=b"\x00" * 32, quality=100),
+                            sample_index=0,
+                            frame_timestamp_ms=0,
+                        ),
+                    ),
+                ),
             )
         ],
         storage_keys=[],
@@ -156,7 +172,12 @@ async def test_concurrent_finalizers_materialize_and_persist_one_output(
 ) -> None:
     """A claim owner blocks a concurrent finalizer before it can write output."""
     seed = await _seed_video_job(db_engine)
-    service = GrokJobService(MagicMock(), MagicMock(), billing_service=BillingService())
+    service = GrokJobService(
+        MagicMock(),
+        MagicMock(),
+        billing_service=BillingService(),
+        media_ingestor=make_media_ingestor(),
+    )
     materializer_started = asyncio.Event()
     allow_materializer_to_finish = asyncio.Event()
     materializer_calls = 0
@@ -207,6 +228,91 @@ async def test_concurrent_finalizers_materialize_and_persist_one_output(
             assert job is not None
             assert job.finalization_claim_token is None
             assert outputs == 1
+            ledger = (
+                (
+                    await verify_session.execute(
+                        select(MediaHash).where(MediaHash.job_id == seed.job_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(ledger) == 1
+            assert ledger[0].user_id == seed.user_id
+            assert ledger[0].source_kind == "output"
+            assert ledger[0].source_media_type == "video"
+    finally:
+        await _cleanup(db_engine, seed)
+
+
+@pytest.mark.parametrize("policy,expected_refunds", [("refund", 1), ("charge", 0)])
+async def test_invalid_video_settles_on_first_attempt_per_billing_policy(
+    db_engine: AsyncEngine, policy: str, expected_refunds: int
+) -> None:
+    seed = await _seed_video_job(db_engine, with_debit=True)
+    materialize = AsyncMock(side_effect=InvalidMediaError("video is not decodable"))
+    service = GrokJobService(
+        MagicMock(),
+        MagicMock(),
+        billing_service=BillingService(),
+        billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
+            "refund",
+            policy,  # type: ignore[arg-type]
+        ),
+        media_ingestor=make_media_ingestor(),
+    )
+    try:
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            with patch.object(service, "_materialize_video_result", new=materialize):
+                job = await service._finalize_completed_video(
+                    session,
+                    job_id=seed.job_id,
+                    result=GrokVideoResult(url="https://provider.invalid/video.mp4"),
+                    product_id="vex",
+                )
+            assert job.status == JobStatus.FAILED.value
+            assert job.failure_code == "provider_output_not_delivered"
+        materialize.assert_awaited_once()
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            refunds = await session.scalar(
+                select(func.count())
+                .select_from(TokenTransaction)
+                .where(
+                    TokenTransaction.job_id == seed.job_id,
+                    TokenTransaction.transaction_type == TransactionType.REFUND.value,
+                )
+            )
+            assert refunds == expected_refunds
+    finally:
+        await _cleanup(db_engine, seed)
+
+
+async def test_operational_video_failure_releases_claim_for_retry(db_engine: AsyncEngine) -> None:
+    seed = await _seed_video_job(db_engine)
+    materialize = AsyncMock(side_effect=MediaProcessingError("timeout"))
+    service = GrokJobService(
+        MagicMock(),
+        MagicMock(),
+        billing_service=BillingService(),
+        media_ingestor=make_media_ingestor(),
+    )
+    try:
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            with (
+                patch.object(service, "_materialize_video_result", new=materialize),
+                pytest.raises(MediaProcessingError),
+            ):
+                await service._finalize_completed_video(
+                    session,
+                    job_id=seed.job_id,
+                    result=GrokVideoResult(url="https://provider.invalid/video.mp4"),
+                    product_id="vex",
+                )
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            job = await session.get(GenerationJob, seed.job_id)
+            assert job is not None
+            assert job.status == JobStatus.RUNNING.value
+            assert job.finalization_claim_token is None
     finally:
         await _cleanup(db_engine, seed)
 
@@ -220,7 +326,12 @@ async def test_expired_finalization_lease_is_recovered_by_a_later_poller(
         finalization_claim_token="stale-owner",
         finalization_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
-    service = GrokJobService(MagicMock(), MagicMock(), billing_service=BillingService())
+    service = GrokJobService(
+        MagicMock(),
+        MagicMock(),
+        billing_service=BillingService(),
+        media_ingestor=make_media_ingestor(),
+    )
 
     async def materialize(**_: object) -> _MaterializedVideo:
         return _materialized_video(seed.job_id)
@@ -345,6 +456,7 @@ async def test_workerless_read_through_settles_an_overdue_video_once(
         grok_client,
         MagicMock(),
         billing_service=BillingService(),
+        media_ingestor=make_media_ingestor(),
         max_poll_time=60,
     )
 
@@ -383,7 +495,12 @@ async def test_current_claim_owner_completes_after_lease_expiry_without_takeover
 ) -> None:
     """Lease expiry permits takeover; it does not invalidate the same token."""
     seed = await _seed_video_job(db_engine)
-    service = GrokJobService(MagicMock(), MagicMock(), billing_service=BillingService())
+    service = GrokJobService(
+        MagicMock(),
+        MagicMock(),
+        billing_service=BillingService(),
+        media_ingestor=make_media_ingestor(),
+    )
     materializer_started = asyncio.Event()
     allow_materializer_to_finish = asyncio.Event()
 

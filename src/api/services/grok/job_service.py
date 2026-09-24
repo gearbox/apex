@@ -43,6 +43,8 @@ from src.api.services.grok import (
 )
 from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.job_state_transition import GenerationOutputData, JobStateTransitionService
+from src.api.services.media_hash_ledger import MediaHashLedger
+from src.api.services.media_ingest import ImageIngestPolicy, InvalidMediaError, MediaIngestor
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
@@ -145,6 +147,7 @@ class GrokJobService:
         ops_event_bus: OpsEventBus | None = None,
         max_poll_time: int = 600,
         finalization_lease_seconds: int = 120,
+        media_ingestor: MediaIngestor,
         billing_policy: ProviderBillingPolicyRegistry | None = None,
     ) -> None:
         """Initialize Grok job service.
@@ -162,6 +165,7 @@ class GrokJobService:
         self._ops_event_bus = ops_event_bus
         self._max_poll_time = max_poll_time
         self._finalization_lease_seconds = finalization_lease_seconds
+        self._media_ingestor = media_ingestor
         self._billing_policy = billing_policy or DEFAULT_PROVIDER_BILLING_POLICIES
         self._http_client: httpx.AsyncClient | None = None
 
@@ -537,14 +541,9 @@ class GrokJobService:
         response.raise_for_status()
         image_data = response.content
 
-        # Determine format from content-type
-        content_type = response.headers.get("content-type", "image/jpeg")
-        if "png" in content_type:
-            image_format = MediaFormat.PNG
-        elif "webp" in content_type:
-            image_format = MediaFormat.WEBP
-        else:
-            image_format = MediaFormat.JPEG
+        prepared = await self._media_ingestor.prepare_image(
+            image_data, policy=ImageIngestPolicy.PROVIDER
+        )
 
         # Upload to R2
         output_id = new_id()
@@ -552,27 +551,31 @@ class GrokJobService:
             user_id=user_id,
             file_id=output_id,
             storage_type=StorageType.OUTPUT,
-            format=image_format,
+            format=prepared.format,
             job_id=job_id,
         )
 
-        await self._put_output_object(storage_key, image_data, image_format.content_type)
+        await self._put_output_object(storage_key, prepared.data, prepared.content_type)
 
         # Create output record
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
-        await output_repo.create(
+        output = await output_repo.create(
             id=output_id,
             user_id=user_id,
             job_id=job_id,
             storage_key=storage_key,
-            content_type=image_format.content_type,
-            size_bytes=len(image_data),
-            format=image_format.value,
+            content_type=prepared.content_type,
+            size_bytes=len(prepared.data),
+            format=prepared.format.value,
             output_index=output_index,
             expires_at=expires_at,
             input_image_id=input_image_id,
             product_id=product_id,
+            width=prepared.width,
+            height=prepared.height,
         )
+        await MediaHashLedger(session).register_output(output, prepared.hash_set)
+        await session.flush()
 
         logger.debug("grok.image_output_stored", output_id=str(output_id), job_id=str(job_id))
 
@@ -583,7 +586,7 @@ class GrokJobService:
             job_id=job_id,
             parent_output_id=output_id,
             parent_output_index=output_index,
-            source_bytes=image_data,
+            source_bytes=prepared.data,
             expires_at=expires_at,
             product_id=product_id,
         )
@@ -1043,53 +1046,6 @@ class GrokJobService:
                 failure=failure,
             )
 
-    async def _store_video_result(
-        self,
-        *,
-        session: AsyncSession,  # noqa: ARG002
-        output_repo: OutputRepository,
-        user_id: UUID,
-        job_id: UUID,
-        result: GrokVideoResult,
-        product_id: str,
-    ) -> None:
-        """Legacy helper used by image/video storage unit tests.
-
-        Production polling uses ``_finalize_completed_video`` so that it owns
-        a durable claim before calling the materializer below.  Keeping this
-        thin wrapper preserves the independently useful storage helper while
-        ensuring its rows mirror the claim-owned path.
-        """
-        materialized = await self._materialize_video_result(
-            user_id=user_id,
-            job_id=job_id,
-            result=result,
-            product_id=product_id,
-        )
-        try:
-            for output in sorted(materialized.outputs, key=lambda item: item.is_thumbnail):
-                await output_repo.create(
-                    id=output.id,
-                    user_id=user_id,
-                    job_id=job_id,
-                    storage_key=output.storage_key,
-                    content_type=output.content_type,
-                    size_bytes=output.size_bytes,
-                    format=output.format,
-                    output_index=output.output_index,
-                    expires_at=output.expires_at,
-                    input_image_id=None,
-                    is_thumbnail=output.is_thumbnail,
-                    parent_output_id=output.parent_output_id,
-                    thumbnail_max_edge=output.thumbnail_max_edge,
-                    width=output.width,
-                    height=output.height,
-                    product_id=product_id,
-                )
-        except Exception:
-            await self._cleanup_materialized_objects(materialized.storage_keys)
-            raise
-
     def _is_video_job_overdue(self, job: GenerationJob) -> bool:
         """TTL runs from provider acceptance, falling back to submission time."""
         basis = job.started_at or job.created_at
@@ -1196,6 +1152,42 @@ class GrokJobService:
             else:
                 await self._release_video_finalization_claim(session, job_id, claim_token)
             return await self._refresh_authoritative_job(session, job_id)
+        except InvalidMediaError:
+            await session.rollback()
+            if materialized is not None:
+                await self._reconcile_materialization_attempt(
+                    session,
+                    job_id=job_id,
+                    product_id=product_id,
+                    materialized=materialized,
+                )
+                raise
+            logger.exception("grok.video_output_invalid", job_id=str(job_id))
+            # The ordinary failure transition deliberately cannot preempt a
+            # live finalization claim. Relinquish our own claim before using
+            # that existing settlement path.
+            await self._release_video_finalization_claim(session, job_id, claim_token)
+            failure = apply_provider_billing_policy(
+                ProviderFailure(
+                    kind=ProviderFailureKind.OUTPUT_NOT_DELIVERED,
+                    provider=Provider.GROK,
+                    sanitized_message=ProviderFailure.safe_message_for_kind(
+                        ProviderFailureKind.OUTPUT_NOT_DELIVERED
+                    ),
+                    provider_request_accepted=True,
+                ),
+                registry=self._billing_policy,
+            )
+            return await self.settle_video_poll_outcome(
+                session,
+                job_id=job_id,
+                outcome=VideoPollOutcome(
+                    status=VideoPollStatus.FAILED,
+                    error_message=failure.sanitized_message,
+                    failure=failure,
+                ),
+                product_id=product_id,
+            )
         except Exception:
             # ``commit()`` can raise after PostgreSQL has committed, and a
             # post-commit refresh can fail too.  Re-read in a new transaction
@@ -1293,13 +1285,14 @@ class GrokJobService:
         response = await self.http_client.get(result.url)
         response.raise_for_status()
         video_data = response.content
+        prepared = await self._media_ingestor.prepare_video(video_data)
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
         output_id = new_id()
         storage_key = self._storage.build_storage_key(
             user_id=user_id,
             file_id=output_id,
             storage_type=StorageType.OUTPUT,
-            format=MediaFormat.MP4,
+            format=prepared.format,
             job_id=job_id,
         )
         artifacts: list[tuple[GenerationOutputData, bytes]] = [
@@ -1307,20 +1300,24 @@ class GrokJobService:
                 GenerationOutputData(
                     id=output_id,
                     storage_key=storage_key,
-                    content_type=MediaFormat.MP4.content_type,
-                    size_bytes=len(video_data),
-                    format=MediaFormat.MP4.value,
+                    content_type=prepared.content_type,
+                    size_bytes=len(prepared.data),
+                    format=prepared.format.value,
                     output_index=0,
                     expires_at=expires_at,
+                    width=prepared.width,
+                    height=prepared.height,
+                    duration_ms=prepared.duration_ms,
+                    hash_set=prepared.hash_set,
                 ),
-                video_data,
+                prepared.data,
             )
         ]
 
         # Derive all thumbnails before the first upload so their keys are also
         # durable before they can exist in R2. Thumbnail generation is still
         # best-effort; a failed upload merely omits that output record.
-        frame_bytes = await extract_video_thumbnail(video_data)
+        frame_bytes = await extract_video_thumbnail(prepared.data)
         if frame_bytes:
             for generated in await make_image_thumbnails(frame_bytes):
                 thumbnail_id = new_id()

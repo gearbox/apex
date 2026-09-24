@@ -18,6 +18,7 @@ from litestar.status_codes import (
     HTTP_404_NOT_FOUND,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     HTTP_502_BAD_GATEWAY,
+    HTTP_503_SERVICE_UNAVAILABLE,
 )
 
 from src.api.schemas.media import MediaObject, MediaOriginal
@@ -27,6 +28,7 @@ from src.api.services.user_content import (
     UserContentNotFoundError,
     UserContentStorageError,
     UserContentTooLargeError,
+    UserContentUnavailableError,
     UserContentValidationError,
 )
 from src.core.enums import OutputMediaType
@@ -247,8 +249,8 @@ class TestUploadImageHandler:
 
     async def test_storage_error_returns_502_upstream_error(self) -> None:
         """D-B3: UserContentStorageError maps to 502, not 500 and not 400 —
-        an R2 outage is not the client's fault. The message must not echo
-        the underlying storage exception text."""
+        an R2 outage is an upstream failure, not the client's fault. The
+        message must not echo the underlying storage exception text."""
         from src.api.routes.storage import StorageController
 
         user_content = AsyncMock()
@@ -267,6 +269,27 @@ class TestUploadImageHandler:
         assert response.content.error == "upstream_error"
         assert response.content.message == "Storage backend unavailable"
         assert "StorageUploadError" not in response.content.message
+
+    async def test_media_unavailable_returns_503_service_unavailable(self) -> None:
+        """Ingest capacity/operational failures are local unavailability (503),
+        distinct from an upstream R2 failure (502)."""
+        from src.api.routes.storage import StorageController
+
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(
+            side_effect=UserContentUnavailableError("video preparation is temporarily unavailable")
+        )
+
+        response = await StorageController.upload_image.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            user_content=user_content,
+            data=_upload_form(),
+        )
+
+        assert response.status_code == HTTP_503_SERVICE_UNAVAILABLE
+        assert response.content.error == "service_unavailable"
+        assert response.content.message == "Media processing is temporarily unavailable"
 
     async def test_none_filename_defaults_to_data_png(self) -> None:
         from src.api.routes.storage import StorageController

@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+import errno
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from litestar.status_codes import HTTP_503_SERVICE_UNAVAILABLE
 
 from src.api.schemas.user_content import UploadedImage
-from src.api.services.frames.ffmpeg import FfprobeError, VideoProbe
-from src.api.services.user_content import UserContentService, UserContentValidationError
+from src.api.services.media_ingest import (
+    InvalidMediaError,
+    MediaIngestService,
+    MediaProcessingError,
+    PreparedVideo,
+)
+from src.api.services.user_content import (
+    UserContentService,
+    UserContentUnavailableError,
+    UserContentValidationError,
+)
+from src.core.enums import MediaFormat
+from src.core.media_hash import HashSample, HashSet, PdqHash
 
 pytestmark = pytest.mark.unit
 
@@ -34,24 +47,58 @@ def _make_db_video(**overrides: object) -> MagicMock:
     img.width = 1920
     img.height = 1080
     img.thumbnail_max_edge = None
+    img.format = "mp4"
     for k, v in overrides.items():
         setattr(img, k, v)
     return img
 
 
+def _prepared_video(*, format: MediaFormat = MediaFormat.MP4) -> PreparedVideo:
+    return PreparedVideo(
+        data=b"prepared-video",
+        format=format,
+        width=1280,
+        height=720,
+        duration_ms=8000,
+        hash_set=HashSet(
+            profile_id="pdq-image-rgb-white-v1",
+            sampling_profile="fps-1-v1",
+            samples=(
+                HashSample(
+                    pdq=PdqHash(bits=b"\x00" * 32, quality=100),
+                    sample_index=0,
+                    frame_timestamp_ms=0,
+                ),
+            ),
+        ),
+    )
+
+
 def _make_service(*, video_max_seconds: int = 300) -> tuple[UserContentService, AsyncMock]:
     storage = AsyncMock()
     session = AsyncMock()
+    session.add_all = MagicMock()
+    session.begin_nested = MagicMock(side_effect=_async_context_manager)
+    media_ingestor = MagicMock()
+    media_ingestor.prepare_video = AsyncMock(return_value=_prepared_video())
     service = UserContentService(
         storage=storage,
         session=session,
         product_id="vex",
         video_max_seconds=video_max_seconds,
+        media_ingestor=media_ingestor,
     )
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
     service._job_repo = AsyncMock()
     return service, storage
+
+
+def _async_context_manager() -> MagicMock:
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=None)
+    context.__aexit__ = AsyncMock(return_value=False)
+    return context
 
 
 class TestUploadVideoAccepted:
@@ -61,12 +108,7 @@ class TestUploadVideoAccepted:
         db_video = _make_db_video(width=1280, height=720)
         service._image_repo.create = AsyncMock(return_value=db_video)
 
-        probe_result = VideoProbe(duration_ms=8000, width=1280, height=720, codec="h264")
         with (
-            patch(
-                "src.api.services.user_content.ffmpeg_probe",
-                AsyncMock(return_value=probe_result),
-            ),
             patch(
                 "src.api.services.user_content.extract_video_thumbnail",
                 AsyncMock(return_value=None),
@@ -74,7 +116,7 @@ class TestUploadVideoAccepted:
         ):
             result = await service.upload_image(
                 user_id=uuid4(),
-                data=b"fake mp4 bytes",
+                data=b"private-metadata-canary",
                 filename="clip.mp4",
                 content_type="video/mp4",
             )
@@ -85,6 +127,7 @@ class TestUploadVideoAccepted:
         assert create_kwargs["width"] == 1280
         assert create_kwargs["height"] == 720
         assert create_kwargs["format"] == "mp4"
+        assert storage.upload.await_args.kwargs["data"] == b"prepared-video"
 
     async def test_upload_video_non_latin_filename_succeeds(self) -> None:
         """Issue B regression: a non-latin filename must not reach R2 metadata
@@ -95,12 +138,7 @@ class TestUploadVideoAccepted:
         db_video = _make_db_video()
         service._image_repo.create = AsyncMock(return_value=db_video)
 
-        probe_result = VideoProbe(duration_ms=8000, width=1280, height=720, codec="h264")
         with (
-            patch(
-                "src.api.services.user_content.ffmpeg_probe",
-                AsyncMock(return_value=probe_result),
-            ),
             patch(
                 "src.api.services.user_content.extract_video_thumbnail",
                 AsyncMock(return_value=None),
@@ -124,13 +162,11 @@ class TestUploadVideoAccepted:
         storage.upload = AsyncMock(return_value=_make_upload_result(ext="mov"))
         db_video = _make_db_video(content_type="video/quicktime")
         service._image_repo.create = AsyncMock(return_value=db_video)
+        service._media_ingestor.prepare_video = AsyncMock(
+            return_value=_prepared_video(format=MediaFormat.MOV)
+        )
 
-        probe_result = VideoProbe(duration_ms=3000, width=640, height=480, codec="hevc")
         with (
-            patch(
-                "src.api.services.user_content.ffmpeg_probe",
-                AsyncMock(return_value=probe_result),
-            ),
             patch(
                 "src.api.services.user_content.extract_video_thumbnail",
                 AsyncMock(return_value=None),
@@ -156,7 +192,6 @@ class TestUploadVideoAccepted:
         thumb_db = MagicMock()
         service._image_repo.create = AsyncMock(side_effect=[db_video, thumb_db])
 
-        probe_result = VideoProbe(duration_ms=5000, width=800, height=600, codec="h264")
         generated = MagicMock()
         generated.spec.label = "sm"
         generated.spec.max_edge = 150
@@ -167,10 +202,6 @@ class TestUploadVideoAccepted:
         generated.result.height = 112
 
         with (
-            patch(
-                "src.api.services.user_content.ffmpeg_probe",
-                AsyncMock(return_value=probe_result),
-            ),
             patch(
                 "src.api.services.user_content.extract_video_thumbnail",
                 AsyncMock(return_value=b"jpegposterbytes"),
@@ -199,12 +230,7 @@ class TestUploadVideoAccepted:
         db_video = _make_db_video()
         service._image_repo.create = AsyncMock(return_value=db_video)
 
-        probe_result = VideoProbe(duration_ms=5000, width=800, height=600, codec="h264")
         with (
-            patch(
-                "src.api.services.user_content.ffmpeg_probe",
-                AsyncMock(return_value=probe_result),
-            ),
             patch(
                 "src.api.services.user_content.extract_video_thumbnail",
                 AsyncMock(side_effect=RuntimeError("ffmpeg crashed")),
@@ -225,14 +251,12 @@ class TestUploadVideoAccepted:
 class TestUploadVideoRejected:
     async def test_upload_video_over_duration_cap_rejected(self) -> None:
         service, _storage = _make_service(video_max_seconds=60)
-        probe_result = VideoProbe(duration_ms=120_000, width=640, height=480, codec="h264")
+        service._media_ingestor.prepare_video = AsyncMock(
+            side_effect=InvalidMediaError("video duration exceeds the configured limit")
+        )
 
         with (
-            patch(
-                "src.api.services.user_content.ffmpeg_probe",
-                AsyncMock(return_value=probe_result),
-            ),
-            pytest.raises(UserContentValidationError, match="exceeds maximum"),
+            pytest.raises(UserContentValidationError, match="exceeds"),
         ):
             await service.upload_image(
                 user_id=uuid4(),
@@ -243,13 +267,12 @@ class TestUploadVideoRejected:
 
     async def test_upload_fake_video_mime_rejected_by_probe(self) -> None:
         service, _storage = _make_service()
+        service._media_ingestor.prepare_video = AsyncMock(
+            side_effect=InvalidMediaError("video is not decodable")
+        )
 
         with (
-            patch(
-                "src.api.services.user_content.ffmpeg_probe",
-                AsyncMock(side_effect=FfprobeError("Invalid data found when processing input")),
-            ),
-            pytest.raises(UserContentValidationError, match="not a decodable video"),
+            pytest.raises(UserContentValidationError, match="not decodable"),
         ):
             await service.upload_image(
                 user_id=uuid4(),
@@ -257,3 +280,50 @@ class TestUploadVideoRejected:
                 filename="fake.mp4",
                 content_type="video/mp4",
             )
+
+    async def test_upload_video_capacity_exhausted_is_unavailable(self) -> None:
+        service, storage = _make_service()
+        service._media_ingestor.prepare_video = AsyncMock(
+            side_effect=MediaProcessingError("video preparation capacity is exhausted")
+        )
+
+        with pytest.raises(UserContentUnavailableError, match="temporarily unavailable"):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=b"fake mp4 bytes",
+                filename="clip.mp4",
+                content_type="video/mp4",
+            )
+        storage.upload.assert_not_awaited()
+
+
+class TestUploadVideoRoute:
+    async def test_temp_dir_failure_returns_503_service_unavailable(self) -> None:
+        """A full/unwritable temp dir is local unavailability (503), not a 500."""
+        from src.api.routes.storage import StorageController
+
+        service, storage = _make_service()
+        service._media_ingestor = MediaIngestService(
+            max_image_megapixels=10, max_input_bytes=2 * 1024 * 1024
+        )
+        upload_file = AsyncMock()
+        upload_file.content_type = "video/mp4"
+        upload_file.filename = "clip.mp4"
+        upload_file.read = AsyncMock(return_value=b"fake mp4 bytes")
+        form = MagicMock()
+        form.data = upload_file
+
+        with patch(
+            "src.api.services.media_ingest.service.tempfile.mkdtemp",
+            side_effect=OSError(errno.ENOSPC, "No space left on device"),
+        ):
+            response = await StorageController.upload_image.fn(
+                MagicMock(),
+                current_user_id=uuid4(),
+                user_content=service,
+                data=form,
+            )
+
+        assert response.status_code == HTTP_503_SERVICE_UNAVAILABLE
+        assert response.content.error == "service_unavailable"
+        storage.upload.assert_not_awaited()

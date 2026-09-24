@@ -1203,6 +1203,54 @@ class Settings(BaseSettings):
             "against decompression-bomb uploads and i2i remix inputs."
         ),
     )
+    media_ingest_image_concurrency: int = Field(
+        default=4,
+        ge=1,
+        le=32,
+        description="Per-process concurrent image preparation limit.",
+    )
+    media_ingest_video_concurrency: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Per-process concurrent video preparation limit.",
+    )
+    media_ingest_admission_wait_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        le=120,
+        description="Maximum wait for a process-local media preparation slot.",
+    )
+    media_ingest_stage_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=300,
+        description="Maximum wall-clock duration of one ffprobe/ffmpeg stage.",
+    )
+    media_ingest_video_deadline_seconds: float = Field(
+        default=90.0,
+        gt=0,
+        le=600,
+        description="End-to-end video preparation deadline, including sampling.",
+    )
+    media_ingest_video_max_frames: int = Field(
+        default=60,
+        ge=1,
+        le=60,
+        description="Maximum decoded video frames retained for PDQ sampling.",
+    )
+    media_ingest_video_max_edge: int = Field(
+        default=512,
+        ge=1,
+        le=512,
+        description="Maximum edge of square-pixel video frames passed to PDQ.",
+    )
+    media_ingest_max_animation_frames: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description="Maximum preserved APNG/WebP animation frames accepted at ingest.",
+    )
 
     # -------------------------------------------------------------------------
     # Video frame extraction
@@ -1701,6 +1749,23 @@ class Settings(BaseSettings):
                 "frame_extract_ffmpeg_timeout_seconds "
                 f"(got stale={self.frame_extract_stale_running_seconds}, "
                 f"worst_case={worst_case_seconds})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_media_ingest_video_budget(self) -> "Settings":
+        """Keep one video preparation budget inside Grok's owned lease.
+
+        The finalizer also needs download, thumbnails, storage and database
+        time, so preparation may consume at most three quarters of its lease.
+        """
+        if (
+            self.media_ingest_video_deadline_seconds * 4
+            > self.grok_video_finalization_lease_seconds * 3
+        ):
+            raise ValueError(
+                "media_ingest_video_deadline_seconds must leave Grok finalization lease "
+                "headroom (deadline <= 75% of grok_video_finalization_lease_seconds)"
             )
         return self
 

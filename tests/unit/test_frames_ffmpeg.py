@@ -1,9 +1,7 @@
-"""Unit tests for ffmpeg/ffprobe subprocess wrappers (frames.ffmpeg).
+"""Unit tests for ffmpeg/ffprobe facades (frames.ffmpeg).
 
-Mirrors tests/unit/test_thumbnail.py's convention: subprocess.run is fully
-mocked (no real ffmpeg invocation) so tests are deterministic and portable
-across dev machines / CI, matching FFMPEG_PATH/FFPROBE_PATH being fixed
-Docker-only paths.
+The shared synchronous media runner is fully mocked, so tests are deterministic
+and portable across dev machines / CI while retaining fixed Docker paths.
 """
 
 from __future__ import annotations
@@ -67,7 +65,7 @@ def _run_result(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -
 
 class TestProbe:
     async def test_probe_returns_duration_and_dimensions(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=0, stdout=_PROBE_JSON)
             result = await probe(Path("fake.mp4"), timeout_seconds=30)
 
@@ -79,26 +77,26 @@ class TestProbe:
         assert mock_run.call_args.args[0][0] == FFPROBE_PATH
 
     async def test_probe_rejects_non_video_bytes(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=1, stderr=b"Invalid data found")
             with pytest.raises(FfprobeError):
                 await probe(Path("fake.txt"), timeout_seconds=30)
 
     async def test_probe_rejects_no_video_stream(self) -> None:
         empty_streams = json.dumps({"streams": [], "format": {"duration": "1.0"}}).encode()
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=0, stdout=empty_streams)
             with pytest.raises(FfprobeError, match="No video stream"):
                 await probe(Path("fake.mp4"), timeout_seconds=30)
 
     async def test_probe_rejects_malformed_json(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=0, stdout=b"not json")
             with pytest.raises(FfprobeError, match="Could not parse"):
                 await probe(Path("fake.mp4"), timeout_seconds=30)
 
     async def test_probe_raises_on_missing_binary(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("ffprobe not found")
             with pytest.raises(FfprobeError, match="not found"):
                 await probe(Path("fake.mp4"), timeout_seconds=30)
@@ -106,7 +104,7 @@ class TestProbe:
 
 class TestExtractFrame:
     async def test_extract_frame_at_timestamp_returns_png(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=0, stdout=_PNG_BYTES)
             result = await extract_frame(
                 Path("fake.mp4"), 2500, out_format="png", timeout_seconds=30
@@ -122,7 +120,7 @@ class TestExtractFrame:
         assert "-vf" not in args  # no scaling for full-res extract
 
     async def test_extract_frame_scaled_max_edge_for_preview(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=0, stdout=_WEBP_BYTES)
             result = await extract_frame(
                 Path("fake.mp4"),
@@ -140,13 +138,13 @@ class TestExtractFrame:
         assert "libwebp" in args
 
     async def test_extract_frame_raises_on_nonzero_exit(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=1, stderr=b"decode error")
             with pytest.raises(FfmpegError, match="decode error"):
                 await extract_frame(Path("fake.mp4"), 0, out_format="png", timeout_seconds=30)
 
     async def test_extract_frame_raises_on_empty_output(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=0, stdout=b"")
             with pytest.raises(FfmpegError, match="no output"):
                 await extract_frame(Path("fake.mp4"), 0, out_format="png", timeout_seconds=30)
@@ -156,7 +154,7 @@ class TestExtractFrame:
             await extract_frame(Path("fake.mp4"), 0, out_format="gif", timeout_seconds=30)
 
     async def test_ffmpeg_timeout_raises(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd=FFMPEG_PATH, timeout=30)
             with pytest.raises(FfmpegError, match="timed out"):
                 await extract_frame(Path("fake.mp4"), 0, out_format="png", timeout_seconds=30)
@@ -164,7 +162,7 @@ class TestExtractFrame:
 
 class TestExtractPreviewStrip:
     async def test_extracts_one_frame_per_timestamp(self) -> None:
-        with patch("src.api.services.frames.ffmpeg.subprocess.run") as mock_run:
+        with patch("src.api.services.media_tools.subprocess.run") as mock_run:
             mock_run.return_value = _run_result(returncode=0, stdout=_WEBP_BYTES)
             results = await extract_preview_strip(
                 Path("fake.mp4"), [0, 1000, 2000], max_edge=512, timeout_seconds=30

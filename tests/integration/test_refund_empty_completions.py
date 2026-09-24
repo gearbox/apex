@@ -27,6 +27,7 @@ from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.repositories.billing import BillingRepository
 from src.db.repositories.job import JobRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
+from tests.media_ingest_support import make_media_ingestor
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -589,6 +590,7 @@ class TestPollerSettlesExecutionErrors:
             billing_service=BillingService(),
             r2_storage=None,
             config=AishaPollerConfig(tunnel_allowed_suffix="gpu.test"),
+            media_ingestor=make_media_ingestor(),
             redis_client_factory=MagicMock(),
         )
         ts = JobStateTransitionService(

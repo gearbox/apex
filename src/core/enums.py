@@ -14,6 +14,20 @@ class Product(StrEnum):
     SYNTHARA = "synthara"
 
 
+class MediaHashSourceKind(StrEnum):
+    """Owner of a stored media hash."""
+
+    UPLOAD = "upload"
+    OUTPUT = "output"
+
+
+class MediaHashMediaType(StrEnum):
+    """Kind of original media represented by a hash."""
+
+    IMAGE = "image"
+    VIDEO = "video"
+
+
 class WorkerMode(StrEnum):
     """Which in-process background workers a Granian process should run.
 

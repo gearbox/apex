@@ -4,27 +4,32 @@ from __future__ import annotations
 
 import io
 import re
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from src.api.schemas.media import MediaObject, MediaOriginal
-from src.api.schemas.user_content import GeneratedImage, ImageAccess, UploadedImage
+from src.api.schemas.user_content import ImageAccess, UploadedImage
+from src.api.services.media_ingest import MediaProcessingError
 from src.api.services.storage import StorageError, StorageNotFoundError, StorageValidationError
 from src.api.services.user_content import (
     UserContentNotFoundError,
     UserContentService,
     UserContentStorageError,
     UserContentTooLargeError,
+    UserContentUnavailableError,
     UserContentValidationError,
     sanitize_display_filename,
 )
 from src.core.enums import MediaFormat, OutputMediaType
+from tests.media_ingest_support import make_media_ingestor
 
 _CANONICAL_FILENAME_RE = re.compile(r"^[0-9a-f-]{36}\.(png|jpeg|webp)$")
+
 
 pytestmark = pytest.mark.unit
 
@@ -78,6 +83,7 @@ def _make_db_image(**overrides: object) -> MagicMock:
     img.width = 800
     img.height = 600
     img.thumbnail_max_edge = None
+    img.format = "png"
     for k, v in overrides.items():
         setattr(img, k, v)
     return img
@@ -93,19 +99,27 @@ def _make_db_output(**overrides: object) -> MagicMock:
     out.output_index = 0
     out.created_at = datetime.now(UTC)
     out.expires_at = datetime.now(UTC) + timedelta(days=7)
-    for k, v in overrides.items():
-        setattr(out, k, v)
+    for key, value in overrides.items():
+        setattr(out, key, value)
     return out
 
 
 def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentService, AsyncMock]:
     storage = AsyncMock()
     session = AsyncMock()
+    session.add_all = MagicMock()
+
+    @asynccontextmanager
+    async def savepoint():
+        yield
+
+    session.begin_nested = MagicMock(side_effect=savepoint)
     service = UserContentService(
         storage=storage,
         session=session,
         product_id="vex",
         max_input_megapixels=max_input_megapixels,
+        media_ingestor=make_media_ingestor(max_image_megapixels=max_input_megapixels),
     )
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
@@ -119,6 +133,38 @@ def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentSe
 
 
 class TestUploadImage:
+    async def test_storage_receives_only_sanitized_image_bytes(self) -> None:
+        service, storage = _make_service()
+        storage.upload = AsyncMock(return_value=_make_upload_result())
+        service._image_repo.create = AsyncMock(return_value=_make_db_image())
+        pnginfo = PngImagePlugin.PngInfo()
+        pnginfo.add_text("Comment", "private-metadata-canary")
+        source = io.BytesIO()
+        Image.new("RGB", (16, 12), (255, 0, 0)).save(source, format="PNG", pnginfo=pnginfo)
+        with patch("src.api.services.user_content.make_image_thumbnails", return_value=[]):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=source.getvalue(),
+                filename="photo.png",
+                content_type="image/png",
+            )
+        stored = storage.upload.await_args.kwargs["data"]
+        assert b"private-metadata-canary" not in stored
+
+    async def test_ingest_operational_failure_is_unavailable_error(self) -> None:
+        service, storage = _make_service()
+        service._media_ingestor.prepare_image = AsyncMock(
+            side_effect=MediaProcessingError("capacity exhausted")
+        )
+        with pytest.raises(UserContentUnavailableError, match="temporarily unavailable"):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=_png_bytes(),
+                filename="photo.png",
+                content_type="image/png",
+            )
+        storage.upload.assert_not_awaited()
+
     async def test_happy_path_returns_uploaded_image(self) -> None:
         service, storage = _make_service()
 
@@ -129,7 +175,6 @@ class TestUploadImage:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(
@@ -152,11 +197,7 @@ class TestUploadImage:
         db_image = _make_db_image(width=1024, height=768)
         service._image_repo.create = AsyncMock(return_value=db_image)
 
-        from src.api.services.image_thumbnail import ImageDimensions
-
-        dims = ImageDimensions(width=1024, height=768)
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=dims),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(
@@ -168,8 +209,8 @@ class TestUploadImage:
 
         assert isinstance(result, UploadedImage)
         create_kwargs = service._image_repo.create.call_args.kwargs
-        assert create_kwargs["width"] == 1024
-        assert create_kwargs["height"] == 768
+        assert create_kwargs["width"] == 16
+        assert create_kwargs["height"] == 12
 
     async def test_creates_thumbnails_when_generated(self) -> None:
         service, storage = _make_service()
@@ -191,7 +232,6 @@ class TestUploadImage:
         )
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[thumb]),
         ):
             result = await service.upload_image(
@@ -215,7 +255,6 @@ class TestUploadImage:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch(
                 "src.api.services.user_content.make_image_thumbnails",
                 side_effect=Exception("thumbnail crash"),
@@ -236,7 +275,6 @@ class TestUploadImage:
         storage.upload = AsyncMock(side_effect=StorageValidationError("too big"))
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
             pytest.raises(UserContentValidationError),
         ):
@@ -252,7 +290,6 @@ class TestUploadImage:
         storage.upload = AsyncMock(side_effect=StorageError("R2 outage"))
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
             pytest.raises(UserContentStorageError),
         ):
@@ -296,7 +333,6 @@ class TestUploadImageFilenameSafety:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(
@@ -323,7 +359,6 @@ class TestUploadImageFilenameSafety:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             await service.upload_image(
@@ -356,7 +391,6 @@ class TestUploadImageFilenameSafety:
         )
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[thumb]),
         ):
             await service.upload_image(
@@ -391,7 +425,6 @@ class TestUploadImageFilenameSafety:
         service._image_repo.create = AsyncMock(return_value=db_image)
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             await service.upload_image(
@@ -480,7 +513,6 @@ class TestUploadImageNormalization:
         png_bytes = _png_bytes()
 
         with (
-            patch("src.api.services.user_content.read_dimensions", return_value=None),
             patch("src.api.services.user_content.make_image_thumbnails", return_value=[]),
         ):
             result = await service.upload_image(
@@ -661,53 +693,6 @@ class TestDeleteUpload:
 
         result = await service.delete_upload(uuid4(), user_id=uuid4())
         assert result is False
-
-
-# ---------------------------------------------------------------------------
-# store_output
-# ---------------------------------------------------------------------------
-
-
-class TestStoreOutput:
-    async def test_returns_generated_image(self) -> None:
-        service, storage = _make_service()
-
-        upload_result = _make_upload_result()
-        storage.upload = AsyncMock(return_value=upload_result)
-
-        db_out = _make_db_output()
-        service._output_repo.create = AsyncMock(return_value=db_out)
-
-        result = await service.store_output(
-            user_id=uuid4(),
-            job_id=uuid4(),
-            data=b"\x89PNG",
-            content_type="image/png",
-            output_index=0,
-        )
-
-        assert isinstance(result, GeneratedImage)
-        assert result.id == db_out.id
-
-    async def test_passes_input_image_id_to_repo(self) -> None:
-        service, storage = _make_service()
-        storage.upload = AsyncMock(return_value=_make_upload_result())
-
-        db_out = _make_db_output()
-        service._output_repo.create = AsyncMock(return_value=db_out)
-
-        input_id = uuid4()
-        await service.store_output(
-            user_id=uuid4(),
-            job_id=uuid4(),
-            data=b"\x89PNG",
-            content_type="image/png",
-            output_index=1,
-            input_image_id=input_id,
-        )
-
-        create_kwargs = service._output_repo.create.call_args.kwargs
-        assert create_kwargs["input_image_id"] == input_id
 
 
 # ---------------------------------------------------------------------------

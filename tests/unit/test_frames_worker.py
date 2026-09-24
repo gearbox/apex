@@ -16,7 +16,9 @@ import pytest
 
 from src.api.services.frames.ffmpeg import FfmpegError, FfprobeError, VideoProbe
 from src.api.services.frames.worker import FrameExtractionWorker
-from src.core.enums import FrameExtractionKind
+from src.api.services.media_ingest import PreparedImage
+from src.core.enums import FrameExtractionKind, MediaFormat
+from src.core.media_hash import HashSample, HashSet, PdqHash
 
 pytestmark = pytest.mark.unit
 
@@ -43,7 +45,24 @@ def _make_db_manager(sessions: list[AsyncMock]) -> MagicMock:
 def _make_session() -> AsyncMock:
     session = AsyncMock()
     session.commit = AsyncMock()
+    session.add_all = MagicMock()
     return session
+
+
+def _prepared_frame() -> PreparedImage:
+    return PreparedImage(
+        data=b"prepared-png",
+        format=MediaFormat.PNG,
+        width=640,
+        height=480,
+        hash_set=HashSet(
+            profile_id="pdq-image-rgb-white-v1",
+            sampling_profile="still-v1",
+            samples=(HashSample(pdq=PdqHash(bits=b"\x00" * 32, quality=0), sample_index=0),),
+        ),
+        orientation_baked=False,
+        converted=False,
+    )
 
 
 def _make_settings(**overrides: object) -> MagicMock:
@@ -80,10 +99,13 @@ def _make_worker(
     sessions = sessions or [_make_session() for _ in range(4)]
     db_manager = _make_db_manager(sessions)
     r2_storage = AsyncMock()
+    media_ingestor = AsyncMock()
+    media_ingestor.prepare_image = AsyncMock(return_value=_prepared_frame())
     worker = FrameExtractionWorker(
         db_manager=db_manager,
         r2_storage=r2_storage,
         settings=settings or _make_settings(),
+        media_ingestor=media_ingestor,
         redis_client_factory=MagicMock(),
     )
     return worker, db_manager, r2_storage
@@ -179,7 +201,7 @@ class TestWorkerExtract:
         output_repo = AsyncMock()
         output_repo.get = AsyncMock(return_value=output)
         image_repo = AsyncMock()
-        db_image = MagicMock(id=upload_result.id)
+        db_image = MagicMock(id=upload_result.id, format="png")
         image_repo.create = AsyncMock(return_value=db_image)
 
         probe_result = VideoProbe(duration_ms=10_000, width=640, height=480, codec="h264")
@@ -197,11 +219,7 @@ class TestWorkerExtract:
             ),
             patch(
                 "src.api.services.frames.worker.frame_ffmpeg.extract_frame",
-                AsyncMock(return_value=b"\x89PNGfakepng"),
-            ),
-            patch(
-                "src.api.services.frames.worker.read_dimensions",
-                AsyncMock(return_value=None),
+                AsyncMock(return_value=b"\x89PNGprivate-metadata-canary"),
             ),
             patch(
                 "src.api.services.frames.worker.make_image_thumbnails",
@@ -211,6 +229,9 @@ class TestWorkerExtract:
             await worker.run_once()
 
         assert image_repo.create.await_count == 2
+        assert all(
+            call.kwargs["data"] == b"prepared-png" for call in r2_storage.upload.await_args_list
+        )
         for call in image_repo.create.await_args_list:
             kwargs = call.kwargs
             assert kwargs["source_output_id"] == job.source_output_id
@@ -328,7 +349,7 @@ class TestWorkerExtract:
         output_repo = AsyncMock()
         output_repo.get = AsyncMock(return_value=output)
         image_repo = AsyncMock()
-        image_repo.create = AsyncMock(return_value=MagicMock(id=upload_result.id))
+        image_repo.create = AsyncMock(return_value=MagicMock(id=upload_result.id, format="png"))
 
         probe_result = VideoProbe(duration_ms=10_000, width=640, height=480, codec="h264")
 
@@ -348,10 +369,6 @@ class TestWorkerExtract:
                 AsyncMock(
                     side_effect=[b"\x89PNGfakepng", FfmpegError("decoder crashed on frame 2")]
                 ),
-            ),
-            patch(
-                "src.api.services.frames.worker.read_dimensions",
-                AsyncMock(return_value=None),
             ),
             patch(
                 "src.api.services.frames.worker.make_image_thumbnails",

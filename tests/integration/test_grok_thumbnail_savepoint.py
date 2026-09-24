@@ -27,6 +27,7 @@ from src.api.services.image_thumbnail import GeneratedThumbnail, ThumbnailResult
 from src.api.services.storage.r2 import R2StorageService, R2StorageSettings
 from src.core.thumbnails import ThumbnailSpec
 from src.db.models.storage import GenerationOutput
+from tests.media_ingest_support import make_media_ingestor
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -127,7 +128,12 @@ async def test_thumbnail_insert_failure_isolated_by_savepoint(
 
     md_thumb_id = uuid4()
 
-    svc = GrokJobService(grok_client=MagicMock(), storage=noop_storage, retention_days=7)
+    svc = GrokJobService(
+        grok_client=MagicMock(),
+        storage=noop_storage,
+        retention_days=7,
+        media_ingestor=make_media_ingestor(),
+    )
 
     with (
         patch(

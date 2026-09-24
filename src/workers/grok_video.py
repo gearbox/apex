@@ -24,6 +24,7 @@ from src.api.services.generation.provider_billing_policy import ProviderBillingP
 from src.api.services.grok import GrokClient
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.grok.video_worker import GrokVideoWorker
+from src.api.services.media_ingest.factory import build_media_ingest_service
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.core.config import Settings, get_settings
@@ -115,6 +116,7 @@ class GrokVideoWorkerCLI:
         ops_event_bus = OpsEventBus(enabled=self._settings.redis_url is not None)
 
         # Initialize job service
+        media_ingestor = build_media_ingest_service(self._settings)
         job_service = GrokJobService(
             grok_client=grok_client,
             storage=r2_storage,
@@ -124,6 +126,7 @@ class GrokVideoWorkerCLI:
             ops_event_bus=ops_event_bus,
             max_poll_time=self._settings.grok_video_max_poll_time,
             finalization_lease_seconds=self._settings.grok_video_finalization_lease_seconds,
+            media_ingestor=media_ingestor,
             billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
                 self._settings.grok_moderation_billing_policy,
                 self._settings.grok_undelivered_output_billing_policy,

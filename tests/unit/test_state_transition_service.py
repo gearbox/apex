@@ -6,7 +6,9 @@ All DB calls are mocked so no real session is needed.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -17,6 +19,10 @@ from src.api.services.job_state_transition import (
     JobStateTransitionService,
 )
 from src.core.enums import JobStatus
+from src.core.media_hash import HashSample, HashSet, PdqHash
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,8 +36,22 @@ def _make_job(status: str = JobStatus.QUEUED.value) -> MagicMock:
     job.status = status
     job.generation_type = "t2i"
     job.provider = "aisha"
+    job.product_id = "vex"
     job.debit_transaction_id = uuid4()
     return job
+
+
+def _image_hash_set() -> HashSet:
+    return HashSet(
+        profile_id="pdq-image-rgb-white-v1",
+        sampling_profile="still-v1",
+        samples=(HashSample(pdq=PdqHash(bits=b"\x00" * 32, quality=100), sample_index=0),),
+    )
+
+
+def _created_row() -> MagicMock:
+    """A created output row; the ledger requires a real persisted format."""
+    return MagicMock(format="webp")
 
 
 def _make_service(
@@ -44,6 +64,13 @@ def _make_service(
     # session.get returns the job, session.refresh re-attaches it
     session.get.return_value = job
     session.refresh = AsyncMock()
+    session.add_all = MagicMock()
+
+    @asynccontextmanager
+    async def savepoint() -> AsyncIterator[None]:
+        yield
+
+    session.begin_nested = MagicMock(side_effect=savepoint)
     # Simulate the UPDATE rowcount
     execute_result = MagicMock()
     execute_result.rowcount = rowcount
@@ -134,13 +161,16 @@ class TestTransitionToCompleted:
             format="webp",
             output_index=index,
             expires_at=datetime.now(UTC) + timedelta(days=7),
+            hash_set=_image_hash_set(),
         )
 
     async def test_running_to_completed(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
         svc, session, _ = _make_service(job)
 
-        with patch.object(svc._output_repo, "create", new_callable=AsyncMock) as mock_create:
+        with patch.object(
+            svc._output_repo, "create", new_callable=AsyncMock, return_value=_created_row()
+        ) as mock_create:
             out = self._make_output()
             await svc.transition_to_completed(job.id, outputs=[out], product_id="vex")
             mock_create.assert_awaited_once()
@@ -174,12 +204,65 @@ class TestTransitionToCompleted:
         with pytest.raises(ValueError, match="no outputs"):
             await svc.transition_to_completed(job.id, outputs=[], product_id="vex")
 
+    async def test_original_without_hash_set_is_refused_before_compare_and_swap(self) -> None:
+        job = _make_job(JobStatus.RUNNING.value)
+        svc, session, _ = _make_service(job)
+        output = self._make_output()
+        output.hash_set = None
+
+        with pytest.raises(TypeError, match="hash set"):
+            await svc.transition_to_completed(job.id, outputs=[output], product_id="vex")
+
+        session.execute.assert_not_awaited()
+        session.commit.assert_not_awaited()
+
+    async def test_thumbnail_only_batch_is_refused_before_compare_and_swap(self) -> None:
+        job = _make_job(JobStatus.RUNNING.value)
+        svc, session, _ = _make_service(job)
+        thumbnail = self._make_output()
+        thumbnail.is_thumbnail = True
+        thumbnail.parent_output_id = uuid4()
+        thumbnail.hash_set = None
+
+        with pytest.raises(ValueError, match="at least one original"):
+            await svc.transition_to_completed(job.id, outputs=[thumbnail], product_id="vex")
+
+        session.execute.assert_not_awaited()
+        session.commit.assert_not_awaited()
+
+    async def test_thumbnail_insert_failure_is_isolated_after_parent_ledger_flush(self) -> None:
+        job = _make_job(JobStatus.RUNNING.value)
+        svc, session, _ = _make_service(job)
+        parent = self._make_output()
+        thumbnail = self._make_output(index=1)
+        thumbnail.is_thumbnail = True
+        thumbnail.parent_output_id = parent.id
+        thumbnail.hash_set = None
+
+        with patch.object(
+            svc._output_repo,
+            "create",
+            new_callable=AsyncMock,
+            side_effect=[_created_row(), RuntimeError("derivative insert failed")],
+        ):
+            await svc.transition_to_completed(
+                job.id,
+                outputs=[parent, thumbnail],
+                product_id="vex",
+            )
+
+        session.flush.assert_awaited_once()
+        session.begin_nested.assert_called_once()
+        session.commit.assert_awaited_once()
+
     async def test_publishes_event_after_commit(self) -> None:
         job = _make_job(JobStatus.RUNNING.value)
         bus = AsyncMock()
         svc, _, _ = _make_service(job, event_bus=bus)
 
-        with patch.object(svc._output_repo, "create", new_callable=AsyncMock):
+        with patch.object(
+            svc._output_repo, "create", new_callable=AsyncMock, return_value=_created_row()
+        ):
             await svc.transition_to_completed(
                 job.id, outputs=[self._make_output()], product_id="vex"
             )
@@ -192,7 +275,9 @@ class TestTransitionToCompleted:
         bus.publish.side_effect = RuntimeError("redis down")
         svc, _, _ = _make_service(job, event_bus=bus)
 
-        with patch.object(svc._output_repo, "create", new_callable=AsyncMock):
+        with patch.object(
+            svc._output_repo, "create", new_callable=AsyncMock, return_value=_created_row()
+        ):
             await svc.transition_to_completed(
                 job.id, outputs=[self._make_output()], product_id="vex"
             )

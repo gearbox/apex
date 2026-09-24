@@ -1,8 +1,7 @@
 """Video thumbnail extraction.
 
 Extracts the first frame of a video as a JPEG thumbnail using ffmpeg.
-Called from ``GrokJobService._store_video_result()`` immediately after
-the video is downloaded from xAI CDN.
+Called from media writers after a prepared video has been materialized.
 
 If ffmpeg is unavailable the function logs a warning and returns None
 rather than crashing the job — thumbnail is optional.

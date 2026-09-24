@@ -7,6 +7,7 @@ from .gpu_session import GpuSessionRepository
 from .gpu_session_operation import EventOutcome, GpuSessionOperationRepository
 from .job import JobRepository
 from .library import LibraryRepository
+from .media_hash import MediaHashRepository
 from .output import OutputRepository
 from .payment_currency import PaymentCurrencyRepository
 from .payment_provider_state import PaymentProviderStateRepository
@@ -23,6 +24,7 @@ __all__ = [
     "GpuSessionRepository",
     "JobRepository",
     "LibraryRepository",
+    "MediaHashRepository",
     "OutputRepository",
     "PaymentCurrencyRepository",
     "PaymentProviderStateRepository",
