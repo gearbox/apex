@@ -8,6 +8,7 @@ C4 (hash stability — registry half), C5 (production hygiene), and the
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import replace
 from datetime import date
 from typing import TYPE_CHECKING
@@ -16,7 +17,7 @@ import pytest
 import structlog
 
 from src.api.services.legal.errors import LegalDocumentNotFoundError, LegalRegistryError
-from src.api.services.legal.registry import LegalDocumentRegistry, content_sha256
+from src.api.services.legal.registry import LegalDocumentRegistry, content_sha256, normalize_content
 from src.core.enums import LegalDocumentType, Product
 from src.core.product_registry import SYNTHARA_CONFIG, VEX_CONFIG
 from tests.legal_support import make_legal_document, make_legal_registry
@@ -40,7 +41,24 @@ def _write_tree(
     manifest: str,
     files: dict[str, str | bytes],
 ) -> Path:
+    """Write a test tree, replacing builder hash markers with content hashes."""
     root.mkdir(parents=True, exist_ok=True)
+
+    def _pin_hash(match: re.Match[str]) -> str:
+        version = match.group(2)
+        raw = files.get(f"vex/terms/{version}.md")
+        if raw is None:
+            digest = "0" * 64  # syntactically valid; the missing-file check runs first
+        else:
+            text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            digest = content_sha256(normalize_content(text))
+        return f'{match.group(1)}"{digest}"'
+
+    manifest = re.sub(
+        r'(version = (\d{4}-\d{2}-\d{2})[^}]*sha256 = )"__CONTENT_SHA256__"',
+        _pin_hash,
+        manifest,
+    )
     (root / "manifest.toml").write_text(manifest, encoding="utf-8")
     for rel, content in files.items():
         path = root / rel
@@ -54,7 +72,10 @@ def _write_tree(
 
 def _terms_manifest(*entries: tuple[str, bool]) -> str:
     rows = ",\n".join(
-        f"  {{ version = {v}, requires_reacceptance = {str(flag).lower()} }}" for v, flag in entries
+        "  { version = "
+        f"{v}, requires_reacceptance = {str(flag).lower()}, "
+        'sha256 = "__CONTENT_SHA256__" }'
+        for v, flag in entries
     )
     return f"[vex]\nterms = [\n{rows},\n]\n"
 
@@ -275,6 +296,39 @@ class TestHashStability:
         assert lf.sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+class TestManifestHashes:
+    @pytest.mark.parametrize("environment", ["development", "staging", "production"])
+    def test_content_hash_mismatch_fails_in_every_environment(
+        self, tmp_path: Path, environment: str
+    ) -> None:
+        root = _write_tree(
+            tmp_path / "legal",
+            _terms_manifest(("2026-10-01", True)),
+            {"vex/terms/2026-10-01.md": "original\n"},
+        )
+        (root / "vex/terms/2026-10-01.md").write_text("edited\n", encoding="utf-8")
+
+        with pytest.raises(
+            LegalRegistryError, match="Published legal documents are immutable"
+        ) as exc:
+            _load(root, environment=environment)
+        assert content_sha256("original\n") in str(exc.value)
+        assert content_sha256("edited\n") in str(exc.value)
+
+    def test_manifest_missing_sha256_fails(self, tmp_path: Path) -> None:
+        root = tmp_path / "legal"
+        path = root / "vex/terms/2026-10-01.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("# Terms\n", encoding="utf-8")
+        (root / "manifest.toml").write_text(
+            "[vex]\nterms = [ { version = 2026-10-01, requires_reacceptance = true } ]\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(LegalRegistryError, match="Invalid legal manifest"):
+            _load(root)
+
+
 class TestProductionHygiene:
     """C5 — unfilled placeholders fail production, only warn elsewhere."""
 
@@ -298,6 +352,36 @@ class TestProductionHygiene:
     def test_markdown_link_passes_in_production(self, tmp_path: Path) -> None:
         root = self._root(tmp_path, "See our [Privacy Policy](https://vex.pics/privacy).\n")
         _load(root, environment="production")
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "See [text][ref].\n\n[ref]: https://vex.pics/privacy\n",
+            "See [text][].\n\n[text]: https://vex.pics/privacy\n",
+            "See [ref].\n\n[ref]: https://vex.pics/privacy\n",
+            "[ref]: https://vex.pics/privacy\n",
+            "- [x] done\n",
+            r"\\[literal\\]\n",
+        ],
+        ids=["full", "collapsed", "shortcut", "definition", "task-list", "escaped"],
+    )
+    def test_allowed_markdown_brackets_pass_in_production(self, tmp_path: Path, body: str) -> None:
+        _load(self._root(tmp_path, body), environment="production")
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "[ADDRESS]\n",
+            "[inclusive / exclusive]\n",
+            "[text][nope]\n",
+            "[text] [ref]\n",
+            "A [sole proprietor and [MB] entity] sentence.\n",
+        ],
+        ids=["placeholder", "choice", "undefined-reference", "spaced-reference", "nested"],
+    )
+    def test_unresolved_brackets_fail_in_production(self, tmp_path: Path, body: str) -> None:
+        with pytest.raises(LegalRegistryError, match="refusing to publish"):
+            _load(self._root(tmp_path, body), environment="production")
 
     def test_staging_only_logs_placeholder(self, tmp_path: Path) -> None:
         root = self._root(tmp_path, "line one\nOperated by [PLACEHOLDER].\n")

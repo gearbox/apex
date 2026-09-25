@@ -28,6 +28,7 @@ from src.api.schemas.library import LibraryTag
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.library_tag import LibraryTagNameConflictError, LibraryTagService
 from src.api.services.token_revocation import TokenRevocationService
+from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY, vex_product_scope
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -58,7 +59,9 @@ def jwt_service() -> JWTService:
 
 @pytest.fixture
 def auth_header(jwt_service: JWTService) -> dict[str, str]:
-    token, _ = jwt_service.create_access_token(uuid4(), product_id="vex")
+    token, _ = jwt_service.create_access_token(
+        uuid4(), product_id="vex", legal_digest=TEST_LEGAL_DIGEST
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -74,10 +77,12 @@ def _make_client(
             "session": Provide(lambda: session, sync_to_thread=False),
             "product_id": Provide(lambda: "vex", sync_to_thread=False),
         },
+        middleware=[vex_product_scope],
         state=State(
             {
                 "jwt_service": jwt_service,
                 "token_revocation": TokenRevocationService(None, max_token_ttl_seconds=0),
+                "legal_registry": TEST_LEGAL_REGISTRY,
             }
         ),
     )

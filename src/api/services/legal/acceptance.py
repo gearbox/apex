@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Annotated, Final
 
 import msgspec
@@ -84,7 +84,7 @@ class LegalAcceptanceService:
         *,
         registry: LegalDocumentRegistry,
         repository: LegalAcceptanceRepository,
-        session: AsyncSession | None = None,
+        session: AsyncSession,
     ) -> None:
         """Initialize the service.
 
@@ -186,6 +186,7 @@ class LegalAcceptanceService:
         Returns:
             Number of rows inserted (0 for an idempotent re-submission).
         """
+        await self._repo.lock_user_ledger(user_id=user_id)
         latest = await self._repo.latest_per_type(user_id=user_id, product_id=product.slug)
         rows = [
             LegalAcceptance(
@@ -227,14 +228,15 @@ class LegalAcceptanceService:
         user_id: UUID,
         product: ProductConfig,
         context: RequestContext,
+        today: date,
     ) -> None:
         """Record withdrawal of sensitive-data consent (account closure only).
 
         No-op when the product doesn't require that consent.
         """
+        await self._repo.lock_user_ledger(user_id=user_id)
         if LegalDocumentType.SENSITIVE_DATA_CONSENT not in product.required_legal_documents:
             return
-        today = datetime.now(UTC).date()
         consent = self._registry.current(
             product.product, LegalDocumentType.SENSITIVE_DATA_CONSENT, today=today
         )
@@ -260,8 +262,7 @@ class LegalAcceptanceService:
     async def _flush(self) -> None:
         # Sessions run with autoflush=False (src/db/session.py); flush here —
         # never in the repository — so later reads in this transaction see the rows.
-        if self._session is not None:
-            await self._session.flush()
+        await self._session.flush()
 
     # ------------------------------------------------------------------
     # Reads

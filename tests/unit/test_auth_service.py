@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 import structlog.testing
 
+import src.api.services.auth as auth_module
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.security.jwt import TokenPayload
 from src.api.services.auth import (
@@ -20,6 +21,7 @@ from src.api.services.auth import (
 )
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import RefreshTokenRevocationReason
+from src.core.product_registry import VEX_CONFIG
 from src.db.models import RefreshToken, User
 from tests.legal_support import (
     TEST_REQUEST_CONTEXT,
@@ -235,6 +237,51 @@ class TestAuthServiceRegister:
                 accepted_documents=accept_all_current(),
                 context=TEST_REQUEST_CONTEXT,
             )
+
+    async def test_register_uses_single_today(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Validation and the minted lgl digest must share one UTC date."""
+        today = datetime(2026, 9, 25, 23, 59, tzinfo=UTC)
+        next_day = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)
+        clock = MagicMock()
+        clock.now.side_effect = [today, next_day]
+        monkeypatch.setattr(auth_module, "datetime", clock)
+
+        user = MagicMock(spec=User)
+        user.id = uuid4()
+        repository = AsyncMock()
+        repository.email_exists = AsyncMock(return_value=False)
+        repository.create_user = AsyncMock(return_value=user)
+        repository.create_refresh_token = AsyncMock()
+        password = MagicMock()
+        password.ahash = AsyncMock(return_value="hash")
+        legal = MagicMock()
+        legal.validate_submission.return_value = ()
+        legal.record_acceptances = AsyncMock()
+        legal.satisfied_digest = AsyncMock(return_value="digest")
+        service = AuthService(
+            repository=repository,
+            jwt_service=JWTService(
+                JWTConfig(secret_key="test_secret_key_for_testing_only_256bits")
+            ),
+            password_service=password,
+            token_revocation_service=_noop_token_revocation(),
+            legal_acceptance_service=legal,
+        )
+
+        await service.register(
+            email="single-today@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=[],
+            context=TEST_REQUEST_CONTEXT,
+        )
+
+        expected_today = today.date()
+        created_user_id = repository.create_user.call_args.kwargs["id"]
+        legal.validate_submission.assert_called_once_with(VEX_CONFIG, [], today=expected_today)
+        legal.satisfied_digest.assert_awaited_once_with(
+            user_id=created_user_id, product=VEX_CONFIG, today=expected_today
+        )
 
 
 class TestAuthServiceLogin:

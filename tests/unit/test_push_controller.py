@@ -28,6 +28,7 @@ from src.api.routes.push import PushController
 from src.api.security import JWTConfig, JWTService
 from src.api.services.push import PushService
 from src.api.services.token_revocation import TokenRevocationService
+from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY, vex_product_scope
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
 
@@ -44,7 +45,9 @@ def test_user_id() -> UUID:
 
 @pytest.fixture
 def auth_header(jwt_service: JWTService, test_user_id: UUID) -> dict[str, str]:
-    token, _ = jwt_service.create_access_token(test_user_id)
+    token, _ = jwt_service.create_access_token(
+        test_user_id, product_id="vex", legal_digest=TEST_LEGAL_DIGEST
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -88,9 +91,11 @@ def _create_app(
                 lambda: resolved_token_revocation, sync_to_thread=False
             ),
         },
+        middleware=[vex_product_scope],
     )
     app.state["jwt_service"] = jwt_service
     app.state["token_revocation"] = resolved_token_revocation
+    app.state["legal_registry"] = TEST_LEGAL_REGISTRY
     app.state["mock_session"] = mock_session
     return app
 

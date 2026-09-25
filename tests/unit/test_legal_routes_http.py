@@ -18,6 +18,7 @@ from litestar import Litestar
 from litestar.datastructures import State
 from litestar.di import Provide
 from litestar.testing import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.app import (
     legal_acceptance_required_handler,
@@ -132,7 +133,8 @@ class TestPublicDocumentEndpoints:
             "content_md": LF_BODY,
         }
         assert resp.headers["etag"] == f'"{expected.sha256}"'
-        assert resp.headers["cache-control"] == "public, max-age=300"
+        assert resp.headers["cache-control"] == "private, no-cache"
+        assert resp.headers["vary"] == "Origin, X-Product-Id"
 
     def test_exact_version_including_future(self) -> None:
         with TestClient(app=_app(_registry())) as client:
@@ -141,6 +143,41 @@ class TestPublicDocumentEndpoints:
             )
         assert resp.status_code == 200
         assert resp.json()["version"] == "2999-01-01"
+        assert resp.headers["cache-control"] == "private, max-age=31536000, immutable"
+        assert resp.headers["vary"] == "Origin, X-Product-Id"
+
+    @pytest.mark.parametrize(
+        ("params", "cache_control"),
+        [
+            (None, "private, no-cache"),
+            ({"version": "2020-01-01"}, "private, max-age=31536000, immutable"),
+        ],
+        ids=["current", "exact"],
+    )
+    def test_if_none_match_returns_304(
+        self, params: dict[str, str] | None, cache_control: str
+    ) -> None:
+        registry = _registry()
+        expected = registry.get(Product.VEX, LegalDocumentType.TERMS, date(2020, 1, 1))
+        with TestClient(app=_app(registry)) as client:
+            resp = client.get(
+                "/v1/legal/documents/terms",
+                params=params,
+                headers={**VEX, "If-None-Match": f'W/"{expected.sha256}"'},
+            )
+        assert resp.status_code == 304
+        assert resp.content == b""
+        assert resp.headers["etag"] == f'"{expected.sha256}"'
+        assert resp.headers["cache-control"] == cache_control
+        assert resp.headers["vary"] == "Origin, X-Product-Id"
+
+    def test_mismatched_if_none_match_returns_200(self) -> None:
+        with TestClient(app=_app(_registry())) as client:
+            resp = client.get(
+                "/v1/legal/documents/terms",
+                headers={**VEX, "If-None-Match": '"other"'},
+            )
+        assert resp.status_code == 200
 
     @pytest.mark.parametrize(
         ("path", "params", "headers"),
@@ -180,7 +217,8 @@ class TestPublicDocumentEndpoints:
         (root / "manifest.toml").write_text(
             "[vex]\n"
             + "".join(
-                f"{t.value} = [ {{ version = 2020-01-01, requires_reacceptance = true }} ]\n"
+                f"{t.value} = [ {{ version = 2020-01-01, requires_reacceptance = true, "
+                f'sha256 = "{make_legal_document(t, content=LF_BODY).sha256}" }} ]\n'
                 for t in LegalDocumentType
             )
         )
@@ -201,7 +239,9 @@ def _acceptance_service(
 ) -> tuple[LegalAcceptanceService, MagicMock]:
     repo = MagicMock(spec=LegalAcceptanceRepository)
     repo.latest_per_type = AsyncMock(return_value=latest or {})
-    return LegalAcceptanceService(registry=registry, repository=repo), repo
+    return LegalAcceptanceService(
+        registry=registry, repository=repo, session=AsyncMock(spec=AsyncSession)
+    ), repo
 
 
 class TestAuthenticatedEndpoints:

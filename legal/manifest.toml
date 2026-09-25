@@ -1,14 +1,16 @@
 # Version = effective date (UTC). A version is "current" from its date onward.
 # requires_reacceptance = true forces every user to re-accept once it becomes effective.
 # The first version of every document MUST set requires_reacceptance = true.
+# Published versions are immutable: pin each normalized file's sha256 here. Publish a new
+# version file for content changes; only an unaccepted version may have its hash corrected.
 
 [vex]
 terms = [
-  { version = 2026-09-25, requires_reacceptance = true },
+  { version = 2026-09-25, requires_reacceptance = true, sha256 = "75e1ae4a9f99bbec42164d9186a999c5e217ef176f0080ebee1be0048febf4fd" },
 ]
 privacy = [
-  { version = 2026-09-25, requires_reacceptance = true },
+  { version = 2026-09-25, requires_reacceptance = true, sha256 = "edcdcdf48dd1dd9b70ab3c2d6ff3015a82589576462fe232f465930bf6713237" },
 ]
 sensitive_data_consent = [
-  { version = 2026-09-25, requires_reacceptance = true },
+  { version = 2026-09-25, requires_reacceptance = true, sha256 = "7524f644ef3dab7dac2e7e39389d0c3f875e335ea1f38ff65809824d97861011" },
 ]

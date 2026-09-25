@@ -286,8 +286,9 @@ class UserService:
             raise UserNotFoundError(f"User {user_id} not found")
 
         # Same transaction as the soft delete.
+        today = datetime.now(UTC).date()
         await self._legal.record_consent_withdrawal(
-            user_id=user_id, product=product, context=context
+            user_id=user_id, product=product, context=context, today=today
         )
 
         # Revoke all tokens

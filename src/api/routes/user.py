@@ -126,7 +126,8 @@ class UserController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
-    @post("/me/password")
+    # Account recovery must remain available when a token's legal digest is stale.
+    @post("/me/password", opt={"legal_exempt": True})
     async def change_password(
         self,
         current_user_id: UUID,

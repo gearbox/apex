@@ -41,6 +41,8 @@ _REVIEWED_LEGAL_EXEMPT: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/v1/legal/acceptances"),
         ("DELETE", "/v1/users/me"),
+        # Password rotation must remain available to secure a compromised account.
+        ("POST", "/v1/users/me/password"),
         ("POST", "/v1/users/me/logout-all"),
         ("POST", "/v1/auth/resend-verification"),
         ("POST", "/v1/auth/content-cookie"),
@@ -182,14 +184,31 @@ class TestExemptionAudit:
         _enforce_legal_acceptance(_connection(method), handler, payload)
 
     def test_non_exempt_mutation_is_blocked_with_stale_digest(self) -> None:
-        handler = next(
-            h for m, p, h in _real_handlers() if (m, p) == ("POST", "/v1/users/me/password")
-        )
+        handler = next(h for m, p, h in _real_handlers() if (m, p) == ("PATCH", "/v1/users/me"))
         payload = TokenPayload(
             sub=str(uuid4()), exp=0, iat=0, jti="j", product_id="vex", legal_digest="stale"
         )
         with pytest.raises(LegalAcceptanceRequiredError):
             _enforce_legal_acceptance(_connection("POST"), handler, payload)
+
+    def test_missing_product_scope_is_a_wiring_error(self) -> None:
+        handler = MagicMock()
+        handler.opt = {}
+        connection = _connection("POST")
+        del connection.state["product_config"]
+        payload = TokenPayload(sub=str(uuid4()), exp=0, iat=0, jti="j", product_id="vex")
+
+        with pytest.raises(RuntimeError, match="Product scope missing"):
+            _enforce_legal_acceptance(connection, handler, payload)
+
+    def test_get_with_missing_product_scope_returns_before_lookup(self) -> None:
+        handler = MagicMock()
+        handler.opt = {}
+        connection = _connection("GET")
+        del connection.state["product_config"]
+        payload = TokenPayload(sub=str(uuid4()), exp=0, iat=0, jti="j", product_id="vex")
+
+        _enforce_legal_acceptance(connection, handler, payload)
 
 
 def _connection(method: str, product: Any = VEX_CONFIG) -> MagicMock:

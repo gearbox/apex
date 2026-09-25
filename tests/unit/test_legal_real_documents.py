@@ -12,8 +12,9 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import structlog
 
-from src.api.services.legal.registry import LegalDocumentRegistry
+from src.api.services.legal.registry import LegalDocumentRegistry, content_sha256
 from src.core.product_registry import PRODUCT_REGISTRY
 
 pytestmark = pytest.mark.unit
@@ -35,6 +36,18 @@ def test_real_legal_directory_loads_for_every_product() -> None:
         for doc in registry.list_current(config.product, today=FIRST_EFFECTIVE):
             assert doc.content_md.strip()
             assert "\r" not in doc.content_md
+            assert doc.sha256 == content_sha256(doc.content_md)
+
+
+def test_real_legal_directory_staging_logs_actual_hygiene_findings() -> None:
+    with structlog.testing.capture_logs() as logs:
+        LegalDocumentRegistry.load(
+            REPO_LEGAL_DIR,
+            products=PRODUCT_REGISTRY.values(),
+            environment="staging",
+            today=FIRST_EFFECTIVE,
+        )
+    assert sum(event["event"] == "legal.placeholder_detected" for event in logs) > 0
 
 
 def test_dockerfile_copies_legal_directory() -> None:

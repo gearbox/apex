@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import date
 from itertools import pairwise
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Self
+from typing import TYPE_CHECKING, Annotated, Final, Self
 
 import msgspec
 import structlog
@@ -43,9 +43,9 @@ logger = structlog.get_logger(__name__)
 
 MANIFEST_FILENAME: Final = "manifest.toml"
 
-# Unfilled template placeholder: a bracketed span that is not a markdown link.
-_PLACEHOLDER_RE: Final = re.compile(r"\[[^\]\n]+\](?!\()")
 _DRAFTING_NOTE_RE: Final = re.compile(r"DRAFTING NOTE")
+_REFERENCE_DEFINITION_RE: Final = re.compile(r"^ {0,3}\[([^\]\n]+)\]:[ \t]*\S")
+_BRACKET_SPAN_RE: Final = re.compile(r"(?<!\\)\[([^\]\n]+)\]")
 
 
 class ManifestEntry(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
@@ -53,6 +53,7 @@ class ManifestEntry(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
 
     version: date
     requires_reacceptance: bool
+    sha256: Annotated[str, msgspec.Meta(pattern=r"^[0-9a-f]{64}$")]
 
 
 LegalManifest = dict[Product, dict[LegalDocumentType, list[ManifestEntry]]]
@@ -80,12 +81,69 @@ def content_sha256(content_md: str) -> str:
     return hashlib.sha256(content_md.encode("utf-8")).hexdigest()
 
 
+def _normalise_reference_label(label: str) -> str:
+    """Normalise a CommonMark reference label for case-insensitive lookup."""
+    return " ".join(label.split()).casefold()
+
+
 def _hygiene_findings(document: LegalDocument) -> list[tuple[int, str]]:
-    """Return ``(line_number, matched_text)`` for every placeholder/drafting note."""
+    """Return ``(line_number, matched_text)`` for placeholders and drafting notes.
+
+    Markdown reference links use bracket notation too. Their labels can only be
+    identified after collecting definitions from the whole document, so this is
+    intentionally a small document-level scanner rather than one regex.
+    """
+    lines = document.content_md.split("\n")
+    definition_lines: set[int] = set()
+    definitions: set[str] = set()
+    for lineno, line in enumerate(lines, start=1):
+        if match := _REFERENCE_DEFINITION_RE.match(line):
+            definition_lines.add(lineno)
+            definitions.add(_normalise_reference_label(match.group(1)))
+
     findings: list[tuple[int, str]] = []
-    for lineno, line in enumerate(document.content_md.split("\n"), start=1):
+    for lineno, line in enumerate(lines, start=1):
         findings.extend((lineno, m.group(0)) for m in _DRAFTING_NOTE_RE.finditer(line))
-        findings.extend((lineno, m.group(0)) for m in _PLACEHOLDER_RE.finditer(line))
+        if lineno in definition_lines:
+            continue
+
+        position = 0
+        while match := _BRACKET_SPAN_RE.search(line, position):
+            text = match.group(0)
+            label = match.group(1)
+            end = match.end()
+
+            # [text](url)
+            if line.startswith("(", end):
+                position = end
+                continue
+
+            # [text][reference] and [text][] (only if the reference resolves).
+            if line.startswith("[", end):
+                if line.startswith("[]", end):
+                    if _normalise_reference_label(label) in definitions:
+                        position = end + 2
+                        continue
+                elif (trailing := _BRACKET_SPAN_RE.match(line, end)) and _normalise_reference_label(
+                    trailing.group(1)
+                ) in definitions:
+                    position = trailing.end()
+                    continue
+
+            # [reference] shortcut link.
+            if _normalise_reference_label(label) in definitions:
+                position = end
+                continue
+
+            # GFM task-list marker at the start of a list item.
+            if text in {"[ ]", "[x]", "[X]"} and re.fullmatch(
+                r"\s*[-*+]\s+", line[: match.start()]
+            ):
+                position = end
+                continue
+
+            findings.append((lineno, text))
+            position = end
     return findings
 
 
@@ -162,6 +220,15 @@ class LegalDocumentRegistry:
                             f"at {path}"
                         ) from exc
                     content = normalize_content(raw)
+                    computed_sha256 = content_sha256(content)
+                    if computed_sha256 != entry.sha256:
+                        raise LegalRegistryError(
+                            f"{product}/{doc_type}/{entry.version}: manifest sha256 "
+                            f"{entry.sha256} does not match computed content sha256 "
+                            f"{computed_sha256}. Published legal documents are immutable — "
+                            "publish a new version file instead. If this version has never been "
+                            "accepted anywhere, update the manifest hash."
+                        )
                     documents.append(
                         LegalDocument(
                             product=product,
@@ -169,7 +236,7 @@ class LegalDocumentRegistry:
                             version=entry.version,
                             requires_reacceptance=entry.requires_reacceptance,
                             content_md=content,
-                            sha256=content_sha256(content),
+                            sha256=computed_sha256,
                         )
                     )
 

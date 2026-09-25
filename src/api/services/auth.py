@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -199,11 +199,10 @@ class AuthService:
             LegalVersionStaleError: A submitted version/sha256 is not current.
             EmailAlreadyExistsError: If email is taken on this product.
         """
+        today = datetime.now(UTC).date()
         product = self._product_resolver(product_id)
         # Pure check before any DB access — a stale form never creates a user.
-        legal_documents = self._legal.validate_submission(
-            product, accepted_documents, today=datetime.now(UTC).date()
-        )
+        legal_documents = self._legal.validate_submission(product, accepted_documents, today=today)
 
         # Check for existing email within the same product
         if await self._repo.email_exists(email, product_id=product_id):
@@ -246,7 +245,9 @@ class AuthService:
         )
 
         # Generate tokens
-        tokens, _refresh_token_id = await self._create_token_pair(user_id, product_id=product_id)
+        tokens, _refresh_token_id = await self._create_token_pair(
+            user_id, product_id=product_id, today=today
+        )
 
         # Send verification email — non-blocking failure: if the email provider
         # is down we still complete registration and let the user resend manually.
@@ -290,6 +291,7 @@ class AuthService:
                 does not exist on this product.
             UserInactiveError: If user account is deactivated.
         """
+        today = datetime.now(UTC).date()
         user = await self._repo.get_active_user_by_email(email, product_id=product_id)
 
         if user is None:
@@ -313,6 +315,7 @@ class AuthService:
             product_id=product_id,
             user_agent=user_agent,
             ip_address=ip_address,
+            today=today,
         )
 
         return user, tokens
@@ -346,6 +349,7 @@ class AuthService:
                 other reason (including legacy rows with no recorded
                 reason).
         """
+        today = datetime.now(UTC).date()
         token_hash = hash_token(refresh_token)
 
         # G1 — look up the owning user_id first via a scalar (non-ORM-entity)
@@ -458,6 +462,7 @@ class AuthService:
             family_id=stored_token.family_id,
             user_agent=user_agent,
             ip_address=ip_address,
+            today=today,
         )
 
         epoch_after = await self._token_revocation.get_current_epoch(stored_token.user_id)
@@ -629,6 +634,7 @@ class AuthService:
         user_id: UUID,
         *,
         product_id: str | None = None,
+        today: date,
         family_id: UUID | None = None,
         user_agent: str | None = None,
         ip_address: str | None = None,
@@ -638,6 +644,7 @@ class AuthService:
         Args:
             user_id: User ID.
             product_id: Product scope to embed in the JWT.
+            today: UTC date shared with all legal work for this request.
             family_id: Token family ID (for rotation).
             user_agent: Client user agent.
             ip_address: Client IP address.
@@ -653,7 +660,7 @@ class AuthService:
             await self._legal.satisfied_digest(
                 user_id=user_id,
                 product=self._product_resolver(product_id),
-                today=datetime.now(UTC).date(),
+                today=today,
             )
             if product_id is not None
             else None

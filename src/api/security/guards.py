@@ -32,7 +32,8 @@ logger = structlog.get_logger(__name__)
 _SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # Route-handler ``opt`` key that exempts a non-safe handler from legal
-# enforcement. Every use is pinned by tests/unit/security/test_legal_exempt_usage.py.
+# enforcement. Every use is pinned by
+# tests/unit/security/test_legal_guard.py::TestExemptionAudit.
 LEGAL_EXEMPT_OPT: Final = "legal_exempt"
 
 
@@ -168,12 +169,9 @@ def _enforce_legal_acceptance(
     method = connection.scope.get("method")
     if method is None or method in _SAFE_METHODS or route_handler.opt.get(LEGAL_EXEMPT_OPT):
         return
-    product_config: ProductConfig | None = None
-    with contextlib.suppress(Exception):
-        product_config = connection.state.get("product_config")
+    product_config: ProductConfig | None = connection.state.get("product_config")
     if product_config is None:
-        # No product scope → nothing to enforce (same posture as _enforce_product).
-        return
+        raise RuntimeError("Product scope missing — ProductMiddleware not applied")
     registry = _get_legal_registry(connection)
     required = registry.required_digest(product_config, today=datetime.now(UTC).date())
     if required is not None and payload.legal_digest != required:

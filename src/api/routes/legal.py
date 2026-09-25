@@ -1,8 +1,8 @@
 """Legal document & acceptance endpoints.
 
 Endpoints:
-  GET  /v1/legal/documents/{doc_type}  — public; one document (current, or ?version=YYYY-MM-DD)
-  GET  /v1/legal/current               — public; current versions of the required set
+  GET  /v1/legal/documents/{doc_type}  — unauthenticated; one document (current, or ?version=YYYY-MM-DD)
+  GET  /v1/legal/current               — unauthenticated; current versions of the required set
   GET  /v1/legal/status                — auth; the caller's acceptance state
   POST /v1/legal/acceptances           — auth, legal-exempt; record re-acceptance
 
@@ -15,14 +15,14 @@ updated ``lgl`` digest that ``auth_guard`` checks. Contract:
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 import structlog
-from litestar import Controller, Response, get, post
+from litestar import Controller, Request, Response, get, post
 from litestar.di import Provide
 from litestar.params import Body, Parameter
-from litestar.status_codes import HTTP_200_OK
+from litestar.status_codes import HTTP_200_OK, HTTP_304_NOT_MODIFIED
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.legal import (
@@ -49,11 +49,23 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-_DOCUMENT_CACHE_CONTROL = "public, max-age=300"
+_DOCUMENT_EXACT_CACHE_CONTROL = "private, max-age=31536000, immutable"
+_DOCUMENT_CURRENT_CACHE_CONTROL = "private, no-cache"
+_DOCUMENT_VARY = "Origin, X-Product-Id"
 
 
 def _today() -> date:
     return datetime.now(UTC).date()
+
+
+def _if_none_match_matches(if_none_match: str | None, quoted_etag: str) -> bool:
+    """Compare one validator, accepting the weak form browsers may send."""
+    if if_none_match is None:
+        return False
+    candidate = if_none_match.strip()
+    if candidate.startswith("W/"):
+        candidate = candidate[2:].strip()
+    return candidate == quoted_etag
 
 
 def _parse_required_type(raw: str, product_config: ProductConfig) -> LegalDocumentType:
@@ -96,6 +108,7 @@ class LegalController(Controller):
         doc_type: str,
         product_config: ProductConfig,
         legal_registry: LegalDocumentRegistry,
+        request: Request[Any, Any, Any],
         version: Annotated[
             date | None,
             Parameter(
@@ -106,7 +119,7 @@ class LegalController(Controller):
     ) -> Response[LegalDocumentResponse]:
         """Fetch one legal document — the current version, or an exact one.
 
-        Public. 404 ``legal_document_not_found`` for an unknown type, a type
+        Unauthenticated. 404 ``legal_document_not_found`` for an unknown type, a type
         this product doesn't require, or an unknown version. Future-dated
         versions are fetchable by exact ``version`` (advance notice) but are
         never "current" before their date.
@@ -117,6 +130,21 @@ class LegalController(Controller):
             if version is None
             else legal_registry.get(product_config.product, parsed, version)
         )
+        quoted_etag = f'"{doc.sha256}"'
+        cache_control = (
+            _DOCUMENT_CURRENT_CACHE_CONTROL if version is None else _DOCUMENT_EXACT_CACHE_CONTROL
+        )
+        headers = {
+            "ETag": quoted_etag,
+            "Cache-Control": cache_control,
+            "Vary": _DOCUMENT_VARY,
+        }
+        if _if_none_match_matches(request.headers.get("if-none-match"), quoted_etag):
+            return Response(
+                content=None,  # type: ignore[arg-type]
+                status_code=HTTP_304_NOT_MODIFIED,
+                headers=headers,
+            )
         return Response(
             content=LegalDocumentResponse(
                 doc_type=doc.doc_type,
@@ -126,7 +154,7 @@ class LegalController(Controller):
                 content_md=doc.content_md,
             ),
             status_code=HTTP_200_OK,
-            headers={"ETag": f'"{doc.sha256}"', "Cache-Control": _DOCUMENT_CACHE_CONTROL},
+            headers=headers,
         )
 
     @get("/current")
@@ -137,7 +165,7 @@ class LegalController(Controller):
     ) -> LegalCurrentResponse:
         """Current versions of the product's required documents.
 
-        Public. The signup form renders these and echoes each
+        Unauthenticated. The signup form renders these and echoes each
         ``{doc_type, version, sha256}`` back as ``accepted_documents``.
         """
         today = _today()

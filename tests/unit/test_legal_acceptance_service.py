@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 from uuid import uuid4
 
 import msgspec
@@ -169,6 +169,10 @@ class TestRecordAcceptances:
         assert all(r.ip_address == CONTEXT.ip_address for r in rows)
         assert all(r.user_agent == CONTEXT.user_agent for r in rows)
         session.flush.assert_awaited_once()
+        assert repo.mock_calls[:2] == [
+            call.lock_user_ledger(user_id=user_id),
+            call.latest_per_type(user_id=user_id, product_id="vex"),
+        ]
 
     async def test_idempotent_resubmission_inserts_nothing(self) -> None:
         """C12 — already-accepted current versions insert 0 rows."""
@@ -255,7 +259,7 @@ class TestConsentWithdrawal:
     async def test_vex_inserts_one_withdraw_row(self) -> None:
         service, repo, session = _service()
         await service.record_consent_withdrawal(
-            user_id=uuid4(), product=VEX_CONFIG, context=CONTEXT
+            user_id=uuid4(), product=VEX_CONFIG, context=CONTEXT, today=TODAY
         )
         (row,) = repo.add_many.call_args.args[0]
         assert row.doc_type == LegalDocumentType.SENSITIVE_DATA_CONSENT
@@ -268,9 +272,37 @@ class TestConsentWithdrawal:
     async def test_synthara_is_noop(self) -> None:
         service, repo, _ = _service()
         await service.record_consent_withdrawal(
-            user_id=uuid4(), product=SYNTHARA_CONFIG, context=CONTEXT
+            user_id=uuid4(), product=SYNTHARA_CONFIG, context=CONTEXT, today=TODAY
         )
         repo.add_many.assert_not_called()
+
+    async def test_withdrawal_uses_passed_today(self) -> None:
+        old = make_legal_document(LegalDocumentType.SENSITIVE_DATA_CONSENT, date(2026, 1, 1))
+        current = make_legal_document(LegalDocumentType.SENSITIVE_DATA_CONSENT, TODAY)
+        registry = make_legal_registry(
+            make_legal_document(LegalDocumentType.TERMS),
+            make_legal_document(LegalDocumentType.PRIVACY),
+            old,
+            current,
+        )
+        service, repo, _ = _service(registry=registry)
+
+        await service.record_consent_withdrawal(
+            user_id=uuid4(), product=VEX_CONFIG, context=CONTEXT, today=date(2026, 5, 1)
+        )
+
+        (row,) = repo.add_many.call_args.args[0]
+        assert row.version == old.version
+
+    async def test_withdrawal_locks_before_its_ledger_read(self) -> None:
+        service, repo, _ = _service()
+        user_id = uuid4()
+
+        await service.record_consent_withdrawal(
+            user_id=user_id, product=VEX_CONFIG, context=CONTEXT, today=TODAY
+        )
+
+        assert repo.mock_calls[:1] == [call.lock_user_ledger(user_id=user_id)]
 
 
 class TestSatisfiedDigestAndStatus:
@@ -343,4 +375,4 @@ class TestRepositoryIsAppendOnly:
 
     def test_public_surface(self) -> None:
         public = {n for n in dir(LegalAcceptanceRepository) if not n.startswith("_")}
-        assert public == {"add_many", "latest_per_type"}
+        assert public == {"add_many", "latest_per_type", "lock_user_ledger"}

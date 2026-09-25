@@ -24,6 +24,7 @@ from src.api.services.billing_errors import OrganizationBalanceError, Organizati
 from src.api.services.organization import OrganizationService
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import OrgRole, TransactionType, UserRole
+from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY, vex_product_scope
 
 if TYPE_CHECKING:
     from src.api.security.jwt import JWTService
@@ -111,7 +112,9 @@ def test_user_id() -> UUID:
 
 @pytest.fixture
 def auth_header(jwt_service: JWTService, test_user_id: UUID) -> dict[str, str]:
-    token, _ = jwt_service.create_access_token(test_user_id)
+    token, _ = jwt_service.create_access_token(
+        test_user_id, product_id="vex", legal_digest=TEST_LEGAL_DIGEST
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -173,9 +176,11 @@ def _create_org_app(
             OrganizationPermissionError: _org_permission_handler,
             OrganizationBalanceError: _org_balance_handler,
         },
+        middleware=[vex_product_scope],
     )
     app.state["jwt_service"] = jwt_service
     app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
+    app.state["legal_registry"] = TEST_LEGAL_REGISTRY
     return app
 
 
