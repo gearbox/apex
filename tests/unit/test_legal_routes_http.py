@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+import structlog
 from litestar import Litestar
 from litestar.datastructures import State
 from litestar.di import Provide
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.app import (
     legal_acceptance_required_handler,
+    legal_account_inactive_handler,
     legal_document_not_found_handler,
     legal_submission_incomplete_handler,
     legal_version_stale_handler,
@@ -35,6 +37,7 @@ from src.api.services.auth import AuthService
 from src.api.services.legal.acceptance import LegalAcceptanceService, RequestContext
 from src.api.services.legal.errors import (
     LegalAcceptanceRequiredError,
+    LegalAccountInactiveError,
     LegalDocumentNotFoundError,
     LegalSubmissionIncompleteError,
     LegalVersionStaleError,
@@ -104,6 +107,7 @@ def _app(
             LegalSubmissionIncompleteError: legal_submission_incomplete_handler,
             LegalVersionStaleError: legal_version_stale_handler,
             LegalAcceptanceRequiredError: legal_acceptance_required_handler,
+            LegalAccountInactiveError: legal_account_inactive_handler,
         },
         state=State(
             {
@@ -180,6 +184,25 @@ class TestPublicDocumentEndpoints:
         assert resp.status_code == 200
 
     @pytest.mark.parametrize(
+        ("template", "status"),
+        [
+            ('"other", W/"{sha}" , "another"', 304),
+            ('"other", W/"another"', 200),
+            ("*", 304),
+        ],
+        ids=["list-containing-etag", "list-without-etag", "wildcard"],
+    )
+    def test_if_none_match_list_and_wildcard(self, template: str, status: int) -> None:
+        registry = _registry()
+        expected = registry.get(Product.VEX, LegalDocumentType.TERMS, date(2020, 1, 1))
+        with TestClient(app=_app(registry)) as client:
+            resp = client.get(
+                "/v1/legal/documents/terms",
+                headers={**VEX, "If-None-Match": template.format(sha=expected.sha256)},
+            )
+        assert resp.status_code == status
+
+    @pytest.mark.parametrize(
         ("path", "params", "headers"),
         [
             ("/v1/legal/documents/cookies", None, VEX),
@@ -239,6 +262,7 @@ def _acceptance_service(
 ) -> tuple[LegalAcceptanceService, MagicMock]:
     repo = MagicMock(spec=LegalAcceptanceRepository)
     repo.latest_per_type = AsyncMock(return_value=latest or {})
+    repo.is_user_active = AsyncMock(return_value=True)
     return LegalAcceptanceService(
         registry=registry, repository=repo, session=AsyncMock(spec=AsyncSession)
     ), repo
@@ -311,6 +335,40 @@ class TestAuthenticatedEndpoints:
         assert body["error"] == "legal_version_stale"
         assert len(body["detail"]["current"]) == 3
         repo.add_many.assert_not_called()
+
+    def test_acceptances_for_deactivated_user_is_401_account_inactive(self) -> None:
+        """F2 — an acceptance racing account closure maps to the login/refresh 401 code."""
+        registry = make_legal_registry()
+        user_id = uuid4()
+        service = MagicMock(spec=LegalAcceptanceService)
+        service.validate_submission.return_value = ()
+        service.record_acceptances = AsyncMock(
+            side_effect=LegalAccountInactiveError(user_id=user_id, product_id="vex")
+        )
+        jwt = JWTService(JWTConfig(secret_key=TEST_SECRET))
+        token, _ = jwt.create_access_token(user_id, product_id="vex")
+        payload = {
+            "accepted_documents": [
+                {"doc_type": d.doc_type.value, "version": d.version.isoformat(), "sha256": d.sha256}
+                for d in accept_all_current(registry)
+            ]
+        }
+        with (
+            structlog.testing.capture_logs() as logs,
+            TestClient(app=_app(registry, legal_service=service, jwt_service=jwt)) as client,
+        ):
+            resp = client.post(
+                "/v1/legal/acceptances",
+                json=payload,
+                headers={**VEX, "Authorization": f"Bearer {token}"},
+            )
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "account_inactive"
+        (event,) = [e for e in logs if e["event"] == "legal.acceptance_rejected_inactive"]
+        assert event["user_id"] == str(user_id)
+        assert event["product_id"] == "vex"
+        assert "ip_address" not in event
+        assert "user_agent" not in event
 
 
 class TestRegisterLegalErrors:

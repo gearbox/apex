@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 
 from src.core.enums import LegalDocumentType
 from src.db.models.legal import LegalAcceptance
+from src.db.models.user import User
 
 # A dedicated int4 namespace for the two-key transaction-scoped legal-ledger
 # lock. It is distinct from the GPU session advisory-lock key spaces.
@@ -47,6 +48,30 @@ class LegalAcceptanceRepository:
             {"ns": LEGAL_LEDGER_LOCK_NAMESPACE, "uid": str(user_id)},
         )
 
+    async def is_user_active(self, *, user_id: UUID) -> bool:
+        """Whether the user row exists and is active, read fresh from the database.
+
+        A deliberate exception to this repository touching only
+        ``legal_acceptances``: the check must run *inside* the ledger's
+        critical section (after :meth:`lock_user_ledger`), so that an
+        acceptance waiting behind a concurrent account closure sees the
+        committed ``is_active = false``.
+
+        - A scalar column select, never ``session.get``: the identity map may
+          hold a ``User`` loaded earlier in the request with a stale
+          ``is_active``; a column select always hits the database.
+        - A plain ``SELECT``, never a row-locking read: it must not take a
+          user-row lock inside the ledger lock, or it would interact with the
+          revocation/logout lock ordering. The advisory lock already
+          serializes it against closure, and under READ COMMITTED a statement
+          issued after the lock is granted sees the closure's commit.
+
+        Returns:
+            ``False`` for an inactive or missing user.
+        """
+        stmt = select(User.is_active).where(User.id == user_id)
+        return bool((await self._session.execute(stmt)).scalar_one_or_none())
+
     async def latest_per_type(
         self, *, user_id: UUID, product_id: str
     ) -> Mapping[LegalDocumentType, LegalAcceptance]:
@@ -66,11 +91,8 @@ class LegalAcceptanceRepository:
                 LegalAcceptance.product_id == product_id,
             )
             .distinct(LegalAcceptance.doc_type)
-            .order_by(
-                LegalAcceptance.doc_type,
-                LegalAcceptance.created_at.desc(),
-                LegalAcceptance.id.desc(),
-            )
+            # seq is the serialized write order; timestamps are evidence only.
+            .order_by(LegalAcceptance.doc_type, LegalAcceptance.seq.desc())
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return {LegalDocumentType(row.doc_type): row for row in rows}

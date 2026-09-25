@@ -46,6 +46,9 @@ MANIFEST_FILENAME: Final = "manifest.toml"
 _DRAFTING_NOTE_RE: Final = re.compile(r"DRAFTING NOTE")
 _REFERENCE_DEFINITION_RE: Final = re.compile(r"^ {0,3}\[([^\]\n]+)\]:[ \t]*\S")
 _BRACKET_SPAN_RE: Final = re.compile(r"(?<!\\)\[([^\]\n]+)\]")
+# Text before a GFM task-list checkbox: a bullet (``-``/``*``/``+``) or ordered
+# (``1.``/``2)``) list marker.
+_TASK_LIST_MARKER_RE: Final = re.compile(r"\s*(?:[-*+]|\d{1,9}[.)])\s+")
 
 
 class ManifestEntry(msgspec.Struct, forbid_unknown_fields=True, frozen=True):
@@ -136,8 +139,8 @@ def _hygiene_findings(document: LegalDocument) -> list[tuple[int, str]]:
                 continue
 
             # GFM task-list marker at the start of a list item.
-            if text in {"[ ]", "[x]", "[X]"} and re.fullmatch(
-                r"\s*[-*+]\s+", line[: match.start()]
+            if text in {"[ ]", "[x]", "[X]"} and _TASK_LIST_MARKER_RE.fullmatch(
+                line[: match.start()]
             ):
                 position = end
                 continue

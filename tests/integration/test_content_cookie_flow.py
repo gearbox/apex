@@ -27,15 +27,20 @@ from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_204_NO_CONTENT,
     HTTP_401_UNAUTHORIZED,
+    HTTP_428_PRECONDITION_REQUIRED,
 )
 from litestar.testing import TestClient
 
+from src.api.app import legal_acceptance_required_handler
 from src.api.dependencies.auth import get_current_user_id
 from src.api.security import auth_guard, content_auth_guard
 from src.api.security.content_cookie import build_content_cookie, clear_content_cookie
 from src.api.security.jwt import JWTConfig, JWTService
+from src.api.services.legal.errors import LegalAcceptanceRequiredError
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import Settings
+from src.core.product_registry import get_product_config_by_slug
+from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY
 
 if TYPE_CHECKING:
     from litestar.types import Receive, Scope, Send
@@ -81,12 +86,16 @@ def settings() -> Settings:
 
 def _make_content_app(jwt_service: JWTService, product_id: str = PRODUCT_ID) -> Litestar:
     """Build a minimal app that exercises the content guard logic."""
+    product_config = get_product_config_by_slug(product_id)
 
     class FakeProductMiddleware(AbstractMiddleware):
+        # Mirror ProductMiddleware: auth_guard's legal enforcement reads
+        # product_config on non-safe methods and fails closed without it.
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             if scope["type"] in ("http", "websocket"):
-                scope.setdefault("state", {})
-                scope["state"]["product_id"] = product_id
+                state = scope.setdefault("state", {})
+                state["product_config"] = product_config
+                state["product_id"] = product_config.slug
             await self.app(scope, receive, send)
 
     class FakeContentController(Controller):
@@ -104,9 +113,11 @@ def _make_content_app(jwt_service: JWTService, product_id: str = PRODUCT_ID) -> 
     app = Litestar(
         route_handlers=[FakeContentController],
         middleware=[FakeProductMiddleware],
+        exception_handlers={LegalAcceptanceRequiredError: legal_acceptance_required_handler},
     )
     app.state["jwt_service"] = jwt_service
     app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
+    app.state["legal_registry"] = TEST_LEGAL_REGISTRY
     return app
 
 
@@ -189,7 +200,9 @@ class TestDeleteBearer:
         assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_valid_bearer_can_delete(self, jwt_service: JWTService, test_user_id: UUID) -> None:
-        token, _ = jwt_service.create_access_token(test_user_id, product_id=PRODUCT_ID)
+        token, _ = jwt_service.create_access_token(
+            test_user_id, product_id=PRODUCT_ID, legal_digest=TEST_LEGAL_DIGEST
+        )
         app = _make_content_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.delete(
@@ -197,6 +210,20 @@ class TestDeleteBearer:
                 headers={"Authorization": f"Bearer {token}"},
             )
         assert resp.status_code == HTTP_204_NO_CONTENT
+
+    def test_bearer_with_stale_legal_digest_cannot_delete(
+        self, jwt_service: JWTService, test_user_id: UUID
+    ) -> None:
+        """The harness runs real legal enforcement, not just a satisfied stub."""
+        token, _ = jwt_service.create_access_token(test_user_id, product_id=PRODUCT_ID)
+        app = _make_content_app(jwt_service)
+        with TestClient(app=app) as client:
+            resp = client.delete(
+                f"/v1/content/{uuid4()}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert resp.status_code == HTTP_428_PRECONDITION_REQUIRED
+        assert resp.json()["error"] == "legal_acceptance_required"
 
 
 # ---------------------------------------------------------------------------

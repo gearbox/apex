@@ -9,6 +9,7 @@ registered in ``src/api/app.py``:
 | ``LegalSubmissionIncompleteError`` | 422 | ``legal_acceptance_incomplete`` |
 | ``LegalVersionStaleError`` | 409 | ``legal_version_stale`` |
 | ``LegalAcceptanceRequiredError`` | 428 | ``legal_acceptance_required`` |
+| ``LegalAccountInactiveError`` | 401 | ``account_inactive`` |
 
 ``LegalRegistryError`` is a startup failure, never an HTTP response.
 """
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import date
+    from uuid import UUID
 
     from src.core.enums import LegalDocumentType
 
@@ -88,3 +90,17 @@ class LegalAcceptanceRequiredError(LegalError):
             "You must accept the current legal documents before continuing. "
             "Accept them, then refresh your session."
         )
+
+
+class LegalAccountInactiveError(LegalError):
+    """The account was closed/deactivated before this acceptance could be recorded.
+
+    Raised inside the ledger lock, so it also covers a closure that committed
+    while the acceptance request (which already passed ``auth_guard``) waited.
+    Maps to the same ``account_inactive`` 401 that login and refresh return.
+    """
+
+    def __init__(self, *, user_id: UUID, product_id: str) -> None:
+        self.user_id = user_id
+        self.product_id = product_id
+        super().__init__("Account has been deactivated")

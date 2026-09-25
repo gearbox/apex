@@ -54,7 +54,7 @@ interface LegalStatusResponse {
     required_version: LegalVersion;   // minimum version that satisfies the requirement
     current_version: LegalVersion;    // what the user would accept now (≥ required_version)
     accepted_version: LegalVersion | null;
-    accepted_at: string | null;       // ISO datetime
+    accepted_at: string | null;       // ISO datetime: when the acceptance row was written (evidence, not an ordering key)
     satisfied: boolean;
   }[];
   all_satisfied: boolean;
@@ -90,6 +90,7 @@ Returns `LegalStatusResponse` for the caller. Use it to decide which documents t
 - Body: `{ accepted_documents: AcceptedDocument[] }`. It must contain **exactly the full required set** at the **current** versions, including documents the user already accepted.
 - Response: `200 LegalStatusResponse` with the new state.
 - Idempotent: already-accepted current versions are skipped server-side. Writes to one user's acceptance ledger are serialized, so concurrent submissions cannot create duplicate evidence rows.
+- Returns **`401 account_inactive`** if the account was closed, including a closure that commits while this request is in flight. It's the same code login and refresh return for a deactivated account, so the existing 401 → refresh → logout handling covers it. No acceptance is recorded.
 - **This endpoint does not issue a new token.** Call `POST /v1/auth/refresh` next (see §4).
 
 ### `POST /v1/auth/register` (changed)
@@ -129,8 +130,13 @@ All errors use the standard `ErrorEnvelope`: `{ error, message, status_code, det
 | 409 | `legal_version_stale` | Register or acceptance submitted an old `version` or a wrong `sha256` | `{ current: [{doc_type, version, sha256}] }` | Refetch the documents, show them again, and resubmit |
 | 422 | `legal_acceptance_incomplete` | Missing, extra or duplicated `doc_type` | `{ missing: [], unexpected: [], duplicated: [] }` | Bug in the form: submit exactly the `/current` set |
 | 404 | `legal_document_not_found` | Unknown type or version, or a type the product doesn't require | `null` | — |
+| 401 | `account_inactive` | `POST /v1/legal/acceptances` for an account that has been closed/deactivated (also returned by login/refresh) | `null` | Existing 401 path: refresh fails → log out |
 
 A `409 legal_version_stale` means a new version went live while the user had the form open. Refetch, show the new text, and ask again. Don't silently resubmit with the new hashes.
+
+### Event ordering (backend semantics)
+
+The acceptance ledger is append-only: one row per accept or withdraw event. Every event for a user is written under a per-user lock, and its order is the row's `seq`, an identity value drawn at insert time, so `seq` matches the order the writes actually happened. "Latest event per document", which drives `/status`, `satisfied`, and the `lgl` digest, means the highest `seq`. `created_at` (surfaced as `accepted_at`) is the insertion-time evidence timestamp (`clock_timestamp()`). It is informational only and never used for ordering.
 
 ---
 

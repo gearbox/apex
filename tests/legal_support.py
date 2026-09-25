@@ -78,6 +78,7 @@ def make_legal_acceptance_service(
     """
     repo = MagicMock(spec=LegalAcceptanceRepository)
     repo.latest_per_type = AsyncMock(return_value=dict(latest or {}))
+    repo.is_user_active = AsyncMock(return_value=True)
     session = AsyncMock(spec=AsyncSession)
     return LegalAcceptanceService(
         registry=registry if registry is not None else make_legal_registry(),

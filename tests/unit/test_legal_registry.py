@@ -361,9 +361,20 @@ class TestProductionHygiene:
             "See [ref].\n\n[ref]: https://vex.pics/privacy\n",
             "[ref]: https://vex.pics/privacy\n",
             "- [x] done\n",
+            "1. [ ] todo\n",
+            "2) [x] done\n",
             r"\\[literal\\]\n",
         ],
-        ids=["full", "collapsed", "shortcut", "definition", "task-list", "escaped"],
+        ids=[
+            "full",
+            "collapsed",
+            "shortcut",
+            "definition",
+            "task-list",
+            "ordered-task-list-dot",
+            "ordered-task-list-paren",
+            "escaped",
+        ],
     )
     def test_allowed_markdown_brackets_pass_in_production(self, tmp_path: Path, body: str) -> None:
         _load(self._root(tmp_path, body), environment="production")

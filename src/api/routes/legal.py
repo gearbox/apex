@@ -59,13 +59,22 @@ def _today() -> date:
 
 
 def _if_none_match_matches(if_none_match: str | None, quoted_etag: str) -> bool:
-    """Compare one validator, accepting the weak form browsers may send."""
+    """RFC 9110 weak comparison of ``If-None-Match`` against the current ETag.
+
+    The header is ``*`` (matches any current representation) or a
+    comma-separated list of entity tags, each optionally weak (``W/``).
+    """
     if if_none_match is None:
         return False
-    candidate = if_none_match.strip()
-    if candidate.startswith("W/"):
-        candidate = candidate[2:].strip()
-    return candidate == quoted_etag
+    if if_none_match.strip() == "*":
+        return True
+    for entry in if_none_match.split(","):
+        candidate = entry.strip()
+        if candidate.startswith("W/"):
+            candidate = candidate[2:].strip()
+        if candidate == quoted_etag:
+            return True
+    return False
 
 
 def _parse_required_type(raw: str, product_config: ProductConfig) -> LegalDocumentType:

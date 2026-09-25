@@ -3,7 +3,9 @@
 Contracts: C6 (register validation creates no user), C7 (signup rows +
 rollback), C8 (lgl in register/login/refresh tokens), C11 (re-acceptance
 flow), C12 (idempotent acceptance), C13 (withdrawal on closure), C14 (CHECK
-constraint), C15 (product scoping).
+constraint), C15 (product scoping). Round-2 remediation: F1 (event order is
+``seq``, ``created_at`` is insertion time), F2 (no ACCEPT after closure), F3
+(concurrency tests synchronise on ``pg_locks``, plus a no-lock canary).
 """
 
 from __future__ import annotations
@@ -11,12 +13,12 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt as pyjwt
 import msgspec
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import DateTime, delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +28,7 @@ from src.api.services.auth import AuthService
 from src.api.services.legal.acceptance import LegalAcceptanceService, RequestContext
 from src.api.services.legal.errors import (
     LegalAcceptanceRequiredError,
+    LegalAccountInactiveError,
     LegalSubmissionIncompleteError,
     LegalVersionStaleError,
 )
@@ -38,14 +41,16 @@ from src.db.models.legal import LegalAcceptance
 from src.db.models.user import User
 from src.db.repositories.legal import LegalAcceptanceRepository
 from src.db.repositories.user import UserRepository
+from tests.integration.pg_locks import wait_for_advisory_lock_waiter
 from tests.legal_support import accept_all_current, make_legal_document, make_legal_registry
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from src.api.services.legal.registry import LegalDocumentRegistry
+    from src.api.services.legal.registry import LegalDocument, LegalDocumentRegistry
     from tests.integration.conftest import UserFactory
 
 JWT_SECRET = "integration-legal-secret-key-32-bytes-long"
@@ -89,9 +94,78 @@ async def _rows(session: AsyncSession, user_id: UUID) -> list[LegalAcceptance]:
     result = await session.execute(
         select(LegalAcceptance)
         .where(LegalAcceptance.user_id == user_id)
-        .order_by(LegalAcceptance.doc_type)
+        .order_by(LegalAcceptance.doc_type, LegalAcceptance.seq)
     )
     return list(result.scalars().all())
+
+
+async def _seqs(session: AsyncSession, user_id: UUID) -> dict[UUID, int]:
+    """``{row id: seq}`` — read as columns so no identity-map state is involved."""
+    result = await session.execute(
+        select(LegalAcceptance.id, LegalAcceptance.seq).where(LegalAcceptance.user_id == user_id)
+    )
+    return dict(result.tuples().all())
+
+
+async def _consent_events(session: AsyncSession, user_id: UUID) -> list[tuple[LegalAction, int]]:
+    """Sensitive-data consent events for a user as ``(action, seq)``, in seq order."""
+    result = await session.execute(
+        select(LegalAcceptance.action, LegalAcceptance.seq)
+        .where(
+            LegalAcceptance.user_id == user_id,
+            LegalAcceptance.doc_type == LegalDocumentType.SENSITIVE_DATA_CONSENT,
+        )
+        .order_by(LegalAcceptance.seq)
+    )
+    return [(LegalAction(action), seq) for action, seq in result.all()]
+
+
+async def _commit_user(engine: AsyncEngine, email_prefix: str) -> User:
+    """Commit a vex user outside any test transaction (for multi-session tests)."""
+    user = User(
+        id=new_id(),
+        email=f"{email_prefix}-{new_id()}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+        session.add(user)
+        await session.commit()
+    return user
+
+
+async def _delete_user(engine: AsyncEngine, user_id: UUID) -> None:
+    async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+        await session.execute(delete(User).where(User.id == user_id))
+        await session.commit()
+
+
+def _user_service(session: AsyncSession, registry: LegalDocumentRegistry) -> UserService:
+    return UserService(
+        repository=UserRepository(session),
+        password_service=PasswordService(),
+        age_verification_service=MagicMock(),
+        token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+        legal_acceptance_service=_legal(session, registry),
+        session=session,
+    )
+
+
+async def _accept_committed(
+    engine: AsyncEngine,
+    registry: LegalDocumentRegistry,
+    user_id: UUID,
+    documents: Sequence[LegalDocument],
+) -> int:
+    """Run ``record_acceptances`` in its own committed transaction."""
+    async with AsyncSession(bind=engine, expire_on_commit=False) as session, session.begin():
+        return await _legal(session, registry).record_acceptances(
+            user_id=user_id,
+            product=VEX_CONFIG,
+            documents=documents,
+            source=LegalAcceptanceSource.REACCEPT,
+            context=CONTEXT,
+        )
 
 
 async def _user_count(session: AsyncSession) -> int:
@@ -348,41 +422,27 @@ class TestIdempotentAcceptance:
         assert await legal.record_acceptances(**kwargs) == 0
         assert len(await _rows(db_session, user.id)) == 3
 
-    async def test_concurrent_reacceptance_inserts_once(self, db_engine: AsyncEngine) -> None:
-        """A transaction-scoped user lock turns concurrent submits into 3 then 0."""
-        user = User(
-            id=new_id(),
-            email=f"c12-race-{new_id()}@example.com",
-            password_hash="hash",
-            product_id="vex",
-        )
-        registry = make_legal_registry()
-        today = _today()
-        documents = registry.list_current(Product.VEX, today=today)
-        first_inserted = asyncio.Event()
-        second_attempting_lock = asyncio.Event()
-        release_first = asyncio.Event()
+    async def _race_two_submissions(
+        self, db_engine: AsyncEngine, *, prove_second_blocks: bool
+    ) -> tuple[int, int, list[LegalAcceptance]]:
+        """First submit inserts and holds its transaction open; then a second submits.
 
-        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
-            session.add(user)
-            await session.commit()
+        With ``prove_second_blocks`` the first is released only once
+        ``pg_locks`` shows the second waiting on the ledger lock; otherwise the
+        second runs to completion first (the no-lock canary, where nothing blocks).
+        """
+        user = await _commit_user(db_engine, "c12-race")
+        registry = make_legal_registry()
+        documents = registry.list_current(Product.VEX, today=_today())
+        first_inserted = asyncio.Event()
+        release_first = asyncio.Event()
 
         async def submit(*, first: bool) -> int:
             async with (
                 AsyncSession(bind=db_engine, expire_on_commit=False) as session,
                 session.begin(),
             ):
-                service = _legal(session, registry)
-                if not first:
-                    original_lock = service._repo.lock_user_ledger
-
-                    async def signal_then_lock(*, user_id: UUID) -> None:
-                        second_attempting_lock.set()
-                        await original_lock(user_id=user_id)
-
-                    service._repo.lock_user_ledger = signal_then_lock  # type: ignore[method-assign]
-
-                inserted = await service.record_acceptances(
+                inserted = await _legal(session, registry).record_acceptances(
                     user_id=user.id,
                     product=VEX_CONFIG,
                     documents=documents,
@@ -398,20 +458,42 @@ class TestIdempotentAcceptance:
             first_task = asyncio.create_task(submit(first=True))
             await first_inserted.wait()
             second_task = asyncio.create_task(submit(first=False))
-            await second_attempting_lock.wait()
-            await asyncio.sleep(0)
+            if prove_second_blocks:
+                await wait_for_advisory_lock_waiter(db_engine)
+            else:
+                await asyncio.wait_for(asyncio.shield(second_task), timeout=5.0)
             release_first.set()
             first, second = await asyncio.gather(first_task, second_task)
 
             async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
                 rows = await _rows(session, user.id)
-            assert (first, second) == (3, 0)
-            assert {row.doc_type for row in rows} == set(LegalDocumentType)
-            assert all(row.action == LegalAction.ACCEPT for row in rows)
+            return first, second, rows
         finally:
-            async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
-                await session.execute(delete(User).where(User.id == user.id))
-                await session.commit()
+            release_first.set()
+            await _delete_user(db_engine, user.id)
+
+    async def test_concurrent_reacceptance_inserts_once(self, db_engine: AsyncEngine) -> None:
+        """A transaction-scoped user lock turns concurrent submits into 3 then 0."""
+        first, second, rows = await self._race_two_submissions(db_engine, prove_second_blocks=True)
+        assert (first, second) == (3, 0)
+        assert {row.doc_type for row in rows} == set(LegalDocumentType)
+        assert all(row.action == LegalAction.ACCEPT for row in rows)
+
+    async def test_concurrent_reacceptance_duplicates_without_lock(
+        self, db_engine: AsyncEngine
+    ) -> None:
+        """Canary: with the ledger lock disabled, the same race double-inserts.
+
+        Exists only to prove ``test_concurrent_reacceptance_inserts_once`` is
+        meaningful — if this stopped producing duplicates, the positive test
+        would no longer be exercising the lock.
+        """
+        with patch.object(LegalAcceptanceRepository, "lock_user_ledger", AsyncMock()):
+            first, second, rows = await self._race_two_submissions(
+                db_engine, prove_second_blocks=False
+            )
+        assert (first, second) == (3, 3)
+        assert len(rows) == 6
 
     async def test_accept_after_withdraw_same_version_inserts(
         self, db_session: AsyncSession
@@ -471,14 +553,7 @@ class TestWithdrawal:
     """C13 — closing a vex account records one consent WITHDRAW; synthara none."""
 
     def _user_service(self, session: AsyncSession) -> UserService:
-        return UserService(
-            repository=UserRepository(session),
-            password_service=PasswordService(),
-            age_verification_service=MagicMock(),
-            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
-            legal_acceptance_service=_legal(session, make_legal_registry()),
-            session=session,
-        )
+        return _user_service(session, make_legal_registry())
 
     async def test_vex_closure_inserts_withdraw(
         self, db_session: AsyncSession, make_user: UserFactory
@@ -603,4 +678,200 @@ class TestProductScoping:
         latest = await LegalAcceptanceRepository(db_session).latest_per_type(
             user_id=user.id, product_id="vex"
         )
-        assert latest[LegalDocumentType.SENSITIVE_DATA_CONSENT].action == LegalAction.WITHDRAW
+        winner = latest[LegalDocumentType.SENSITIVE_DATA_CONSENT]
+        seqs = await _seqs(db_session, user.id)
+        assert winner.action == LegalAction.WITHDRAW
+        assert seqs[winner.id] == max(seqs.values())
+        assert len(set(seqs.values())) == 2
+
+
+class TestEventOrdering:
+    """F1 — order is the serialized write order (seq), not transaction start time."""
+
+    async def test_withdraw_after_accept_with_earlier_tx_start_is_latest(
+        self, db_engine: AsyncEngine
+    ) -> None:
+        user = await _commit_user(db_engine, "f1-order")
+        registry = make_legal_registry()
+        today = _today()
+        try:
+            async with (
+                AsyncSession(bind=db_engine, expire_on_commit=False) as closure,
+                closure.begin(),
+            ):
+                # T1 (closure) starts first: pin its snapshot/transaction start,
+                # and force a real gap before T2 begins.
+                await closure.execute(text("SELECT 1"))
+                await closure.execute(text("SELECT pg_sleep(0.01)"))
+
+                # T2 (acceptance) starts later, takes the lock first, commits.
+                inserted = await _accept_committed(
+                    db_engine,
+                    registry,
+                    user.id,
+                    registry.list_current(Product.VEX, today=today),
+                )
+                assert inserted == 3
+
+                # T1 now takes the lock and writes WITHDRAW after T2's ACCEPT.
+                await _legal(closure, registry).record_consent_withdrawal(
+                    user_id=user.id, product=VEX_CONFIG, context=CONTEXT, today=today
+                )
+
+            async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+                latest = await LegalAcceptanceRepository(session).latest_per_type(
+                    user_id=user.id, product_id="vex"
+                )
+                digest = await _legal(session, registry).satisfied_digest(
+                    user_id=user.id, product=VEX_CONFIG, today=today
+                )
+                events = await _consent_events(session, user.id)
+            assert latest[LegalDocumentType.SENSITIVE_DATA_CONSENT].action == LegalAction.WITHDRAW
+            assert digest is None
+            (accept_seq,) = [seq for action, seq in events if action == LegalAction.ACCEPT]
+            (withdraw_seq,) = [seq for action, seq in events if action == LegalAction.WITHDRAW]
+            assert withdraw_seq > accept_seq
+        finally:
+            await _delete_user(db_engine, user.id)
+
+    async def test_created_at_is_insertion_time(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """created_at is clock_timestamp() at INSERT, not the transaction start."""
+        user = await make_user(email="f1-created-at@example.com")
+        await db_session.execute(text("SELECT pg_sleep(0.05)"))
+        row = LegalAcceptance(
+            id=new_id(),
+            user_id=user.id,
+            product_id="vex",
+            doc_type=LegalDocumentType.TERMS,
+            action=LegalAction.ACCEPT,
+            version=date(2020, 1, 1),
+            content_sha256="a" * 64,
+            source=LegalAcceptanceSource.SIGNUP,
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        created_at, tx_start = (
+            await db_session.execute(
+                select(
+                    LegalAcceptance.created_at,
+                    func.transaction_timestamp(type_=DateTime(timezone=True)),
+                ).where(LegalAcceptance.id == row.id)
+            )
+        ).one()
+        assert (created_at - tx_start).total_seconds() >= 0.05
+
+
+class TestAcceptanceVsClosure:
+    """F2 — an acceptance can never become the latest event after account closure."""
+
+    async def test_acceptance_waiting_on_closure_is_rejected(self, db_engine: AsyncEngine) -> None:
+        user = await _commit_user(db_engine, "f2-wait")
+        registry = make_legal_registry()
+        documents = registry.list_current(Product.VEX, today=_today())
+        assert await _accept_committed(db_engine, registry, user.id, documents) == 3
+        closure_locked = asyncio.Event()
+        release_closure = asyncio.Event()
+
+        async def close_account() -> None:
+            async with (
+                AsyncSession(bind=db_engine, expire_on_commit=False) as session,
+                session.begin(),
+            ):
+                service = _user_service(session, registry)
+                repo = service._legal._repo
+                original_lock = repo.lock_user_ledger
+
+                async def lock_then_pause(*, user_id: UUID) -> None:
+                    await original_lock(user_id=user_id)
+                    closure_locked.set()
+                    await release_closure.wait()
+
+                repo.lock_user_ledger = lock_then_pause  # type: ignore[method-assign]
+                await service.deactivate_account(user.id, product=VEX_CONFIG, context=CONTEXT)
+
+        try:
+            closure_task = asyncio.create_task(close_account())
+            await closure_locked.wait()
+            accept_task = asyncio.create_task(
+                _accept_committed(db_engine, registry, user.id, documents)
+            )
+            await wait_for_advisory_lock_waiter(db_engine)
+            release_closure.set()
+            await closure_task
+            with pytest.raises(LegalAccountInactiveError):
+                await accept_task
+
+            async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+                latest = await LegalAcceptanceRepository(session).latest_per_type(
+                    user_id=user.id, product_id="vex"
+                )
+                events = await _consent_events(session, user.id)
+            assert latest[LegalDocumentType.SENSITIVE_DATA_CONSENT].action == LegalAction.WITHDRAW
+            withdraw_seq = next(seq for action, seq in events if action == LegalAction.WITHDRAW)
+            assert not [
+                seq for action, seq in events if action == LegalAction.ACCEPT and seq > withdraw_seq
+            ]
+        finally:
+            release_closure.set()
+            await _delete_user(db_engine, user.id)
+
+    async def test_acceptance_before_closure_then_withdraw_is_latest(
+        self, db_engine: AsyncEngine
+    ) -> None:
+        user = await _commit_user(db_engine, "f2-before")
+        registry = make_legal_registry()
+        documents = registry.list_current(Product.VEX, today=_today())
+        accepted = asyncio.Event()
+        release_acceptance = asyncio.Event()
+
+        async def accept() -> int:
+            async with (
+                AsyncSession(bind=db_engine, expire_on_commit=False) as session,
+                session.begin(),
+            ):
+                inserted = await _legal(session, registry).record_acceptances(
+                    user_id=user.id,
+                    product=VEX_CONFIG,
+                    documents=documents,
+                    source=LegalAcceptanceSource.REACCEPT,
+                    context=CONTEXT,
+                )
+                accepted.set()
+                await release_acceptance.wait()
+                return inserted
+
+        async def close_account() -> None:
+            async with (
+                AsyncSession(bind=db_engine, expire_on_commit=False) as session,
+                session.begin(),
+            ):
+                await _user_service(session, registry).deactivate_account(
+                    user.id, product=VEX_CONFIG, context=CONTEXT
+                )
+
+        try:
+            accept_task = asyncio.create_task(accept())
+            await accepted.wait()
+            closure_task = asyncio.create_task(close_account())
+            await wait_for_advisory_lock_waiter(db_engine)
+            release_acceptance.set()
+            assert await accept_task == 3
+            await closure_task
+
+            async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+                latest = await LegalAcceptanceRepository(session).latest_per_type(
+                    user_id=user.id, product_id="vex"
+                )
+                events = await _consent_events(session, user.id)
+                is_active = (
+                    await session.execute(select(User.is_active).where(User.id == user.id))
+                ).scalar_one()
+            assert latest[LegalDocumentType.SENSITIVE_DATA_CONSENT].action == LegalAction.WITHDRAW
+            assert [action for action, _ in events] == [LegalAction.ACCEPT, LegalAction.WITHDRAW]
+            assert is_active is False
+        finally:
+            release_acceptance.set()
+            await _delete_user(db_engine, user.id)

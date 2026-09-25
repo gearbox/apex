@@ -15,6 +15,7 @@ from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
 from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
     HTTP_402_PAYMENT_REQUIRED,
     HTTP_403_FORBIDDEN,
     HTTP_404_NOT_FOUND,
@@ -77,6 +78,7 @@ from src.api.services.billing_errors import (
 from src.api.services.idempotency import IdempotencyConflictError
 from src.api.services.legal.errors import (
     LegalAcceptanceRequiredError,
+    LegalAccountInactiveError,
     LegalDocumentNotFoundError,
     LegalSubmissionIncompleteError,
     LegalVersionStaleError,
@@ -362,6 +364,22 @@ def legal_acceptance_required_handler(
     return _error("legal_acceptance_required", str(exc), HTTP_428_PRECONDITION_REQUIRED)
 
 
+def legal_account_inactive_handler(
+    request: Request[Any, Any, Any],
+    exc: LegalAccountInactiveError,
+) -> Response[Any]:
+    # Same wire code as login/refresh for a deactivated user, so the client's
+    # existing 401 -> refresh -> logout path handles it. Never log IP/UA.
+    _log_handler_event(
+        "legal.acceptance_rejected_inactive",
+        request,
+        HTTP_401_UNAUTHORIZED,
+        user_id=str(exc.user_id),
+        product_id=exc.product_id,
+    )
+    return _error("account_inactive", str(exc), HTTP_401_UNAUTHORIZED)
+
+
 def idempotency_conflict_handler(
     request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
@@ -566,6 +584,7 @@ def create_app() -> Litestar:
             LegalSubmissionIncompleteError: legal_submission_incomplete_handler,
             LegalVersionStaleError: legal_version_stale_handler,
             LegalAcceptanceRequiredError: legal_acceptance_required_handler,
+            LegalAccountInactiveError: legal_account_inactive_handler,
             Exception: global_exception_handler,
         },
         dependencies=dependencies,

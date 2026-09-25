@@ -238,6 +238,52 @@ class TestAuthServiceRegister:
                 context=TEST_REQUEST_CONTEXT,
             )
 
+    async def test_register_creates_user_before_recording_acceptances(
+        self, jwt_service: JWTService
+    ) -> None:
+        """F2 — signup never reaches LegalAccountInactiveError.
+
+        ``record_acceptances`` re-reads ``users.is_active`` from the DB after
+        taking the ledger lock. ``UserRepository.create_user`` flushes the new
+        (active) row, so it must run before ``record_acceptances`` — and with a
+        real service whose active check passes, register completes.
+        """
+        user = MagicMock(spec=User)
+        user.id = uuid4()
+        order = MagicMock()
+        repository = AsyncMock()
+        repository.email_exists = AsyncMock(return_value=False)
+        repository.create_user = AsyncMock(return_value=user)
+        order.attach_mock(repository.create_user, "create_user")
+        legal = make_legal_acceptance_service()
+        repo = legal._repo
+        assert isinstance(repo, MagicMock)
+        order.attach_mock(repo.lock_user_ledger, "lock_user_ledger")
+        order.attach_mock(repo.is_user_active, "is_user_active")
+        service = AuthService(
+            repository=repository,
+            jwt_service=jwt_service,
+            password_service=PasswordService(),
+            token_revocation_service=_noop_token_revocation(),
+            legal_acceptance_service=legal,
+        )
+
+        await service.register(
+            email="order@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
+        )
+
+        created_id = repository.create_user.call_args.kwargs["id"]
+        assert [c[0] for c in order.mock_calls] == [
+            "create_user",
+            "lock_user_ledger",
+            "is_user_active",
+        ]
+        repo.is_user_active.assert_awaited_once_with(user_id=created_id)
+
     async def test_register_uses_single_today(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Validation and the minted lgl digest must share one UTC date."""
         today = datetime(2026, 9, 25, 23, 59, tzinfo=UTC)

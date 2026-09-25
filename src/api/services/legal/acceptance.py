@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Annotated, Final
 import msgspec
 import structlog
 
-from src.api.services.legal.errors import LegalSubmissionIncompleteError, LegalVersionStaleError
+from src.api.services.legal.errors import (
+    LegalAccountInactiveError,
+    LegalSubmissionIncompleteError,
+    LegalVersionStaleError,
+)
 from src.core.enums import LegalAcceptanceSource, LegalAction, LegalDocumentType
 from src.core.uid import new_id
 from src.db.models.legal import LegalAcceptance
@@ -185,8 +189,15 @@ class LegalAcceptanceService:
 
         Returns:
             Number of rows inserted (0 for an idempotent re-submission).
+
+        Raises:
+            LegalAccountInactiveError: The account is closed/deactivated — checked
+                after taking the ledger lock, so an acceptance that waited behind
+                a concurrent closure can never land after its ``WITHDRAW`` (401).
         """
         await self._repo.lock_user_ledger(user_id=user_id)
+        if not await self._repo.is_user_active(user_id=user_id):
+            raise LegalAccountInactiveError(user_id=user_id, product_id=product.slug)
         latest = await self._repo.latest_per_type(user_id=user_id, product_id=product.slug)
         rows = [
             LegalAcceptance(
@@ -232,7 +243,9 @@ class LegalAcceptanceService:
     ) -> None:
         """Record withdrawal of sensitive-data consent (account closure only).
 
-        No-op when the product doesn't require that consent.
+        No-op when the product doesn't require that consent. Deliberately no
+        ``is_active`` check: closure deactivates the user in this same
+        transaction, and the withdrawal must still be written.
         """
         await self._repo.lock_user_ledger(user_id=user_id)
         if LegalDocumentType.SENSITIVE_DATA_CONSENT not in product.required_legal_documents:

@@ -23,6 +23,9 @@ def upgrade() -> None:
     op.create_table(
         "legal_acceptances",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        # Event order: drawn at INSERT, and every insert for a user happens
+        # under that user's ledger advisory lock, so seq order == write order.
+        sa.Column("seq", sa.BigInteger(), sa.Identity(always=True), nullable=False),
         sa.Column(
             "user_id",
             postgresql.UUID(as_uuid=True),
@@ -41,8 +44,11 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            # Insertion time (evidence only) — not transaction start, and
+            # never used for ordering.
+            server_default=sa.text("clock_timestamp()"),
         ),
+        sa.UniqueConstraint("seq", name="uq_legal_acceptances_seq"),
         sa.CheckConstraint(
             "action <> 'accept' OR content_sha256 IS NOT NULL",
             name="ck_legal_acceptances_accept_has_hash",
@@ -50,9 +56,9 @@ def upgrade() -> None:
     )
     op.create_index("ix_legal_acceptances_product_id", "legal_acceptances", ["product_id"])
     op.create_index(
-        "ix_legal_acceptances_user_doc_created",
+        "ix_legal_acceptances_user_product_doc_seq",
         "legal_acceptances",
-        ["user_id", "doc_type", "created_at"],
+        ["user_id", "product_id", "doc_type", "seq"],
     )
 
 

@@ -21,7 +21,11 @@ from src.api.services.legal.acceptance import (
     LegalAcceptanceService,
     RequestContext,
 )
-from src.api.services.legal.errors import LegalSubmissionIncompleteError, LegalVersionStaleError
+from src.api.services.legal.errors import (
+    LegalAccountInactiveError,
+    LegalSubmissionIncompleteError,
+    LegalVersionStaleError,
+)
 from src.core.enums import LegalAcceptanceSource, LegalAction, LegalDocumentType, Product
 from src.core.product_registry import SYNTHARA_CONFIG, VEX_CONFIG
 from src.db.models.legal import LegalAcceptance
@@ -65,6 +69,7 @@ def _service(
 ) -> tuple[LegalAcceptanceService, MagicMock, AsyncMock]:
     repo = MagicMock(spec=LegalAcceptanceRepository)
     repo.latest_per_type = AsyncMock(return_value=latest or {})
+    repo.is_user_active = AsyncMock(return_value=True)
     session = AsyncMock()
     registry = registry_kwargs.get("registry") or make_legal_registry()
     return (
@@ -169,10 +174,34 @@ class TestRecordAcceptances:
         assert all(r.ip_address == CONTEXT.ip_address for r in rows)
         assert all(r.user_agent == CONTEXT.user_agent for r in rows)
         session.flush.assert_awaited_once()
-        assert repo.mock_calls[:2] == [
+        assert repo.mock_calls[:3] == [
             call.lock_user_ledger(user_id=user_id),
+            call.is_user_active(user_id=user_id),
             call.latest_per_type(user_id=user_id, product_id="vex"),
         ]
+
+    async def test_inactive_user_is_rejected_after_lock(self) -> None:
+        """F2 — a closure committed while we waited on the lock blocks the ACCEPT."""
+        service, repo, session = _service()
+        repo.is_user_active.return_value = False
+        docs = service.validate_submission(VEX_CONFIG, accept_all_current(), today=TODAY)
+        user_id = uuid4()
+
+        with pytest.raises(LegalAccountInactiveError) as exc_info:
+            await service.record_acceptances(
+                user_id=user_id,
+                product=VEX_CONFIG,
+                documents=docs,
+                source=LegalAcceptanceSource.REACCEPT,
+                context=CONTEXT,
+            )
+
+        assert (exc_info.value.user_id, exc_info.value.product_id) == (user_id, "vex")
+        assert repo.mock_calls == [
+            call.lock_user_ledger(user_id=user_id),
+            call.is_user_active(user_id=user_id),
+        ]
+        session.flush.assert_not_awaited()
 
     async def test_idempotent_resubmission_inserts_nothing(self) -> None:
         """C12 — already-accepted current versions insert 0 rows."""
@@ -303,6 +332,8 @@ class TestConsentWithdrawal:
         )
 
         assert repo.mock_calls[:1] == [call.lock_user_ledger(user_id=user_id)]
+        # Closure deactivates the user in the same transaction: never gate on is_active.
+        repo.is_user_active.assert_not_called()
 
 
 class TestSatisfiedDigestAndStatus:
@@ -375,4 +406,4 @@ class TestRepositoryIsAppendOnly:
 
     def test_public_surface(self) -> None:
         public = {n for n in dir(LegalAcceptanceRepository) if not n.startswith("_")}
-        assert public == {"add_many", "latest_per_type", "lock_user_ledger"}
+        assert public == {"add_many", "is_user_active", "latest_per_type", "lock_user_ledger"}
