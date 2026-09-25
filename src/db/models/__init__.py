@@ -22,6 +22,7 @@ from .gpu_session_deployment import GpuSessionDeployment
 from .gpu_session_operation import GpuSessionOperation
 from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
+from .legal import LegalAcceptance
 from .library import LibraryAssetMetadata, LibraryAssetTag, LibraryProject, LibraryTag
 from .media_hash import MediaHash
 from .push_subscription import PushSubscription
@@ -54,6 +55,7 @@ __all__ = [
     "GpuSessionOperation",
     "HealthSnapshot",
     "IdempotencyKey",
+    "LegalAcceptance",
     "LibraryAssetMetadata",
     "LibraryAssetTag",
     "LibraryProject",

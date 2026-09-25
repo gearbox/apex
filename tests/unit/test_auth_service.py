@@ -21,6 +21,11 @@ from src.api.services.auth import (
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import RefreshTokenRevocationReason
 from src.db.models import RefreshToken, User
+from tests.legal_support import (
+    TEST_REQUEST_CONTEXT,
+    accept_all_current,
+    make_legal_acceptance_service,
+)
 
 
 def _noop_token_revocation() -> TokenRevocationService:
@@ -60,6 +65,7 @@ def auth_service(
 ) -> AuthService:
     """Create auth service with mocked repository."""
     return AuthService(
+        legal_acceptance_service=make_legal_acceptance_service(),
         repository=mock_repository,
         jwt_service=jwt_service,
         password_service=password_service,
@@ -203,6 +209,8 @@ class TestAuthServiceRegister:
             password="secure_password",
             display_name="Test User",
             product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
         )
 
         assert user.email == email
@@ -224,6 +232,8 @@ class TestAuthServiceRegister:
                 email="existing@example.com",
                 password="password123",
                 product_id="vex",
+                accepted_documents=accept_all_current(),
+                context=TEST_REQUEST_CONTEXT,
             )
 
 
@@ -413,6 +423,7 @@ class TestAuthServiceRefresh:
 
         mock_token_revocation = AsyncMock()
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -447,6 +458,7 @@ class TestAuthServiceRefresh:
 
         mock_ops_event_bus = AsyncMock()
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -593,6 +605,7 @@ class TestAuthServiceLogout:
         tracker.attach_mock(token_revocation.revoke_token, "revoke_token")
 
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -632,6 +645,7 @@ class TestAuthServiceLogout:
         token_revocation = AsyncMock()
 
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -690,6 +704,7 @@ class TestAuthServiceLogout:
         token_revocation.revoke_token.return_value = False  # write failed
 
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -734,6 +749,7 @@ class TestAuthServiceLogout:
         token survives 'log out everywhere' for its full remaining lifetime."""
         mock_token_revocation = AsyncMock()
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -766,6 +782,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -777,7 +794,13 @@ class TestAuthServiceMissingBranches:
             billing_repo = AsyncMock()
             billing_repo_cls.return_value = billing_repo
 
-            await svc.register(email="new@example.com", password="pw", product_id="vex")
+            await svc.register(
+                email="new@example.com",
+                password="pw",
+                product_id="vex",
+                accepted_documents=accept_all_current(),
+                context=TEST_REQUEST_CONTEXT,
+            )
 
         billing_repo.create_personal_account.assert_awaited_once()
 
@@ -800,6 +823,7 @@ class TestAuthServiceMissingBranches:
         email_verification.send_verification_email = AsyncMock()
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -808,7 +832,13 @@ class TestAuthServiceMissingBranches:
             email_verification_service=email_verification,
         )
 
-        await svc.register(email="new@example.com", password="pw", product_id="vex")
+        await svc.register(
+            email="new@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
+        )
 
         email_verification.send_verification_email.assert_awaited_once()
 
@@ -832,6 +862,7 @@ class TestAuthServiceMissingBranches:
         email_verification.send_verification_email = AsyncMock(side_effect=Exception("smtp down"))
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -841,7 +872,13 @@ class TestAuthServiceMissingBranches:
         )
 
         # Should not raise even though email fails
-        user, _tokens = await svc.register(email="new@example.com", password="pw", product_id="vex")
+        user, _tokens = await svc.register(
+            email="new@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
+        )
         assert user is mock_user
 
     @pytest.mark.asyncio
@@ -860,6 +897,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -882,6 +920,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.get_refresh_token_by_hash_for_update.return_value = None
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -907,6 +946,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.get_active_user.return_value = None  # user not found/inactive
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,

@@ -22,6 +22,10 @@ class TokenPayload:
     jti: str  # JWT ID (for tracking/revocation)
     type: str = "access"  # Token type
     product_id: str | None = None  # Product scope (optional for backward compat)
+    # Digest of the legal-document requirement satisfied at mint time (claim
+    # "lgl"); compared by auth_guard to the registry's current required digest.
+    # None = nothing satisfied / nothing required. Access tokens only.
+    legal_digest: str | None = None
 
     @property
     def user_id(self) -> UUID | None:
@@ -83,13 +87,17 @@ class JWTService:
         *,
         product_id: str | None = None,
         jti: str | None = None,
+        legal_digest: str | None = None,
         extra_claims: dict[str, Any] | None = None,
     ) -> tuple[str, datetime]:
         """Create a new access token.
 
         Args:
             user_id: User ID to encode in token.
+            product_id: Product scope claim.
             jti: Optional JWT ID for tracking.
+            legal_digest: Satisfied legal requirement digest; emitted as the
+                ``lgl`` claim only when not None.
             extra_claims: Optional additional claims.
 
         Returns:
@@ -108,6 +116,8 @@ class JWTService:
 
         if product_id is not None:
             payload["product_id"] = product_id
+        if legal_digest is not None:
+            payload["lgl"] = legal_digest
 
         if self._config.issuer:
             payload["iss"] = self._config.issuer
@@ -156,6 +166,7 @@ class JWTService:
                 jti=payload["jti"],
                 type=payload.get("type", "access"),
                 product_id=payload.get("product_id"),
+                legal_digest=payload.get("lgl"),
             )
 
         except jwt.ExpiredSignatureError:

@@ -24,10 +24,12 @@ from src.api.services.email_verification import EmailVerificationService
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.core.enums import RefreshTokenRevocationReason
+from src.core.product_registry import VEX_CONFIG
 from src.core.uid import new_id
 from src.db.models.user import RefreshToken
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
+from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -93,6 +95,7 @@ class TestLogoutAllDeletesPushSubscriptions:
         await _seed_subscriptions(push_subscription_repo, user.id)
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(db_session),
             jwt_service=MagicMock(),
             password_service=PasswordService(),
@@ -117,6 +120,7 @@ class TestChangePasswordDeletesPushSubscriptions:
         await _seed_subscriptions(push_subscription_repo, user.id)
 
         user_service = UserService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(db_session),
             password_service=password_service,
             age_verification_service=MagicMock(),
@@ -142,6 +146,7 @@ class TestDeactivateAccountDeletesPushSubscriptions:
         await _seed_subscriptions(push_subscription_repo, user.id)
 
         user_service = UserService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(db_session),
             password_service=PasswordService(),
             age_verification_service=MagicMock(),
@@ -149,7 +154,9 @@ class TestDeactivateAccountDeletesPushSubscriptions:
             session=db_session,
         )
 
-        await user_service.deactivate_account(user.id)
+        await user_service.deactivate_account(
+            user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT
+        )
 
         assert await push_subscription_repo.list_by_user(user.id) == []
 
@@ -196,6 +203,7 @@ class TestTokenReuseDetectionDeletesPushSubscriptions:
         )
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(db_session),
             jwt_service=MagicMock(),
             password_service=PasswordService(),
@@ -224,6 +232,7 @@ class TestSingleLogoutLeavesPushSubscriptionsIntact:
         raw_token = await _seed_refresh_token(db_session, user_id=user.id)
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(db_session),
             jwt_service=MagicMock(),
             password_service=PasswordService(),
@@ -253,6 +262,7 @@ class TestPushDeletionFailureDoesNotBlockPrimaryAction:
 
         ops_event_bus = AsyncMock()
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(db_session),
             jwt_service=MagicMock(),
             password_service=PasswordService(),
@@ -297,6 +307,7 @@ class TestPushDeletionFailureDoesNotBlockPrimaryAction:
 
         ops_event_bus = AsyncMock()
         user_service = UserService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(db_session),
             password_service=password_service,
             age_verification_service=MagicMock(),

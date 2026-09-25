@@ -31,6 +31,7 @@ ENV PYTHONUNBUFFERED=1
 COPY src/ ./src/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
+COPY legal/ ./legal/
 COPY tests/ ./tests/
 
 EXPOSE 8000

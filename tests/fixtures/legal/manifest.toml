@@ -1,0 +1,13 @@
+# Test-only legal documents: effective in the past so any "today" resolves.
+# Real documents live in /legal and are covered by test_legal_real_documents.py.
+
+[vex]
+terms = [
+  { version = 2020-01-01, requires_reacceptance = true },
+]
+privacy = [
+  { version = 2020-01-01, requires_reacceptance = true },
+]
+sensitive_data_consent = [
+  { version = 2020-01-01, requires_reacceptance = true },
+]

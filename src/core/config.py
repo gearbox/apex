@@ -1,6 +1,7 @@
 """Application configuration using pydantic-settings."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
@@ -760,6 +761,16 @@ class Settings(BaseSettings):
             "a shared leader if they ever end up pointed at the same Redis instance. Unrelated "
             "to the per-request product_id (vex/synthara) — this is a single value per deployed "
             "process, not per-tenant."
+        ),
+    )
+
+    legal_documents_dir: Path = Field(
+        default=Path("legal"),
+        description=(
+            "Directory holding legal/manifest.toml and legal/{product}/{doc_type}/{YYYY-MM-DD}.md. "
+            "Loaded once at startup into the LegalDocumentRegistry; a manifest/file mismatch, "
+            "a required document with no effective version, or (in production) an unfilled "
+            "placeholder fails startup. Relative paths resolve against the working directory."
         ),
     )
 

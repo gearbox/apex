@@ -22,18 +22,26 @@ from src.api.security import (
 )
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.push_cleanup import delete_user_push_subscriptions
-from src.core.enums import RefreshTokenRevocationReason
+from src.core.enums import LegalAcceptanceSource, RefreshTokenRevocationReason
+from src.core.product_registry import get_product_config_by_slug
 from src.core.uid import new_id
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.security.jwt import TokenPayload
     from src.api.services.email_verification import EmailVerificationService
+    from src.api.services.legal.acceptance import (
+        AcceptedDocument,
+        LegalAcceptanceService,
+        RequestContext,
+    )
     from src.api.services.token_revocation import TokenRevocationService
+    from src.core.product import ProductConfig
     from src.db.models import User
     from src.db.repositories import UserRepository
 
@@ -117,6 +125,8 @@ class AuthService:
         password_service: PasswordService,
         *,
         token_revocation_service: TokenRevocationService,
+        legal_acceptance_service: LegalAcceptanceService,
+        product_resolver: Callable[[str], ProductConfig] = get_product_config_by_slug,
         session: AsyncSession | None = None,
         email_verification_service: EmailVerificationService | None = None,
         ops_event_bus: OpsEventBus | None = None,
@@ -135,6 +145,11 @@ class AuthService:
                 ``TokenRevocationService(None, max_token_ttl_seconds=0)`` so
                 the choice is visible rather than a silent default (issue
                 #142 A1).
+            legal_acceptance_service: Validates/records signup acceptance and
+                computes the ``lgl`` digest embedded in every access token.
+                Required so the digest is never silently omitted.
+            product_resolver: Resolves a product slug to its config (defaults
+                to the product registry).
             session: Database session (for billing account creation).
             email_verification_service: Optional — when provided, sends a
                 verification email immediately after successful registration.
@@ -152,6 +167,8 @@ class AuthService:
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
         )
         self._token_revocation = token_revocation_service
+        self._legal = legal_acceptance_service
+        self._product_resolver = product_resolver
 
     async def register(
         self,
@@ -159,6 +176,8 @@ class AuthService:
         email: str,
         password: str,
         product_id: str,
+        accepted_documents: Sequence[AcceptedDocument],
+        context: RequestContext,
         display_name: str | None = None,
     ) -> tuple[User, TokenPair]:
         """Register a new user.
@@ -167,14 +186,25 @@ class AuthService:
             email: User email.
             password: Plain text password.
             product_id: Product the user is registering on.
+            accepted_documents: Legal documents the user accepted on the
+                signup form; must match the product's current required set.
+            context: Client IP / user agent, stored with the acceptance rows.
             display_name: Optional display name.
 
         Returns:
             Tuple of (User, TokenPair).
 
         Raises:
+            LegalSubmissionIncompleteError: Required documents missing/extra/duplicated.
+            LegalVersionStaleError: A submitted version/sha256 is not current.
             EmailAlreadyExistsError: If email is taken on this product.
         """
+        product = self._product_resolver(product_id)
+        # Pure check before any DB access — a stale form never creates a user.
+        legal_documents = self._legal.validate_submission(
+            product, accepted_documents, today=datetime.now(UTC).date()
+        )
+
         # Check for existing email within the same product
         if await self._repo.email_exists(email, product_id=product_id):
             raise EmailAlreadyExistsError(f"Email {email} is already registered")
@@ -198,6 +228,15 @@ class AuthService:
                 id=new_id(), user_id=user_id, product_id=product_id
             )
             logger.info("billing.account_created", user_id=str(user_id))
+
+        # Same transaction as the user row: a later failure rolls these back too.
+        await self._legal.record_acceptances(
+            user_id=user_id,
+            product=product,
+            documents=legal_documents,
+            source=LegalAcceptanceSource.SIGNUP,
+            context=context,
+        )
 
         logger.info("user.registered", user_id=str(user_id))
         await self._ops_event_bus.publish(
@@ -608,8 +647,22 @@ class AuthService:
             lets refresh_tokens' post-mint race check (F2) revoke this exact
             row if a bulk revocation is detected to have landed mid-mint.
         """
+        # Legal digest — covers register, login and refresh in one place. The
+        # guard compares it to the currently required digest on mutations.
+        legal_digest = (
+            await self._legal.satisfied_digest(
+                user_id=user_id,
+                product=self._product_resolver(product_id),
+                today=datetime.now(UTC).date(),
+            )
+            if product_id is not None
+            else None
+        )
+
         # Create access token
-        access_token, expires_at = self._jwt.create_access_token(user_id, product_id=product_id)
+        access_token, expires_at = self._jwt.create_access_token(
+            user_id, product_id=product_id, legal_digest=legal_digest
+        )
         expires_in = int(self._jwt.access_token_lifetime.total_seconds())
 
         # Create refresh token

@@ -17,6 +17,8 @@ from src.api.services.user import (
     UserService,
 )
 from src.core.product import AgeGatePolicy, ProductConfig
+from src.core.product_registry import VEX_CONFIG
+from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 
 pytestmark = pytest.mark.unit
 
@@ -64,6 +66,7 @@ def _make_service(
 
     age_svc = age_verification_service or AgeVerificationService()
     svc = UserService(
+        legal_acceptance_service=make_legal_acceptance_service(),
         repository=repo,
         password_service=pwd,
         age_verification_service=age_svc,
@@ -376,7 +379,7 @@ class TestDeactivateAccount:
         repo.soft_delete_user = AsyncMock(return_value=user)
         repo.revoke_all_user_tokens = AsyncMock(return_value=1)
 
-        ts = await svc.deactivate_account(user.id)
+        ts = await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
         assert isinstance(ts, datetime)
         repo.revoke_all_user_tokens.assert_awaited_once_with(user.id)
 
@@ -385,7 +388,7 @@ class TestDeactivateAccount:
         repo.soft_delete_user = AsyncMock(return_value=None)
 
         with pytest.raises(UserNotFoundError):
-            await svc.deactivate_account(uuid4())
+            await svc.deactivate_account(uuid4(), product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
 
     async def test_bulk_revokes_access_tokens(self) -> None:
         """issue #142 — deactivation should also kill live access
@@ -396,7 +399,7 @@ class TestDeactivateAccount:
         repo.soft_delete_user = AsyncMock(return_value=user)
         repo.revoke_all_user_tokens = AsyncMock(return_value=1)
 
-        await svc.deactivate_account(user.id)
+        await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
 
         mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user.id)
 

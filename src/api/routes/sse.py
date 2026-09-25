@@ -39,6 +39,8 @@ class SSEController(Controller):
         "/sse-ticket",
         guards=[auth_guard],
         dependencies={"current_user_id": Provide(get_current_user_id)},
+        # Read-only stream access; a POST only because tickets are one-time.
+        opt={"legal_exempt": True},
     )
     async def create_sse_ticket(
         self,

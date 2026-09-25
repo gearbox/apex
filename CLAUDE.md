@@ -71,11 +71,15 @@ The backend serves two distinct products from the same codebase:
 │   │   │   │                   #   /groups/{job_id}; PATCH/PUT/DELETE favorite/delete; POST assets/bulk
 │   │   │   ├── library_project.py  # LibraryProjectController: CRUD /v1/library/projects
 │   │   │   ├── library_tag.py      # LibraryTagController: CRUD /v1/library/tags
+│   │   │   ├── legal.py        # LegalController: GET /v1/legal/documents/{doc_type}, /current (public);
+│   │   │   │                   #   GET /status, POST /acceptances (auth; acceptances is legal-exempt)
 │   │   │   └── push.py         # PushController: GET /v1/push/vapid-public-key
 │   │   │                       #   POST/DELETE /v1/push/subscriptions
 │   │   ├── schemas/            # msgspec.Struct request/response DTOs
 │   │   │   ├── library.py      # LibraryAssetItem/Detail/Patch, LibraryGroupDetail, LibraryLineageGraph,
 │   │   │   │                   #   LibraryProject*, LibraryTag*, BulkOperation (tagged union)
+│   │   │   ├── legal.py        # LegalDocumentResponse/Meta, LegalCurrentResponse, LegalStatusResponse,
+│   │   │   │                   #   LegalAcceptanceRequest (AcceptedDocument lives in services/legal/acceptance.py)
 │   │   │   └── push.py         # PushSubscriptionRequest/Response, PushNotificationPayload (wire contract)
 │   │   ├── security/           # Guards, JWT, password hashing
 │   │   │   ├── guards.py       # auth_guard, optional_auth_guard (validates product_id JWT claim)
@@ -113,6 +117,12 @@ The backend serves two distinct products from the same codebase:
 │   │       ├── moderation.py   # Provider-specific moderation detectors
 │   │       ├── push.py         # PushService — upsert/delete/send; WebPushSender protocol + PywebpushSender
 │   │       ├── push_mapping.py # map_event_to_notification() — pure EventEnvelope -> PushNotificationPayload | None
+│   │       ├── legal/          # Versioned legal documents + acceptance (see Key Convention 14)
+│   │       │   ├── registry.py # LegalDocumentRegistry — immutable, loaded from legal/ at startup; current/required
+│   │       │   │               #   resolution, required_digest() (the `lgl` JWT claim)
+│   │       │   ├── acceptance.py  # LegalAcceptanceService — validate_submission, record_acceptances,
+│   │       │   │               #   record_consent_withdrawal, satisfied_digest, status; AcceptedDocument, RequestContext
+│   │       │   └── errors.py   # LegalRegistryError (startup), 404/409/422/428 domain errors
 │   │       └── storage/        # R2 storage (r2.py, schemas.py); r2.py has stream_object() context manager
 │   ├── core/
 │   │   ├── config.py           # Settings (pydantic-settings); per-product Stripe/NowPayments keys
@@ -130,6 +140,7 @@ The backend serves two distinct products from the same codebase:
 │   │   │   ├── gpu_session.py  # GpuSession — Vast.ai node lifecycle tracking
 │   │   │   ├── health.py       # HealthSnapshot — persisted health check results
 │   │   │   ├── push_subscription.py  # PushSubscription — Web Push endpoint + keys
+│   │   │   ├── legal.py        # LegalAcceptance — append-only accept/withdraw events
 │   │   │   └── library.py      # LibraryAssetMetadata (favorite/title/project_id, polymorphic asset_type+asset_id),
 │   │   │                       #   LibraryProject, LibraryTag, LibraryAssetTag (many-to-many join)
 │   │   ├── repositories/
@@ -143,11 +154,14 @@ The backend serves two distinct products from the same codebase:
 │   │   │   ├── library.py      # LibraryRepository — UNION list_assets over user_images+generation_outputs,
 │   │   │   │                   #   lineage walks, metadata upsert/purge (both branches product_id-scoped by construction)
 │   │   │   ├── library_project.py  # LibraryProjectRepository
-│   │   │   └── library_tag.py      # LibraryTagRepository — CRUD + batched tag lookups + bulk add/remove
+│   │   │   ├── library_tag.py      # LibraryTagRepository — CRUD + batched tag lookups + bulk add/remove
+│   │   │   └── legal.py        # LegalAcceptanceRepository — insert-only add_many + latest_per_type (no update/delete)
 │   │   └── session.py          # DatabaseManager, async session factory
 │   └── main.py                 # Granian entrypoint
 ├── config/
 │   └── bundles/                # ComfyUI workflow bundles (YYMMDD-nn versioned)
+├── legal/                      # Legal documents: manifest.toml + {product}/{doc_type}/{YYYY-MM-DD}.md
+│                               #   (copied into the Docker images; tests use tests/fixtures/legal/)
 ├── alembic/
 │   ├── env.py                  # Async migration env
 │   ├── script.py.mako          # Migration template
@@ -236,6 +250,11 @@ dependencies = {
     ),
     # Web Push (503 via get_push_service when VAPID keys/Redis not configured)
     "push_service": Provide(get_push_service, sync_to_thread=False),
+    # Legal documents: registry singleton, request-scoped acceptance service,
+    # and the client IP/UA evidence context (get_real_ip + User-Agent)
+    "legal_registry": Provide(get_legal_registry, sync_to_thread=False),
+    "legal_acceptance_service": Provide(get_legal_acceptance_service, sync_to_thread=False),
+    "request_context": Provide(provide_request_context, sync_to_thread=False),
 }
 ```
 
@@ -303,6 +322,10 @@ Lifecycle: `lifespan` context manager in `app.py` calls `init_services()` / `shu
 
 13. **Library asset identity & capabilities** — `src/core/library_ref.py`'s `AssetRef`/`parse_asset_ref`/`format_asset_ref` are the only way a client-supplied `asset_ref` (`"upload:<uuid>"` / `"output:<uuid>"`) is resolved: parse → typed lookup → ownership + product check, never a bare-UUID try-both-tables lookup. `LibraryRepository.list_assets` is a `UNION ALL` over `user_images` + `generation_outputs`, keyed by a 3-part cursor (`encode_library_cursor`/`decode_library_cursor`, alongside the regular cursor helpers in `src/api/schemas/pagination.py`) so pagination has one strict total order across both tables — a cursor is rejected if replayed under a different `sort`. `available_actions` on every library item is resolved by `resolve_library_actions()` (`src/api/services/library_capabilities.py`) — a pure, table-driven function of media type + whether the asset has generation metadata; never infer actions from `source` in route/service code. `library_asset_metadata`/`library_asset_tags` are polymorphic (`asset_type` + `asset_id`, no FK) — any path that deletes an asset (single delete, bulk delete, or the retention sweeper) must also purge its metadata/tag rows explicitly, or they leak as orphans.
 
+14. **Legal documents & acceptance** — versioned markdown in `legal/{product}/{doc_type}/{YYYY-MM-DD}.md`, declared in `legal/manifest.toml` (strict bijection, strictly increasing versions, first version must set `requires_reacceptance`). Version = effective date (UTC); "current" = latest `version <= today`; "required" = latest effective version with `requires_reacceptance`. `LegalDocumentRegistry` is built once in `init_services()` (a mismatch, an unsatisfiable `ProductConfig.required_legal_documents`, or — in production — a `DRAFTING NOTE`/`[placeholder]` fails startup) and exposed on `app.state["legal_registry"]`. Acceptances are append-only rows in `legal_acceptances` (version + `content_sha256` + IP + UA + source); sensitive-data consent withdrawal is recorded only by `DELETE /v1/users/me`.
+    - **Enforcement lives in `auth_guard`**: access tokens carry an `lgl` claim (`required_digest` the user had satisfied at mint time, computed in `AuthService._create_token_pair` for register/login/refresh). On every non-safe method (anything but GET/HEAD/OPTIONS) the guard compares it to the registry's current digest — no DB hit — and raises `428 legal_acceptance_required` on mismatch. **New mutating routes are enforced by default.** Opt out only with `opt={"legal_exempt": True}` (`LEGAL_EXEMPT_OPT`), and add the route to the pinned set in `tests/unit/security/test_legal_guard.py`. `content_auth_guard` is not enforced.
+    - After `POST /v1/legal/acceptances` the client must `POST /v1/auth/refresh` to get a token with the new `lgl` (the legal controller never mints tokens). Frontend contract: `docs/contracts/legal-documents-contract.md`.
+
 ---
 
 ## Common Commands
@@ -363,6 +386,7 @@ make format                       # ruff format
 | `LibraryProject` | `library_projects` | User-created grouping; one project per asset (nullable FK on `LibraryAssetMetadata`, `ON DELETE SET NULL`); name unique case-insensitively per owner |
 | `LibraryTag` | `library_tags` | User-created tag; name unique case-insensitively per owner |
 | `LibraryAssetTag` | `library_asset_tags` | Many-to-many join: one asset tagged with one tag; polymorphic like `LibraryAssetMetadata`; `ON DELETE CASCADE` from `LibraryTag` |
+| `LegalAcceptance` | `legal_acceptances` | Append-only legal events: one row per ACCEPT/WITHDRAW of one document version (`content_sha256`, IP, UA, source); CHECK: ACCEPT requires a hash; `ON DELETE CASCADE` from `users` only |
 
 ---
 
@@ -432,6 +456,9 @@ VAPID_PUBLIC_KEY=...           # Generate with: uv run python tools/generate_vap
 VAPID_PRIVATE_KEY=...          # Never commit — secrets/env only
 VAPID_SUBJECT=mailto:ops@apex.ai
 PUSH_BROADCAST_CONCURRENCY=10  # Max concurrent Web Push sends per broadcast fan-out batch
+
+# Legal documents (see docs/CONFIGURATION.md)
+LEGAL_DOCUMENTS_DIR=legal      # manifest.toml + {product}/{doc_type}/{YYYY-MM-DD}.md; validated at startup
 
 # Aisha-specific
 ACS_COMFYUI_PATH=/workspace/ComfyUI

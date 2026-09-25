@@ -420,6 +420,32 @@ class LibraryBadge(StrEnum):
     PROMPT = "prompt"
 
 
+class LegalDocumentType(StrEnum):
+    """Versioned legal document kinds.
+
+    Values are also the directory names under ``legal/{product}/``.
+    """
+
+    TERMS = "terms"
+    PRIVACY = "privacy"
+    SENSITIVE_DATA_CONSENT = "sensitive_data_consent"
+
+
+class LegalAction(StrEnum):
+    """Kind of event recorded in ``legal_acceptances``."""
+
+    ACCEPT = "accept"  # for PRIVACY this records acknowledgement, not consent
+    WITHDRAW = "withdraw"
+
+
+class LegalAcceptanceSource(StrEnum):
+    """Where a legal acceptance/withdrawal event originated."""
+
+    SIGNUP = "signup"
+    REACCEPT = "reaccept"
+    ACCOUNT_CLOSURE = "account_closure"
+
+
 class SubscriptionTier(StrEnum):
     """User subscription tiers."""
 

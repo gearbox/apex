@@ -22,6 +22,11 @@ from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import GpuSessionStatus, JobStatus
 from src.db.models import RefreshToken, User
+from tests.legal_support import (
+    TEST_REQUEST_CONTEXT,
+    accept_all_current,
+    make_legal_acceptance_service,
+)
 
 
 class TestOpsEventBus:
@@ -86,6 +91,7 @@ class TestAuthRegisterPublishesUserRegistered:
 
         ops_bus = AsyncMock()
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=PasswordService(),
@@ -93,7 +99,13 @@ class TestAuthRegisterPublishesUserRegistered:
             ops_event_bus=ops_bus,
         )
 
-        await service.register(email="new@example.com", password="pw", product_id="vex")
+        await service.register(
+            email="new@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
+        )
 
         ops_bus.publish.assert_awaited_once()
         _, kwargs = ops_bus.publish.call_args

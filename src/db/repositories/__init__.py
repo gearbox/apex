@@ -6,6 +6,7 @@ from .frame_extraction import FrameExtractionJobRepository
 from .gpu_session import GpuSessionRepository
 from .gpu_session_operation import EventOutcome, GpuSessionOperationRepository
 from .job import JobRepository
+from .legal import LegalAcceptanceRepository
 from .library import LibraryRepository
 from .media_hash import MediaHashRepository
 from .output import OutputRepository
@@ -23,6 +24,7 @@ __all__ = [
     "GpuSessionOperationRepository",
     "GpuSessionRepository",
     "JobRepository",
+    "LegalAcceptanceRepository",
     "LibraryRepository",
     "MediaHashRepository",
     "OutputRepository",

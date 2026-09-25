@@ -1,0 +1,14 @@
+# Version = effective date (UTC). A version is "current" from its date onward.
+# requires_reacceptance = true forces every user to re-accept once it becomes effective.
+# The first version of every document MUST set requires_reacceptance = true.
+
+[vex]
+terms = [
+  { version = 2026-09-25, requires_reacceptance = true },
+]
+privacy = [
+  { version = 2026-09-25, requires_reacceptance = true },
+]
+sensitive_data_consent = [
+  { version = 2026-09-25, requires_reacceptance = true },
+]

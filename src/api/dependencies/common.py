@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator  # noqa: TC003
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import httpx
@@ -12,6 +13,7 @@ from litestar import Request  # noqa: TC002
 from litestar.di import Provide
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 
+from src.api.dependencies.request_context import provide_request_context
 from src.api.middleware.rate_limit import init_rate_limiter
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.admin_notifications import AdminNotificationService
@@ -53,6 +55,8 @@ from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
 from src.api.services.idempotency import IdempotencyService
 from src.api.services.jobs.sweep import JobSweepService
+from src.api.services.legal.acceptance import LegalAcceptanceService
+from src.api.services.legal.registry import LegalDocumentRegistry
 from src.api.services.library import LibraryService
 from src.api.services.library_project import LibraryProjectService
 from src.api.services.library_tag import LibraryTagService
@@ -80,8 +84,9 @@ from src.api.services.workflow import WorkflowService
 from src.core.config import Settings, get_settings
 from src.core.enums import WorkerMode
 from src.core.product import ProductConfig  # noqa: TC001
+from src.core.product_registry import PRODUCT_REGISTRY
 from src.db import DatabaseManager, init_db
-from src.db.repositories import UserRepository
+from src.db.repositories import LegalAcceptanceRepository, UserRepository
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
 from src.workers.payment_currency_sync import PaymentCurrencySyncWorker
@@ -117,6 +122,7 @@ class ServiceContainer:
     db_manager: DatabaseManager | None = None
     jwt_service: JWTService | None = None
     token_revocation_service: TokenRevocationService | None = None
+    legal_registry: LegalDocumentRegistry | None = None
     password_service: PasswordService | None = None
     billing_service: BillingService | None = None
     payment_provider_state_service: PaymentProviderStateService | None = None
@@ -323,6 +329,33 @@ def get_password_service() -> PasswordService:
     return _services.password_service
 
 
+def get_legal_registry() -> LegalDocumentRegistry:
+    """Provide the process-wide legal document registry.
+
+    Raises:
+        RuntimeError: If not initialized.
+    """
+    if _services.legal_registry is None:
+        raise RuntimeError("Legal document registry not initialized")
+    return _services.legal_registry
+
+
+def get_legal_acceptance_service(session: AsyncSession) -> LegalAcceptanceService:
+    """Provide the legal acceptance service for request scope.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        LegalAcceptanceService bound to the request session.
+    """
+    return LegalAcceptanceService(
+        registry=get_legal_registry(),
+        repository=LegalAcceptanceRepository(session),
+        session=session,
+    )
+
+
 def get_auth_service(session: AsyncSession) -> AuthService:
     """Provide auth service for request scope.
 
@@ -341,6 +374,7 @@ def get_auth_service(session: AsyncSession) -> AuthService:
         email_verification_service=get_email_verification_service(),
         ops_event_bus=get_ops_event_bus(),
         token_revocation_service=get_token_revocation_service(),
+        legal_acceptance_service=get_legal_acceptance_service(session),
     )
 
 
@@ -360,6 +394,7 @@ def get_user_service(session: AsyncSession) -> UserService:
         age_verification_service=AgeVerificationService(),
         r2_storage=_services.r2_storage,
         token_revocation_service=get_token_revocation_service(),
+        legal_acceptance_service=get_legal_acceptance_service(session),
         ops_event_bus=get_ops_event_bus(),
         session=session,
     )
@@ -691,6 +726,18 @@ async def init_services(settings: Settings) -> JWTService:
     redis_enabled = settings.redis_url is not None
     if not workers_enabled:
         logger.info("workers.disabled_by_mode", worker_mode=settings.worker_mode.value)
+
+    # Legal documents first: a manifest/file mismatch, an unsatisfiable
+    # required document, or (production) an unfilled placeholder must fail
+    # startup before any pool or worker is created. `today` here only
+    # validates startup; every request re-resolves "current" with its own date.
+    _services.legal_registry = LegalDocumentRegistry.load(
+        settings.legal_documents_dir,
+        products=PRODUCT_REGISTRY.values(),
+        environment=settings.environment,
+        today=datetime.now(UTC).date(),
+    )
+    logger.info("legal_registry.initialized", root=str(settings.legal_documents_dir))
 
     # Initialize database
     _services.db_manager = init_db(
@@ -1598,6 +1645,11 @@ dependencies = {
     "product_id": Provide(get_product_id, sync_to_thread=False),
     # JWT service (needed by auth routes to mint content tokens)
     "jwt_service": Provide(get_jwt_service, sync_to_thread=False),
+    # Legal documents (registry singleton + request-scoped acceptance service)
+    "legal_registry": Provide(get_legal_registry, sync_to_thread=False),
+    "legal_acceptance_service": Provide(get_legal_acceptance_service, sync_to_thread=False),
+    # Client IP (trusted-header aware) + user agent, for acceptance evidence
+    "request_context": Provide(provide_request_context, sync_to_thread=False),
     # Token revocation (needed by the logout route to denylist its own jti)
     "token_revocation_service": Provide(get_token_revocation_service, sync_to_thread=False),
     # Content proxy

@@ -50,6 +50,7 @@ from src.db.models.push_subscription import PushSubscription
 from src.db.models.user import RefreshToken, User
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
+from tests.legal_support import make_legal_acceptance_service
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -220,6 +221,7 @@ async def _run_bulk_logout_all(
         session.begin(),
     ):
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(session),
             jwt_service=jwt_service,
             password_service=_make_password_service(),

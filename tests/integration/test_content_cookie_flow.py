@@ -376,12 +376,13 @@ class TestAuthControllerCookies:
 
         response = await AuthController.register.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            data=RegisterRequest(email="a@b.com", password="pass1234"),
+            data=RegisterRequest(email="a@b.com", password="pass1234", accepted_documents=[]),
             auth_service=mock_auth,
             jwt_service=jwt_service,
             product_id=PRODUCT_ID,
             product_config=_make_product_config(),
             settings=settings,
+            request_context=MagicMock(),
         )
 
         assert len(response.cookies) == 1
@@ -553,12 +554,13 @@ class TestAuthControllerCookies:
 
         response = await AuthController.register.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            data=RegisterRequest(email="a@b.com", password="pass1234"),
+            data=RegisterRequest(email="a@b.com", password="pass1234", accepted_documents=[]),
             auth_service=mock_auth,
             jwt_service=jwt_service,
             product_id=PRODUCT_ID,
             product_config=_make_product_config(),
             settings=debug_settings,
+            request_context=MagicMock(),
         )
 
         cookie = response.cookies[0]
