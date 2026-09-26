@@ -83,7 +83,7 @@ Returns the current version of each **required** document: `{ documents: LegalDo
 
 ### `GET /v1/legal/status` (Bearer)
 
-Returns `LegalStatusResponse` for the caller. Use it to decide which documents the re-acceptance screen must show (`satisfied === false`).
+Returns `LegalStatusResponse` for the caller. The re-acceptance screen must show every document where `accepted_version !== current_version`. Unsatisfied documents are a subset. Every submitted document must have been displayed, because the backend records an acceptance for each current version not yet accepted.
 
 ### `POST /v1/legal/acceptances` (Bearer, works with a stale token)
 
@@ -146,7 +146,7 @@ Access tokens carry an `lgl` claim, a digest of the legal versions the user had 
 
 1. When a new version with `requires_reacceptance = true` takes effect (at **00:00 UTC** on its effective date), **every** existing access token becomes stale for mutations at that moment. That includes users who accept later in the day on another device, until they refresh.
 2. On `428 legal_acceptance_required`:
-   1. `GET /v1/legal/status` shows which types are unsatisfied.
+   1. `GET /v1/legal/status` shows which documents changed since the user's last acceptance (`accepted_version !== current_version`).
    2. Fetch `/v1/legal/current`, then for each listed item fetch `GET /v1/legal/documents/{doc_type}?version=<version>` to render exactly the text whose `sha256` you will echo back.
    3. `POST /v1/legal/acceptances` with **all** required types at their current versions (take them from `/v1/legal/current`).
    4. **`POST /v1/auth/refresh`**. The new access token carries the updated `lgl`.
