@@ -15,16 +15,19 @@ from litestar.openapi import OpenAPIConfig
 from litestar.openapi.spec import Contact, Server
 from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
+    HTTP_401_UNAUTHORIZED,
     HTTP_402_PAYMENT_REQUIRED,
     HTTP_403_FORBIDDEN,
     HTTP_404_NOT_FOUND,
     HTTP_409_CONFLICT,
     HTTP_422_UNPROCESSABLE_ENTITY,
+    HTTP_428_PRECONDITION_REQUIRED,
     HTTP_500_INTERNAL_SERVER_ERROR,
 )
 
 from src.api.dependencies.common import (
     dependencies,
+    get_legal_registry,
     get_token_revocation_service,
     init_services,
     shutdown_services,
@@ -45,6 +48,7 @@ from src.api.routes.gpu_session import GpuSessionController
 from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
 from src.api.routes.jobs import UnifiedJobController
+from src.api.routes.legal import LegalController
 from src.api.routes.library import LibraryController
 from src.api.routes.library_project import LibraryProjectController
 from src.api.routes.library_tag import LibraryTagController
@@ -72,6 +76,13 @@ from src.api.services.billing_errors import (
     RefundNotEligibleError,
 )
 from src.api.services.idempotency import IdempotencyConflictError
+from src.api.services.legal.errors import (
+    LegalAcceptanceRequiredError,
+    LegalAccountInactiveError,
+    LegalDocumentNotFoundError,
+    LegalSubmissionIncompleteError,
+    LegalVersionStaleError,
+)
 from src.api.services.library import LibraryBulkTagCapError
 from src.api.services.library_project import LibraryProjectNameConflictError
 from src.api.services.library_tag import LibraryTagNameConflictError
@@ -315,6 +326,60 @@ def library_bulk_tag_cap_handler(
     )
 
 
+def legal_document_not_found_handler(
+    request: Request[Any, Any, Any],
+    exc: LegalDocumentNotFoundError,
+) -> Response[Any]:
+    _log_handler_event(
+        "legal.document_not_found", request, HTTP_404_NOT_FOUND, doc_type=exc.doc_type
+    )
+    return _error("legal_document_not_found", str(exc), HTTP_404_NOT_FOUND)
+
+
+def legal_submission_incomplete_handler(
+    request: Request[Any, Any, Any],
+    exc: LegalSubmissionIncompleteError,
+) -> Response[Any]:
+    _log_handler_event(
+        "legal.acceptance_incomplete", request, HTTP_422_UNPROCESSABLE_ENTITY, **exc.detail
+    )
+    return _error(
+        "legal_acceptance_incomplete", str(exc), HTTP_422_UNPROCESSABLE_ENTITY, exc.detail
+    )
+
+
+def legal_version_stale_handler(
+    request: Request[Any, Any, Any],
+    exc: LegalVersionStaleError,
+) -> Response[Any]:
+    _log_handler_event("legal.version_stale", request, HTTP_409_CONFLICT)
+    return _error("legal_version_stale", str(exc), HTTP_409_CONFLICT, exc.detail)
+
+
+def legal_acceptance_required_handler(
+    request: Request[Any, Any, Any],
+    exc: LegalAcceptanceRequiredError,
+) -> Response[Any]:
+    _log_handler_event("legal.acceptance_required", request, HTTP_428_PRECONDITION_REQUIRED)
+    return _error("legal_acceptance_required", str(exc), HTTP_428_PRECONDITION_REQUIRED)
+
+
+def legal_account_inactive_handler(
+    request: Request[Any, Any, Any],
+    exc: LegalAccountInactiveError,
+) -> Response[Any]:
+    # Same wire code as login/refresh for a deactivated user, so the client's
+    # existing 401 -> refresh -> logout path handles it. Never log IP/UA.
+    _log_handler_event(
+        "legal.acceptance_rejected_inactive",
+        request,
+        HTTP_401_UNAUTHORIZED,
+        user_id=str(exc.user_id),
+        product_id=exc.product_id,
+    )
+    return _error("account_inactive", str(exc), HTTP_401_UNAUTHORIZED)
+
+
 def idempotency_conflict_handler(
     request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
@@ -407,6 +472,8 @@ async def lifespan(app: Litestar) -> AsyncGenerator[None]:
     app.state["jwt_service"] = jwt_service
     # Store token revocation service in app state for auth guards (issue #142)
     app.state["token_revocation"] = get_token_revocation_service()
+    # Store legal registry in app state for auth_guard's legal enforcement
+    app.state["legal_registry"] = get_legal_registry()
 
     try:
         yield
@@ -493,6 +560,8 @@ def create_app() -> Litestar:
             ContentProxyController,
             # Web Push
             PushController,
+            # Legal documents & acceptance
+            LegalController,
         ],
         exception_handlers={
             HTTPException: http_exception_handler,
@@ -511,6 +580,11 @@ def create_app() -> Litestar:
             LibraryTagNameConflictError: library_tag_name_conflict_handler,
             LibraryBulkTagCapError: library_bulk_tag_cap_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
+            LegalDocumentNotFoundError: legal_document_not_found_handler,
+            LegalSubmissionIncompleteError: legal_submission_incomplete_handler,
+            LegalVersionStaleError: legal_version_stale_handler,
+            LegalAcceptanceRequiredError: legal_acceptance_required_handler,
+            LegalAccountInactiveError: legal_account_inactive_handler,
             Exception: global_exception_handler,
         },
         dependencies=dependencies,

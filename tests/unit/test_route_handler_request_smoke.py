@@ -49,6 +49,7 @@ from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.core.enums import GenerationType, JobStatus, ModelType
 from src.core.product_registry import VEX_CONFIG
+from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY, vex_product_scope
 
 pytestmark = pytest.mark.unit
 
@@ -67,7 +68,9 @@ def test_user_id() -> UUID:
 
 @pytest.fixture
 def auth_header(jwt_service: JWTService, test_user_id: UUID) -> dict[str, str]:
-    token, _ = jwt_service.create_access_token(test_user_id, product_id="vex")
+    token, _ = jwt_service.create_access_token(
+        test_user_id, product_id="vex", legal_digest=TEST_LEGAL_DIGEST
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -175,6 +178,7 @@ class TestUnifiedGenerationControllerSmoke:
                 "product_config": Provide(lambda: VEX_CONFIG, sync_to_thread=False),
                 "product_id": Provide(lambda: "vex", sync_to_thread=False),
             },
+            middleware=[vex_product_scope],
         )
 
     def test_generate_returns_real_serialized_response(
@@ -199,6 +203,7 @@ class TestUnifiedGenerationControllerSmoke:
         )
         app.state["jwt_service"] = jwt_service
         app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
+        app.state["legal_registry"] = TEST_LEGAL_REGISTRY
 
         with TestClient(app=app) as client:
             resp = client.post(
@@ -234,6 +239,7 @@ class TestUnifiedGenerationControllerSmoke:
         )
         app.state["jwt_service"] = jwt_service
         app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
+        app.state["legal_registry"] = TEST_LEGAL_REGISTRY
 
         with TestClient(app=app) as client:
             resp = client.post(

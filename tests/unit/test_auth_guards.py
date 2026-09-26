@@ -25,6 +25,7 @@ from src.api.dependencies.auth import get_current_token_payload, get_current_use
 from src.api.security import JWTConfig, JWTService, auth_guard
 from src.api.security.guards import AuthenticatedUser, extract_token_from_header
 from src.api.services.token_revocation import TokenRevocationService
+from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY, vex_product_scope
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -60,7 +61,9 @@ def test_user_id() -> UUID:
 @pytest.fixture
 def auth_header(jwt_service: JWTService, test_user_id: UUID) -> dict[str, str]:
     """Generate a valid Authorization header for the test user."""
-    token, _ = jwt_service.create_access_token(test_user_id)
+    token, _ = jwt_service.create_access_token(
+        test_user_id, product_id="vex", legal_digest=TEST_LEGAL_DIGEST
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -236,9 +239,11 @@ def _create_test_app(jwt_service: JWTService) -> Litestar:
     app = Litestar(
         route_handlers=[public_route, protected_route, protected_action],
         dependencies={"current_user_id": Provide(get_current_user_id)},
+        middleware=[vex_product_scope],
     )
     app.state["jwt_service"] = jwt_service
     app.state["token_revocation"] = _no_op_token_revocation()
+    app.state["legal_registry"] = TEST_LEGAL_REGISTRY
     return app
 
 
@@ -313,7 +318,7 @@ class TestAuthGuardIntegration:
     def test_user_id_matches_token_subject(self, jwt_service: JWTService) -> None:
         """Verify the extracted user_id matches the token's subject claim."""
         uid = uuid4()
-        token, _ = jwt_service.create_access_token(uid)
+        token, _ = jwt_service.create_access_token(uid, product_id="vex")
 
         app = _create_test_app(jwt_service)
         with TestClient(app=app) as client:
@@ -324,8 +329,8 @@ class TestAuthGuardIntegration:
     def test_different_users_get_different_ids(self, jwt_service: JWTService) -> None:
         user_a = uuid4()
         user_b = uuid4()
-        token_a, _ = jwt_service.create_access_token(user_a)
-        token_b, _ = jwt_service.create_access_token(user_b)
+        token_a, _ = jwt_service.create_access_token(user_a, product_id="vex")
+        token_b, _ = jwt_service.create_access_token(user_b, product_id="vex")
 
         app = _create_test_app(jwt_service)
         with TestClient(app=app) as client:

@@ -17,6 +17,7 @@ from src.api.services.user import UserService
 from src.core.config import Settings
 from src.db.models import User
 from src.db.repositories import UserRepository
+from tests.legal_support import make_legal_acceptance_service
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,6 +77,7 @@ def auth_service(
 ) -> AuthService:
     """Create auth service with mocked repository."""
     return AuthService(
+        legal_acceptance_service=make_legal_acceptance_service(),
         repository=mock_user_repository,
         jwt_service=jwt_service,
         password_service=password_service,
@@ -90,6 +92,7 @@ def user_service(
 ) -> UserService:
     """Create user service with mocked repository."""
     return UserService(
+        legal_acceptance_service=make_legal_acceptance_service(),
         repository=mock_user_repository,
         password_service=password_service,
         age_verification_service=AgeVerificationService(),

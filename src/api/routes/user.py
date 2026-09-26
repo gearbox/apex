@@ -27,6 +27,7 @@ from src.api.schemas.user import (
 from src.api.security import CLEAR_SITE_DATA_HEADER, auth_guard
 from src.api.services.age_verification import AgeVerificationError
 from src.api.services.auth import AuthService
+from src.api.services.legal.acceptance import RequestContext
 from src.api.services.user import (
     EmailAlreadyExistsError,
     InvalidPasswordError,
@@ -125,7 +126,8 @@ class UserController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
-    @post("/me/password")
+    # Account recovery must remain available when a token's legal digest is stale.
+    @post("/me/password", opt={"legal_exempt": True})
     async def change_password(
         self,
         current_user_id: UUID,
@@ -166,22 +168,30 @@ class UserController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
 
-    @delete("/me", status_code=HTTP_200_OK)
+    @delete("/me", status_code=HTTP_200_OK, opt={"legal_exempt": True})
     async def delete_account(
         self,
         current_user_id: UUID,
         user_service: UserService,
+        product_config: ProductConfig,
+        request_context: RequestContext,
     ) -> Response[DeleteAccountResponse]:
         """Deactivate current user's account.
 
-        This is a soft delete - the account can be recovered.
+        This is a soft delete - the account can be recovered. Closing the
+        account is also how sensitive-data consent is withdrawn: a
+        ``withdraw`` event is recorded in the same transaction (products
+        that require that consent only). Legal-exempt, so a user who hasn't
+        accepted updated terms can still leave.
         All sessions will be invalidated, including the caller's own — so
         on success the response also sends
         `Clear-Site-Data: "cache", "storage"` to purge this origin's HTTP
         cache on the device that made the call.
         """
         try:
-            deactivated_at = await user_service.deactivate_account(current_user_id)
+            deactivated_at = await user_service.deactivate_account(
+                current_user_id, product=product_config, context=request_context
+            )
             return Response(
                 content=DeleteAccountResponse(
                     message="Account has been deactivated",
@@ -208,7 +218,7 @@ class UserController(Controller):
         except UserNotFoundError as e:
             raise NotFoundException(detail="User not found") from e
 
-    @post("/me/logout-all")
+    @post("/me/logout-all", opt={"legal_exempt": True})
     async def logout_all(
         self,
         current_user_id: UUID,

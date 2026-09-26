@@ -63,6 +63,8 @@ ENV BUILD_SHA=${BUILD_SHA}
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser alembic/ ./alembic/
 COPY --chown=appuser:appuser alembic.ini ./
+# Versioned legal documents — loaded at startup; a missing copy fails startup.
+COPY --chown=appuser:appuser legal/ ./legal/
 
 # Switch to non-root user
 USER appuser

@@ -7,16 +7,22 @@ from typing import Annotated
 
 import msgspec
 
+# Runtime import: msgspec resolves struct annotations at runtime.
+from src.api.services.legal.acceptance import AcceptedDocument
+
 # -----------------------------------------------------------------------------
 # Request schemas
 # -----------------------------------------------------------------------------
 
 
-class RegisterRequest(msgspec.Struct, kw_only=True):
+class RegisterRequest(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     """User registration request."""
 
     email: str
     password: str
+    accepted_documents: list[AcceptedDocument]
+    """Exactly the product's required legal documents at their current
+    versions (from ``GET /v1/legal/current``). ``[]`` when none are required."""
     display_name: str | None = None
 
 

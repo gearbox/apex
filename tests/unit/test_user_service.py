@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+import src.api.services.user as user_module
 from src.api.services.age_verification import AgeVerificationError, AgeVerificationService
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import (
@@ -17,6 +18,8 @@ from src.api.services.user import (
     UserService,
 )
 from src.core.product import AgeGatePolicy, ProductConfig
+from src.core.product_registry import VEX_CONFIG
+from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 
 pytestmark = pytest.mark.unit
 
@@ -64,6 +67,7 @@ def _make_service(
 
     age_svc = age_verification_service or AgeVerificationService()
     svc = UserService(
+        legal_acceptance_service=make_legal_acceptance_service(),
         repository=repo,
         password_service=pwd,
         age_verification_service=age_svc,
@@ -376,7 +380,7 @@ class TestDeactivateAccount:
         repo.soft_delete_user = AsyncMock(return_value=user)
         repo.revoke_all_user_tokens = AsyncMock(return_value=1)
 
-        ts = await svc.deactivate_account(user.id)
+        ts = await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
         assert isinstance(ts, datetime)
         repo.revoke_all_user_tokens.assert_awaited_once_with(user.id)
 
@@ -385,7 +389,7 @@ class TestDeactivateAccount:
         repo.soft_delete_user = AsyncMock(return_value=None)
 
         with pytest.raises(UserNotFoundError):
-            await svc.deactivate_account(uuid4())
+            await svc.deactivate_account(uuid4(), product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
 
     async def test_bulk_revokes_access_tokens(self) -> None:
         """issue #142 — deactivation should also kill live access
@@ -396,9 +400,35 @@ class TestDeactivateAccount:
         repo.soft_delete_user = AsyncMock(return_value=user)
         repo.revoke_all_user_tokens = AsyncMock(return_value=1)
 
-        await svc.deactivate_account(user.id)
+        await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
 
         mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user.id)
+
+    async def test_withdrawal_uses_passed_today(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        today = datetime(2026, 9, 25, 23, 59, tzinfo=UTC)
+        next_day = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)
+        clock = MagicMock()
+        clock.now.side_effect = [today, next_day]
+        monkeypatch.setattr(user_module, "datetime", clock)
+        user = _make_user()
+        svc, repo, _ = _make_service(user)
+        repo.soft_delete_user = AsyncMock(return_value=user)
+        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+        legal = MagicMock()
+        legal.record_consent_withdrawal = AsyncMock()
+        svc._legal = legal
+
+        deactivated_at = await svc.deactivate_account(
+            user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT
+        )
+
+        legal.record_consent_withdrawal.assert_awaited_once_with(
+            user_id=user.id,
+            product=VEX_CONFIG,
+            context=TEST_REQUEST_CONTEXT,
+            today=today.date(),
+        )
+        assert deactivated_at == next_day
 
 
 class TestGetStats:

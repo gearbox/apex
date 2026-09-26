@@ -48,6 +48,7 @@ from src.core.product_registry import VEX_CONFIG
 from src.core.uid import new_id
 from src.db.models.user import RefreshToken, User
 from src.db.repositories.user import UserRepository
+from tests.legal_support import make_legal_acceptance_service
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -160,6 +161,7 @@ def _auth_service(
     token_revocation: TokenRevocationService,
 ) -> AuthService:
     return AuthService(
+        legal_acceptance_service=make_legal_acceptance_service(),
         repository=UserRepository(session),
         jwt_service=jwt_service,
         password_service=_make_password_service(),

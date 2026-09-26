@@ -51,6 +51,7 @@ from src.api.services.email_verification import (
     InvalidTokenError,
     UserNotFoundError,
 )
+from src.api.services.legal.acceptance import RequestContext
 from src.core.config import Settings
 from src.core.product import ProductConfig
 from src.db.repositories.user import UserRepository
@@ -98,16 +99,23 @@ class AuthController(Controller):
         product_id: str,
         product_config: ProductConfig,
         settings: Settings,
+        request_context: RequestContext,
     ) -> Response[TokenResponse | ErrorEnvelope]:
         """Register a new user account.
 
-        Creates a new user and returns authentication tokens.
+        Creates a new user, records acceptance of the product's required legal
+        documents (with client IP / user agent as evidence), and returns
+        authentication tokens. ``accepted_documents`` errors map to 422
+        ``legal_acceptance_incomplete`` / 409 ``legal_version_stale`` via the
+        global handlers, before any user row is created.
         """
         try:
             user, tokens = await auth_service.register(
                 email=data.email,
                 password=data.password,
                 product_id=product_id,
+                accepted_documents=data.accepted_documents,
+                context=request_context,
                 display_name=data.display_name,
             )
 
@@ -176,6 +184,7 @@ class AuthController(Controller):
         "/resend-verification",
         guards=[auth_guard],
         dependencies={"current_user_id": Provide(get_current_user_id)},
+        opt={"legal_exempt": True},
     )
     async def resend_verification(
         self,
@@ -232,6 +241,7 @@ class AuthController(Controller):
         status_code=HTTP_200_OK,
         guards=[auth_guard],
         dependencies={"current_user_id": Provide(get_current_user_id)},
+        opt={"legal_exempt": True},
     )
     async def remint_content_cookie(
         self,

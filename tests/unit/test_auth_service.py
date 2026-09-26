@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 import structlog.testing
 
+import src.api.services.auth as auth_module
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.security.jwt import TokenPayload
 from src.api.services.auth import (
@@ -20,7 +21,13 @@ from src.api.services.auth import (
 )
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.enums import RefreshTokenRevocationReason
+from src.core.product_registry import VEX_CONFIG
 from src.db.models import RefreshToken, User
+from tests.legal_support import (
+    TEST_REQUEST_CONTEXT,
+    accept_all_current,
+    make_legal_acceptance_service,
+)
 
 
 def _noop_token_revocation() -> TokenRevocationService:
@@ -60,6 +67,7 @@ def auth_service(
 ) -> AuthService:
     """Create auth service with mocked repository."""
     return AuthService(
+        legal_acceptance_service=make_legal_acceptance_service(),
         repository=mock_repository,
         jwt_service=jwt_service,
         password_service=password_service,
@@ -203,6 +211,8 @@ class TestAuthServiceRegister:
             password="secure_password",
             display_name="Test User",
             product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
         )
 
         assert user.email == email
@@ -224,7 +234,100 @@ class TestAuthServiceRegister:
                 email="existing@example.com",
                 password="password123",
                 product_id="vex",
+                accepted_documents=accept_all_current(),
+                context=TEST_REQUEST_CONTEXT,
             )
+
+    async def test_register_creates_user_before_recording_acceptances(
+        self, jwt_service: JWTService
+    ) -> None:
+        """F2 — signup never reaches LegalAccountInactiveError.
+
+        ``record_acceptances`` re-reads ``users.is_active`` from the DB after
+        taking the ledger lock. ``UserRepository.create_user`` flushes the new
+        (active) row, so it must run before ``record_acceptances`` — and with a
+        real service whose active check passes, register completes.
+        """
+        user = MagicMock(spec=User)
+        user.id = uuid4()
+        order = MagicMock()
+        repository = AsyncMock()
+        repository.email_exists = AsyncMock(return_value=False)
+        repository.create_user = AsyncMock(return_value=user)
+        order.attach_mock(repository.create_user, "create_user")
+        legal = make_legal_acceptance_service()
+        repo = legal._repo
+        assert isinstance(repo, MagicMock)
+        order.attach_mock(repo.lock_user_ledger, "lock_user_ledger")
+        order.attach_mock(repo.is_user_active, "is_user_active")
+        service = AuthService(
+            repository=repository,
+            jwt_service=jwt_service,
+            password_service=PasswordService(),
+            token_revocation_service=_noop_token_revocation(),
+            legal_acceptance_service=legal,
+        )
+
+        await service.register(
+            email="order@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
+        )
+
+        created_id = repository.create_user.call_args.kwargs["id"]
+        assert [c[0] for c in order.mock_calls] == [
+            "create_user",
+            "lock_user_ledger",
+            "is_user_active",
+        ]
+        repo.is_user_active.assert_awaited_once_with(user_id=created_id)
+
+    async def test_register_uses_single_today(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Validation and the minted lgl digest must share one UTC date."""
+        today = datetime(2026, 9, 25, 23, 59, tzinfo=UTC)
+        next_day = datetime(2026, 9, 26, 0, 0, tzinfo=UTC)
+        clock = MagicMock()
+        clock.now.side_effect = [today, next_day]
+        monkeypatch.setattr(auth_module, "datetime", clock)
+
+        user = MagicMock(spec=User)
+        user.id = uuid4()
+        repository = AsyncMock()
+        repository.email_exists = AsyncMock(return_value=False)
+        repository.create_user = AsyncMock(return_value=user)
+        repository.create_refresh_token = AsyncMock()
+        password = MagicMock()
+        password.ahash = AsyncMock(return_value="hash")
+        legal = MagicMock()
+        legal.validate_submission.return_value = ()
+        legal.record_acceptances = AsyncMock()
+        legal.satisfied_digest = AsyncMock(return_value="digest")
+        service = AuthService(
+            repository=repository,
+            jwt_service=JWTService(
+                JWTConfig(secret_key="test_secret_key_for_testing_only_256bits")
+            ),
+            password_service=password,
+            token_revocation_service=_noop_token_revocation(),
+            legal_acceptance_service=legal,
+        )
+
+        await service.register(
+            email="single-today@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=[],
+            context=TEST_REQUEST_CONTEXT,
+        )
+
+        expected_today = today.date()
+        created_user_id = repository.create_user.call_args.kwargs["id"]
+        legal.validate_submission.assert_called_once_with(VEX_CONFIG, [], today=expected_today)
+        legal.satisfied_digest.assert_awaited_once_with(
+            user_id=created_user_id, product=VEX_CONFIG, today=expected_today
+        )
 
 
 class TestAuthServiceLogin:
@@ -413,6 +516,7 @@ class TestAuthServiceRefresh:
 
         mock_token_revocation = AsyncMock()
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -447,6 +551,7 @@ class TestAuthServiceRefresh:
 
         mock_ops_event_bus = AsyncMock()
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -593,6 +698,7 @@ class TestAuthServiceLogout:
         tracker.attach_mock(token_revocation.revoke_token, "revoke_token")
 
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -632,6 +738,7 @@ class TestAuthServiceLogout:
         token_revocation = AsyncMock()
 
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -690,6 +797,7 @@ class TestAuthServiceLogout:
         token_revocation.revoke_token.return_value = False  # write failed
 
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -734,6 +842,7 @@ class TestAuthServiceLogout:
         token survives 'log out everywhere' for its full remaining lifetime."""
         mock_token_revocation = AsyncMock()
         service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -766,6 +875,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -777,7 +887,13 @@ class TestAuthServiceMissingBranches:
             billing_repo = AsyncMock()
             billing_repo_cls.return_value = billing_repo
 
-            await svc.register(email="new@example.com", password="pw", product_id="vex")
+            await svc.register(
+                email="new@example.com",
+                password="pw",
+                product_id="vex",
+                accepted_documents=accept_all_current(),
+                context=TEST_REQUEST_CONTEXT,
+            )
 
         billing_repo.create_personal_account.assert_awaited_once()
 
@@ -800,6 +916,7 @@ class TestAuthServiceMissingBranches:
         email_verification.send_verification_email = AsyncMock()
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -808,7 +925,13 @@ class TestAuthServiceMissingBranches:
             email_verification_service=email_verification,
         )
 
-        await svc.register(email="new@example.com", password="pw", product_id="vex")
+        await svc.register(
+            email="new@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
+        )
 
         email_verification.send_verification_email.assert_awaited_once()
 
@@ -832,6 +955,7 @@ class TestAuthServiceMissingBranches:
         email_verification.send_verification_email = AsyncMock(side_effect=Exception("smtp down"))
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -841,7 +965,13 @@ class TestAuthServiceMissingBranches:
         )
 
         # Should not raise even though email fails
-        user, _tokens = await svc.register(email="new@example.com", password="pw", product_id="vex")
+        user, _tokens = await svc.register(
+            email="new@example.com",
+            password="pw",
+            product_id="vex",
+            accepted_documents=accept_all_current(),
+            context=TEST_REQUEST_CONTEXT,
+        )
         assert user is mock_user
 
     @pytest.mark.asyncio
@@ -860,6 +990,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -882,6 +1013,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.get_refresh_token_by_hash_for_update.return_value = None
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,
@@ -907,6 +1039,7 @@ class TestAuthServiceMissingBranches:
         mock_repository.get_active_user.return_value = None  # user not found/inactive
 
         svc = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
             jwt_service=jwt_service,
             password_service=password_service,

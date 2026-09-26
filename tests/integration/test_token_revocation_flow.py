@@ -41,9 +41,11 @@ from src.api.services.auth import AuthService, InvalidRefreshTokenError, TokenRe
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
+from src.core.product_registry import VEX_CONFIG
 from src.core.uid import new_id
 from src.db.models.user import RefreshToken, User
 from src.db.repositories.user import UserRepository
+from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -220,6 +222,7 @@ class TestSameSecondRevocationIsRejected:
         app = _make_app(jwt_service, token_revocation)
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=_make_repo(),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -249,6 +252,7 @@ class TestLogoutAllRevokesAccessTokens:
         assert resp.status_code == HTTP_200_OK
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=_make_repo(),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -280,6 +284,7 @@ class TestLogoutAllRevokesAccessTokens:
         """
         user_id = uuid4()
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=_make_repo(),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -315,6 +320,7 @@ class TestChangePasswordRevokesAccessTokens:
         repo.get_user.return_value = user
         repo.update_user.return_value = user
         user_service = UserService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=repo,
             password_service=_make_password_service(),
             age_verification_service=MagicMock(),
@@ -353,6 +359,7 @@ class TestDeactivateAccountRevokesAccessTokens:
         repo = _make_repo()
         repo.soft_delete_user.return_value = MagicMock()
         user_service = UserService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=repo,
             password_service=_make_password_service(),
             age_verification_service=MagicMock(),
@@ -362,6 +369,8 @@ class TestDeactivateAccountRevokesAccessTokens:
             MagicMock(),
             current_user_id=user_id,
             user_service=user_service,
+            product_config=VEX_CONFIG,
+            request_context=TEST_REQUEST_CONTEXT,
         )
         assert delete_account_response.headers["Clear-Site-Data"] == '"cache", "storage"'
 
@@ -396,6 +405,7 @@ class TestSingleDeviceLogoutDenylistsOnlyThatToken:
         payload_a = jwt_service.decode_access_token(device_a_token)
         assert payload_a is not None
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=_make_repo(),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -451,6 +461,7 @@ class TestUnknownRefreshTokenLogoutStillPurgesCache:
         from src.api.routes.auth import AuthController
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=_make_repo(),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -498,6 +509,7 @@ class TestContentCookieRevokedByLogoutAll:
         assert resp.status_code == HTTP_200_OK
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=_make_repo(),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -609,6 +621,7 @@ class TestTokenReuseDetectionRevokesAccessTokens:
         repo.revoke_token_family = AsyncMock(return_value=3)
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=repo,
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -645,6 +658,7 @@ class TestOptionalAuthGuardRevocation:
         assert resp.json()["user_id"] == str(user_id)
 
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=_make_repo(),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -710,6 +724,7 @@ async def _attempt_refresh(
         session.begin(),
     ):
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(session),
             jwt_service=jwt_service,
             password_service=_make_password_service(),
@@ -742,6 +757,7 @@ async def _attempt_logout_all(
         session.begin(),
     ):
         auth_service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
             repository=UserRepository(session),
             jwt_service=jwt_service,
             password_service=_make_password_service(),

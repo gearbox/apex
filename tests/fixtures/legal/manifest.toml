@@ -1,0 +1,13 @@
+# Test-only legal documents: effective in the past so any "today" resolves.
+# Real documents live in /legal and are covered by test_legal_real_documents.py.
+
+[vex]
+terms = [
+  { version = 2020-01-01, requires_reacceptance = true, sha256 = "43f978422550014ed4d050de1db422674fe9a1991cecc4c4b931aafc36603514" },
+]
+privacy = [
+  { version = 2020-01-01, requires_reacceptance = true, sha256 = "f8d763592833a280c03b1de5d42b03964cce2bf97d2fb18e34e11fe7dedbe8ea" },
+]
+sensitive_data_consent = [
+  { version = 2020-01-01, requires_reacceptance = true, sha256 = "4da064c58c19bd4c0df948aa75937b1c05949a84bcefde9ad59b0681fe9e9c00" },
+]

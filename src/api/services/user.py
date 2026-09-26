@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.security import PasswordService
+    from src.api.services.legal.acceptance import LegalAcceptanceService, RequestContext
     from src.api.services.storage import R2StorageService
     from src.api.services.token_revocation import TokenRevocationService
     from src.core.product import ProductConfig
@@ -64,6 +65,7 @@ class UserService:
         age_verification_service: AgeVerificationService,
         *,
         token_revocation_service: TokenRevocationService,
+        legal_acceptance_service: LegalAcceptanceService,
         r2_storage: R2StorageService | None = None,
         ops_event_bus: OpsEventBus | None = None,
         session: AsyncSession | None = None,
@@ -82,6 +84,8 @@ class UserService:
                 ``TokenRevocationService(None, max_token_ttl_seconds=0)`` so
                 the choice is visible rather than a silent default (issue
                 #142 A1).
+            legal_acceptance_service: Records the sensitive-data consent
+                withdrawal on account closure.
             r2_storage: R2 storage service for presigned URL generation (optional).
             ops_event_bus: Publishes an alert when a bulk access-token
                 revocation write fails against a configured Redis (issue
@@ -97,6 +101,7 @@ class UserService:
         self._age_verification = age_verification_service
         self._r2 = r2_storage
         self._token_revocation = token_revocation_service
+        self._legal = legal_acceptance_service
         self._ops_event_bus = (
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
         )
@@ -251,14 +256,24 @@ class UserService:
             bulk_access_revoked=bulk_access_revoked,
         )
 
-    async def deactivate_account(self, user_id: UUID) -> datetime:
+    async def deactivate_account(
+        self,
+        user_id: UUID,
+        *,
+        product: ProductConfig,
+        context: RequestContext,
+    ) -> datetime:
         """Soft delete user account.
 
-        Sets is_active to False and revokes all refresh tokens plus any
-        live access tokens/content cookies (issue #142).
+        Sets is_active to False, records withdrawal of sensitive-data consent
+        (closure *is* withdrawal — see legal/{product}/sensitive_data_consent),
+        and revokes all refresh tokens plus any live access tokens/content
+        cookies (issue #142).
 
         Args:
             user_id: User ID.
+            product: The user's product (decides whether consent is tracked).
+            context: Client IP / user agent, stored with the withdrawal event.
 
         Returns:
             Deactivation timestamp.
@@ -269,6 +284,12 @@ class UserService:
         user = await self._repo.soft_delete_user(user_id)
         if user is None:
             raise UserNotFoundError(f"User {user_id} not found")
+
+        # Same transaction as the soft delete.
+        today = datetime.now(UTC).date()
+        await self._legal.record_consent_withdrawal(
+            user_id=user_id, product=product, context=context, today=today
+        )
 
         # Revoke all tokens
         await self._repo.revoke_all_user_tokens(user_id)

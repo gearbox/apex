@@ -306,6 +306,8 @@ class TestUserRouteHandlers:
             MagicMock(),
             current_user_id=uuid4(),
             user_service=user_service,
+            product_config=MagicMock(),
+            request_context=MagicMock(),
         )
         assert response.status_code == HTTP_200_OK
         assert response.headers["Clear-Site-Data"] == '"cache", "storage"'
@@ -322,6 +324,8 @@ class TestUserRouteHandlers:
                 MagicMock(),
                 current_user_id=uuid4(),
                 user_service=user_service,
+                product_config=MagicMock(),
+                request_context=MagicMock(),
             )
 
     async def test_get_stats_success(self) -> None:
@@ -1395,6 +1399,7 @@ class TestAuthRouteHandlers:
             product_id="vex",
             product_config=product_config,
             settings=settings,
+            request_context=MagicMock(),
         )
         assert response.status_code == 201
 
@@ -1420,6 +1425,7 @@ class TestAuthRouteHandlers:
             product_id="vex",
             product_config=product_config,
             settings=settings,
+            request_context=MagicMock(),
         )
         assert response.status_code == 400
 

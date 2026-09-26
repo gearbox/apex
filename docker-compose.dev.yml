@@ -40,10 +40,12 @@ services:
       - ./src:/app/src:ro
       - ./config:/app/config:ro
       - ./alembic:/app/alembic:ro
+      - ./legal:/app/legal:ro
       - ./tests:/app/tests:ro
       - ./.env.staging.example:/app/.env.staging.example:ro
       - ./docker-compose.staging.yml:/app/docker-compose.staging.yml:ro
       - ./docker-compose.portainer-staging.yml:/app/docker-compose.portainer-staging.yml:ro
+      - ./Dockerfile:/app/Dockerfile:ro
       # Pass through coverage report to local filesystem
       - ./htmlcov:/app/htmlcov
     

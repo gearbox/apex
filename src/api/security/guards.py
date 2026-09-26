@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 from litestar.exceptions import NotAuthorizedException
 
+from src.api.services.legal.errors import LegalAcceptanceRequiredError
 from src.core.config import get_settings
 
 if TYPE_CHECKING:
@@ -18,10 +20,21 @@ if TYPE_CHECKING:
     from litestar.handlers import BaseRouteHandler
 
     from src.api.security.jwt import JWTService, TokenPayload
+    from src.api.services.legal.registry import LegalDocumentRegistry
     from src.api.services.token_revocation import TokenRevocationService
+    from src.core.product import ProductConfig
     from src.db.models import User
 
 logger = structlog.get_logger(__name__)
+
+# Methods never blocked by legal enforcement: users can always read and
+# download their own data, even before (re-)accepting.
+_SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# Route-handler ``opt`` key that exempts a non-safe handler from legal
+# enforcement. Every use is pinned by
+# tests/unit/security/test_legal_guard.py::TestExemptionAudit.
+LEGAL_EXEMPT_OPT: Final = "legal_exempt"
 
 
 class AuthenticatedUser:
@@ -126,7 +139,48 @@ def _get_token_revocation(
     return token_revocation
 
 
-async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRouteHandler) -> None:
+def _get_legal_registry(
+    connection: ASGIConnection[Any, Any, Any, Any],
+) -> LegalDocumentRegistry:
+    """Fetch the LegalDocumentRegistry wired into app.state by the lifespan.
+
+    Same posture as ``_get_token_revocation``: a miss is a wiring bug, not a
+    runtime condition to degrade on.
+    """
+    registry: LegalDocumentRegistry | None = connection.app.state.get("legal_registry")
+    if registry is None:
+        raise RuntimeError("Legal document registry not configured")
+    return registry
+
+
+def _enforce_legal_acceptance(
+    connection: ASGIConnection[Any, Any, Any, Any],
+    route_handler: BaseRouteHandler,
+    payload: TokenPayload,
+) -> None:
+    """Raise 428 if a mutating request's token lacks the current legal digest.
+
+    No DB hit: the ``lgl`` claim was computed from the user's acceptances at
+    mint time, so comparing it to the registry's currently required digest
+    is enough. Safe methods and ``opt={"legal_exempt": True}`` handlers are
+    never blocked.
+    """
+    # WebSocket scopes have no method; there are no mutating WS routes today.
+    method = connection.scope.get("method")
+    if method is None or method in _SAFE_METHODS or route_handler.opt.get(LEGAL_EXEMPT_OPT):
+        return
+    product_config: ProductConfig | None = connection.state.get("product_config")
+    if product_config is None:
+        raise RuntimeError("Product scope missing — ProductMiddleware not applied")
+    registry = _get_legal_registry(connection)
+    required = registry.required_digest(product_config, today=datetime.now(UTC).date())
+    if required is not None and payload.legal_digest != required:
+        raise LegalAcceptanceRequiredError
+
+
+async def auth_guard(
+    connection: ASGIConnection[Any, Any, Any, Any], route_handler: BaseRouteHandler
+) -> None:
     """Guard that requires valid JWT authentication.
 
     Extracts and validates JWT from Authorization header.
@@ -136,12 +190,18 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
     after acquiring a row lock that serializes it against a concurrent bulk
     revocation (see ``PushController.create_subscription``).
 
+    Finally enforces legal acceptance on non-safe methods (428
+    ``legal_acceptance_required``) unless the handler sets
+    ``opt={"legal_exempt": True}``.
+
     Args:
         connection: ASGI connection.
-        _: Route handler (unused).
+        route_handler: Route handler (read for the ``legal_exempt`` opt).
 
     Raises:
         NotAuthorizedException: If authentication fails.
+        LegalAcceptanceRequiredError: If a mutating request's token doesn't
+            carry the currently required legal digest.
     """
     authorization = connection.headers.get("authorization")
     token = extract_token_from_header(authorization)
@@ -170,6 +230,8 @@ async def auth_guard(connection: ASGIConnection[Any, Any, Any, Any], _: BaseRout
     connection.state["user_id"] = user_id
     connection.state["auth_user"] = AuthenticatedUser(user_id=user_id)
     connection.state["token_payload"] = payload
+
+    _enforce_legal_acceptance(connection, route_handler, payload)
 
 
 async def content_auth_guard(

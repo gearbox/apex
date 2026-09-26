@@ -1,6 +1,20 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-07-28 — **Review remediation r2: serialize push-subscription creation
+> _Last updated: 2026-09-25 — **Legal documents & acceptance** (new §2b). **Breaking:**
+> `POST /v1/auth/register` now requires `accepted_documents: [{doc_type, version, sha256}]`, exactly
+> the product's required set at current versions (vex: `terms`, `privacy`, `sensitive_data_consent`;
+> synthara: `[]`). `RegisterRequest` also rejects unknown fields. New public endpoints are
+> `GET /v1/legal/current` and `GET /v1/legal/documents/{doc_type}[?version=]`. New authenticated
+> endpoints are `GET /v1/legal/status` and `POST /v1/legal/acceptances`. Access tokens carry a new
+> `lgl` claim. Every non-GET call behind `auth_guard` returns `428 legal_acceptance_required` when
+> that claim isn't current (it goes stale when a version flagged `requires_reacceptance` takes
+> effect at 00:00 UTC). To recover, call `POST /v1/legal/acceptances` and then `POST /v1/auth/refresh`.
+> New error codes are `409 legal_version_stale`, `422 legal_acceptance_incomplete`, and
+> `404 legal_document_not_found`. `DELETE /v1/users/me` now also records withdrawal of
+> sensitive-data consent. Canonical contract: `docs/contracts/legal-documents-contract.md`. The
+> frontend must regenerate types (`gen:api`)._
+>
+> _Prior (2026-07-28): **Review remediation r2: serialize push-subscription creation
 > against bulk revocation** (§15b): `POST /v1/push/subscriptions` could commit a fresh
 > subscription row *after* a concurrent bulk revocation (logout-all, password change/reset,
 > deactivation, refresh-token reuse detection) had already run its cleanup — `push_subscriptions.
@@ -469,6 +483,26 @@ Note:     Re-mints the apex_content cookie (same attributes login/register/refre
           cookie actually lapses, rather than waiting for a 401. The content cookie itself
           does NOT authorize this endpoint — only a valid Bearer access token does.
 ```
+
+---
+
+## 2b. Legal Documents & Acceptance
+
+Versioned Terms of Use, Privacy Policy and sensitive-data consent, served per product from the
+backend repo (`legal/`). Full semantics, types and the 428 recovery flow are in
+**`docs/contracts/legal-documents-contract.md`**. It is the canonical frontend contract.
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| GET | `/v1/legal/current` | public | Current `{doc_type, version, sha256, requires_reacceptance}` of each required document |
+| GET | `/v1/legal/documents/{doc_type}` | public | Current version, or `?version=YYYY-MM-DD`; `ETag: "<sha256>"`, `Cache-Control: public, max-age=300` |
+| GET | `/v1/legal/status` | Bearer | Per-type `required_version` / `current_version` / `accepted_version` / `satisfied`, plus `all_satisfied` |
+| POST | `/v1/legal/acceptances` | Bearer (legal-exempt) | `{accepted_documents}` → status. Then call `POST /v1/auth/refresh` |
+
+**Enforcement:** every non-safe method behind `auth_guard` returns `428 legal_acceptance_required`
+unless the token's `lgl` claim matches the currently required digest. Exempt routes:
+`POST /v1/legal/acceptances`, `DELETE /v1/users/me`, `POST /v1/users/me/logout-all`,
+`POST /v1/auth/resend-verification`, `POST /v1/auth/content-cookie`, `POST /v1/events/sse-ticket`.
 
 ---
 

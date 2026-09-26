@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Final
 
 # Runtime import required: PEP 563 field annotations on ProductConfig are resolved
 # by Litestar DI and msgspec at runtime.
-from src.core.enums import ModelType, Product  # noqa: TC001
+from src.core.enums import LegalDocumentType, ModelType, Product  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -174,6 +174,11 @@ class ProductConfig:
     # Cookie domain — registrable domain for the content cookie (e.g. "vex-domain.com").
     # None for localhost/dev pseudo-products that don't set Domain on the cookie.
     cookie_domain: str | None = None
+
+    # Legal documents a user must have accepted (current required versions)
+    # before any mutating API call is allowed — see src/api/services/legal/.
+    # Empty = nothing required; no acceptance is recorded or enforced.
+    required_legal_documents: frozenset[LegalDocumentType] = field(default_factory=frozenset)
 
     def is_model_allowed(self, model: ModelType) -> bool:
         """Check if a model is accessible on this product."""

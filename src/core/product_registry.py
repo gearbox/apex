@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import tldextract as _tldextract
 
-from src.core.enums import ModelType, Product
+from src.core.enums import LegalDocumentType, ModelType, Product
 from src.core.product import (
     AgeGatePolicy,
     AuthMethod,
@@ -73,6 +73,13 @@ VEX_CONFIG = ProductConfig(
     ),
     features=frozenset(),
     cookie_domain="vex.pics",
+    required_legal_documents=frozenset(
+        {
+            LegalDocumentType.TERMS,
+            LegalDocumentType.PRIVACY,
+            LegalDocumentType.SENSITIVE_DATA_CONSENT,
+        }
+    ),
 )
 
 SYNTHARA_CONFIG = ProductConfig(
@@ -127,6 +134,8 @@ SYNTHARA_CONFIG = ProductConfig(
     ),
     features=frozenset({"organizations"}),
     cookie_domain="synthara.app",
+    # required_legal_documents deliberately left empty: synthara legal documents
+    # are a named follow-up (see docs/contracts/legal-documents-contract.md).
 )
 
 
@@ -175,6 +184,18 @@ def resolve_product_by_domain(hostname: str) -> ProductConfig | None:
     if apex is None:
         return None
     return next((config for config in _ALL_PRODUCTS if apex in config.domains), None)
+
+
+def get_product_config_by_slug(slug: str) -> ProductConfig:
+    """Get configuration for a product slug. Raises KeyError if unknown.
+
+    Strict counterpart of :func:`resolve_product_by_slug` for callers that
+    hold an already-validated slug (e.g. a stored ``product_id`` column).
+    """
+    config = resolve_product_by_slug(slug)
+    if config is None:
+        raise KeyError(slug)
+    return config
 
 
 def resolve_product_by_slug(slug: str) -> ProductConfig | None:

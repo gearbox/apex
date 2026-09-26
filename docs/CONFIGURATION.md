@@ -259,6 +259,14 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 
 ---
 
+### Legal Documents
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `LEGAL_DOCUMENTS_DIR` | `legal` | `Path` | Directory containing `manifest.toml` and `{product}/{doc_type}/{YYYY-MM-DD}.md`. Loaded once at startup into the `LegalDocumentRegistry`. Startup **fails** if the manifest and files disagree, if versions are not strictly increasing, if a product's required document has no version effective today (UTC), or — when `ENVIRONMENT=production` — if any document contains `DRAFTING NOTE` or an unfilled `[...]` placeholder (other environments only log `legal.placeholder_detected`). The Docker images copy `legal/` next to `src/`. See `docs/contracts/legal-documents-contract.md`. |
+
+---
+
 ### Generation Defaults
 
 Fallback values used when a generation request omits optional parameters. All can be
