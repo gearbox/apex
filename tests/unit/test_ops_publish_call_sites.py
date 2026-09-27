@@ -90,6 +90,13 @@ class TestAuthRegisterPublishesUserRegistered:
         mock_repository.create_refresh_token.return_value = MagicMock(spec=RefreshToken)
 
         ops_bus = AsyncMock()
+        transaction = MagicMock()
+        transaction.__aenter__ = AsyncMock(return_value=None)
+        transaction.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.begin_nested = MagicMock(return_value=transaction)
+        session.add = MagicMock()
+        session.flush = AsyncMock()
         service = AuthService(
             legal_acceptance_service=make_legal_acceptance_service(),
             repository=mock_repository,
@@ -97,6 +104,7 @@ class TestAuthRegisterPublishesUserRegistered:
             password_service=PasswordService(),
             token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
             ops_event_bus=ops_bus,
+            session=session,
         )
 
         await service.register(

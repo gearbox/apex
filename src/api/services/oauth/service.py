@@ -14,6 +14,7 @@ the provider ``sub``, or the provider email.
 from __future__ import annotations
 
 import hmac
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
@@ -47,6 +48,7 @@ from src.api.services.oauth.pkce import (
 )
 from src.core.enums import OAuthErrorCode, OAuthResult
 from src.core.uid import new_id
+from src.db.integrity import violated_constraint
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -72,6 +74,14 @@ _IDENTITY_CONSTRAINTS: Final = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class CallbackRedirect:
+    """Frontend redirect and the lifetime for the binding it carries."""
+
+    url: str
+    binding_max_age: int
+
+
 class CallbackRejectReason(StrEnum):
     """Why a callback's flow state was refused (logged; the wire code is always flow_expired)."""
 
@@ -90,12 +100,7 @@ def _binding_matches(binding: str | None, expected_hash: str) -> bool:
 
 def _is_identity_conflict(exc: IntegrityError) -> bool:
     """Whether a unique violation hit one of the two ``user_identities`` constraints."""
-    cause: BaseException | None = exc.orig
-    while cause is not None:
-        if getattr(cause, "constraint_name", None) in _IDENTITY_CONSTRAINTS:
-            return True
-        cause = cause.__cause__
-    return any(name in str(exc.orig) for name in _IDENTITY_CONSTRAINTS)
+    return violated_constraint(exc, _IDENTITY_CONSTRAINTS) is not None
 
 
 class OAuthService:
@@ -314,25 +319,28 @@ class OAuthService:
         outcome: CallbackOutcome,
         return_to: str | None,
         binding: str,
-    ) -> str:
+    ) -> CallbackRedirect:
         """Write the handoff/ticket to Redis and build the frontend fragment URL.
 
         Call only after the callback's DB writes are committed.
         """
         params: dict[str, str]
+        binding_max_age: int
         match outcome:
             case LoginOutcome(user_id=user_id):
                 code = generate_opaque_token()
+                binding_max_age = self._settings.oauth_handoff_ttl_seconds
                 await self._store.put_handoff(
                     code,
                     OAuthHandoff(
                         product_id=product.slug, user_id=user_id, binding_hash=binding_hash(binding)
                     ),
-                    self._settings.oauth_handoff_ttl_seconds,
+                    binding_max_age,
                 )
                 params = {"result": OAuthResult.LOGIN.value, "code": code}
             case SignupOutcome(identity=identity):
                 ticket = generate_opaque_token()
+                binding_max_age = self._settings.oauth_signup_ticket_ttl_seconds
                 await self._store.put_signup(
                     ticket,
                     PendingSignup(
@@ -342,12 +350,14 @@ class OAuthService:
                         email=identity.email,
                         binding_hash=binding_hash(binding),
                     ),
-                    self._settings.oauth_signup_ticket_ttl_seconds,
+                    binding_max_age,
                 )
                 params = {"result": OAuthResult.SIGNUP.value, "ticket": ticket}
         if return_to is not None:
             params["return_to"] = return_to
-        return self._frontend_url(product, params)
+        return CallbackRedirect(
+            url=self._frontend_url(product, params), binding_max_age=binding_max_age
+        )
 
     def error_redirect(self, *, product: ProductConfig, error: OAuthErrorCode) -> str:
         """Frontend fragment URL reporting a flow error."""

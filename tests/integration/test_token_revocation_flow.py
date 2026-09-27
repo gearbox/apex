@@ -45,6 +45,7 @@ from src.core.product_registry import VEX_CONFIG
 from src.core.uid import new_id
 from src.db.models.user import RefreshToken, User
 from src.db.repositories.user import UserRepository
+from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 
 if TYPE_CHECKING:
@@ -325,6 +326,7 @@ class TestChangePasswordRevokesAccessTokens:
             password_service=_make_password_service(),
             age_verification_service=MagicMock(),
             token_revocation_service=token_revocation,
+            identity_repository=AsyncMock(spec=UserIdentityRepository),
         )
         data = MagicMock()
         data.current_password = "old"
@@ -364,6 +366,7 @@ class TestDeactivateAccountRevokesAccessTokens:
             password_service=_make_password_service(),
             age_verification_service=MagicMock(),
             token_revocation_service=token_revocation,
+            identity_repository=AsyncMock(spec=UserIdentityRepository),
         )
         delete_account_response = await UserController.delete_account.fn(  # type: ignore[attr-defined]
             MagicMock(),

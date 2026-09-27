@@ -1564,9 +1564,7 @@ class Settings(BaseSettings):
         default=900,
         ge=60,
         le=3600,
-        description=(
-            "TTL of a pending OAuth signup ticket (and of the apex_oauth_tx binding cookie)."
-        ),
+        description="TTL of a pending OAuth signup ticket.",
     )
     oauth_jwks_cache_ttl_seconds: int = Field(
         default=3600,

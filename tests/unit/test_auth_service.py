@@ -36,6 +36,18 @@ def _noop_token_revocation() -> TokenRevocationService:
     return TokenRevocationService(None, max_token_ttl_seconds=0)
 
 
+def _mock_session() -> MagicMock:
+    """Session double with a functioning savepoint for provisioning tests."""
+    transaction = MagicMock()
+    transaction.__aenter__ = AsyncMock(return_value=None)
+    transaction.__aexit__ = AsyncMock(return_value=False)
+    session = MagicMock()
+    session.begin_nested = MagicMock(return_value=transaction)
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    return session
+
+
 @pytest.fixture
 def password_service() -> PasswordService:
     """Create password service."""
@@ -72,6 +84,7 @@ def auth_service(
         jwt_service=jwt_service,
         password_service=password_service,
         token_revocation_service=_noop_token_revocation(),
+        session=_mock_session(),
     )
 
 
@@ -238,6 +251,27 @@ class TestAuthServiceRegister:
                 context=TEST_REQUEST_CONTEXT,
             )
 
+    async def test_r2_e_provision_user_requires_a_session(self, jwt_service: JWTService) -> None:
+        """R2-e — the race-closing savepoint is never silently omitted."""
+        service = AuthService(
+            legal_acceptance_service=make_legal_acceptance_service(),
+            repository=AsyncMock(),
+            jwt_service=jwt_service,
+            password_service=PasswordService(),
+            token_revocation_service=_noop_token_revocation(),
+        )
+
+        with pytest.raises(RuntimeError, match="provision_user requires a session"):
+            await service.provision_user(
+                user_id=uuid4(),
+                email="person@example.com",
+                password_hash=None,
+                validated=MagicMock(product=VEX_CONFIG),
+                context=TEST_REQUEST_CONTEXT,
+                display_name=None,
+                email_verified_at=None,
+            )
+
     async def test_register_creates_user_before_recording_acceptances(
         self, jwt_service: JWTService
     ) -> None:
@@ -266,6 +300,7 @@ class TestAuthServiceRegister:
             password_service=PasswordService(),
             token_revocation_service=_noop_token_revocation(),
             legal_acceptance_service=legal,
+            session=_mock_session(),
         )
 
         await service.register(
@@ -312,6 +347,7 @@ class TestAuthServiceRegister:
             password_service=password,
             token_revocation_service=_noop_token_revocation(),
             legal_acceptance_service=legal,
+            session=_mock_session(),
         )
 
         await service.register(
@@ -867,7 +903,7 @@ class TestAuthServiceMissingBranches:
 
         from src.api.services.auth import AuthService
 
-        session = AsyncMock()
+        session = _mock_session()
         mock_repository.email_exists.return_value = False
         mock_user = MagicMock(spec=User)
         mock_user.id = uuid4()
@@ -904,8 +940,7 @@ class TestAuthServiceMissingBranches:
         from src.api.services.auth import AuthService
         from src.api.services.email_verification import EmailVerificationService
 
-        session = AsyncMock()
-        session.add = MagicMock()
+        session = _mock_session()
         mock_repository.email_exists.return_value = False
         mock_user = MagicMock(spec=User)
         mock_user.id = uuid4()
@@ -943,8 +978,7 @@ class TestAuthServiceMissingBranches:
         from src.api.services.auth import AuthService
         from src.api.services.email_verification import EmailVerificationService
 
-        session = AsyncMock()
-        session.add = MagicMock()
+        session = _mock_session()
         mock_repository.email_exists.return_value = False
         mock_user = MagicMock(spec=User)
         mock_user.id = uuid4()

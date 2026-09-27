@@ -287,7 +287,7 @@ Frontend contract: `docs/contracts/oauth-contract.md`.
 | `OAUTH_FRONTEND_CALLBACK_PATH` | `/auth/callback` | `str` | Frontend route that reads the result fragment. |
 | `OAUTH_FLOW_TTL_SECONDS` | `600` | `int (60–1800)` | Lifetime of a pending authorize→callback flow (state, nonce, PKCE verifier). |
 | `OAUTH_HANDOFF_TTL_SECONDS` | `60` | `int (10–300)` | Lifetime of the one-time login code redeemed at `/exchange`. |
-| `OAUTH_SIGNUP_TICKET_TTL_SECONDS` | `900` | `int (60–3600)` | Lifetime of a pending signup, and `Max-Age` of the `apex_oauth_tx` binding cookie. |
+| `OAUTH_SIGNUP_TICKET_TTL_SECONDS` | `900` | `int (60–3600)` | Lifetime of a pending signup ticket. The `apex_oauth_tx` binding cookie is re-minted at each OAuth step to the lifetime of the Redis artifact it guards: flow, login handoff, or signup ticket. |
 | `OAUTH_JWKS_CACHE_TTL_SECONDS` | `3600` | `int (≥60)` | How long Google's signing keys are cached. An unknown `kid` forces one refetch, at most one per 60 s. |
 | `OAUTH_HTTP_TIMEOUT_SECONDS` | `10.0` | `float (>0)` | Timeout for the token endpoint and JWKS calls. |
 

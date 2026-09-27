@@ -8,7 +8,7 @@ Canonical frontend contract: docs/contracts/oauth-contract.md.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, Final
+from typing import TYPE_CHECKING, Annotated, Any, Final, cast
 
 import structlog
 from litestar import Controller, Response, get, post
@@ -54,7 +54,7 @@ from src.api.services.oauth.errors import (
     OAuthProviderNotEnabledError,
 )
 from src.api.services.oauth.pkce import generate_opaque_token
-from src.api.services.oauth.service import OAuthService
+from src.api.services.oauth.service import CallbackRedirect, OAuthService
 from src.core.config import Settings
 from src.core.enums import OAuthErrorCode
 from src.core.product import OAuthProvider, ProductConfig
@@ -125,7 +125,7 @@ class OAuthController(Controller):
             cookies=[
                 mint_oauth_tx_cookie(
                     binding,
-                    max_age=settings.oauth_signup_ticket_ttl_seconds,
+                    max_age=settings.oauth_flow_ttl_seconds,
                     secure=settings.content_cookie_secure,
                 )
             ],
@@ -138,6 +138,7 @@ class OAuthController(Controller):
         product_config: ProductConfig,
         oauth_service: OAuthService,
         session: AsyncSession,
+        settings: Settings,
         binding: TxBinding = None,
         code: str | None = None,
         oauth_state: Annotated[str | None, Parameter(query="state", required=False)] = None,
@@ -150,7 +151,7 @@ class OAuthController(Controller):
         """
         parsed = _parse_provider(provider)
         try:
-            url = await _callback_redirect(
+            redirect = await _callback_redirect(
                 oauth_service,
                 session,
                 product=product_config,
@@ -160,7 +161,18 @@ class OAuthController(Controller):
                 error=error,
                 binding=binding,
             )
+            url = redirect.url
+            binding_value = cast("str", binding)  # resolve_callback rejects a missing binding
+            # SameSite restricts sending a cookie, not setting one on this cross-site redirect.
+            cookies = [
+                mint_oauth_tx_cookie(
+                    binding_value,
+                    max_age=redirect.binding_max_age,
+                    secure=settings.content_cookie_secure,
+                )
+            ]
         except OAuthError as exc:
+            # Leave the cookie untouched and let it lapse: a failed callback may belong to another tab's live flow.
             logger.info(
                 "auth.oauth.callback_error",
                 product_id=product_config.slug,
@@ -168,6 +180,7 @@ class OAuthController(Controller):
                 error=exc.code.value,
             )
             url = oauth_service.error_redirect(product=product_config, error=exc.code)
+            cookies = []
         except Exception:
             # Never JSON from a browser navigation: roll back and report a
             # generic failure to the frontend.
@@ -178,7 +191,10 @@ class OAuthController(Controller):
             url = oauth_service.error_redirect(
                 product=product_config, error=OAuthErrorCode.OAUTH_FAILED
             )
-        return Redirect(path=url, status_code=HTTP_302_FOUND, headers=_REDIRECT_HEADERS)
+            cookies = []
+        return Redirect(
+            path=url, status_code=HTTP_302_FOUND, headers=_REDIRECT_HEADERS, cookies=cookies
+        )
 
     @post("/exchange", status_code=HTTP_200_OK)
     async def exchange(
@@ -302,7 +318,7 @@ async def _callback_redirect(
     state: str | None,
     error: str | None,
     binding: str | None,
-) -> str:
+) -> CallbackRedirect:
     """The success redirect for a callback, or raise the ``OAuthError`` to report."""
     if error is not None:
         raise OAuthCancelledError if error == "access_denied" else OAuthFailedError

@@ -33,8 +33,8 @@ def mint_oauth_tx_cookie(binding: str, *, max_age: int, secure: bool) -> Cookie:
 
     Args:
         binding: Random per-flow binding value.
-        max_age: Lifetime in seconds — ``oauth_signup_ticket_ttl_seconds`` so the
-            cookie outlives the whole flow up to complete-signup.
+        max_age: Lifetime in seconds of the Redis artifact guarded at this
+            step (flow, login handoff, or signup ticket).
         secure: ``Settings.content_cookie_secure`` (dropped only in dev).
     """
     return Cookie(

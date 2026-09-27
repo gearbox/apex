@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.ops_events import (
     PLATFORM_PRODUCT_ID,
@@ -25,6 +26,7 @@ from src.api.services.push_cleanup import delete_user_push_subscriptions
 from src.core.enums import LegalAcceptanceSource, RefreshTokenRevocationReason
 from src.core.product_registry import get_product_config_by_slug
 from src.core.uid import new_id
+from src.db.integrity import violated_constraint
 from src.db.repositories.billing import BillingRepository
 
 if TYPE_CHECKING:
@@ -47,6 +49,8 @@ if TYPE_CHECKING:
     from src.db.repositories import UserRepository
 
 logger = structlog.get_logger(__name__)
+
+_USER_EMAIL_CONSTRAINTS: Final = frozenset({"ix_users_email_product"})
 
 
 class AuthError(Exception):
@@ -307,27 +311,37 @@ class AuthService:
         product = validated.product
         product_id = product.slug
 
+        if self._session is None:
+            raise RuntimeError("provision_user requires a session")
+
         # Check for existing email within the same product
         if await self._repo.email_exists(email, product_id=product_id):
             raise EmailAlreadyExistsError(f"Email {email} is already registered")
 
-        # Create user
-        user = await self._repo.create_user(
-            id=user_id,
-            email=email,
-            password_hash=password_hash,
-            product_id=product_id,
-            display_name=display_name,
-            email_verified_at=email_verified_at,
-        )
+        try:
+            # Releasing the savepoint flushes the INSERT.  On a concurrent
+            # email registration the outer transaction remains usable.
+            async with self._session.begin_nested():
+                user = await self._repo.create_user(
+                    id=user_id,
+                    email=email,
+                    password_hash=password_hash,
+                    product_id=product_id,
+                    display_name=display_name,
+                    email_verified_at=email_verified_at,
+                )
+        except IntegrityError as exc:
+            if violated_constraint(exc, _USER_EMAIL_CONSTRAINTS) is None:
+                raise
+            logger.info("auth.signup_email_race_lost", product_id=product_id)
+            raise EmailAlreadyExistsError(f"Email {email} is already registered") from exc
 
         # Create personal token account in the same transaction
-        if self._session is not None:
-            billing_repo = BillingRepository(self._session)
-            await billing_repo.create_personal_account(
-                id=new_id(), user_id=user_id, product_id=product_id
-            )
-            logger.info("billing.account_created", user_id=str(user_id))
+        billing_repo = BillingRepository(self._session)
+        await billing_repo.create_personal_account(
+            id=new_id(), user_id=user_id, product_id=product_id
+        )
+        logger.info("billing.account_created", user_id=str(user_id))
 
         # Same transaction as the user row: a later failure rolls these back too.
         await self._legal.record_acceptances(

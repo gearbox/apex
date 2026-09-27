@@ -28,8 +28,12 @@ from src.api.services.oauth.models import (
 from src.api.services.oauth.registry import OAuthProviderRegistry
 from src.core.config import Settings
 from src.core.product import OAuthProvider
+from src.core.uid import new_id
+from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from pydantic import SecretStr
 
 GOOGLE_ISSUER = "https://accounts.google.com"
@@ -120,6 +124,36 @@ class InMemoryOAuthFlowStore:
 
     async def take_signup(self, ticket: str) -> PendingSignup | None:
         return self.signups.pop(ticket, None)
+
+
+async def commit_active_user_for_email_race(
+    engine: Any, *, email: str, product_id: str = "vex"
+) -> UUID:
+    """Commit the competing row from another session for signup race tests."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    user_id = new_id()
+    async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+        await UserRepository(session).create_user(
+            id=user_id,
+            email=email,
+            password_hash="race-password-hash",
+            product_id=product_id,
+        )
+        await session.commit()
+    return user_id
+
+
+async def delete_email_race_user(engine: Any, user_id: UUID) -> None:
+    """Remove the separately committed race fixture after its test."""
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.db.models.user import User
+
+    async with AsyncSession(bind=engine, expire_on_commit=False) as session:
+        await session.execute(delete(User).where(User.id == user_id))
+        await session.commit()
 
 
 # ---------------------------------------------------------------------------

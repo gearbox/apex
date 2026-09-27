@@ -38,7 +38,7 @@ from src.api.services.legal.errors import (
     LegalVersionStaleError,
 )
 from src.api.services.oauth.errors import EmailUnverifiedError, OAuthFailedError
-from src.api.services.oauth.models import OAuthFlow
+from src.api.services.oauth.models import LoginOutcome, OAuthFlow, SignupOutcome
 from src.api.services.oauth.service import OAuthService
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.product import OAuthProvider
@@ -201,6 +201,7 @@ def _start(client: TestClient[Litestar], **params: str) -> str:
 
 class TestAuthorize:
     def test_redirects_to_provider_with_binding_cookie(self) -> None:
+        """R1-a — authorize binds the cookie to the pending flow's lifetime."""
         h = Harness()
         with TestClient(app=h.app()) as client:
             resp = _authorize(client, return_to="/library")
@@ -213,7 +214,7 @@ class TestAuthorize:
         assert "Path=/v1/auth/oauth" in set_cookie
         assert "SameSite=lax" in set_cookie or "SameSite=Lax" in set_cookie
         assert "Domain" not in set_cookie
-        assert f"Max-Age={h.settings.oauth_signup_ticket_ttl_seconds}" in set_cookie
+        assert f"Max-Age={h.settings.oauth_flow_ttl_seconds}" in set_cookie
         (flow,) = h.store.flows.values()
         assert flow.return_to == "/library"
         assert flow.product_id == "vex"
@@ -274,10 +275,35 @@ class TestAuthorize:
 
 
 class TestCallback:
+    @pytest.mark.parametrize("outcome", ["login", "signup"])
+    async def test_r1_f_redirect_binding_max_age_matches_written_artifact(
+        self, outcome: str
+    ) -> None:
+        """R1-f — the returned binding age is the exact TTL given to the store."""
+        h = Harness()
+        callback_outcome = (
+            LoginOutcome(user_id=h.user.id)
+            if outcome == "login"
+            else SignupOutcome(identity=identity())
+        )
+
+        redirect = await h.service.issue_redirect(
+            product=VEX_CONFIG,
+            outcome=callback_outcome,
+            return_to=None,
+            binding="binding-value",
+        )
+
+        key = next(iter(h.store.handoffs)) if outcome == "login" else next(iter(h.store.signups))
+        artifact = "handoff" if outcome == "login" else "signup"
+        assert redirect.binding_max_age == h.store.ttls[f"{artifact}:{key}"]
+
     def test_signup_outcome(self) -> None:
+        """R1-b — signup callback re-mints the same binding for the signup ticket."""
         h = Harness()
         with TestClient(app=h.app()) as client:
             state = _start(client, return_to="/library?tab=fav&x=1")
+            binding = client.cookies[OAUTH_TX_COOKIE]
             resp = _callback(client, code="provider-code", state=state)
         assert resp.status_code == 302
         location = resp.headers["location"]
@@ -290,15 +316,19 @@ class TestCallback:
         assert pending.email == "person@example.com"
         assert h.store.flows == {}  # state consumed
         assert resp.headers["referrer-policy"] == "no-referrer"
+        set_cookie = resp.headers["set-cookie"]
+        assert set_cookie.startswith(f"{OAUTH_TX_COOKIE}={binding}")
+        assert f"Max-Age={h.settings.oauth_signup_ticket_ttl_seconds}" in set_cookie
 
     def test_login_outcome_commits_before_handoff(self) -> None:
-        """I13 — DB writes are committed before the handoff lands in Redis."""
+        """I13/R1-c — commit first; re-mint the binding for the login handoff."""
         h = Harness()
         linked = MagicMock(id=uuid4(), user_id=h.user.id)
         h.identity_repo.get_by_subject = AsyncMock(return_value=linked)
         h.user_repo.get_user = AsyncMock(return_value=h.user)
         with TestClient(app=h.app()) as client:
             state = _start(client)
+            binding = client.cookies[OAUTH_TX_COOKIE]
             resp = _callback(client, code="provider-code", state=state)
         frag = fragment_params(resp.headers["location"])
         assert frag["result"] == "login"
@@ -306,6 +336,9 @@ class TestCallback:
         assert h.store.handoffs[frag["code"]].user_id == h.user.id
         assert [c[0] for c in h.order.mock_calls] == ["commit", "put_handoff"]
         h.identity_repo.touch_last_login.assert_awaited_once_with(linked.id)
+        set_cookie = resp.headers["set-cookie"]
+        assert set_cookie.startswith(f"{OAUTH_TX_COOKIE}={binding}")
+        assert f"Max-Age={h.settings.oauth_handoff_ttl_seconds}" in set_cookie
 
     def test_provider_received_stored_verifier_and_redirect_uri(self) -> None:
         h = Harness()
@@ -403,6 +436,37 @@ class TestCallback:
         assert resp.status_code == 302
         assert fragment_params(resp.headers["location"])["error"] == "oauth_failed"
         h.session.rollback.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "case", ["access_denied", "binding_mismatch", "oauth_failed", "generic"]
+    )
+    def test_r1_d_callback_errors_do_not_set_oauth_binding_cookie(self, case: str) -> None:
+        """R1-d — callback errors leave another tab's potentially live binding alone."""
+        provider_error: Exception | None = None
+        if case == "oauth_failed":
+            provider_error = OAuthFailedError()
+        elif case == "generic":
+            provider_error = RuntimeError("boom")
+        h = Harness(
+            provider=(
+                FakeProviderClient(error=provider_error)
+                if provider_error
+                else FakeProviderClient(identity())
+            )
+        )
+        with TestClient(app=h.app()) as client:
+            state = _start(client)
+            if case == "access_denied":
+                resp = _callback(client, error="access_denied", state=state)
+            else:
+                if case == "binding_mismatch":
+                    client.cookies.clear()
+                    client.cookies.set(OAUTH_TX_COOKIE, "other-tab-binding")
+                resp = _callback(client, code="provider-code", state=state)
+        assert not any(
+            cookie.startswith(f"{OAUTH_TX_COOKIE}=")
+            for cookie in resp.headers.get_list("set-cookie")
+        )
 
 
 class TestProviderMismatch:

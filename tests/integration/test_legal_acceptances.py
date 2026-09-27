@@ -41,6 +41,7 @@ from src.db.models.legal import LegalAcceptance
 from src.db.models.user import User
 from src.db.repositories.legal import LegalAcceptanceRepository
 from src.db.repositories.user import UserRepository
+from src.db.repositories.user_identity import UserIdentityRepository
 from tests.integration.pg_locks import wait_for_advisory_lock_waiter
 from tests.legal_support import accept_all_current, make_legal_document, make_legal_registry
 
@@ -147,6 +148,7 @@ def _user_service(session: AsyncSession, registry: LegalDocumentRegistry) -> Use
         age_verification_service=MagicMock(),
         token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
         legal_acceptance_service=_legal(session, registry),
+        identity_repository=UserIdentityRepository(session),
         session=session,
     )
 

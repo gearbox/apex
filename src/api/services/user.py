@@ -71,7 +71,7 @@ class UserService:
         *,
         token_revocation_service: TokenRevocationService,
         legal_acceptance_service: LegalAcceptanceService,
-        identity_repository: UserIdentityRepository | None = None,
+        identity_repository: UserIdentityRepository,
         r2_storage: R2StorageService | None = None,
         ops_event_bus: OpsEventBus | None = None,
         session: AsyncSession | None = None,
@@ -93,9 +93,10 @@ class UserService:
             legal_acceptance_service: Records the sensitive-data consent
                 withdrawal on account closure.
             identity_repository: Deletes the user's OAuth identity links on
-                self-closure so the subject can sign up again. Production
-                always wires one (get_user_service); ``None`` skips that
-                cleanup (tests, older call sites).
+                self-closure so the subject can sign up again. Required —
+                callers that intentionally do not use OAuth must pass an
+                explicit repository so this security-relevant cleanup is
+                never silently skipped (issue #142 A1).
             r2_storage: R2 storage service for presigned URL generation (optional).
             ops_event_bus: Publishes an alert when a bulk access-token
                 revocation write fails against a configured Redis (issue
@@ -308,10 +309,9 @@ class UserService:
         # Unlink OAuth identities in the same transaction, so the provider
         # subject can sign up afresh. (Admin deactivation keeps them — it's
         # reversible; self-closure is not.)
-        if self._identities is not None:
-            unlinked = await self._identities.delete_for_user(user_id)
-            if unlinked:
-                logger.info("user.identities_unlinked", user_id=str(user_id), count=unlinked)
+        unlinked = await self._identities.delete_for_user(user_id)
+        if unlinked:
+            logger.info("user.identities_unlinked", user_id=str(user_id), count=unlinked)
 
         # Revoke all tokens
         await self._repo.revoke_all_user_tokens(user_id)

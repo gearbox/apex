@@ -85,6 +85,7 @@ All endpoints are product-scoped through the usual `Origin` / `Host` / `X-Produc
 - `return_to` is optional. It must be a same-origin **path** that starts with a single `/`, has no whitespace and no `#`, and is at most 512 chars. Anything else returns `400 invalid_return_to`, including `//host`, `/\host`, and `https://…`.
 - Returns `404` when the provider isn't enabled for this product. That shouldn't happen if the button follows `product-info`.
 - Starting a sign-in **replaces** any earlier binding cookie, so a flow already open in another tab ends with `flow_expired`. Only one sign-in can be in progress per browser, and that is intended.
+- The `apex_oauth_tx` binding cookie is set to the pending flow's lifetime here. On a successful callback it is re-minted to the resulting login handoff or signup ticket lifetime; it is not changed on callback errors.
 
 ### `GET /v1/auth/oauth/{provider}/callback` (Google → API)
 
@@ -119,7 +120,7 @@ This is the API's redirect target, and the SPA never calls it. It always respond
 - **201:** `TokenResponse` plus the `apex_content` cookie, with `apex_oauth_tx` cleared. The account's email is already verified. It has no password (see §5).
 - **Legal errors come before the ticket is consumed.** `409 legal_version_stale` / `422 legal_acceptance_incomplete` behave exactly as for register (legal contract §3). Refetch `/v1/legal/current`, show the new text, and submit again with the **same ticket**.
 - **400 `invalid_signup_ticket`:** expired or already used. A double-click is safe: exactly one request succeeds and the other gets this error. Restart sign-in.
-- **400 `email_exists`:** someone registered this email on this product since the callback. Suggest signing in instead.
+- **400 `email_exists`:** someone registered this email on this product since the callback. The ticket is spent; send the user back to sign in. If that account's email is verified, signing in with Google again auto-links it. Otherwise, sign in with a password or reset it.
 - **409 `identity_conflict`:** this Google account was linked to another account since the callback. Restart sign-in.
 
 **Signup screen requirements:** render the legal documents exactly as the password signup form does. That means `GET /v1/legal/current`, each body fetched with `?version=`, and `sensitive_data_consent` as its own unticked checkbox. Submit `accepted_documents` in the same shape as `POST /v1/auth/register`. `display_name` is optional. The backend never imports the Google name or picture.

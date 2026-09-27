@@ -20,7 +20,7 @@ import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import httpx
@@ -44,7 +44,9 @@ from src.api.app import (
 )
 from src.api.dependencies.common import get_product_config, get_product_id
 from src.api.middleware.product import ProductMiddleware
+from src.api.routes.auth import AuthController
 from src.api.routes.oauth import OAuthController
+from src.api.schemas.auth import RegisterRequest
 from src.api.schemas.ops_events import OpsEventType
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.security.guards import _enforce_legal_acceptance
@@ -78,6 +80,8 @@ from tests.legal_support import accept_all_current, make_legal_registry
 from tests.oauth_support import (
     FakeProviderClient,
     InMemoryOAuthFlowStore,
+    commit_active_user_for_email_race,
+    delete_email_race_user,
     fake_registry,
     fragment_params,
     identity,
@@ -95,6 +99,7 @@ if TYPE_CHECKING:
 
     from src.api.services.legal.registry import LegalDocumentRegistry
     from src.api.services.oauth.flow_store import OAuthFlowStore
+    from src.core.config import Settings
     from tests.integration.conftest import ResetTokenFactory, UserFactory
 
 JWT_SECRET = "integration-oauth-secret-key-32-bytes-long"
@@ -123,9 +128,10 @@ class Flow:
         store: OAuthFlowStore | None = None,
         email: str = "person@example.com",
         subject: str = SUBJECT,
+        settings: Settings | None = None,
     ) -> None:
         self.session = session
-        self.settings = oauth_settings()
+        self.settings = settings or oauth_settings()
         self.provider = FakeProviderClient(identity(subject=subject, email=email))
         self.store = store if store is not None else InMemoryOAuthFlowStore()
         self.legal_registry = make_legal_registry()
@@ -139,6 +145,7 @@ class Flow:
             legal_registry=self.legal_registry,
             jwt_service=self.jwt,
             ops=self.ops,
+            settings=self.settings,
         )
 
     def client(self) -> contextlib.AbstractAsyncContextManager[httpx.AsyncClient]:
@@ -214,8 +221,9 @@ def build_service(
     legal_registry: LegalDocumentRegistry,
     jwt_service: JWTService,
     ops: Any = None,
+    settings: Settings | None = None,
 ) -> OAuthService:
-    settings = oauth_settings()
+    settings = settings or oauth_settings()
     legal = LegalAcceptanceService(
         registry=legal_registry, repository=LegalAcceptanceRepository(session), session=session
     )
@@ -390,6 +398,123 @@ class TestSignup:
         assert resp.status_code == 400
         assert resp.json()["error"] == "invalid_signup_ticket"
         assert not await _identities(db_session)
+
+    async def test_r1_e_per_step_cookie_lifetimes_work_with_inverted_ttls(
+        self, db_session: AsyncSession
+    ) -> None:
+        """R1-e — flow TTL may exceed signup TTL; the completed signup still works."""
+        settings = oauth_settings(
+            oauth_flow_ttl_seconds=1800,
+            oauth_signup_ticket_ttl_seconds=60,
+        )
+        flow = Flow(db_session, settings=settings)
+        async with flow.client() as client:
+            authorize = await client.get(
+                "/v1/auth/oauth/google/authorize", headers=VEX, follow_redirects=False
+            )
+            assert "Max-Age=1800" in authorize.headers["set-cookie"]
+            state = query_params(authorize.headers["location"])["state"]
+            callback = await client.get(
+                "/v1/auth/oauth/google/callback",
+                params={"code": "provider-code", "state": state},
+                headers=VEX,
+                follow_redirects=False,
+            )
+            assert "Max-Age=60" in callback.headers["set-cookie"]
+            ticket = fragment_params(callback.headers["location"])["ticket"]
+            completed = await flow.complete(client, ticket)
+        assert completed.status_code == 201
+
+    async def test_r2_a_same_email_oauth_race_returns_email_exists_and_spends_ticket(
+        self, db_session: AsyncSession, db_engine: AsyncEngine
+    ) -> None:
+        """R2-a — a lost email race is terminal, transactional, and never a 500."""
+        email = f"oauth-race-{uuid4().hex}@example.com"
+        flow = Flow(db_session, email=email)
+        competing_user_id: UUID | None = None
+        try:
+            async with flow.client() as client:
+                ticket = (await flow.callback(client))["ticket"]
+                competing_user_id = await commit_active_user_for_email_race(db_engine, email=email)
+                models = (User, UserIdentity, TokenAccount, LegalAcceptance)
+                before = [await _count(db_session, model) for model in models]
+                with patch.object(UserRepository, "email_exists", AsyncMock(return_value=False)):
+                    response = await flow.complete(client, ticket)
+                again = await flow.complete(client, ticket)
+            assert response.status_code == 400
+            assert response.json()["error"] == "email_exists"
+            assert again.status_code == 400
+            assert again.json()["error"] == "invalid_signup_ticket"
+            assert [await _count(db_session, model) for model in models] == before
+        finally:
+            if competing_user_id is not None:
+                await delete_email_race_user(db_engine, competing_user_id)
+
+    async def test_r2_b_same_email_register_race_returns_email_exists_and_keeps_session_usable(
+        self, db_session: AsyncSession, db_engine: AsyncEngine
+    ) -> None:
+        """R2-b — password registration translates the race and keeps its session usable."""
+        email = f"register-race-{uuid4().hex}@example.com"
+        registry = make_legal_registry()
+        jwt_service = JWTService(JWTConfig(secret_key=JWT_SECRET))
+        legal = LegalAcceptanceService(
+            registry=registry,
+            repository=LegalAcceptanceRepository(db_session),
+            session=db_session,
+        )
+        auth = AuthService(
+            repository=UserRepository(db_session),
+            jwt_service=jwt_service,
+            password_service=PasswordService(),
+            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+            legal_acceptance_service=legal,
+            session=db_session,
+        )
+        competing_user_id = await commit_active_user_for_email_race(db_engine, email=email)
+        try:
+            response = await AuthController.register.fn(  # type: ignore[attr-defined]
+                MagicMock(),
+                data=RegisterRequest(
+                    email=email,
+                    password="password-for-race",
+                    accepted_documents=accept_all_current(registry, today=_today()),
+                ),
+                auth_service=auth,
+                jwt_service=jwt_service,
+                product_id="vex",
+                product_config=VEX_CONFIG,
+                settings=oauth_settings(),
+                request_context=CONTEXT,
+            )
+            assert response.status_code == 400
+            assert response.content.error == "email_exists"
+            assert (await db_session.execute(text("SELECT 1"))).scalar_one() == 1
+        finally:
+            await delete_email_race_user(db_engine, competing_user_id)
+
+    async def test_r2_c_non_email_integrity_error_propagates(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """R2-c — only ix_users_email_product is translated to email_exists."""
+        from sqlalchemy.exc import IntegrityError
+
+        duplicate_id = new_id()
+        await make_user(email="existing-id@example.com", user_id=duplicate_id)
+        flow = Flow(db_session)
+        validated = flow.service._auth.validate_signup(
+            "vex", accept_all_current(flow.legal_registry, today=_today())
+        )
+
+        with pytest.raises(IntegrityError):
+            await flow.service._auth.provision_user(
+                user_id=duplicate_id,
+                email="new-email@example.com",
+                password_hash="hash",
+                validated=validated,
+                context=CONTEXT,
+                display_name=None,
+                email_verified_at=None,
+            )
 
 
 class TestSignupIdentityConflict:
