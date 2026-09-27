@@ -53,6 +53,8 @@ class UserProfileResponse(msgspec.Struct, kw_only=True):
     age_verified: bool
     age_verified_at: datetime | None = None
     date_of_birth: date | None = None
+    has_password: bool = True
+    """False for OAuth-only accounts — hide change-password, offer forgot-password."""
 
 
 class UserStatsResponse(msgspec.Struct, kw_only=True):

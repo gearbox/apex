@@ -1048,3 +1048,60 @@ class TestAuthServiceMissingBranches:
 
         with pytest.raises(UserInactiveError):
             await svc.refresh_tokens("valid_token_inactive_user")
+
+
+class TestLoginWithoutPassword:
+    """I15 — OAuth-only account (NULL hash) behaves exactly like an unknown email."""
+
+    async def test_null_hash_is_invalid_credentials_with_dummy_hash(
+        self, jwt_service: JWTService
+    ) -> None:
+        user = MagicMock(spec=User)
+        user.id = uuid4()
+        user.password_hash = None
+        repository = AsyncMock()
+        repository.get_active_user_by_email = AsyncMock(return_value=user)
+        password = MagicMock()
+        password.ahash = AsyncMock(return_value="dummy")
+        password.averify = AsyncMock()
+        service = AuthService(
+            repository=repository,
+            jwt_service=jwt_service,
+            password_service=password,
+            token_revocation_service=_noop_token_revocation(),
+            legal_acceptance_service=make_legal_acceptance_service(),
+        )
+
+        with pytest.raises(InvalidCredentialsError):
+            await service.login(email="oauth@example.com", password="guess", product_id="vex")
+
+        password.ahash.assert_awaited_once_with("dummy_password")
+        password.averify.assert_not_called()
+        repository.create_refresh_token.assert_not_called()
+
+
+class TestIssueSession:
+    async def test_issue_session_records_context_and_lgl(self, jwt_service: JWTService) -> None:
+        repository = AsyncMock()
+        legal = MagicMock()
+        legal.satisfied_digest = AsyncMock(return_value="digest-abc")
+        service = AuthService(
+            repository=repository,
+            jwt_service=jwt_service,
+            password_service=PasswordService(),
+            token_revocation_service=_noop_token_revocation(),
+            legal_acceptance_service=legal,
+        )
+        user_id = uuid4()
+
+        tokens = await service.issue_session(
+            user_id, product_id="vex", context=TEST_REQUEST_CONTEXT
+        )
+
+        payload = jwt_service.decode_access_token(tokens.access_token)
+        assert payload is not None
+        assert payload.legal_digest == "digest-abc"
+        assert payload.product_id == "vex"
+        kwargs = repository.create_refresh_token.await_args.kwargs
+        assert kwargs["ip_address"] == TEST_REQUEST_CONTEXT.ip_address
+        assert kwargs["user_agent"] == TEST_REQUEST_CONTEXT.user_agent

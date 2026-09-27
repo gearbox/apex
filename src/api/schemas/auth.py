@@ -39,24 +39,6 @@ class RefreshTokenRequest(msgspec.Struct, kw_only=True):
     refresh_token: str
 
 
-class PKCEAuthRequest(msgspec.Struct, kw_only=True):
-    """PKCE authorization request.
-
-    Used for OAuth2 PKCE flow initiation.
-    """
-
-    code_challenge: str
-    code_challenge_method: str = "S256"
-    state: str | None = None
-
-
-class PKCETokenRequest(msgspec.Struct, kw_only=True):
-    """PKCE token exchange request."""
-
-    code: str
-    code_verifier: str
-
-
 class VerifyEmailRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Token from the verification link query string."""
 

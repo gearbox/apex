@@ -273,6 +273,13 @@ class EmailVerificationService:
         if user is None:
             raise UserNotFoundError(f"User {user_id} not found after token consumption")
 
+        # A consumed reset link proves control of the inbox — the recovery
+        # path for OAuth's account_exists_unverified (auto-link requires a
+        # verified local email). Never overwrites an existing timestamp.
+        if user.email_verified_at is None:
+            await user_repo.mark_email_verified(user_id)
+            logger.info("user.email_verified_via_reset", user_id=str(user_id))
+
         # Revoke all refresh tokens — forces re-authentication on all devices
         revoked = await user_repo.revoke_all_refresh_tokens(user_id)
         # Bulk-revoke live access tokens/content cookies too (issue #142) —

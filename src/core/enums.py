@@ -826,3 +826,25 @@ PLATFORM_SCOPED_NOTIFICATION_CLASSES: Final[frozenset[NotificationClass]] = froz
         NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
     }
 )
+
+
+class OAuthResult(StrEnum):
+    """Outcome carried in the OAuth callback redirect fragment (``result=``)."""
+
+    LOGIN = "login"
+    SIGNUP = "signup"
+    ERROR = "error"
+
+
+class OAuthErrorCode(StrEnum):
+    """Wire error codes of the OAuth flow (fragment ``error=`` and JSON ``error``)."""
+
+    OAUTH_CANCELLED = "oauth_cancelled"  # provider returned error=access_denied
+    OAUTH_FAILED = "oauth_failed"  # token endpoint / id_token verification failure
+    FLOW_EXPIRED = "flow_expired"  # state unknown/consumed, binding or product mismatch
+    EMAIL_UNVERIFIED = "email_unverified"  # provider says email_verified != true
+    ACCOUNT_EXISTS_UNVERIFIED = "account_exists_unverified"
+    ACCOUNT_INACTIVE = "account_inactive"
+    IDENTITY_CONFLICT = "identity_conflict"  # user already linked to a different subject
+    INVALID_HANDOFF = "invalid_handoff"
+    INVALID_SIGNUP_TICKET = "invalid_signup_ticket"

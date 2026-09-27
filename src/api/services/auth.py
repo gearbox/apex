@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         LegalAcceptanceService,
         RequestContext,
     )
+    from src.api.services.legal.registry import LegalDocument
     from src.api.services.token_revocation import TokenRevocationService
     from src.core.product import ProductConfig
     from src.db.models import User
@@ -74,6 +75,20 @@ class InvalidRefreshTokenError(AuthError):
 
 class TokenReuseDetectedError(AuthError):
     """Potential token theft detected - revoked token was reused."""
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedSignup:
+    """A signup's legal submission, validated against the product's current documents.
+
+    Produced by :meth:`AuthService.validate_signup` (pure) and consumed by
+    :meth:`AuthService.provision_user`, so a stale form is rejected before any
+    row is written — and, for OAuth, before the signup ticket is consumed.
+    """
+
+    product: ProductConfig
+    legal_documents: Sequence[LegalDocument]
+    today: date
 
 
 @dataclass
@@ -199,54 +214,23 @@ class AuthService:
             LegalVersionStaleError: A submitted version/sha256 is not current.
             EmailAlreadyExistsError: If email is taken on this product.
         """
-        today = datetime.now(UTC).date()
-        product = self._product_resolver(product_id)
         # Pure check before any DB access — a stale form never creates a user.
-        legal_documents = self._legal.validate_submission(product, accepted_documents, today=today)
-
-        # Check for existing email within the same product
-        if await self._repo.email_exists(email, product_id=product_id):
-            raise EmailAlreadyExistsError(f"Email {email} is already registered")
-
-        # Create user
-        user_id = new_id()
+        validated = self.validate_signup(product_id, accepted_documents)
         password_hash = await self._password.ahash(password)
-
-        user = await self._repo.create_user(
-            id=user_id,
+        user_id = new_id()
+        user = await self.provision_user(
+            user_id=user_id,
             email=email,
             password_hash=password_hash,
-            product_id=product_id,
-            display_name=display_name,
-        )
-
-        # Create personal token account in the same transaction
-        if self._session is not None:
-            billing_repo = BillingRepository(self._session)
-            await billing_repo.create_personal_account(
-                id=new_id(), user_id=user_id, product_id=product_id
-            )
-            logger.info("billing.account_created", user_id=str(user_id))
-
-        # Same transaction as the user row: a later failure rolls these back too.
-        await self._legal.record_acceptances(
-            user_id=user_id,
-            product=product,
-            documents=legal_documents,
-            source=LegalAcceptanceSource.SIGNUP,
+            validated=validated,
             context=context,
-        )
-
-        logger.info("user.registered", user_id=str(user_id))
-        await self._ops_event_bus.publish(
-            event_type=OpsEventType.USER_REGISTERED,
-            product_id=product_id,
-            payload=UserRegisteredOpsPayload(user_id=user_id),
+            display_name=display_name,
+            email_verified_at=None,
         )
 
         # Generate tokens
         tokens, _refresh_token_id = await self._create_token_pair(
-            user_id, product_id=product_id, today=today
+            user_id, product_id=product_id, today=validated.today
         )
 
         # Send verification email — non-blocking failure: if the email provider
@@ -264,6 +248,129 @@ class AuthService:
                 )
 
         return user, tokens
+
+    def validate_signup(
+        self, product_id: str, accepted_documents: Sequence[AcceptedDocument]
+    ) -> ValidatedSignup:
+        """Validate a signup's legal submission (pure — no DB access).
+
+        Args:
+            product_id: Product the user is signing up on.
+            accepted_documents: Legal documents the user accepted on the form.
+
+        Returns:
+            The validated submission, carrying the single UTC ``today`` that all
+            later legal work for this signup (recording, ``lgl`` digest) shares.
+
+        Raises:
+            LegalSubmissionIncompleteError: Required documents missing/extra/duplicated.
+            LegalVersionStaleError: A submitted version/sha256 is not current.
+        """
+        today = datetime.now(UTC).date()
+        product = self._product_resolver(product_id)
+        legal_documents = self._legal.validate_submission(product, accepted_documents, today=today)
+        return ValidatedSignup(product=product, legal_documents=legal_documents, today=today)
+
+    async def provision_user(
+        self,
+        *,
+        user_id: UUID,
+        email: str,
+        password_hash: str | None,
+        validated: ValidatedSignup,
+        context: RequestContext,
+        display_name: str | None,
+        email_verified_at: datetime | None,
+    ) -> User:
+        """Create a user with its billing account and signup acceptances.
+
+        Shared by password registration and OAuth signup. Everything happens in
+        the caller's transaction (never commits): a later failure rolls back
+        the user, the account and the acceptance rows together.
+
+        Args:
+            user_id: Id for the new user (the caller keeps it for token minting).
+            email: User email (lower-cased by the repository).
+            password_hash: Argon2 hash, or ``None`` for an OAuth-only account.
+            validated: Output of :meth:`validate_signup`.
+            context: Client IP / user agent, stored with the acceptance rows.
+            display_name: Optional display name.
+            email_verified_at: Set when the email is already proven (OAuth
+                provider asserted ``email_verified``); ``None`` otherwise.
+
+        Returns:
+            The created user.
+
+        Raises:
+            EmailAlreadyExistsError: If email is taken on this product.
+        """
+        product = validated.product
+        product_id = product.slug
+
+        # Check for existing email within the same product
+        if await self._repo.email_exists(email, product_id=product_id):
+            raise EmailAlreadyExistsError(f"Email {email} is already registered")
+
+        # Create user
+        user = await self._repo.create_user(
+            id=user_id,
+            email=email,
+            password_hash=password_hash,
+            product_id=product_id,
+            display_name=display_name,
+            email_verified_at=email_verified_at,
+        )
+
+        # Create personal token account in the same transaction
+        if self._session is not None:
+            billing_repo = BillingRepository(self._session)
+            await billing_repo.create_personal_account(
+                id=new_id(), user_id=user_id, product_id=product_id
+            )
+            logger.info("billing.account_created", user_id=str(user_id))
+
+        # Same transaction as the user row: a later failure rolls these back too.
+        await self._legal.record_acceptances(
+            user_id=user_id,
+            product=product,
+            documents=validated.legal_documents,
+            source=LegalAcceptanceSource.SIGNUP,
+            context=context,
+        )
+
+        logger.info("user.registered", user_id=str(user_id))
+        await self._ops_event_bus.publish(
+            event_type=OpsEventType.USER_REGISTERED,
+            product_id=product_id,
+            payload=UserRegisteredOpsPayload(user_id=user_id),
+        )
+        return user
+
+    async def issue_session(
+        self, user_id: UUID, *, product_id: str, context: RequestContext
+    ) -> TokenPair:
+        """Mint a fresh access/refresh token pair (new family) for a user.
+
+        Public entry point for callers that authenticated the user some other
+        way (OAuth exchange / signup). Carries the same ``lgl`` digest as
+        register/login/refresh.
+
+        Args:
+            user_id: The authenticated user.
+            product_id: Product scope to embed in the JWT.
+            context: Client IP / user agent recorded on the refresh-token row.
+
+        Returns:
+            The new token pair.
+        """
+        tokens, _refresh_token_id = await self._create_token_pair(
+            user_id,
+            product_id=product_id,
+            today=datetime.now(UTC).date(),
+            user_agent=context.user_agent,
+            ip_address=context.ip_address,
+        )
+        return tokens
 
     async def login(
         self,
@@ -296,6 +403,13 @@ class AuthService:
 
         if user is None:
             # Prevent timing attacks — covers both not-found and inactive accounts
+            await self._password.ahash("dummy_password")
+            raise InvalidCredentialsError("Invalid email or password")
+
+        if user.password_hash is None:
+            # OAuth-only account: no password to check. Same timing and error
+            # as the not-found branch, so this can't probe how an account
+            # signs in. averify must never receive None.
             await self._password.ahash("dummy_password")
             raise InvalidCredentialsError("Invalid email or password")
 

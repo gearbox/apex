@@ -216,6 +216,9 @@ Controls rate limits for authentication endpoints using Redis sliding-window cou
 | `RATE_LIMIT_LOGIN` | `10/minute` | `str` | Limit on login endpoint per IP. |
 | `RATE_LIMIT_FORGOT_PASSWORD` | `3/hour` | `str` | Limit on forgot-password endpoint per IP. |
 | `RATE_LIMIT_RESEND_VERIFICATION` | `3/hour` | `str` | Limit on resend-verification endpoint per IP. |
+| `RATE_LIMIT_OAUTH_AUTHORIZE` | `20/minute` | `str` | Limit on `GET /v1/auth/oauth/{provider}/authorize` and `/callback` per IP (one entry per provider, generated from `OAuthProvider`). |
+| `RATE_LIMIT_OAUTH_EXCHANGE` | `20/minute` | `str` | Limit on `POST /v1/auth/oauth/exchange` and `/signup-info` per IP. |
+| `RATE_LIMIT_OAUTH_COMPLETE_SIGNUP` | `5/hour` | `str` | Limit on `POST /v1/auth/oauth/complete-signup` per IP (parity with register). |
 
 > **Redis durability (issue #142 F3):** `docker-compose.yml`'s `redis` service runs with
 > `--appendonly yes --appendfsync everysec` — without AOF, a Redis restart can lose every revocation
@@ -264,6 +267,50 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `LEGAL_DOCUMENTS_DIR` | `legal` | `Path` | Directory containing `manifest.toml` and `{product}/{doc_type}/{YYYY-MM-DD}.md`. Loaded once at startup into the `LegalDocumentRegistry`. Startup **fails** if the manifest and files disagree, if versions are not strictly increasing, if a product's required document has no version effective today (UTC), or — when `ENVIRONMENT=production` — if any document contains `DRAFTING NOTE` or an unfilled `[...]` placeholder (other environments only log `legal.placeholder_detected`). The Docker images copy `legal/` next to `src/`. See `docs/contracts/legal-documents-contract.md`. |
+
+---
+
+### OAuth Sign-In (Google)
+
+Per-product OAuth clients. Env-var names come from `ProductConfig.oauth_clients`
+(`src/core/product_registry.py`). A provider is **enabled** for a product only when its `AuthMethod`
+is in `allowed_auth_methods` **and** both the client id and secret are set. Otherwise
+`/v1/auth/oauth/{provider}/authorize` returns 404, and `GET /v1/auth/product-info` omits the method.
+Frontend contract: `docs/contracts/oauth-contract.md`.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `GOOGLE_OAUTH_CLIENT_ID_VEX` / `_SYNTHARA` | `None` | `str \| None` | Google OAuth client ID (type *Web application*) for the product. |
+| `GOOGLE_OAUTH_CLIENT_SECRET_VEX` / `_SYNTHARA` | `None` | `SecretStr \| None` | Client secret for that client. Secrets/env only, and never logged. |
+| `API_PUBLIC_URL_VEX` / `_SYNTHARA` | `None` | `str \| None` | Public origin of **this API** for the product (scheme+host, no path, no trailing slash), e.g. `https://api.vex.pics`. It is the only input to the `redirect_uri` `{API_PUBLIC_URL_<P>}/v1/auth/oauth/google/callback`. That value must **byte-match** the URI registered in Google Cloud. It is never derived from request headers. |
+| `APP_URL_VEX` / `_SYNTHARA` | `https://vex.pics` / `https://synthara.app` | `str` | Frontend origin. The OAuth callback 302s to `{APP_URL_<P>}{OAUTH_FRONTEND_CALLBACK_PATH}#…`. Emails still use `APP_URL`. |
+| `OAUTH_FRONTEND_CALLBACK_PATH` | `/auth/callback` | `str` | Frontend route that reads the result fragment. |
+| `OAUTH_FLOW_TTL_SECONDS` | `600` | `int (60–1800)` | Lifetime of a pending authorize→callback flow (state, nonce, PKCE verifier). |
+| `OAUTH_HANDOFF_TTL_SECONDS` | `60` | `int (10–300)` | Lifetime of the one-time login code redeemed at `/exchange`. |
+| `OAUTH_SIGNUP_TICKET_TTL_SECONDS` | `900` | `int (60–3600)` | Lifetime of a pending signup, and `Max-Age` of the `apex_oauth_tx` binding cookie. |
+| `OAUTH_JWKS_CACHE_TTL_SECONDS` | `3600` | `int (≥60)` | How long Google's signing keys are cached. An unknown `kid` forces one refetch, at most one per 60 s. |
+| `OAUTH_HTTP_TIMEOUT_SECONDS` | `10.0` | `float (>0)` | Timeout for the token endpoint and JWKS calls. |
+
+**Startup validation (`Settings.validate_oauth_config`):** each of these fails startup:
+- A client id without its secret, or the reverse.
+- A configured client without `API_PUBLIC_URL_<P>`, or with an `API_PUBLIC_URL_<P>` that isn't a bare origin.
+- A configured client without `REDIS_URL`. Flow state, handoff codes and signup tickets are single-use Redis values (`GETDEL`), and the flow fails closed on Redis errors.
+
+**Google Cloud setup (once per brand):**
+
+1. Create a **separate GCP project per brand**. The project ID must **not** contain "apex", because users can see it on the consent screen and in account settings.
+2. *APIs & Services → OAuth consent screen*:
+   - User type: External.
+   - App name: the product display name (`vex.pics`, `Synthara`). No "Apex" anywhere.
+   - Support and developer emails: the brand's.
+   - Scopes: only `openid` and `email`. Leave out `profile`, since name and picture are never imported.
+   - Publish the app, which moves it from "Testing" to "In production".
+3. *Credentials → Create OAuth client ID*:
+   - Type: **Web application**.
+   - Authorized JavaScript origins: none needed.
+   - Authorized redirect URIs: `https://api.vex.pics/v1/auth/oauth/google/callback` plus the staging equivalent, e.g. `https://api.staging.vex.pics/v1/auth/oauth/google/callback`. Each must equal `{API_PUBLIC_URL_<P>}/v1/auth/oauth/google/callback` exactly.
+4. Put the client ID and secret into `GOOGLE_OAUTH_CLIENT_ID_<P>` / `GOOGLE_OAUTH_CLIENT_SECRET_<P>`, and set `API_PUBLIC_URL_<P>` and `APP_URL_<P>`.
+5. Restart. Startup logs `auth.oauth.provider_enabled product_id=<p> provider=google`.
 
 ---
 

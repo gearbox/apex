@@ -13,6 +13,7 @@ from litestar.params import Body
 from litestar.status_codes import (
     HTTP_200_OK,
     HTTP_400_BAD_REQUEST,
+    HTTP_409_CONFLICT,
 )
 
 from src.api.schemas.auth import MessageResponse
@@ -31,6 +32,7 @@ from src.api.services.legal.acceptance import RequestContext
 from src.api.services.user import (
     EmailAlreadyExistsError,
     InvalidPasswordError,
+    PasswordNotSetError,
     UserNotFoundError,
     UserService,
 )
@@ -157,6 +159,16 @@ class UserController(Controller):
 
         except UserNotFoundError as e:
             raise NotFoundException(detail="User not found") from e
+
+        except PasswordNotSetError:
+            return Response(
+                content=ErrorEnvelope(
+                    error="password_not_set",
+                    message=("This account has no password yet. Use 'Forgot password' to set one."),
+                    status_code=HTTP_409_CONFLICT,
+                ),
+                status_code=HTTP_409_CONFLICT,
+            )
 
         except InvalidPasswordError:
             return Response(

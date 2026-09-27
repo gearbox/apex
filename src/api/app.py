@@ -52,6 +52,7 @@ from src.api.routes.legal import LegalController
 from src.api.routes.library import LibraryController
 from src.api.routes.library_project import LibraryProjectController
 from src.api.routes.library_tag import LibraryTagController
+from src.api.routes.oauth import OAuthController
 from src.api.routes.organization import OrganizationController
 from src.api.routes.payment_provider_admin import PaymentProviderAdminController
 from src.api.routes.providers import ProvidersController
@@ -524,6 +525,7 @@ def create_app() -> Litestar:
             AdminHealthController,
             # Authentication (public)
             AuthController,
+            OAuthController,  # /v1/auth/oauth/*
             # User management (authenticated)
             UserController,
             # Billing & payments

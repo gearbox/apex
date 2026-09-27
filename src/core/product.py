@@ -36,6 +36,36 @@ class AuthMethod(StrEnum):
     # SSO_SAML = "sso_saml"  # Future: enterprise SSO
 
 
+class OAuthProvider(StrEnum):
+    """URL-segment identifier of an OAuth/OIDC identity provider.
+
+    Lives here (not in ``src.core.enums``) because it maps onto ``AuthMethod``,
+    and ``enums`` cannot import this module without a cycle.
+    """
+
+    GOOGLE = "google"
+
+    @property
+    def auth_method(self) -> AuthMethod:
+        """The product-policy ``AuthMethod`` this provider implements.
+
+        Raises:
+            ValueError: If the provider has no mapping — fail loud rather than
+                silently treating a new provider as always disabled.
+        """
+        method = _OAUTH_PROVIDER_AUTH_METHOD.get(self)
+        if method is None:
+            raise ValueError(f"No AuthMethod mapped for OAuth provider {self.value!r}")
+        return method
+
+
+# Every OAuthProvider member MUST appear here; test_oauth_provider_auth_method_total
+# fails the build if a new provider is added without a mapping.
+_OAUTH_PROVIDER_AUTH_METHOD: Final[Mapping[OAuthProvider, AuthMethod]] = {
+    OAuthProvider.GOOGLE: AuthMethod.GOOGLE_OAUTH,
+}
+
+
 class PaymentMethodKind(StrEnum):
     """User-facing payment method class — deliberately gateway-agnostic."""
 
@@ -125,6 +155,15 @@ class NowPaymentsConfig:
 
 
 @dataclass(frozen=True)
+class OAuthClientEnv:
+    """Env-var names holding one product's OAuth client credentials (values live in Settings)."""
+
+    provider: OAuthProvider
+    client_id_env: str  # e.g. "google_oauth_client_id_vex"
+    client_secret_env: str  # e.g. "google_oauth_client_secret_vex"
+
+
+@dataclass(frozen=True)
 class ProductConfig:
     """Complete configuration for a product.
 
@@ -164,6 +203,11 @@ class ProductConfig:
     )
     stripe_config: StripeConfig | None = None
     nowpayments_config: NowPaymentsConfig | None = None
+
+    # OAuth clients — one per provider. A provider is usable only when its
+    # AuthMethod is also in allowed_auth_methods AND both credentials are set
+    # (see src/api/services/oauth/registry.py).
+    oauth_clients: tuple[OAuthClientEnv, ...] = ()
 
     # Rate limits
     rate_limits: ProductRateLimits = field(default_factory=ProductRateLimits)
