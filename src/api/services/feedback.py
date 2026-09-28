@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 MESSAGE_MIN_LENGTH = 10
+MESSAGE_MAX_LENGTH = 4000
 USER_AGENT_MAX_LENGTH = 512
 
 
@@ -49,7 +50,10 @@ class FeedbackError(Exception):
 
 
 class InvalidFeedbackMessageError(FeedbackError):
-    """The message is too short after ``strip()`` or contains NUL. → 400"""
+    """The message is too short or too long after ``strip()``, or contains NUL. → 400
+
+    Length is counted in Unicode code points (``len()``), not UTF-16 units.
+    """
 
 
 class InvalidFeedbackContextError(FeedbackError):
@@ -104,16 +108,17 @@ class FeedbackService:
         """Validate context ownership and stage the row. Does NOT commit or publish.
 
         Raises:
-            InvalidFeedbackMessageError: Message shorter than the minimum
-                after ``strip()``, or containing NUL.
+            InvalidFeedbackMessageError: Message shorter than the minimum or
+                longer than the maximum after ``strip()``, or containing NUL.
             InvalidFeedbackContextError: ``asset_ref`` is malformed.
             FeedbackContextNotFoundError: ``job_id``/``asset_ref`` is missing
                 or not owned by ``user_id`` (soft-deleted jobs count as missing).
         """
         message = data.message.strip()
-        if len(message) < MESSAGE_MIN_LENGTH:
+        if not MESSAGE_MIN_LENGTH <= len(message) <= MESSAGE_MAX_LENGTH:
             raise InvalidFeedbackMessageError(
-                f"Message must be at least {MESSAGE_MIN_LENGTH} characters"
+                f"Message must be {MESSAGE_MIN_LENGTH}-{MESSAGE_MAX_LENGTH} characters "
+                "after trimming"
             )
         if "\x00" in message:
             raise InvalidFeedbackMessageError("Message must not contain NUL characters")

@@ -13,9 +13,6 @@ import msgspec
 
 from src.core.enums import FeedbackCategory, FeedbackStatus
 
-# Length is re-checked after strip() in FeedbackService (D10); NUL is rejected
-# there too, so a NUL-bearing message is a 400, never an asyncpg 500.
-_Message = Annotated[str, msgspec.Meta(min_length=10, max_length=4000)]
 # location.pathname only — no query string or fragment (those can carry tokens).
 _ClientPath = Annotated[str, msgspec.Meta(max_length=512, pattern=r"\A/[^?#\x00-\x1f\x7f]*\Z")]
 # No control characters (asyncpg rejects NUL in text columns). \A…\Z, not ^…$:
@@ -30,7 +27,10 @@ class FeedbackCreate(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     """``POST /v1/feedback`` body."""
 
     category: FeedbackCategory
-    message: _Message
+    # Length (10-4000 after strip()) and NUL are enforced in FeedbackService.submit()
+    # — never on the raw value, or a trailing textarea newline would reject a valid
+    # 4000-char report with a framework 400 instead of validation_error.
+    message: str
     job_id: UUID | None = None
     asset_ref: str | None = None  # "upload:<uuid>" / "output:<uuid>"
     client_path: _ClientPath | None = None

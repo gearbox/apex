@@ -26,7 +26,7 @@ type FeedbackStatus = "open" | "in_progress" | "resolved" | "dismissed";
 // POST /v1/feedback — request
 interface FeedbackCreate {
   category: FeedbackCategory;
-  message: string;          // 10–4000 chars after trimming; see §2
+  message: string;          // 10–4000 code points after trimming; see §2
   job_id?: string | null;   // UUID of the caller's own generation job
   asset_ref?: string | null; // "upload:<uuid>" | "output:<uuid>" — the library's asset_ref
   client_path?: string | null; // location.pathname ONLY — see §2
@@ -61,7 +61,7 @@ Suggested category labels:
 | Field | Rule | On failure |
 |---|---|---|
 | `category` | One of the six values above. | `400` |
-| `message` | 10–4000 characters. The backend trims leading/trailing whitespace **before** it checks the 10-character minimum, so `"   hi   "` is rejected. Must not contain NUL (`\u0000`). | `400 validation_error` |
+| `message` | 10–4000 **Unicode code points after trimming**. The backend trims leading/trailing whitespace **before** it checks both bounds, so `"   hi   "` is rejected and a 4000-character message with a trailing newline or surrounding spaces is accepted. Count with `[...text.trim()].length`, not `text.length` (an emoji is 2 UTF-16 units but 1 code point; a `textarea` `maxLength` counts UTF-16 units). Must not contain NUL (`\u0000`). Every message-length and NUL violation returns `400 validation_error`. | `400 validation_error` |
 | `job_id` | A UUID of a job the caller owns that is not deleted. | `404 job_not_found` |
 | `asset_ref` | `upload:<uuid>` or `output:<uuid>`, owned by the caller. Pass the `asset_ref` from the library item as-is. | malformed → `400 validation_error`; missing/not owned → `404 asset_not_found` |
 | `client_path` | Must start with `/`. At most 512 characters. No `?`, no `#`, no control characters. | `400` |
@@ -81,11 +81,14 @@ Every error uses the standard envelope: `{ error, message, status_code, detail? 
 
 | Status | `error` | When | UX |
 |---|---|---|---|
-| 400 | `validation_error` | Message too short after trimming, NUL in message, malformed `asset_ref` | Show inline on the message field |
+| 400 | `validation_error` | Message too short or too long after trimming, NUL in message, malformed `asset_ref` | Show inline on the message field |
 | 400 | *(framework validation)* | Schema violation: bad category, bad `client_path`/`app_version`, unknown field | Treat as a client bug; log it |
 | 401 | — | Not signed in / token expired | Normal refresh-then-retry |
 | 404 | `job_not_found` / `asset_not_found` | See §2 | Offer to send without the attachment reference |
+| 413 | `error` *(generic)* | Request body over 64 KiB. Cannot happen with a valid report | Treat as a client bug; log it |
 | 429 | `rate_limited` | More than **10 reports per hour from one IP** (`RATE_LIMIT_FEEDBACK`). `detail.retry_after` is in seconds. | "You've sent several reports recently — please try again later." |
+
+The `413` carries the generic `error: "error"` value because the global error-code table has no entry for 413 yet. Match on `status_code`, not on `error`.
 
 **No `428` on this endpoint.** `POST /v1/feedback` is exempt from legal re-acceptance. A user blocked by a pending terms update can still report a problem. Don't route them to the re-acceptance screen first.
 

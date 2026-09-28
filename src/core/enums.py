@@ -471,17 +471,14 @@ class FeedbackStatus(StrEnum):
 
     @property
     def is_terminal(self) -> bool:
-        """Whether no further status transition is possible."""
-        return self in _TERMINAL_FEEDBACK_STATUSES
+        """Whether no further status transition is possible (no outgoing transitions)."""
+        return not _FEEDBACK_TRANSITIONS[self]
 
     def can_transition_to(self, target: FeedbackStatus) -> bool:
         """Whether an admin may move a report from this status to ``target``."""
         return target in _FEEDBACK_TRANSITIONS[self]
 
 
-_TERMINAL_FEEDBACK_STATUSES: Final[frozenset[FeedbackStatus]] = frozenset(
-    {FeedbackStatus.RESOLVED, FeedbackStatus.DISMISSED}
-)
 _FEEDBACK_TRANSITIONS: Final[Mapping[FeedbackStatus, frozenset[FeedbackStatus]]] = {
     FeedbackStatus.OPEN: frozenset(
         {FeedbackStatus.IN_PROGRESS, FeedbackStatus.RESOLVED, FeedbackStatus.DISMISSED}

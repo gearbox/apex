@@ -2225,7 +2225,7 @@ The in-product reporting function (vex Terms §11.1). The report text stays insi
 ```
 Request:  {
   category: "bug" | "generation" | "billing" | "account" | "content" | "other",
-  message: string,              // 10–4000 chars after trim; no NUL
+  message: string,              // 10–4000 Unicode code points after trim; no NUL
   job_id?: UUID | null,         // caller-owned, not soft-deleted
   asset_ref?: string | null,    // "upload:<uuid>" | "output:<uuid>", caller-owned
   client_path?: string | null,  // location.pathname only: starts with "/", ≤512, no ? # or control chars
@@ -2233,11 +2233,16 @@ Request:  {
 }
 Response: { id: UUID, status: "open", created_at: datetime }
 Status:   201 Created
-Errors:   400 validation_error (message too short after trim / NUL, malformed asset_ref;
-              schema violations incl. unknown fields)
+Errors:   400 validation_error (message too short or too long after trim / NUL,
+              malformed asset_ref)
+          400 bad_request (framework schema violations incl. unknown fields — client bug)
           404 job_not_found | asset_not_found (missing OR not owned — identical body)
+          413 (body > 64 KiB, per-handler bound; generic error "error" — client bug)
           429 rate_limited (RATE_LIMIT_FEEDBACK, default 10/hour per IP)
-Note:     Legal-exempt: never 428, so a user with a pending re-acceptance can still report.
+Note:     Both message bounds are checked only after trimming (code points, i.e. Python
+          len(); the FE should count [...text.trim()].length), so a 4000-char message with
+          a trailing newline is accepted. The schema puts no raw length bound on `message`.
+          Legal-exempt: never 428, so a user with a pending re-acceptance can still report.
           User-Agent is read server-side (truncated to 512); the client IP is not stored.
           The ops event is published only after the row is committed.
 ```

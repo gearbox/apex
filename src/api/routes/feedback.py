@@ -8,13 +8,18 @@ Wire contract: ``docs/contracts/feedback-contract.md``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from litestar import Controller, Request, Response, post
 from litestar.di import Provide
 from litestar.openapi.datastructures import ResponseSpec
-from litestar.status_codes import HTTP_201_CREATED, HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
+from litestar.status_codes import (
+    HTTP_201_CREATED,
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
@@ -32,14 +37,24 @@ from src.core.enums import FeedbackStatus
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+# Transport bound for this endpoint only (the app default is sized for uploads).
+# 4000 chars fully \uXXXX-escaped ≈ 24 KB + other fields; 64 KiB leaves headroom.
+FEEDBACK_MAX_BODY_BYTES: Final = 64 * 1024
+
 _ERROR_RESPONSES = {
     HTTP_400_BAD_REQUEST: ResponseSpec(
         data_container=ErrorEnvelope,
-        description="Invalid message (too short after trimming, or NUL) or malformed asset_ref.",
+        description=(
+            "Invalid message (too short or too long after trimming, or NUL) or malformed asset_ref."
+        ),
     ),
     HTTP_404_NOT_FOUND: ResponseSpec(
         data_container=ErrorEnvelope,
         description="job_id / asset_ref is missing or not owned by the caller.",
+    ),
+    HTTP_413_REQUEST_ENTITY_TOO_LARGE: ResponseSpec(
+        data_container=ErrorEnvelope,
+        description="Request body larger than 64 KiB.",
     ),
 }
 
@@ -58,7 +73,13 @@ class FeedbackController(Controller):
 
     # Legal-exempt: a user blocked by a pending re-acceptance must still be
     # able to report a problem (Terms §11.1 in-product reporting function).
-    @post("/", status_code=HTTP_201_CREATED, opt={"legal_exempt": True}, responses=_ERROR_RESPONSES)
+    @post(
+        "/",
+        status_code=HTTP_201_CREATED,
+        opt={"legal_exempt": True},
+        responses=_ERROR_RESPONSES,
+        request_max_body_size=FEEDBACK_MAX_BODY_BYTES,
+    )
     async def submit(
         self,
         request: Request[Any, Any, Any],

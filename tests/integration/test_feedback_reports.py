@@ -6,7 +6,9 @@ session (the ops bus is a mock). Concurrency uses committed rows and two
 independent sessions.
 
 Contracts: C6 (ownership 404s leak nothing), C7 (short/NUL message → 400,
-never 500), C9 (CHECK constraints), C11 (terminal-once under concurrency),
+never 500), review r1 R1-R3 (message length checked after trimming, always
+``validation_error``; per-handler 64 KiB body bound), C9 (CHECK constraints),
+C11 (terminal-once under concurrency),
 C12 (product scoping + admin-only), C13 (keyset pagination + filters), C17
 (report survives a user hard-delete), C18 (migration 049 round-trip).
 """
@@ -15,10 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import httpx
@@ -36,7 +39,7 @@ from src.api.app import legal_acceptance_required_handler
 from src.api.dependencies.common import get_product_config, get_product_id
 from src.api.middleware.product import ProductMiddleware
 from src.api.routes.admin_feedback import AdminFeedbackController
-from src.api.routes.feedback import FeedbackController
+from src.api.routes.feedback import FEEDBACK_MAX_BODY_BYTES, FeedbackController
 from src.api.schemas.feedback import FeedbackAdminPatch
 from src.api.schemas.ops_events import FeedbackSubmittedOpsPayload, OpsEventType
 from src.api.security import JWTConfig, JWTService
@@ -318,6 +321,105 @@ class TestSubmit:
             )
         assert resp.status_code == 201
         assert patch_resp.status_code == 428
+
+
+async def _reports_of(session: AsyncSession, user: User) -> Sequence[FeedbackReport]:
+    return (
+        (await session.execute(select(FeedbackReport).where(FeedbackReport.user_id == user.id)))
+        .scalars()
+        .all()
+    )
+
+
+class TestMessageLength:
+    """Review r1 R1-R3: bounds apply after ``strip()`` and are one error code."""
+
+    @pytest.mark.parametrize(
+        "message",
+        ["x" * 4000 + "\n", "  " + "x" * 4000 + "  "],
+        ids=["trailing-newline", "padded"],
+    )
+    async def test_4000_after_trim_accepted(
+        self, db_session: AsyncSession, make_user: UserFactory, message: str
+    ) -> None:
+        """T1 — a full-length textarea value with surrounding whitespace is valid."""
+        api = Api(db_session)
+        user = await _user(make_user)
+        async with api.client() as client:
+            resp = await client.post(
+                "/v1/feedback",
+                json={"category": "bug", "message": message},
+                headers=api.headers(user),
+            )
+        assert resp.status_code == 201, resp.text
+        (row,) = await _reports_of(db_session, user)
+        assert len(row.message) == 4000
+        assert row.message == row.message.strip()
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "x" * 4001,
+            " \n" + "x" * 4001 + "\n ",
+            "   short   ",
+            "         ",
+        ],
+        ids=["4001", "4001-padded", "short-padded", "blank"],
+    )
+    async def test_out_of_bounds_is_validation_error(
+        self, db_session: AsyncSession, make_user: UserFactory, message: str
+    ) -> None:
+        """T2/T3 — the error code, not only the status: a framework 400 is a client bug."""
+        api = Api(db_session)
+        user = await _user(make_user)
+        async with api.client() as client:
+            resp = await client.post(
+                "/v1/feedback",
+                json={"category": "bug", "message": message},
+                headers=api.headers(user),
+            )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "validation_error"
+        assert await _reports_of(db_session, user) == []
+        api.ops.publish.assert_not_awaited()
+
+    async def test_oversized_body_is_413_before_service(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """T6 — the per-handler transport bound, not the app-wide upload limit."""
+        api = Api(db_session)
+        user = await _user(make_user)
+        body = json.dumps({"category": "bug", "message": "x" * FEEDBACK_MAX_BODY_BYTES})
+        assert len(body.encode()) > FEEDBACK_MAX_BODY_BYTES
+        with patch.object(api.service, "submit", wraps=api.service.submit) as submit:
+            async with api.client() as client:
+                resp = await client.post(
+                    "/v1/feedback",
+                    content=body,
+                    headers={**api.headers(user), "Content-Type": "application/json"},
+                )
+        assert resp.status_code == 413, resp.text
+        submit.assert_not_called()
+        assert await _reports_of(db_session, user) == []
+        api.ops.publish.assert_not_awaited()
+
+    async def test_max_valid_escaped_body_fits_bound(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """T6 — 4000 emoji as \\uXXXX surrogate pairs (~48 KB) is still accepted."""
+        api = Api(db_session)
+        user = await _user(make_user)
+        body = json.dumps({"category": "bug", "message": "🙂" * 4000}, ensure_ascii=True)
+        assert 40_000 < len(body.encode()) <= FEEDBACK_MAX_BODY_BYTES
+        async with api.client() as client:
+            resp = await client.post(
+                "/v1/feedback",
+                content=body,
+                headers={**api.headers(user), "Content-Type": "application/json"},
+            )
+        assert resp.status_code == 201, resp.text
+        (row,) = await _reports_of(db_session, user)
+        assert row.message == "🙂" * 4000
 
 
 # ---------------------------------------------------------------------------

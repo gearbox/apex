@@ -112,10 +112,11 @@ class TestFeedbackCreateSchema:
     def test_pathname_accepted(self, path: str) -> None:
         assert _decode_create(client_path=path).client_path == path
 
-    @pytest.mark.parametrize("message", ["short", "x" * 4001])
-    def test_message_length_bounds(self, message: str) -> None:
-        with pytest.raises(msgspec.ValidationError):
-            _decode_create(message=message)
+    @pytest.mark.parametrize("message", ["short", "x" * 4001, "         ", "x" * 4000 + "\n"])
+    def test_message_length_not_enforced_by_schema(self, message: str) -> None:
+        """R1/R2 — length is a post-strip() service rule (400 validation_error),
+        never a raw schema bound (framework 400 bad_request)."""
+        assert _decode_create(message=message).message == message
 
     @pytest.mark.parametrize("version", ["", "1.0\x00", "1.0\n", "v" * 65])
     def test_invalid_app_version_rejected(self, version: str) -> None:
@@ -186,6 +187,12 @@ class TestFeedbackStatusEnum:
             FeedbackStatus.RESOLVED,
             FeedbackStatus.DISMISSED,
         }
+
+    @pytest.mark.parametrize("status", list(FeedbackStatus))
+    def test_terminal_iff_no_outgoing_transitions(self, status: FeedbackStatus) -> None:
+        """R4 — ``is_terminal`` is derived from the transition table."""
+        has_outgoing = any(status.can_transition_to(target) for target in FeedbackStatus)
+        assert status.is_terminal is (not has_outgoing)
 
 
 class TestNotificationWiring:
@@ -301,8 +308,43 @@ class TestSubmit:
         assert report.asset_id is None
 
     @pytest.mark.parametrize(
+        ("message", "stored_length"),
+        [
+            ("x" * 10, 10),
+            ("\n  " + "x" * 10 + "  \t", 10),
+            ("x" * 4000, 4000),
+            ("x" * 4000 + "\n", 4000),
+            ("  " + "x" * 4000 + "  ", 4000),
+            ("🙂" * 4000, 4000),  # code points, not UTF-16 units (R5)
+        ],
+        ids=["10", "10-padded", "4000", "4000-newline", "4000-padded", "4000-emoji"],
+    )
+    async def test_message_length_boundaries_accepted(
+        self, message: str, stored_length: int
+    ) -> None:
+        service, session, _bus = _service()
+        report = await service.submit(
+            user_id=uuid4(),
+            product_id="vex",
+            data=_decode_create(message=message),
+            user_agent=None,
+        )
+        session.add.assert_called_once_with(report)
+        assert len(report.message) == stored_length
+        assert report.message == message.strip()
+
+    @pytest.mark.parametrize(
         "message",
-        ["   short    ", "\n\t  123456789 \n", "ten chars \x00 but has NUL"],
+        [
+            "   short    ",
+            "\n\t  123456789 \n",  # 9 after strip
+            "         ",
+            "x" * 4001,
+            "  " + "x" * 4001 + "\n",  # 4001 after strip
+            "🙂" * 4001,
+            "ten chars \x00 but has NUL",
+        ],
+        ids=["short", "nine", "blank", "4001", "4001-padded", "4001-emoji", "nul"],
     )
     async def test_invalid_message_rejected(self, message: str) -> None:
         service, session, _bus = _service()
