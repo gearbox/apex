@@ -14,6 +14,7 @@ from .billing import (
     TokenAccount,
     TokenTransaction,
 )
+from .feedback import FeedbackReport
 from .frame_extraction import FrameExtractionJob
 from .generation_model import GenerationModel
 from .gpu_session import GpuSession
@@ -44,6 +45,7 @@ __all__ = [
     "AdminTelegramLink",
     "Base",
     "EmailVerificationToken",
+    "FeedbackReport",
     "FrameExtractionJob",
     "GenerationJob",
     "GenerationJobSource",

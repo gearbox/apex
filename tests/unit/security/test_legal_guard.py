@@ -47,6 +47,8 @@ _REVIEWED_LEGAL_EXEMPT: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/v1/auth/resend-verification"),
         ("POST", "/v1/auth/content-cookie"),
         ("POST", "/v1/events/sse-ticket"),
+        # In-product problem reports (Terms §11.1) must work while re-acceptance is pending.
+        ("POST", "/v1/feedback"),
     }
 )
 
@@ -182,6 +184,19 @@ class TestExemptionAudit:
             sub=str(uuid4()), exp=0, iat=0, jti="j", product_id="vex", legal_digest="stale"
         )
         _enforce_legal_acceptance(_connection(method), handler, payload)
+
+    def test_feedback_admin_patch_is_blocked_with_stale_digest(self) -> None:
+        """Feedback C14 — only the user POST is exempt; admin triage is enforced."""
+        handler = next(
+            h
+            for m, p, h in _real_handlers()
+            if (m, p) == ("PATCH", "/v1/admin/feedback/{report_id:uuid}")
+        )
+        payload = TokenPayload(
+            sub=str(uuid4()), exp=0, iat=0, jti="j", product_id="vex", legal_digest="stale"
+        )
+        with pytest.raises(LegalAcceptanceRequiredError):
+            _enforce_legal_acceptance(_connection("PATCH"), handler, payload)
 
     def test_non_exempt_mutation_is_blocked_with_stale_digest(self) -> None:
         handler = next(h for m, p, h in _real_handlers() if (m, p) == ("PATCH", "/v1/users/me"))

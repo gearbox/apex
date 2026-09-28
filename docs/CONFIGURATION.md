@@ -219,6 +219,7 @@ Controls rate limits for authentication endpoints using Redis sliding-window cou
 | `RATE_LIMIT_OAUTH_AUTHORIZE` | `20/minute` | `str` | Limit on `GET /v1/auth/oauth/{provider}/authorize` and `/callback` per IP (one entry per provider, generated from `OAuthProvider`). |
 | `RATE_LIMIT_OAUTH_EXCHANGE` | `20/minute` | `str` | Limit on `POST /v1/auth/oauth/exchange` and `/signup-info` per IP. |
 | `RATE_LIMIT_OAUTH_COMPLETE_SIGNUP` | `5/hour` | `str` | Limit on `POST /v1/auth/oauth/complete-signup` per IP (parity with register). |
+| `RATE_LIMIT_FEEDBACK` | `10/hour` | `str` | Limit on `POST /v1/feedback` (in-product problem reports) per IP. Counted before authentication. Operator Telegram bursts are further bounded by each admin's `min_interval_seconds` on `feedback.submitted`. |
 
 > **Redis durability (issue #142 F3):** `docker-compose.yml`'s `redis` service runs with
 > `--appendonly yes --appendfsync everysec` — without AOF, a Redis restart can lose every revocation

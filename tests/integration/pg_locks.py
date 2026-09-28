@@ -57,3 +57,37 @@ async def wait_for_advisory_lock_waiter(
         if loop.time() >= deadline:
             pytest.fail(f"No advisory-lock waiter appeared within {timeout}s")
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+
+async def wait_for_row_lock_waiter(
+    engine: AsyncEngine,
+    *,
+    relation: str,
+    timeout: float = 5.0,  # noqa: ASYNC109 — polls with a deadline and fails the test
+) -> None:
+    """Block until some backend is waiting on a lock while querying ``relation``.
+
+    A ``SELECT … FOR UPDATE`` blocked on another transaction's row lock shows
+    up as an ungranted lock (on the holder's transaction id) held by a backend
+    whose current query names the relation.
+
+    Args:
+        engine: Engine for the test database; a fresh connection is used per poll.
+        relation: Table name the blocked query touches.
+        timeout: Seconds before the test fails.
+    """
+    query = text(
+        "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+        " WHERE NOT l.granted AND a.datname = current_database()"
+        " AND a.query ILIKE :pattern"
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        async with engine.connect() as conn:
+            waiting = (await conn.execute(query, {"pattern": f"%{relation}%"})).scalar_one()
+        if waiting >= 1:
+            return
+        if loop.time() >= deadline:
+            pytest.fail(f"No row-lock waiter on {relation} appeared within {timeout}s")
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)

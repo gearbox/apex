@@ -1588,6 +1588,10 @@ class Settings(BaseSettings):
         default="5/hour",
         description="Rate limit for POST /v1/auth/oauth/complete-signup (parity with register).",
     )
+    rate_limit_feedback: str = Field(
+        default="10/hour",
+        description="Feedback submission endpoint rate limit (POST /v1/feedback), per client IP.",
+    )
 
     # -------------------------------------------------------------------------
     # Aisha Job Poller

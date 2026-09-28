@@ -446,6 +446,52 @@ class LegalAcceptanceSource(StrEnum):
     ACCOUNT_CLOSURE = "account_closure"
 
 
+class FeedbackCategory(StrEnum):
+    """What an in-product problem report is about (chosen by the user)."""
+
+    BUG = "bug"
+    GENERATION = "generation"
+    BILLING = "billing"
+    ACCOUNT = "account"
+    CONTENT = "content"
+    OTHER = "other"
+
+
+class FeedbackStatus(StrEnum):
+    """Triage lifecycle of a problem report: ``open → in_progress → resolved | dismissed``.
+
+    Terminal states are terminal-once (no reopen). Self-transitions are not
+    allowed — a PATCH to the current status is a conflict, not a no-op.
+    """
+
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    DISMISSED = "dismissed"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether no further status transition is possible."""
+        return self in _TERMINAL_FEEDBACK_STATUSES
+
+    def can_transition_to(self, target: FeedbackStatus) -> bool:
+        """Whether an admin may move a report from this status to ``target``."""
+        return target in _FEEDBACK_TRANSITIONS[self]
+
+
+_TERMINAL_FEEDBACK_STATUSES: Final[frozenset[FeedbackStatus]] = frozenset(
+    {FeedbackStatus.RESOLVED, FeedbackStatus.DISMISSED}
+)
+_FEEDBACK_TRANSITIONS: Final[Mapping[FeedbackStatus, frozenset[FeedbackStatus]]] = {
+    FeedbackStatus.OPEN: frozenset(
+        {FeedbackStatus.IN_PROGRESS, FeedbackStatus.RESOLVED, FeedbackStatus.DISMISSED}
+    ),
+    FeedbackStatus.IN_PROGRESS: frozenset({FeedbackStatus.RESOLVED, FeedbackStatus.DISMISSED}),
+    FeedbackStatus.RESOLVED: frozenset(),
+    FeedbackStatus.DISMISSED: frozenset(),
+}
+
+
 class SubscriptionTier(StrEnum):
     """User subscription tiers."""
 
@@ -809,6 +855,7 @@ class NotificationClass(StrEnum):
     HEALTH_RESTORED = "health.restored"
     TOKEN_REVOCATION_FAILED = "token_revocation.failed"  # noqa: S105
     PUSH_SUBSCRIPTIONS_CLEANUP_FAILED = "push_subscriptions.cleanup_failed"
+    FEEDBACK_SUBMITTED = "feedback.submitted"
 
 
 # Platform-scoped classes are delivered to every subscribed admin/superadmin

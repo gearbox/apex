@@ -36,6 +36,7 @@ class OpsEventType(StrEnum):
     HEALTH_SUBSYSTEM_RESTORED = "ops.health.subsystem_restored"
     TOKEN_REVOCATION_FAILED = "ops.auth.token_revocation_failed"  # noqa: S105
     PUSH_SUBSCRIPTIONS_CLEANUP_FAILED = "ops.push.subscriptions_cleanup_failed"
+    FEEDBACK_SUBMITTED = "ops.feedback.submitted"
 
 
 class OpsEventEnvelope(msgspec.Struct, kw_only=True):
@@ -110,3 +111,17 @@ class PushSubscriptionsCleanupFailedOpsPayload(msgspec.Struct, kw_only=True):
 
     user_id: UUID
     op: str
+
+
+class FeedbackSubmittedOpsPayload(msgspec.Struct, kw_only=True):
+    """IDs and enums only (D10) — never the message, path, or user agent.
+
+    User-authored feedback text never leaves apex; the operator looks the
+    report up by ``report_id`` in the admin API. ``category`` is a
+    ``FeedbackCategory`` value.
+    """
+
+    report_id: UUID
+    user_id: UUID
+    category: str
+    job_id: UUID | None = None

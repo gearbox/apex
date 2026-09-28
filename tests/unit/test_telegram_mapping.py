@@ -9,6 +9,7 @@ import msgspec
 import pytest
 
 from src.api.schemas.ops_events import (
+    FeedbackSubmittedOpsPayload,
     GenerationCreatedOpsPayload,
     GenerationFailedOpsPayload,
     GpuNodeStartedOpsPayload,
@@ -335,3 +336,59 @@ class TestUnknownEventType:
         )
 
         assert map_ops_event(envelope) is None
+
+
+class TestFeedbackSubmitted:
+    """Feedback C4 — IDs/enums only, every value escaped, job line iff job_id."""
+
+    def test_maps_ids_with_job_line(self) -> None:
+        report_id, user_id, job_id = uuid4(), uuid4(), uuid4()
+        envelope = _envelope(
+            OpsEventType.FEEDBACK_SUBMITTED,
+            "vex",
+            FeedbackSubmittedOpsPayload(
+                report_id=report_id, user_id=user_id, category="billing", job_id=job_id
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert notification.notification_class == NotificationClass.FEEDBACK_SUBMITTED
+        assert notification.product_id == "vex"
+        assert notification.text == (
+            "[vex] 📨 <b>New feedback</b> · <code>billing</code>\n"
+            f"report <code>{report_id}</code>\n"
+            f"user <code>{user_id}</code>\n"
+            f"job <code>{job_id}</code>"
+        )
+
+    def test_no_job_line_without_job_id(self) -> None:
+        envelope = _envelope(
+            OpsEventType.FEEDBACK_SUBMITTED,
+            "synthara",
+            FeedbackSubmittedOpsPayload(report_id=uuid4(), user_id=uuid4(), category="bug"),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert "job" not in notification.text
+        assert notification.text.count("\n") == 2
+
+    def test_escapes_every_interpolated_value(self) -> None:
+        envelope = _envelope(
+            OpsEventType.FEEDBACK_SUBMITTED,
+            "<p&>",
+            FeedbackSubmittedOpsPayload(
+                report_id=uuid4(), user_id=uuid4(), category="<script>&amp", job_id=None
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert "[&lt;p&amp;&gt;]" in notification.text
+        assert "<code>&lt;script&gt;&amp;amp</code>" in notification.text
+        assert "<script>" not in notification.text
+        assert "<p&>" not in notification.text

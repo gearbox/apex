@@ -37,12 +37,14 @@ from src.api.middleware.product import ProductMiddleware
 from src.api.middleware.rate_limit import RateLimitMiddleware, build_rate_limit_config
 from src.api.responses import error_response as _error
 from src.api.routes.admin import AdminController
+from src.api.routes.admin_feedback import AdminFeedbackController
 from src.api.routes.admin_management import AdminManagementController
 from src.api.routes.admin_notifications import AdminNotificationController
 from src.api.routes.auth import AuthController
 from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.billing_public import BillingPublicController
 from src.api.routes.content import ContentProxyController
+from src.api.routes.feedback import FeedbackController
 from src.api.routes.frames import FramesController
 from src.api.routes.gpu_session import GpuSessionController
 from src.api.routes.health import AdminHealthController, HealthController
@@ -538,6 +540,7 @@ def create_app() -> Litestar:
             AdminController,
             AdminManagementController,
             AdminNotificationController,
+            AdminFeedbackController,
             PaymentProviderAdminController,
             # Generation (unified)
             UnifiedGenerationController,  # POST /v1/generate
@@ -564,6 +567,8 @@ def create_app() -> Litestar:
             PushController,
             # Legal documents & acceptance
             LegalController,
+            # In-product problem reports
+            FeedbackController,
         ],
         exception_handlers={
             HTTPException: http_exception_handler,

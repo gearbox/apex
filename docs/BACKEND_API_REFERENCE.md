@@ -1,6 +1,18 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-09-25 — **Legal documents & acceptance** (new §2b). **Breaking:**
+> _Last updated: 2026-09-28 — **In-product problem reports** (new §12b, admin triage in §13).
+> New `POST /v1/feedback` (authenticated, **legal-exempt**, `10/hour` per IP via
+> `RATE_LIMIT_FEEDBACK`) returns `201 {id, status, created_at}`. New admin endpoints are
+> `GET /v1/admin/feedback`, `GET /v1/admin/feedback/{report_id}` and
+> `PATCH /v1/admin/feedback/{report_id}`. The status lifecycle is `open → in_progress →
+> resolved | dismissed` (terminal, no reopen; any other transition returns
+> `409 invalid_status_transition`). New product-scoped ops notification class
+> `feedback.submitted` (§15c) carries IDs and the category only, never the message text. New
+> enums `FeedbackCategory`, `FeedbackStatus` (§17). Rate-limit path matching now ignores a
+> trailing slash, so `/x` and `/x/` share one budget (§20). Canonical contract:
+> `docs/contracts/feedback-contract.md`._
+>
+> _Prior (2026-09-25): **Legal documents & acceptance** (new §2b). **Breaking:**
 > `POST /v1/auth/register` now requires `accepted_documents: [{doc_type, version, sha256}]`, exactly
 > the product's required set at current versions (vex: `terms`, `privacy`, `sensitive_data_consent`;
 > synthara: `[]`). `RegisterRequest` also rejects unknown fields. New public endpoints are
@@ -2204,6 +2216,34 @@ MemberResponse: {
 
 ---
 
+## 12b. Feedback / Problem Reports *(authenticated)*
+
+The in-product reporting function (vex Terms §11.1). The report text stays inside apex: operators get a Telegram ping with IDs only (§15c `feedback.submitted`) and read the report through the admin API (§13 *Feedback Triage*). No attachments, no confirmation email, no user-facing report history. Full semantics: `docs/contracts/feedback-contract.md`.
+
+#### `POST /v1/feedback`
+
+```
+Request:  {
+  category: "bug" | "generation" | "billing" | "account" | "content" | "other",
+  message: string,              // 10–4000 chars after trim; no NUL
+  job_id?: UUID | null,         // caller-owned, not soft-deleted
+  asset_ref?: string | null,    // "upload:<uuid>" | "output:<uuid>", caller-owned
+  client_path?: string | null,  // location.pathname only: starts with "/", ≤512, no ? # or control chars
+  app_version?: string | null   // 1–64 chars, no control chars
+}
+Response: { id: UUID, status: "open", created_at: datetime }
+Status:   201 Created
+Errors:   400 validation_error (message too short after trim / NUL, malformed asset_ref;
+              schema violations incl. unknown fields)
+          404 job_not_found | asset_not_found (missing OR not owned — identical body)
+          429 rate_limited (RATE_LIMIT_FEEDBACK, default 10/hour per IP)
+Note:     Legal-exempt: never 428, so a user with a pending re-acceptance can still report.
+          User-Agent is read server-side (truncated to 512); the client IP is not stored.
+          The ops event is published only after the row is committed.
+```
+
+---
+
 ## 13. Admin *(authenticated — ADMIN or SUPERADMIN role)*
 
 ### Role Hierarchy
@@ -2410,6 +2450,55 @@ GenerationModelResponse: {
 Request:  { is_enabled: bool }
 Response: GenerationModelResponse
 Errors:   404
+```
+
+---
+
+### Feedback Triage
+
+All three endpoints are scoped to the request's product: a report of another product returns `404 feedback_not_found`, exactly like a missing one. Non-admins get `401` (the shared admin dependency).
+
+```
+FeedbackReportAdmin: {
+  id: UUID, category: FeedbackCategory, status: FeedbackStatus,
+  message: string,                         // untrusted — render as text
+  user_id: UUID | null, user_email: string | null,   // null once the user is hard-deleted
+  job_id: UUID | null, asset_ref: string | null,     // asset_ref may dangle (retention)
+  client_path: string | null, app_version: string | null, user_agent: string | null,
+  admin_note: string | null,
+  resolved_at: datetime | null, resolved_by: UUID | null,  // written once, on entering a terminal status
+  created_at: datetime, updated_at: datetime
+}
+```
+
+#### `GET /v1/admin/feedback`
+
+```
+Query:    status?: FeedbackStatus, category?: FeedbackCategory, limit?: int (1–100, default 30), cursor?: string
+Response: CursorPage<FeedbackReportAdmin>   // newest first
+Errors:   400 invalid_cursor
+```
+
+#### `GET /v1/admin/feedback/{report_id}`
+
+```
+Response: FeedbackReportAdmin
+Errors:   404 feedback_not_found
+```
+
+#### `PATCH /v1/admin/feedback/{report_id}`
+
+```
+Request:  { status?: FeedbackStatus, admin_note?: string | null }   // ≤4000 chars, no NUL; null clears
+Response: FeedbackReportAdmin
+Errors:   400 validation_error (empty body)
+          404 feedback_not_found
+          409 invalid_status_transition  detail: { current, target }
+          428 legal_acceptance_required (not legal-exempt)
+Note:     open → in_progress | resolved | dismissed; in_progress → resolved | dismissed.
+          resolved/dismissed are terminal (no reopen). A same-status PATCH is a 409, not a
+          no-op. Note-only PATCHes work in any status. Concurrent terminal PATCHes are
+          serialized by a row lock — exactly one wins, the other gets 409.
 ```
 
 ---
@@ -3050,8 +3139,9 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `health.restored` | platform | A platform health subsystem recovers from a bad status back to a healthy one |
 | `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup (`delete_all_for_user`) failed — the affected user's devices that should have been unsubscribed may still receive push notifications |
+| `feedback.submitted` | product | A user submitted an in-product problem report (§12b). The message carries the report id, user id, category and optional job id only — never the text |
 
-- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
+- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`, `feedback.submitted`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
 - **Platform-scoped** classes (`provider_authentication.failed`, `health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
 - `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`); `provider_authentication.failed` ships the same way in migration `034` (kept separate from the `033` migration that introduced the class's schema/mapping, because Alembic never re-runs an already-applied revision — appending the seed to `033` would silently skip any environment already at `033`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` and `provider_authentication.failed` have no second, preference-independent channel (no health checker watches them), which is why seeding — not just a release note — was judged necessary there.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
@@ -3358,6 +3448,7 @@ Values: `"billing_adjust"`
 | `health.restored` | platform | A health subsystem recovers |
 | `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup failed |
+| `feedback.submitted` | product | A user submitted an in-product problem report |
 
 > Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 
@@ -3386,6 +3477,16 @@ Values: `"upload"`, `"output"`
 Which table a Library asset lives in (`user_images` vs. `generation_outputs`). Prefixes every
 `asset_ref` on the wire (`"upload:<uuid>"` / `"output:<uuid>"`) and is the `source=` filter value
 on `GET /v1/library/`.
+
+### FeedbackCategory
+
+Values: `"bug"`, `"generation"`, `"billing"`, `"account"`, `"content"`, `"other"`
+
+### FeedbackStatus
+
+Values: `"open"`, `"in_progress"`, `"resolved"`, `"dismissed"`
+
+> `resolved` and `dismissed` are terminal. Allowed transitions: `open → in_progress | resolved | dismissed`, `in_progress → resolved | dismissed`. See §13 *Feedback Triage*.
 
 ### LibrarySort
 
@@ -3545,6 +3646,9 @@ These URLs:
 | `POST /v1/auth/oauth/exchange`, `/signup-info` | 20/minute per IP |
 | `POST /v1/auth/oauth/complete-signup` | 5/hour per IP |
 | `POST /v1/events/sse-ticket` | 10/minute per user |
+| `POST /v1/feedback` | 10/hour per IP (`RATE_LIMIT_FEEDBACK`) |
+
+Paths are matched with any trailing slash removed, so `/x` and `/x/` share one budget.
 
 Rate limit headers are **not currently exposed** in responses. The frontend should handle 429 responses gracefully with a user-friendly message.
 

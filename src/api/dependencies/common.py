@@ -26,6 +26,7 @@ from src.api.services.content_retention import ContentRetentionService
 from src.api.services.email import EmailService, LogEmailService, ResendEmailService
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
+from src.api.services.feedback import FeedbackService
 from src.api.services.frames.service import FrameExtractionService
 from src.api.services.frames.worker import FrameExtractionWorker
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
@@ -703,6 +704,11 @@ def get_library_project_service(session: AsyncSession) -> LibraryProjectService:
 def get_library_tag_service(session: AsyncSession) -> LibraryTagService:
     """Provide LibraryTagService per-request."""
     return LibraryTagService(session=session)
+
+
+def get_feedback_service(session: AsyncSession) -> FeedbackService:
+    """Provide FeedbackService per-request (commit-free; the route commits, then publishes)."""
+    return FeedbackService(session=session, ops_event_bus=get_ops_event_bus())
 
 
 def provide_settings() -> Settings:
@@ -1717,6 +1723,8 @@ dependencies = {
     "library_service": Provide(get_library_service, sync_to_thread=False),
     "library_project_service": Provide(get_library_project_service, sync_to_thread=False),
     "library_tag_service": Provide(get_library_tag_service, sync_to_thread=False),
+    # In-product problem reports
+    "feedback_service": Provide(get_feedback_service, sync_to_thread=False),
     # Idempotency
     "idempotency_service": Provide(get_idempotency_service, sync_to_thread=False),
     # Health
