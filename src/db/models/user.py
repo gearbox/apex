@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
     from src.db.models.billing import TokenAccount
     from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
+    from src.db.models.user_identity import UserIdentity
 
 
 class User(Base):
@@ -36,9 +37,11 @@ class User(Base):
         String(255),
         nullable=False,
     )
-    password_hash: Mapped[str] = mapped_column(
+    # NULL for accounts created via OAuth signup that never set a password
+    # (they log in through their linked identity or set one via forgot-password).
+    password_hash: Mapped[str | None] = mapped_column(
         String(255),
-        nullable=False,
+        nullable=True,
     )
     display_name: Mapped[str | None] = mapped_column(
         String(100),
@@ -148,6 +151,13 @@ class User(Base):
     )
     password_reset_tokens: Mapped[list[PasswordResetToken]] = relationship(
         "PasswordResetToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    # Hard deletes only — self-closure deletes identities explicitly
+    # (UserIdentityRepository.delete_for_user); soft deactivation keeps them.
+    identities: Mapped[list[UserIdentity]] = relationship(
+        "UserIdentity",
         back_populates="user",
         cascade="all, delete-orphan",
     )

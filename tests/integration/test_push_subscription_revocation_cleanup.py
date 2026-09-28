@@ -29,6 +29,7 @@ from src.core.uid import new_id
 from src.db.models.user import RefreshToken
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
+from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 
 if TYPE_CHECKING:
@@ -125,6 +126,7 @@ class TestChangePasswordDeletesPushSubscriptions:
             password_service=password_service,
             age_verification_service=MagicMock(),
             token_revocation_service=_noop_token_revocation(),
+            identity_repository=UserIdentityRepository(db_session),
             session=db_session,
         )
 
@@ -151,6 +153,7 @@ class TestDeactivateAccountDeletesPushSubscriptions:
             password_service=PasswordService(),
             age_verification_service=MagicMock(),
             token_revocation_service=_noop_token_revocation(),
+            identity_repository=UserIdentityRepository(db_session),
             session=db_session,
         )
 
@@ -312,6 +315,7 @@ class TestPushDeletionFailureDoesNotBlockPrimaryAction:
             password_service=password_service,
             age_verification_service=MagicMock(),
             token_revocation_service=_noop_token_revocation(),
+            identity_repository=UserIdentityRepository(db_session),
             session=db_session,
             ops_event_bus=ops_event_bus,
         )

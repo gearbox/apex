@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from src.api.services.user import (
 )
 from src.core.product import AgeGatePolicy, ProductConfig
 from src.core.product_registry import VEX_CONFIG
+from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 
 pytestmark = pytest.mark.unit
@@ -52,6 +54,7 @@ def _make_service(
     password_verify: bool = True,
     age_verification_service: AgeVerificationService | None = None,
     token_revocation_service: AsyncMock | None = None,
+    identity_repository: UserIdentityRepository | None = None,
 ) -> tuple[UserService, AsyncMock, MagicMock]:
     repo = AsyncMock()
     pwd = MagicMock()
@@ -75,6 +78,11 @@ def _make_service(
             token_revocation_service
             if token_revocation_service is not None
             else TokenRevocationService(None, max_token_ttl_seconds=0)
+        ),
+        identity_repository=(
+            identity_repository
+            if identity_repository is not None
+            else cast("UserIdentityRepository", AsyncMock(spec=UserIdentityRepository))
         ),
     )
     return svc, repo, pwd
@@ -374,6 +382,31 @@ class TestChangePassword:
 
 
 class TestDeactivateAccount:
+    async def test_r3_a_deactivate_always_unlinks_oauth_identities(self) -> None:
+        """R3-a — account closure removes every identity exactly once."""
+        user = _make_user()
+        identities = AsyncMock(spec=UserIdentityRepository)
+        svc, repo, _ = _make_service(
+            user, identity_repository=cast("UserIdentityRepository", identities)
+        )
+        repo.soft_delete_user = AsyncMock(return_value=user)
+        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+
+        await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
+
+        identities.delete_for_user.assert_awaited_once_with(user.id)
+
+    def test_r3_b_identity_repository_is_required(self) -> None:
+        """R3-b — callers cannot silently opt out of identity cleanup."""
+        with pytest.raises(TypeError):
+            cast("Any", UserService)(
+                legal_acceptance_service=make_legal_acceptance_service(),
+                repository=AsyncMock(),
+                password_service=MagicMock(),
+                age_verification_service=AgeVerificationService(),
+                token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+            )
+
     async def test_deactivates_and_returns_timestamp(self) -> None:
         user = _make_user()
         svc, repo, _ = _make_service(user)
@@ -452,3 +485,45 @@ class TestGetStats:
         svc, _, _ = _make_service(user=None)
         with pytest.raises(UserNotFoundError):
             await svc.get_stats(uuid4())
+
+
+class TestPasswordlessAccounts:
+    """I16 — OAuth-only accounts (password_hash IS NULL)."""
+
+    async def test_change_password_raises_password_not_set(self) -> None:
+        from src.api.services.user import PasswordNotSetError
+
+        user = _make_user()
+        user.password_hash = None
+        svc, repo, pwd = _make_service(user)
+        repo.update_user = AsyncMock()
+
+        with pytest.raises(PasswordNotSetError):
+            await svc.change_password(user.id, current_password="x", new_password="new-pass")
+
+        pwd.averify.assert_not_called()
+        repo.update_user.assert_not_awaited()
+
+    async def test_profile_reports_has_password(self) -> None:
+        user = _make_user()
+        svc, _, _ = _make_service(user)
+        assert (await svc.get_profile(user.id)).has_password is True
+        user.password_hash = None
+        assert (await svc.get_profile(user.id)).has_password is False
+
+
+class TestDeactivateUnlinksIdentities:
+    """I12 (unit) — self-closure deletes OAuth identities; the call is wired."""
+
+    async def test_deletes_identities_when_repository_wired(self) -> None:
+        user = _make_user()
+        svc, repo, _ = _make_service(user)
+        repo.soft_delete_user = AsyncMock(return_value=user)
+        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+        identities = MagicMock()
+        identities.delete_for_user = AsyncMock(return_value=1)
+        svc._identities = identities
+
+        await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
+
+        identities.delete_for_user.assert_awaited_once_with(user.id)

@@ -23,6 +23,7 @@ from redis.exceptions import RedisError
 
 from src.api.schemas.errors import ErrorEnvelope
 from src.core.config import Settings, get_settings
+from src.core.product import OAuthProvider
 
 if TYPE_CHECKING:
     from litestar.types import ASGIApp, Message, Receive, Scope, Send
@@ -162,7 +163,16 @@ def build_rate_limit_config(settings: Settings) -> dict[str, str]:
     Returns:
         Dictionary mapping '{METHOD} {path}' to limit strings.
     """
+    oauth_provider_routes = {
+        f"GET /v1/auth/oauth/{provider.value}/{step}": settings.rate_limit_oauth_authorize
+        for provider in OAuthProvider
+        for step in ("authorize", "callback")
+    }
     return {
+        **oauth_provider_routes,
+        "POST /v1/auth/oauth/exchange": settings.rate_limit_oauth_exchange,
+        "POST /v1/auth/oauth/signup-info": settings.rate_limit_oauth_exchange,
+        "POST /v1/auth/oauth/complete-signup": settings.rate_limit_oauth_complete_signup,
         "POST /v1/auth/register": settings.rate_limit_register,
         "POST /v1/auth/login": settings.rate_limit_login,
         "POST /v1/auth/forgot-password": settings.rate_limit_forgot_password,

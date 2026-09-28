@@ -277,6 +277,29 @@ class TestUserRouteHandlers:
         assert response.status_code == HTTP_400_BAD_REQUEST
         assert "Clear-Site-Data" not in response.headers
 
+    async def test_change_password_returns_409_when_no_password_set(self) -> None:
+        """I16 — OAuth-only accounts get 409 password_not_set (use forgot-password)."""
+        from src.api.routes.user import UserController
+        from src.api.services.user import PasswordNotSetError
+
+        user_service = AsyncMock()
+        user_service.change_password = AsyncMock(side_effect=PasswordNotSetError("none"))
+
+        data = MagicMock()
+        data.current_password = "anything"
+        data.new_password = "new-password"
+
+        response = await UserController.change_password.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            data=data,
+            user_service=user_service,
+        )
+        assert response.status_code == 409
+        assert response.content.error == "password_not_set"
+        assert "Forgot password" in response.content.message
+        assert "Clear-Site-Data" not in response.headers
+
     async def test_change_password_raises_404_on_user_not_found(self) -> None:
         from src.api.routes.user import UserController
         from src.api.services.user import UserNotFoundError
@@ -1981,12 +2004,17 @@ class TestAuthRouteHandlers:
         product_config.content_policy.rating = MagicMock(value="permissive")
         product_config.payment_providers = [MagicMock(value="stripe")]
 
+        oauth_registry = MagicMock()
+        oauth_registry.is_enabled.return_value = True
+
         result = await AuthController.product_info.fn(  # type: ignore[attr-defined]
             MagicMock(),
             product_config=product_config,
+            oauth_registry=oauth_registry,
         )
         assert result.product == "vex"
         assert result.display_name == "Vex"
+        assert result.allowed_auth_methods == ["email"]
 
 
 # ---------------------------------------------------------------------------

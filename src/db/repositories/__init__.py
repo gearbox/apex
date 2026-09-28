@@ -14,6 +14,7 @@ from .payment_currency import PaymentCurrencyRepository
 from .payment_provider_state import PaymentProviderStateRepository
 from .push_subscription import PushSubscriptionRepository
 from .user import UserRepository
+from .user_identity import UserIdentityRepository
 from .user_image import UserImageRepository
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "PaymentCurrencyRepository",
     "PaymentProviderStateRepository",
     "PushSubscriptionRepository",
+    "UserIdentityRepository",
     "UserImageRepository",
     "UserRepository",
 ]

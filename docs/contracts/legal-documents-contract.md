@@ -185,6 +185,6 @@ Backend operators can commit a future-dated version up to 14 days ahead, as the 
 
 ## 7. Out of scope (next arcs)
 
-- **OAuth signup:** a post-callback acceptance screen that reuses the same payload and endpoints.
+- **OAuth signup:** implemented — the post-callback signup screen reuses the same payload via `POST /v1/auth/oauth/complete-signup` (source `signup`). See `docs/contracts/oauth-contract.md`.
 - **Synthara documents:** `required_legal_documents` is empty until they exist.
 - **Email notification** of upcoming versions.

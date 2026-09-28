@@ -350,11 +350,14 @@ Response: {
   product: string,              // "vex" | "synthara"
   display_name: string,         // e.g. "example.com"
   age_gate: string,             // "none" | "checkbox" | "date_of_birth"
-  allowed_auth_methods: string[],  // e.g. ["email_password", "google_oauth"]
+  allowed_auth_methods: string[],  // e.g. ["email_password", "google_oauth"] — sorted
   content_rating: string,       // "sfw" | "permissive"
   payment_providers: string[]   // e.g. ["stripe", "nowpayments"]
 }
 Note:     Public endpoint — no auth needed. Frontend calls this on load.
+          `allowed_auth_methods` lists only methods that are allowed for the product AND usable:
+          an OAuth method appears only when its client credentials are configured (§2c). Render
+          a "Continue with Google" button iff "google_oauth" is present.
 ```
 
 #### `POST /v1/auth/register`
@@ -451,6 +454,8 @@ Rate:     3/hour
 Request:  { token: string (20-100 chars), new_password: string (8-128 chars) }
 Response: { message: string }
 Errors:   400 (invalid_token | expired)
+Effect:   Also marks the email verified if it wasn't (a consumed reset link proves inbox
+          control) — the recovery path for OAuth's `account_exists_unverified`.
 Headers:  (200 only) Clear-Site-Data: "cache", "storage" — the calling device ends its own
           session here too, and this is the compromised-account recovery path.
 Note:     One of the five bulk-revocation sites — also deletes every Web Push subscription the
@@ -484,6 +489,12 @@ Note:     Re-mints the apex_content cookie (same attributes login/register/refre
           does NOT authorize this endpoint — only a valid Bearer access token does.
 ```
 
+#### `POST /v1/auth/login` — OAuth-only accounts
+
+An account created through OAuth signup (§2c) has no password. Password login against it returns
+the same `401 invalid_credentials` as an unknown email (same timing). The user can set a password
+through `POST /v1/auth/forgot-password`.
+
 ---
 
 ## 2b. Legal Documents & Acceptance
@@ -506,6 +517,27 @@ unless the token's `lgl` claim matches the currently required digest. Exempt rou
 
 ---
 
+## 2c. OAuth Sign-In (Google)
+
+Server-side OIDC authorization-code flow (confidential client + PKCE S256, `state`, `nonce`). The
+full sequence, fragment grammar, error codes with UX copy, and frontend rules live in
+**`docs/contracts/oauth-contract.md`** — the canonical frontend contract.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/v1/auth/oauth/{provider}/authorize?return_to=/path` | **Top-level navigation.** 302 → provider, sets `apex_oauth_tx` (HttpOnly, `SameSite=Lax`, `Path=/v1/auth/oauth`, host-only). 404 if the provider isn't enabled for the product; 400 `invalid_return_to` |
+| GET | `/v1/auth/oauth/{provider}/callback` | Provider redirect target. Always 302 → `{app_url}/auth/callback#result=login&code=…` / `#result=signup&ticket=…` / `#result=error&error=<code>` |
+| POST | `/v1/auth/oauth/exchange` | `{code}` → 200 `TokenResponse` + `apex_content` cookie; clears `apex_oauth_tx`. 400 `invalid_handoff`, 401 `account_inactive` |
+| POST | `/v1/auth/oauth/signup-info` | `{ticket}` → 200 `{email, provider}` (non-consuming). 400 `invalid_signup_ticket` |
+| POST | `/v1/auth/oauth/complete-signup` | `{ticket, accepted_documents, display_name?}` → 201 `TokenResponse` + cookie; clears `apex_oauth_tx`. 400 `invalid_signup_ticket` / `email_exists`, 409 `identity_conflict`, 422/409 legal (ticket **not** consumed) |
+
+`provider` is `google` today. All POSTs need `credentials: 'include'` (the binding cookie). Rate
+limits: authorize + callback `20/minute`, exchange + signup-info `20/minute`, complete-signup
+`5/hour` (per IP). Tokens are minted only at `exchange` / `complete-signup`. Access tokens carry
+the `lgl` digest like register/login/refresh do.
+
+---
+
 ## 3. User Profile
 
 All endpoints below require `Authorization: Bearer <access_token>`.
@@ -525,7 +557,9 @@ Response: {
   updated_at: datetime,
   age_verified: bool,                  // true once the user has passed the age gate
   age_verified_at: datetime | null,    // timestamp of first successful verification; null if never
-  date_of_birth: date | null           // stored only for DATE_OF_BIRTH-policy products; else null
+  date_of_birth: date | null,          // stored only for DATE_OF_BIRTH-policy products; else null
+  has_password: bool                   // false for OAuth-only accounts: hide change-password,
+                                       // offer "set a password" via forgot-password instead
 }
 ```
 
@@ -559,6 +593,8 @@ Note:     Age capture is policy-driven by the active product's age_gate (see GET
 Request:  { current_password: string, new_password: string }
 Response: { message: string }
 Errors:   400 invalid_password
+          409 password_not_set — OAuth-only account (`has_password: false`); set a password
+              through POST /v1/auth/forgot-password instead
 Headers:  (200 only) Clear-Site-Data: "cache", "storage" — the caller's own session ends here too.
 Note:     Revokes ALL refresh tokens, plus all live access tokens and the content cookie
           (issue #142) — the most security-sensitive of the three bulk-revocation sites,
@@ -3505,6 +3541,9 @@ These URLs:
 | `POST /auth/login` | 10/minute per IP |
 | `POST /auth/forgot-password` | 3/hour per IP |
 | `POST /auth/resend-verification` | 3/hour per IP |
+| `GET /v1/auth/oauth/{provider}/authorize`, `/callback` | 20/minute per IP |
+| `POST /v1/auth/oauth/exchange`, `/signup-info` | 20/minute per IP |
+| `POST /v1/auth/oauth/complete-signup` | 5/hour per IP |
 | `POST /v1/events/sse-ticket` | 10/minute per user |
 
 Rate limit headers are **not currently exposed** in responses. The frontend should handle 429 responses gracefully with a user-friendly message.

@@ -42,18 +42,20 @@ class UserRepository:
         *,
         id: UUID,
         email: str,
-        password_hash: str,
+        password_hash: str | None,
         product_id: str,
         display_name: str | None = None,
+        email_verified_at: datetime | None = None,
     ) -> User:
         """Create a new user.
 
         Args:
             id: User ID.
             email: User email (must be unique within product).
-            password_hash: Hashed password.
+            password_hash: Hashed password, or ``None`` for an OAuth-only account.
             product_id: Product the user is registering on.
             display_name: Optional display name.
+            email_verified_at: Pre-verified timestamp (OAuth signup), else ``None``.
 
         Returns:
             Created User instance.
@@ -64,6 +66,7 @@ class UserRepository:
             password_hash=password_hash,
             product_id=product_id,
             display_name=display_name,
+            email_verified_at=email_verified_at,
         )
         self._session.add(user)
         await self._session.flush()

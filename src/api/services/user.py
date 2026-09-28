@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from src.core.product import ProductConfig
     from src.db.models import User
     from src.db.repositories import UserRepository
+    from src.db.repositories.user_identity import UserIdentityRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -52,6 +53,10 @@ class InvalidPasswordError(UserServiceError):
     """Current password is incorrect."""
 
 
+class PasswordNotSetError(UserServiceError):
+    """The account has no password (OAuth-only) — set one via forgot-password instead."""
+
+
 class UserService:
     """User profile management service.
 
@@ -66,6 +71,7 @@ class UserService:
         *,
         token_revocation_service: TokenRevocationService,
         legal_acceptance_service: LegalAcceptanceService,
+        identity_repository: UserIdentityRepository,
         r2_storage: R2StorageService | None = None,
         ops_event_bus: OpsEventBus | None = None,
         session: AsyncSession | None = None,
@@ -86,6 +92,11 @@ class UserService:
                 #142 A1).
             legal_acceptance_service: Records the sensitive-data consent
                 withdrawal on account closure.
+            identity_repository: Deletes the user's OAuth identity links on
+                self-closure so the subject can sign up again. Required —
+                callers that intentionally do not use OAuth must pass an
+                explicit repository so this security-relevant cleanup is
+                never silently skipped (issue #142 A1).
             r2_storage: R2 storage service for presigned URL generation (optional).
             ops_event_bus: Publishes an alert when a bulk access-token
                 revocation write fails against a configured Redis (issue
@@ -102,6 +113,7 @@ class UserService:
         self._r2 = r2_storage
         self._token_revocation = token_revocation_service
         self._legal = legal_acceptance_service
+        self._identities = identity_repository
         self._ops_event_bus = (
             ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
         )
@@ -224,11 +236,15 @@ class UserService:
 
         Raises:
             UserNotFoundError: If user not found.
+            PasswordNotSetError: If the account has no password (OAuth-only).
             InvalidPasswordError: If current password is wrong.
         """
         user = await self._repo.get_user(user_id)
         if user is None:
             raise UserNotFoundError(f"User {user_id} not found")
+
+        if user.password_hash is None:
+            raise PasswordNotSetError("This account has no password set")
 
         # Verify current password
         if not await self._password.averify(user.password_hash, current_password):
@@ -290,6 +306,12 @@ class UserService:
         await self._legal.record_consent_withdrawal(
             user_id=user_id, product=product, context=context, today=today
         )
+        # Unlink OAuth identities in the same transaction, so the provider
+        # subject can sign up afresh. (Admin deactivation keeps them — it's
+        # reversible; self-closure is not.)
+        unlinked = await self._identities.delete_for_user(user_id)
+        if unlinked:
+            logger.info("user.identities_unlinked", user_id=str(user_id), count=unlinked)
 
         # Revoke all tokens
         await self._repo.revoke_all_user_tokens(user_id)
@@ -396,4 +418,5 @@ class UserService:
             age_verified=user.age_verified_at is not None,
             age_verified_at=user.age_verified_at,
             date_of_birth=user.date_of_birth,
+            has_password=user.password_hash is not None,
         )

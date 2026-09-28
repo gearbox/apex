@@ -35,6 +35,7 @@ from .storage import (
     UserImage,
 )
 from .user import RefreshToken, User
+from .user_identity import UserIdentity
 
 __all__ = [
     "AdminAuditLog",
@@ -74,5 +75,6 @@ __all__ = [
     "TokenAccount",
     "TokenTransaction",
     "User",
+    "UserIdentity",
     "UserImage",
 ]

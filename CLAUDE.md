@@ -71,6 +71,8 @@ The backend serves two distinct products from the same codebase:
 │   │   │   │                   #   /groups/{job_id}; PATCH/PUT/DELETE favorite/delete; POST assets/bulk
 │   │   │   ├── library_project.py  # LibraryProjectController: CRUD /v1/library/projects
 │   │   │   ├── library_tag.py      # LibraryTagController: CRUD /v1/library/tags
+│   │   │   ├── oauth.py        # OAuthController: GET /v1/auth/oauth/{provider}/authorize|callback;
+│   │   │   │                   #   POST /exchange, /signup-info, /complete-signup (unguarded)
 │   │   │   ├── legal.py        # LegalController: GET /v1/legal/documents/{doc_type}, /current (public);
 │   │   │   │                   #   GET /status, POST /acceptances (auth; acceptances is legal-exempt)
 │   │   │   └── push.py         # PushController: GET /v1/push/vapid-public-key
@@ -327,6 +329,8 @@ Lifecycle: `lifespan` context manager in `app.py` calls `init_services()` / `shu
     - **Ledger write rule:** every `legal_acceptances` write first takes the per-user advisory lock (`LegalAcceptanceRepository.lock_user_ledger`). Event order is `seq` (`BIGINT GENERATED ALWAYS AS IDENTITY`, drawn at INSERT under that lock), **never timestamps** — `created_at` is `clock_timestamp()` insertion-time evidence only. `record_acceptances` re-reads `users.is_active` (plain column `SELECT`, no row lock) *after* the lock and raises `LegalAccountInactiveError` (401 `account_inactive`), so an acceptance can't land after a concurrent closure's `WITHDRAW`.
     - After `POST /v1/legal/acceptances` the client must `POST /v1/auth/refresh` to get a token with the new `lgl` (the legal controller never mints tokens). For signup and re-acceptance, fetch `/v1/legal/current` first and then each document with its exact `?version=` — never render the cacheable current alias and submit a separately fetched hash. Frontend contract: `docs/contracts/legal-documents-contract.md`.
 
+15. **OAuth sign-in** — server-side OIDC code flow (Google today) in `src/api/services/oauth/`, routes in `src/api/routes/oauth.py`, identities in `user_identities` (`UserIdentity`, `password_hash` is nullable for OAuth-only users). Per-product clients via `ProductConfig.oauth_clients` → `Settings.google_oauth_client_*_{slug}` + `api_public_url_{slug}` (the only redirect_uri source); `OAuthProviderRegistry.is_enabled` gates `/authorize` and `product-info`. State/handoff/ticket are single-use Redis values (`oauth:flow|handoff|signup:*`, `GETDEL`) bound to the `apex_oauth_tx` cookie; tokens are minted only at `/exchange` and `/complete-signup`; the callback commits DB writes **before** writing the handoff. Unknown identities create **no rows** until `complete-signup` (legal acceptance first). Auto-link only when Google `email_verified` AND local `email_verified_at` are set. Self-closure deletes identities; admin deactivation keeps them. Contract: `docs/contracts/oauth-contract.md`.
+
 ---
 
 ## Common Commands
@@ -387,6 +391,7 @@ make format                       # ruff format
 | `LibraryProject` | `library_projects` | User-created grouping; one project per asset (nullable FK on `LibraryAssetMetadata`, `ON DELETE SET NULL`); name unique case-insensitively per owner |
 | `LibraryTag` | `library_tags` | User-created tag; name unique case-insensitively per owner |
 | `LibraryAssetTag` | `library_asset_tags` | Many-to-many join: one asset tagged with one tag; polymorphic like `LibraryAssetMetadata`; `ON DELETE CASCADE` from `LibraryTag` |
+| `UserIdentity` | `user_identities` | OAuth subject link: `(product_id, provider, subject)` unique, one per `(user_id, provider)`; no email stored; deleted on self-closure, kept on admin deactivation |
 | `LegalAcceptance` | `legal_acceptances` | Append-only legal events: one row per ACCEPT/WITHDRAW of one document version (`content_sha256`, IP, UA, source); CHECK: ACCEPT requires a hash; `ON DELETE CASCADE` from `users` only |
 
 ---

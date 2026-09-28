@@ -19,6 +19,7 @@ from litestar.status_codes import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
+from src.api.routes._token_response import build_token_response
 from src.api.schemas.auth import (
     ContentCookieResponse,
     ForgotPasswordRequest,
@@ -52,6 +53,7 @@ from src.api.services.email_verification import (
     UserNotFoundError,
 )
 from src.api.services.legal.acceptance import RequestContext
+from src.api.services.oauth.registry import OAuthProviderRegistry
 from src.core.config import Settings
 from src.core.product import ProductConfig
 from src.db.repositories.user import UserRepository
@@ -119,23 +121,14 @@ class AuthController(Controller):
                 display_name=data.display_name,
             )
 
-            content_cookie, content_cookie_expires_at = mint_content_cookie(
+            response = build_token_response(
                 user_id=user.id,
                 product_id=product_id,
+                tokens=tokens,
                 jwt_service=jwt_service,
                 settings=settings,
                 product_config=product_config,
-            )
-            response: Response[TokenResponse | ErrorEnvelope] = Response(
-                content=TokenResponse(
-                    access_token=tokens.access_token,
-                    refresh_token=tokens.refresh_token,
-                    expires_in=tokens.expires_in,
-                    expires_at=tokens.expires_at,
-                    content_cookie_expires_at=content_cookie_expires_at,
-                ),
                 status_code=HTTP_201_CREATED,
-                cookies=[content_cookie],
             )
 
         except EmailAlreadyExistsError as e:
@@ -307,23 +300,14 @@ class AuthController(Controller):
                 ip_address=ip_address,
             )
 
-            content_cookie, content_cookie_expires_at = mint_content_cookie(
+            response = build_token_response(
                 user_id=user.id,
                 product_id=product_id,
+                tokens=tokens,
                 jwt_service=jwt_service,
                 settings=settings,
                 product_config=product_config,
-            )
-            response: Response[TokenResponse | ErrorEnvelope] = Response(
-                content=TokenResponse(
-                    access_token=tokens.access_token,
-                    refresh_token=tokens.refresh_token,
-                    expires_in=tokens.expires_in,
-                    expires_at=tokens.expires_at,
-                    content_cookie_expires_at=content_cookie_expires_at,
-                ),
                 status_code=HTTP_200_OK,
-                cookies=[content_cookie],
             )
 
         except InvalidCredentialsError:
@@ -379,23 +363,14 @@ class AuthController(Controller):
                 ip_address=ip_address,
             )
 
-            content_cookie, content_cookie_expires_at = mint_content_cookie(
+            response = build_token_response(
                 user_id=user_id,
                 product_id=product_id,
+                tokens=tokens,
                 jwt_service=jwt_service,
                 settings=settings,
                 product_config=product_config,
-            )
-            response: Response[TokenResponse | ErrorEnvelope] = Response(
-                content=TokenResponse(
-                    access_token=tokens.access_token,
-                    refresh_token=tokens.refresh_token,
-                    expires_in=tokens.expires_in,
-                    expires_at=tokens.expires_at,
-                    content_cookie_expires_at=content_cookie_expires_at,
-                ),
                 status_code=HTTP_200_OK,
-                cookies=[content_cookie],
             )
 
         except InvalidRefreshTokenError:
@@ -589,18 +564,25 @@ class AuthController(Controller):
     async def product_info(
         self,
         product_config: ProductConfig,
+        oauth_registry: OAuthProviderRegistry,
     ) -> ProductInfoResponse:
         """Return product context for the current origin.
 
         Public endpoint — no authentication required.
         The frontend calls this on load to configure the UI
         (age gate requirements, allowed auth methods, content rating).
+        ``allowed_auth_methods`` lists only methods that are both allowed for
+        the product and usable (an OAuth method needs a configured client).
         """
         return ProductInfoResponse(
             product=product_config.slug,
             display_name=product_config.display_name,
             age_gate=product_config.age_gate.value,
-            allowed_auth_methods=[m.value for m in product_config.allowed_auth_methods],
+            allowed_auth_methods=sorted(
+                m.value
+                for m in product_config.allowed_auth_methods
+                if oauth_registry.is_enabled(product_config, m)
+            ),
             content_rating=product_config.content_policy.rating.value,
             payment_providers=[p.value for p in product_config.payment_providers],
         )

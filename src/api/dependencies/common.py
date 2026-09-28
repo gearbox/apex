@@ -61,6 +61,7 @@ from src.api.services.library import LibraryService
 from src.api.services.library_project import LibraryProjectService
 from src.api.services.library_tag import LibraryTagService
 from src.api.services.media_ingest.factory import build_media_ingest_service
+from src.api.services.oauth import OAuthProviderRegistry, OAuthService, RedisOAuthFlowStore
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.organization import OrganizationService
 from src.api.services.payment_currency_logos import LOGO_KEY_PREFIX, LogoCacheService
@@ -85,8 +86,13 @@ from src.core.config import Settings, get_settings
 from src.core.enums import WorkerMode
 from src.core.product import ProductConfig  # noqa: TC001
 from src.core.product_registry import PRODUCT_REGISTRY
+from src.core.redis import get_redis_client
 from src.db import DatabaseManager, init_db
-from src.db.repositories import LegalAcceptanceRepository, UserRepository
+from src.db.repositories import (
+    LegalAcceptanceRepository,
+    UserIdentityRepository,
+    UserRepository,
+)
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
 from src.workers.payment_currency_sync import PaymentCurrencySyncWorker
@@ -123,6 +129,9 @@ class ServiceContainer:
     jwt_service: JWTService | None = None
     token_revocation_service: TokenRevocationService | None = None
     legal_registry: LegalDocumentRegistry | None = None
+    # OAuth sign-in: provider clients (per product) + their shared HTTP client
+    oauth_registry: OAuthProviderRegistry | None = None
+    oauth_http_client: httpx.AsyncClient | None = None
     password_service: PasswordService | None = None
     billing_service: BillingService | None = None
     payment_provider_state_service: PaymentProviderStateService | None = None
@@ -378,6 +387,41 @@ def get_auth_service(session: AsyncSession) -> AuthService:
     )
 
 
+def get_oauth_registry() -> OAuthProviderRegistry:
+    """Provide the process-wide OAuth provider registry.
+
+    Raises:
+        RuntimeError: If not initialized.
+    """
+    if _services.oauth_registry is None:
+        raise RuntimeError("OAuth provider registry not initialized")
+    return _services.oauth_registry
+
+
+def get_oauth_service(session: AsyncSession) -> OAuthService:
+    """Provide the OAuth service for request scope.
+
+    The flow store uses the default short-lived Redis pool; it is only touched
+    once a provider is enabled, which ``Settings.validate_oauth_config`` ties
+    to ``REDIS_URL`` being set.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        OAuthService bound to the request session.
+    """
+    return OAuthService(
+        registry=get_oauth_registry(),
+        store=RedisOAuthFlowStore(get_redis_client),
+        identity_repo=UserIdentityRepository(session),
+        user_repo=UserRepository(session),
+        auth_service=get_auth_service(session),
+        session=session,
+        settings=get_settings(),
+    )
+
+
 def get_user_service(session: AsyncSession) -> UserService:
     """Provide user service for request scope.
 
@@ -395,6 +439,7 @@ def get_user_service(session: AsyncSession) -> UserService:
         r2_storage=_services.r2_storage,
         token_revocation_service=get_token_revocation_service(),
         legal_acceptance_service=get_legal_acceptance_service(session),
+        identity_repository=UserIdentityRepository(session),
         ops_event_bus=get_ops_event_bus(),
         session=session,
     )
@@ -738,6 +783,13 @@ async def init_services(settings: Settings) -> JWTService:
         today=datetime.now(UTC).date(),
     )
     logger.info("legal_registry.initialized", root=str(settings.legal_documents_dir))
+
+    # OAuth providers: one shared async client (JWKS + token endpoint) and a
+    # registry of the (product, provider) pairs that are allowed + configured.
+    _services.oauth_http_client = httpx.AsyncClient(timeout=settings.oauth_http_timeout_seconds)
+    _services.oauth_registry = OAuthProviderRegistry.build(
+        settings, _services.oauth_http_client, PRODUCT_REGISTRY.values()
+    )
 
     # Initialize database
     _services.db_manager = init_db(
@@ -1596,6 +1648,10 @@ async def shutdown_services() -> None:
         await _services.health_http_client.aclose()
         logger.info("health_http_client.closed")
 
+    if _services.oauth_http_client is not None:
+        await _services.oauth_http_client.aclose()
+        logger.info("oauth_http_client.closed")
+
     from src.core.redis import close_redis_pool
 
     await close_redis_pool()
@@ -1650,6 +1706,9 @@ dependencies = {
     "legal_acceptance_service": Provide(get_legal_acceptance_service, sync_to_thread=False),
     # Client IP (trusted-header aware) + user agent, for acceptance evidence
     "request_context": Provide(provide_request_context, sync_to_thread=False),
+    # OAuth sign-in (registry singleton + request-scoped service)
+    "oauth_registry": Provide(get_oauth_registry, sync_to_thread=False),
+    "oauth_service": Provide(get_oauth_service, sync_to_thread=False),
     # Token revocation (needed by the logout route to denylist its own jti)
     "token_revocation_service": Provide(get_token_revocation_service, sync_to_thread=False),
     # Content proxy

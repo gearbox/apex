@@ -16,6 +16,7 @@ from src.core.constants import (
     validate_dev_ref_is_route_safe,
 )
 from src.core.enums import WorkerMode
+from src.core.product_registry import PRODUCT_REGISTRY
 from src.core.topup_pricing import build_tiers
 
 
@@ -1509,6 +1510,86 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
+    # OAuth login (per-product clients — see ProductConfig.oauth_clients)
+    # -------------------------------------------------------------------------
+
+    google_oauth_client_id_vex: str | None = Field(
+        default=None,
+        description="Google OAuth (Web application) client ID for vex.",
+    )
+    google_oauth_client_secret_vex: SecretStr | None = Field(
+        default=None,
+        description="Google OAuth client secret for vex. Secrets/env only.",
+    )
+    google_oauth_client_id_synthara: str | None = Field(
+        default=None,
+        description="Google OAuth (Web application) client ID for Synthara.",
+    )
+    google_oauth_client_secret_synthara: SecretStr | None = Field(
+        default=None,
+        description="Google OAuth client secret for Synthara. Secrets/env only.",
+    )
+    api_public_url_vex: str | None = Field(
+        default=None,
+        description=(
+            "Public origin of THIS API for vex (scheme+host, no trailing slash), e.g. "
+            "https://api.example.com. Used ONLY to build the OAuth redirect_uri — never "
+            "derived from request headers. Required when a vex OAuth client is configured."
+        ),
+    )
+    api_public_url_synthara: str | None = Field(
+        default=None,
+        description=(
+            "Public origin of THIS API for Synthara (scheme+host, no trailing slash). "
+            "Required when a Synthara OAuth client is configured."
+        ),
+    )
+    oauth_frontend_callback_path: str = Field(
+        default="/auth/callback",
+        description="Frontend path the OAuth callback 302s to (fragment carries the result).",
+    )
+    oauth_flow_ttl_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=1800,
+        description="TTL of a pending authorize→callback flow (state/nonce/PKCE verifier).",
+    )
+    oauth_handoff_ttl_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="TTL of the one-time login handoff code redeemed at /oauth/exchange.",
+    )
+    oauth_signup_ticket_ttl_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=3600,
+        description="TTL of a pending OAuth signup ticket.",
+    )
+    oauth_jwks_cache_ttl_seconds: int = Field(
+        default=3600,
+        ge=60,
+        description="How long fetched provider JWKS signing keys are cached.",
+    )
+    oauth_http_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="Timeout for OAuth provider HTTP calls (token endpoint, JWKS).",
+    )
+    rate_limit_oauth_authorize: str = Field(
+        default="20/minute",
+        description="Rate limit for GET /v1/auth/oauth/{provider}/authorize and /callback.",
+    )
+    rate_limit_oauth_exchange: str = Field(
+        default="20/minute",
+        description="Rate limit for POST /v1/auth/oauth/exchange and /signup-info.",
+    )
+    rate_limit_oauth_complete_signup: str = Field(
+        default="5/hour",
+        description="Rate limit for POST /v1/auth/oauth/complete-signup (parity with register).",
+    )
+
+    # -------------------------------------------------------------------------
     # Aisha Job Poller
     # -------------------------------------------------------------------------
 
@@ -1798,6 +1879,50 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_oauth_config(self) -> "Settings":
+        """Fail loud on a half-configured OAuth client (per product, per provider).
+
+        Driven by ``ProductConfig.oauth_clients`` so the env-var names have a
+        single source of truth. A client id without its secret (or vice
+        versa) is a deploy mistake, not "disabled"; a configured client also
+        needs the API's public origin (for the redirect_uri) and Redis (for
+        the single-use flow state).
+        """
+        for product in PRODUCT_REGISTRY.values():
+            for client in product.oauth_clients:
+                client_id = getattr(self, client.client_id_env)
+                client_secret = getattr(self, client.client_secret_env)
+                label = f"{client.provider.value} OAuth client for product {product.slug!r}"
+                if bool(client_id) != bool(client_secret):
+                    raise ValueError(
+                        f"{label}: {client.client_id_env.upper()} and "
+                        f"{client.client_secret_env.upper()} must be set together"
+                    )
+                if not client_id:
+                    continue
+                api_url = self.api_public_url_for(product.slug)
+                if not api_url:
+                    raise ValueError(
+                        f"{label} is configured but API_PUBLIC_URL_{product.slug.upper()} "
+                        "is not set (needed to build the redirect_uri)"
+                    )
+                parsed = urlparse(api_url)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc
+                    or parsed.path
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError(
+                        f"API_PUBLIC_URL_{product.slug.upper()} must be a bare origin "
+                        f"(scheme+host, no path or trailing slash); got {api_url!r}"
+                    )
+                if self.redis_url is None:
+                    raise ValueError(f"{label} is configured but REDIS_URL is not set")
+        return self
+
+    @model_validator(mode="after")
     def validate_billing_pricing_tiers(self) -> "Settings":
         """Fail loud on a malformed top-up pricing config.
 
@@ -1999,6 +2124,31 @@ class Settings(BaseSettings):
         """
         _secret, source = self._nowpayments_ipn_secret_with_source(product_id)
         return source
+
+    def app_url_for(self, product_slug: str) -> str:
+        """Frontend base URL for a product (``app_url_{slug}``).
+
+        Explicit per-product dict (not getattr reflection) so an unrecognized
+        slug can never probe an unrelated attribute name.
+
+        Raises:
+            KeyError: Unknown product slug.
+        """
+        return {
+            "vex": self.app_url_vex,
+            "synthara": self.app_url_synthara,
+        }[product_slug]
+
+    def api_public_url_for(self, product_slug: str) -> str | None:
+        """Public origin of this API for a product (``api_public_url_{slug}``), if set.
+
+        Raises:
+            KeyError: Unknown product slug.
+        """
+        return {
+            "vex": self.api_public_url_vex,
+            "synthara": self.api_public_url_synthara,
+        }[product_slug]
 
     @property
     def email_configured(self) -> bool:

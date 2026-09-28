@@ -2,6 +2,7 @@
 
 from .auth import AuthController
 from .health import AdminHealthController, HealthController
+from .oauth import OAuthController
 from .storage import StorageController
 from .user import UserController
 
@@ -9,6 +10,7 @@ __all__ = [
     "AdminHealthController",
     "AuthController",
     "HealthController",
+    "OAuthController",
     "StorageController",
     "UserController",
 ]

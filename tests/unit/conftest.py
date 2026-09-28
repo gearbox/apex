@@ -17,12 +17,30 @@ from src.api.services.user import UserService
 from src.core.config import Settings
 from src.db.models import User
 from src.db.repositories import UserRepository
+from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import make_legal_acceptance_service
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 _DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
+
+
+def _nested_transaction() -> MagicMock:
+    transaction = MagicMock()
+    transaction.__aenter__ = AsyncMock(return_value=None)
+    transaction.__aexit__ = AsyncMock(return_value=False)
+    return transaction
+
+
+@pytest.fixture
+def mock_session() -> MagicMock:
+    """Session double with the savepoint used by AuthService.provision_user."""
+    session = MagicMock()
+    session.begin_nested = MagicMock(side_effect=_nested_transaction)
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    return session
 
 
 @pytest.fixture
@@ -74,6 +92,7 @@ def auth_service(
     mock_user_repository: AsyncMock,
     jwt_service: JWTService,
     password_service: PasswordService,
+    mock_session: MagicMock,
 ) -> AuthService:
     """Create auth service with mocked repository."""
     return AuthService(
@@ -82,6 +101,7 @@ def auth_service(
         jwt_service=jwt_service,
         password_service=password_service,
         token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+        session=mock_session,
     )
 
 
@@ -97,6 +117,7 @@ def user_service(
         password_service=password_service,
         age_verification_service=AgeVerificationService(),
         token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+        identity_repository=AsyncMock(spec=UserIdentityRepository),
     )
 
 

@@ -14,6 +14,8 @@ from src.core.product import (
     ContentPolicyConfig,
     ContentRating,
     NowPaymentsConfig,
+    OAuthClientEnv,
+    OAuthProvider,
     PaymentProvider,
     ProductConfig,
     ProductRateLimits,
@@ -64,6 +66,13 @@ VEX_CONFIG = ProductConfig(
     nowpayments_config=NowPaymentsConfig(
         api_key_env="nowpayments_api_key_vex",
         ipn_secret_env="nowpayments_ipn_secret_vex",  # noqa: S106
+    ),
+    oauth_clients=(
+        OAuthClientEnv(
+            provider=OAuthProvider.GOOGLE,
+            client_id_env="google_oauth_client_id_vex",
+            client_secret_env="google_oauth_client_secret_vex",  # noqa: S106
+        ),
     ),
     rate_limits=ProductRateLimits(
         generation_per_user="120/hour",
@@ -126,6 +135,13 @@ SYNTHARA_CONFIG = ProductConfig(
         publishable_key_env="stripe_publishable_key_synthara",
     ),
     nowpayments_config=None,
+    oauth_clients=(
+        OAuthClientEnv(
+            provider=OAuthProvider.GOOGLE,
+            client_id_env="google_oauth_client_id_synthara",
+            client_secret_env="google_oauth_client_secret_synthara",  # noqa: S106
+        ),
+    ),
     rate_limits=ProductRateLimits(
         generation_per_user="300/hour",
         generation_per_user_burst="30/minute",

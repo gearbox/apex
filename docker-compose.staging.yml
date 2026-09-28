@@ -183,6 +183,18 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:?VAPID_PUBLIC_KEY is required for web-push}
       VAPID_SUBJECT: ${VAPID_SUBJECT:?VAPID_SUBJECT is required for web-push}
 
+      # --- OAuth sign-in (optional; see docs/CONFIGURATION.md "OAuth sign-in") ---
+      # A client id without its secret (or without API_PUBLIC_URL_<PRODUCT>)
+      # fails startup; leave all empty to disable Google sign-in.
+      APP_URL_VEX: ${APP_URL_VEX:-https://vex.pics}
+      APP_URL_SYNTHARA: ${APP_URL_SYNTHARA:-https://synthara.app}
+      API_PUBLIC_URL_VEX: ${API_PUBLIC_URL_VEX:-}
+      API_PUBLIC_URL_SYNTHARA: ${API_PUBLIC_URL_SYNTHARA:-}
+      GOOGLE_OAUTH_CLIENT_ID_VEX: ${GOOGLE_OAUTH_CLIENT_ID_VEX:-}
+      GOOGLE_OAUTH_CLIENT_SECRET_VEX: ${GOOGLE_OAUTH_CLIENT_SECRET_VEX:-}
+      GOOGLE_OAUTH_CLIENT_ID_SYNTHARA: ${GOOGLE_OAUTH_CLIENT_ID_SYNTHARA:-}
+      GOOGLE_OAUTH_CLIENT_SECRET_SYNTHARA: ${GOOGLE_OAUTH_CLIENT_SECRET_SYNTHARA:-}
+
       # --- NowPayments (optional; for crypto payments) ---
       NOWPAYMENTS_API_KEY_VEX: ${NOWPAYMENTS_API_KEY_VEX:?NOWPAYMENTS_API_KEY_VEX is required}
       NOWPAYMENTS_IPN_SECRET_VEX: ${NOWPAYMENTS_IPN_SECRET_VEX:?NOWPAYMENTS_IPN_SECRET_VEX is required}
