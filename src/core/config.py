@@ -871,7 +871,9 @@ class Settings(BaseSettings):
             "rejected by the access-token decoder), product-scoped, HttpOnly/Secure/"
             "SameSite=Lax/Path=/v1/content, and the content proxy still performs a full "
             "ownership check on every request — its blast radius is read access to the "
-            "bearer's own media on one product. clear_content_cookie on logout remains the "
+            "bearer's own media on one product, and for ADMIN/SUPERADMIN additionally the "
+            "assets referenced by that product's feedback reports (audit-logged, "
+            "GET /v1/content/feedback/{report_id}). clear_content_cookie on logout remains the "
             "revocation path."
         ),
     )
@@ -1587,6 +1589,10 @@ class Settings(BaseSettings):
     rate_limit_oauth_complete_signup: str = Field(
         default="5/hour",
         description="Rate limit for POST /v1/auth/oauth/complete-signup (parity with register).",
+    )
+    rate_limit_feedback: str = Field(
+        default="10/hour",
+        description="Feedback submission endpoint rate limit (POST /v1/feedback), per client IP.",
     )
 
     # -------------------------------------------------------------------------

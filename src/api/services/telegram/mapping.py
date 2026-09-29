@@ -11,6 +11,7 @@ from __future__ import annotations
 import msgspec
 
 from src.api.schemas.ops_events import (
+    FeedbackSubmittedOpsPayload,
     GenerationCreatedOpsPayload,
     GenerationFailedOpsPayload,
     GpuNodeStartedOpsPayload,
@@ -60,6 +61,8 @@ def map_ops_event(envelope: OpsEventEnvelope) -> OpsNotification | None:
         return _map_token_revocation_failed(envelope)
     if envelope.event_type is OpsEventType.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED:
         return _map_push_subscriptions_cleanup_failed(envelope)
+    if envelope.event_type is OpsEventType.FEEDBACK_SUBMITTED:
+        return _map_feedback_submitted(envelope)
     return None
 
 
@@ -179,6 +182,22 @@ def _map_push_subscriptions_cleanup_failed(envelope: OpsEventEnvelope) -> OpsNot
     )
     return OpsNotification(
         notification_class=NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
+        product_id=envelope.product_id,
+        text=text,
+    )
+
+
+def _map_feedback_submitted(envelope: OpsEventEnvelope) -> OpsNotification:
+    payload = msgspec.json.decode(envelope.payload, type=FeedbackSubmittedOpsPayload)
+    job_line = "" if payload.job_id is None else f"\njob <code>{escape(str(payload.job_id))}</code>"
+    text = (
+        f"{_tag(envelope.product_id)} 📨 <b>New feedback</b> · "
+        f"<code>{escape(payload.category)}</code>\n"
+        f"report <code>{escape(str(payload.report_id))}</code>\n"
+        f"user <code>{escape(str(payload.user_id))}</code>{job_line}"
+    )
+    return OpsNotification(
+        notification_class=NotificationClass.FEEDBACK_SUBMITTED,
         product_id=envelope.product_id,
         text=text,
     )

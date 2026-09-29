@@ -21,8 +21,10 @@ from litestar.testing import AsyncTestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from src.api.app import app as application
+from src.api.app import create_app
 from src.api.middleware.rate_limit import (
     MovingWindowRateLimiter,
+    build_rate_limit_config,
     get_rate_limiter_storage,
     init_rate_limiter,
 )
@@ -44,6 +46,7 @@ _TEST_SETTINGS = Settings(
     rate_limit_forgot_password="3/hour",
     rate_limit_resend_verification="3/hour",
     rate_limit_sse_ticket="10/minute",
+    rate_limit_feedback="10/hour",
     trusted_ip_header="x-forwarded-for",
     aisha_poller_enabled=False,
 )
@@ -141,3 +144,31 @@ class TestRateLimiterHealthyStorageUnaffected:
 
             response = await client.post("/v1/auth/register", json={}, headers=_PRODUCT_HEADERS)
         assert response.status_code == HTTP_429_TOO_MANY_REQUESTS
+
+
+class TestFeedbackRateLimit:
+    """Feedback C15 — the key matches the real route; the 11th request/hour is refused."""
+
+    def test_key_matches_the_real_route_path(self) -> None:
+        config = build_rate_limit_config(Settings())
+        assert config["POST /v1/feedback"] == "10/hour"
+        real = {
+            f"{method} {route.path}"
+            for route in create_app().routes
+            for handler in getattr(route, "route_handlers", [])
+            for method in handler.http_methods
+        }
+        assert "POST /v1/feedback" in real
+
+    @pytest.mark.asyncio
+    async def test_eleventh_request_per_hour_is_429(self, override_limiter: None) -> None:  # noqa: ARG002
+        """Counted before auth_guard, so unauthenticated attempts spend the budget too.
+        Alternating trailing-slash spellings share one bucket (no bypass)."""
+        async with AsyncTestClient(app=application) as client:
+            for i in range(10):
+                path = "/v1/feedback/" if i % 2 else "/v1/feedback"
+                response = await client.post(path, json={}, headers=_PRODUCT_HEADERS)
+                assert response.status_code != HTTP_429_TOO_MANY_REQUESTS
+            response = await client.post("/v1/feedback/", json={}, headers=_PRODUCT_HEADERS)
+        assert response.status_code == HTTP_429_TOO_MANY_REQUESTS
+        assert response.headers["x-ratelimit-limit"] == "10"

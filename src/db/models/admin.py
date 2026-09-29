@@ -45,10 +45,11 @@ class AdminPermissionGrant(Base):
 
 
 class AdminAuditLog(Base):
-    """Append-only audit log for admin role and permission changes.
+    """Append-only audit log for admin role and permission changes, and content views.
 
-    Covers: role grants/revokes, permission grants/revokes.
-    Written by both API and CLI paths.
+    Covers: role grants/revokes, permission grants/revokes, and an admin
+    viewing a user's asset via a feedback report (``feedback.asset.view``;
+    ``detail`` carries IDs only). Written by both API and CLI paths.
     """
 
     __tablename__ = "admin_audit_log"
@@ -60,10 +61,14 @@ class AdminAuditLog(Base):
         ForeignKey("users.id"),
         nullable=False,
     )
-    # Who was affected
+    # Who was affected. NULL when not user-specific or after the user is purged.
     target_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("users.id"),
+        ForeignKey(
+            "users.id",
+            name="fk_admin_audit_log_target_user_id",
+            ondelete="SET NULL",
+        ),
         nullable=True,
     )
     product_id: Mapped[str] = mapped_column(String(32), nullable=False)

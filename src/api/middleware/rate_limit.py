@@ -179,6 +179,7 @@ def build_rate_limit_config(settings: Settings) -> dict[str, str]:
         "POST /v1/auth/resend-verification": settings.rate_limit_resend_verification,
         "POST /v1/auth/content-cookie": settings.rate_limit_content_cookie,
         "POST /v1/events/sse-ticket": settings.rate_limit_sse_ticket,
+        "POST /v1/feedback": settings.rate_limit_feedback,
     }
 
 
@@ -210,7 +211,10 @@ class RateLimitMiddleware(MiddlewareProtocol):
 
         request: Request[Any, Any, Any] = Request(scope)
         method = request.method
-        path = request.url.path
+        # Litestar routes "/x" and "/x/" to the same handler, so normalise
+        # before the exact-match lookup — otherwise a trailing slash would
+        # bypass the limit (and alternating spellings would double the budget).
+        path = request.url.path.rstrip("/") or "/"
         route_key = f"{method} {path}"
 
         limit_item = self.route_limits.get(route_key)

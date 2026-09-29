@@ -65,7 +65,8 @@ The backend serves two distinct products from the same codebase:
 │   │   │   ├── health.py       # HealthController: GET /health/live, /health/ready
 │   │   │   │                   # AdminHealthController: GET /v1/admin/health/
 │   │   │   │                   #   GET /v1/admin/health/stream (SSE), GET /v1/admin/health/history
-│   │   │   ├── content.py      # ContentProxyController: GET /v1/content/outputs/{id}, /uploads/{id}
+│   │   │   ├── content.py      # ContentProxyController: GET /v1/content/outputs/{id}, /uploads/{id},
+│   │   │   │                   #   /feedback/{report_id} (admin-only, no-store, audit-logged)
 │   │   │   ├── storage.py      # StorageController: upload, single-item access/download, stats
 │   │   │   ├── library.py      # LibraryController: GET /v1/library/, /assets/{asset_ref}[/lineage],
 │   │   │   │                   #   /groups/{job_id}; PATCH/PUT/DELETE favorite/delete; POST assets/bulk
@@ -75,6 +76,10 @@ The backend serves two distinct products from the same codebase:
 │   │   │   │                   #   POST /exchange, /signup-info, /complete-signup (unguarded)
 │   │   │   ├── legal.py        # LegalController: GET /v1/legal/documents/{doc_type}, /current (public);
 │   │   │   │                   #   GET /status, POST /acceptances (auth; acceptances is legal-exempt)
+│   │   │   ├── feedback.py     # FeedbackController: POST /v1/feedback (legal-exempt, IP rate-limited;
+│   │   │   │                   #   commits, then publishes ops.feedback.submitted — IDs only)
+│   │   │   ├── admin_feedback.py  # AdminFeedbackController: GET /v1/admin/feedback[/{id}], PATCH /{id}
+│   │   │   │                   #   (product-scoped triage: open → in_progress → resolved | dismissed)
 │   │   │   └── push.py         # PushController: GET /v1/push/vapid-public-key
 │   │   │                       #   POST/DELETE /v1/push/subscriptions
 │   │   ├── schemas/            # msgspec.Struct request/response DTOs
@@ -82,6 +87,7 @@ The backend serves two distinct products from the same codebase:
 │   │   │   │                   #   LibraryProject*, LibraryTag*, BulkOperation (tagged union)
 │   │   │   ├── legal.py        # LegalDocumentResponse/Meta, LegalCurrentResponse, LegalStatusResponse,
 │   │   │   │                   #   LegalAcceptanceRequest (AcceptedDocument lives in services/legal/acceptance.py)
+│   │   │   ├── feedback.py     # FeedbackCreate, FeedbackCreated, FeedbackReportAdmin, FeedbackAdminPatch
 │   │   │   └── push.py         # PushSubscriptionRequest/Response, PushNotificationPayload (wire contract)
 │   │   ├── security/           # Guards, JWT, password hashing
 │   │   │   ├── guards.py       # auth_guard, optional_auth_guard (validates product_id JWT claim)
@@ -117,6 +123,8 @@ The backend serves two distinct products from the same codebase:
 │   │       ├── payment.py      # PaymentService (per-product Stripe/NowPayments keys)
 │   │       ├── organization.py # OrganizationService (teams; requires "organizations" feature flag)
 │   │       ├── moderation.py   # Provider-specific moderation detectors
+│   │       ├── feedback.py     # FeedbackService — submit (ownership-checked context, commit-free),
+│   │       │                   #   publish_submitted (post-commit), admin list/get/update (FOR UPDATE)
 │   │       ├── push.py         # PushService — upsert/delete/send; WebPushSender protocol + PywebpushSender
 │   │       ├── push_mapping.py # map_event_to_notification() — pure EventEnvelope -> PushNotificationPayload | None
 │   │       ├── legal/          # Versioned legal documents + acceptance (see Key Convention 14)
@@ -143,6 +151,7 @@ The backend serves two distinct products from the same codebase:
 │   │   │   ├── health.py       # HealthSnapshot — persisted health check results
 │   │   │   ├── push_subscription.py  # PushSubscription — Web Push endpoint + keys
 │   │   │   ├── legal.py        # LegalAcceptance — append-only accept/withdraw events
+│   │   │   ├── feedback.py     # FeedbackReport — in-product problem reports (no FK on asset ref)
 │   │   │   └── library.py      # LibraryAssetMetadata (favorite/title/project_id, polymorphic asset_type+asset_id),
 │   │   │                       #   LibraryProject, LibraryTag, LibraryAssetTag (many-to-many join)
 │   │   ├── repositories/
@@ -157,7 +166,8 @@ The backend serves two distinct products from the same codebase:
 │   │   │   │                   #   lineage walks, metadata upsert/purge (both branches product_id-scoped by construction)
 │   │   │   ├── library_project.py  # LibraryProjectRepository
 │   │   │   ├── library_tag.py      # LibraryTagRepository — CRUD + batched tag lookups + bulk add/remove
-│   │   │   └── legal.py        # LegalAcceptanceRepository — insert-only add_many + latest_per_type (no update/delete)
+│   │   │   ├── legal.py        # LegalAcceptanceRepository — insert-only add_many + latest_per_type (no update/delete)
+│   │   │   └── feedback.py     # FeedbackReportRepository — add, list_page (keyset + email join), get_for_update
 │   │   └── session.py          # DatabaseManager, async session factory
 │   └── main.py                 # Granian entrypoint
 ├── config/
@@ -257,6 +267,8 @@ dependencies = {
     "legal_registry": Provide(get_legal_registry, sync_to_thread=False),
     "legal_acceptance_service": Provide(get_legal_acceptance_service, sync_to_thread=False),
     "request_context": Provide(provide_request_context, sync_to_thread=False),
+    # In-product problem reports (request-scoped, commit-free)
+    "feedback_service": Provide(get_feedback_service, sync_to_thread=False),
 }
 ```
 
@@ -392,6 +404,7 @@ make format                       # ruff format
 | `LibraryTag` | `library_tags` | User-created tag; name unique case-insensitively per owner |
 | `LibraryAssetTag` | `library_asset_tags` | Many-to-many join: one asset tagged with one tag; polymorphic like `LibraryAssetMetadata`; `ON DELETE CASCADE` from `LibraryTag` |
 | `UserIdentity` | `user_identities` | OAuth subject link: `(product_id, provider, subject)` unique, one per `(user_id, provider)`; no email stored; deleted on self-closure, kept on admin deactivation |
+| `FeedbackReport` | `feedback_reports` | In-product problem report: category/status (`open → in_progress → resolved \| dismissed`, terminal-once `resolved_at`/`resolved_by`), user text, optional `job_id` + polymorphic asset ref (no FK); `user_id`/`job_id`/`resolved_by` `ON DELETE SET NULL` so reports survive purges. Contract: `docs/contracts/feedback-contract.md` |
 | `LegalAcceptance` | `legal_acceptances` | Append-only legal events: one row per ACCEPT/WITHDRAW of one document version (`content_sha256`, IP, UA, source); CHECK: ACCEPT requires a hash; `ON DELETE CASCADE` from `users` only |
 
 ---

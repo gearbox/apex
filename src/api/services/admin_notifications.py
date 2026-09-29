@@ -62,6 +62,9 @@ _CATALOG_DESCRIPTIONS: dict[NotificationClass, str] = {
         "A bulk-revocation event's push-subscription cleanup failed — a user's "
         "devices that should have been unsubscribed may still receive push notifications."
     ),
+    NotificationClass.FEEDBACK_SUBMITTED: (
+        "A user submitted a feedback / problem report on your product."
+    ),
 }
 # Fail at import time, not at GET /v1/admin/notifications/classes request
 # time: get_class_catalog() indexes this dict by every NotificationClass
