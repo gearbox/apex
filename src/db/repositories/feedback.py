@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import literal, select, tuple_
+from sqlalchemy import Select, literal, select, tuple_
 
 from src.db.models.feedback import FeedbackReport
 from src.db.models.user import User
@@ -70,6 +70,19 @@ class FeedbackReportRepository:
         )
         return result.tuples().all()
 
+    @staticmethod
+    def _select_with_email(report_id: UUID, product_id: str) -> Select[tuple[FeedbackReport, str]]:
+        """One report + the reporter's email (``None`` once the user is purged).
+
+        Typed ``str`` because ``User.email`` is non-null; the outer join yields
+        ``None`` at runtime, which callers' ``str | None`` return types cover.
+        """
+        return (
+            select(FeedbackReport, User.email)
+            .outerjoin(User, User.id == FeedbackReport.user_id)
+            .where(FeedbackReport.id == report_id, FeedbackReport.product_id == product_id)
+        )
+
     async def get_with_email(
         self,
         report_id: UUID,
@@ -77,23 +90,22 @@ class FeedbackReportRepository:
         product_id: str,
     ) -> tuple[FeedbackReport, str | None] | None:
         """Fetch one report with the reporter's email (``None`` once the user is purged)."""
-        result = await self._session.execute(
-            select(FeedbackReport, User.email)
-            .outerjoin(User, User.id == FeedbackReport.user_id)
-            .where(FeedbackReport.id == report_id, FeedbackReport.product_id == product_id)
-        )
+        result = await self._session.execute(self._select_with_email(report_id, product_id))
         return result.tuples().one_or_none()
 
-    async def get_for_update(self, report_id: UUID, *, product_id: str) -> FeedbackReport | None:
-        """Fetch one report under a row lock (``SELECT … FOR UPDATE``).
+    async def get_for_update(
+        self, report_id: UUID, *, product_id: str
+    ) -> tuple[FeedbackReport, str | None] | None:
+        """Fetch one report and its reporter's email, locking only the report row.
 
-        ``populate_existing`` so a row already in the identity map is
-        refreshed with the post-lock state rather than served stale.
+        ``FOR UPDATE OF feedback_reports``: Postgres rejects FOR UPDATE on the
+        nullable side of an outer join, and the users row must not be locked.
+        ``populate_existing`` so a row already in the identity map is refreshed
+        with the post-lock state rather than served stale.
         """
         result = await self._session.execute(
-            select(FeedbackReport)
-            .where(FeedbackReport.id == report_id, FeedbackReport.product_id == product_id)
-            .with_for_update()
+            self._select_with_email(report_id, product_id)
+            .with_for_update(of=FeedbackReport)
             .execution_options(populate_existing=True)
         )
-        return result.scalar_one_or_none()
+        return result.tuples().one_or_none()

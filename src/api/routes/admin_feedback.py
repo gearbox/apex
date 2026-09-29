@@ -31,6 +31,7 @@ from src.api.services.feedback import (
     FeedbackNotFoundError,
     FeedbackService,
     InvalidFeedbackTransitionError,
+    to_admin_view,
 )
 from src.core.enums import FeedbackCategory, FeedbackStatus
 from src.db.models import User
@@ -132,7 +133,7 @@ class AdminFeedbackController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
         try:
-            await feedback_service.update_by_admin(
+            report, email = await feedback_service.update_by_admin(
                 report_id, product_id=product_id, admin_id=admin.id, patch=data
             )
         except FeedbackNotFoundError:
@@ -147,7 +148,6 @@ class AdminFeedbackController(Controller):
                 ),
                 status_code=HTTP_409_CONFLICT,
             )
+        # A failed commit propagates (500, rolled back): see review r2 D3.
         await session.commit()
-        return Response(
-            content=await feedback_service.get_for_admin(report_id, product_id=product_id)
-        )
+        return Response(content=to_admin_view(report, email))

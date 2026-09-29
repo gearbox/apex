@@ -470,7 +470,7 @@ class TestUpdateByAdmin:
         resolved_at = datetime(2026, 1, 1, tzinfo=UTC) if current.is_terminal else None
         report = _report(status=current.value, resolved_at=resolved_at)
         service._repo = MagicMock()
-        service._repo.get_for_update = AsyncMock(return_value=report)
+        service._repo.get_for_update = AsyncMock(return_value=(report, None))
         admin_id = uuid4()
 
         call = service.update_by_admin(
@@ -487,8 +487,9 @@ class TestUpdateByAdmin:
             assert report.resolved_at == resolved_at
             return
 
-        result = await call
+        result, email = await call
         assert result is report
+        assert email is None
         assert report.status == target.value
         if target.is_terminal:
             assert report.resolved_at is not None
@@ -505,7 +506,7 @@ class TestUpdateByAdmin:
             status=FeedbackStatus.RESOLVED.value, resolved_at=resolved_at, resolved_by=resolver
         )
         service._repo = MagicMock()
-        service._repo.get_for_update = AsyncMock(return_value=report)
+        service._repo.get_for_update = AsyncMock(return_value=(report, None))
 
         await service.update_by_admin(
             report.id,
@@ -518,11 +519,23 @@ class TestUpdateByAdmin:
         assert report.resolved_at == resolved_at
         assert report.resolved_by == resolver
 
+    async def test_returns_reporter_email(self) -> None:
+        service, _session, _bus = _service()
+        report = _report()
+        service._repo = MagicMock()
+        service._repo.get_for_update = AsyncMock(return_value=(report, "a@example.com"))
+
+        result, email = await service.update_by_admin(
+            report.id, product_id="vex", admin_id=uuid4(), patch=FeedbackAdminPatch(admin_note="n")
+        )
+        assert result is report
+        assert email == "a@example.com"
+
     async def test_null_note_clears(self) -> None:
         service, _session, _bus = _service()
         report = _report(admin_note="old")
         service._repo = MagicMock()
-        service._repo.get_for_update = AsyncMock(return_value=report)
+        service._repo.get_for_update = AsyncMock(return_value=(report, None))
 
         await service.update_by_admin(
             report.id, product_id="vex", admin_id=uuid4(), patch=FeedbackAdminPatch(admin_note=None)
@@ -645,7 +658,7 @@ class TestNoUserTextInLogs:
                 user_agent=SECRET_UA,
             )
             service._repo = MagicMock()
-            service._repo.get_for_update = AsyncMock(return_value=report)
+            service._repo.get_for_update = AsyncMock(return_value=(report, None))
             await service.update_by_admin(
                 report.id,
                 product_id="vex",

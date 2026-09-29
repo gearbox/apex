@@ -22,6 +22,7 @@ from litestar import Litestar
 from litestar.datastructures import State
 from litestar.di import Provide
 from litestar.testing import TestClient
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.app import legal_acceptance_required_handler
@@ -39,6 +40,7 @@ from src.api.services.feedback import (
     InvalidFeedbackContextError,
     InvalidFeedbackMessageError,
     InvalidFeedbackTransitionError,
+    to_admin_view,
 )
 from src.api.services.legal.errors import LegalAcceptanceRequiredError
 from src.api.services.token_revocation import TokenRevocationService
@@ -287,36 +289,55 @@ class TestAdminRoutes:
         service.update_by_admin.assert_not_awaited()
         session.commit.assert_not_awaited()
 
-    async def test_patch_commits_then_rereads(self) -> None:
-        view = _view()
+    async def test_patch_commits_and_maps_locked_row(self) -> None:
+        report = _report()
+        email = "reporter@example.com"
         admin = MagicMock()
         admin.id = uuid4()
         session = MagicMock()
         session.commit = AsyncMock()
         service = MagicMock()
-        service.update_by_admin = AsyncMock()
-        service.get_for_admin = AsyncMock(return_value=view)
+        service.update_by_admin = AsyncMock(return_value=(report, email))
+        service.get_for_admin = AsyncMock()
         order = MagicMock()
         order.attach_mock(service.update_by_admin, "update")
         order.attach_mock(session.commit, "commit")
-        order.attach_mock(service.get_for_admin, "reread")
         patch_ = FeedbackAdminPatch(status=FeedbackStatus.RESOLVED)
 
         response = await _update(
             MagicMock(),
             admin=admin,
             product_id="vex",
-            report_id=view.id,
+            report_id=report.id,
             data=patch_,
             session=session,
             feedback_service=service,
         )
 
-        assert [name for name, _a, _k in order.mock_calls] == ["update", "commit", "reread"]
+        assert [name for name, _a, _k in order.mock_calls] == ["update", "commit"]
         service.update_by_admin.assert_awaited_once_with(
-            view.id, product_id="vex", admin_id=admin.id, patch=patch_
+            report.id, product_id="vex", admin_id=admin.id, patch=patch_
         )
-        assert response.content is view
+        service.get_for_admin.assert_not_awaited()
+        assert response.content == to_admin_view(report, email)
+
+    async def test_patch_commit_failure_propagates(self) -> None:
+        """Review r2 D3 — a failed commit is not swallowed or mapped to a 4xx."""
+        session = MagicMock()
+        session.commit = AsyncMock(side_effect=DBAPIError("COMMIT", None, Exception("boom")))
+        service = MagicMock()
+        service.update_by_admin = AsyncMock(return_value=(_report(), None))
+
+        with pytest.raises(DBAPIError):
+            await _update(
+                MagicMock(),
+                admin=MagicMock(),
+                product_id="vex",
+                report_id=uuid4(),
+                data=FeedbackAdminPatch(admin_note="n"),
+                session=session,
+                feedback_service=service,
+            )
 
     @pytest.mark.parametrize(
         ("exc", "status", "error"),

@@ -246,7 +246,7 @@ class FeedbackService:
         product_id: str,
         admin_id: UUID,
         patch: FeedbackAdminPatch,
-    ) -> FeedbackReport:
+    ) -> tuple[FeedbackReport, str | None]:
         """Lock the row, validate the transition, stage the change. Does NOT commit.
 
         ``resolved_at``/``resolved_by`` are written exactly once: only on the
@@ -254,17 +254,20 @@ class FeedbackService:
         outgoing transitions. The row lock serialises concurrent PATCHes, so
         the loser re-reads the terminal status and gets a 409.
 
-        Returns the staged row; the caller commits and then re-reads it via
-        ``get_for_admin`` (``updated_at`` is server-generated at flush time).
+        Returns the staged row and the reporter's email. The caller commits and
+        then maps with ``to_admin_view``. ``updated_at`` is fetched by
+        ``RETURNING`` at flush (``eager_defaults``), so the object is current
+        after the commit without a re-read.
 
         Raises:
             FeedbackNotFoundError: No such report in ``product_id``.
             InvalidFeedbackTransitionError: ``patch.status`` is not reachable
                 from the current status (including the current status itself).
         """
-        report = await self._repo.get_for_update(report_id, product_id=product_id)
-        if report is None:
+        row = await self._repo.get_for_update(report_id, product_id=product_id)
+        if row is None:
             raise FeedbackNotFoundError
+        report, email = row
 
         if patch.status is not msgspec.UNSET:
             current = FeedbackStatus(report.status)
@@ -285,7 +288,7 @@ class FeedbackService:
             admin_id=str(admin_id),
             product_id=product_id,
         )
-        return report
+        return report, email
 
 
 def to_admin_view(report: FeedbackReport, user_email: str | None) -> FeedbackReportAdmin:

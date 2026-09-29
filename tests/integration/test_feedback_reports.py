@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -31,7 +32,7 @@ from alembic.runtime.migration import MigrationContext
 from litestar import Litestar
 from litestar.datastructures import State
 from litestar.di import Provide
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -656,6 +657,60 @@ class TestAdminTriage:
         assert bad_cursor.json()["error"] == "invalid_cursor"
         assert bad_filter.status_code == 400
 
+    async def test_patch_succeeds_when_reporter_was_purged(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """Review r2 T4 — pins D1: FOR UPDATE must be ``OF`` the report on the outer join."""
+        api = Api(db_session)
+        admin = await _user(make_user, admin=True)
+        report = _report(None)
+        await _insert(db_session, report)
+
+        async with api.client() as client:
+            resp = await client.patch(
+                f"/v1/admin/feedback/{report.id}",
+                json={"status": "in_progress"},
+                headers=api.headers(admin),
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["user_email"] is None
+        assert body["user_id"] is None
+        assert body["status"] == "in_progress"
+
+    async def test_note_only_patch_keeps_resolution_and_advances_updated_at(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """Review r2 T5 — a note-only PATCH touches neither status nor resolved_*."""
+        api = Api(db_session)
+        admin = await _user(make_user, admin=True)
+        past = datetime.now(UTC) - timedelta(days=1)
+        report = _report(
+            await _user(make_user),
+            status=FeedbackStatus.RESOLVED.value,
+            resolved_at=past,
+            resolved_by=admin.id,
+            created_at=past,
+            updated_at=past,
+        )
+        await _insert(db_session, report)
+
+        async with api.client() as client:
+            resp = await client.patch(
+                f"/v1/admin/feedback/{report.id}",
+                json={"admin_note": "followed up"},
+                headers=api.headers(admin),
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["admin_note"] == "followed up"
+        assert body["status"] == "resolved"
+        assert body["resolved_by"] == str(admin.id)
+        assert datetime.fromisoformat(body["resolved_at"]) == past
+        assert datetime.fromisoformat(body["updated_at"]) > past
+
 
 # ---------------------------------------------------------------------------
 # C11 — terminal-once under concurrency (committed rows, two sessions)
@@ -748,6 +803,98 @@ class TestConcurrentTerminalTransition:
             assert row.resolved_at is not None
         finally:
             await _purge(db_engine, report.id, [reporter.id, admin_a.id, admin_b.id])
+
+
+# ---------------------------------------------------------------------------
+# Review r2 — PATCH serves the locked row (committed rows, fresh-session read-back)
+# ---------------------------------------------------------------------------
+
+
+class TestPatchServesLockedRow:
+    async def _seed(self, engine: AsyncEngine) -> tuple[User, User, FeedbackReport]:
+        reporter = User(
+            id=new_id(), email=f"fb-rep-{new_id()}@example.com", password_hash="h", product_id="vex"
+        )
+        admin = User(
+            id=new_id(),
+            email=f"fb-adm-{new_id()}@example.com",
+            password_hash="h",
+            product_id="vex",
+            role=UserRole.ADMIN,
+        )
+        past = datetime.now(UTC) - timedelta(days=1)
+        report = _report(reporter, created_at=past, updated_at=past)
+        await _commit(engine, reporter, admin, report)
+        return reporter, admin, report
+
+    async def test_response_matches_committed_row(self, db_engine: AsyncEngine) -> None:
+        """T2 — the RETURNING-populated object is what gets served."""
+        reporter, admin, report = await self._seed(db_engine)
+        pre_patch_updated_at = report.updated_at
+        try:
+            async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+                api = Api(session)
+                async with api.client() as client:
+                    resp = await client.patch(
+                        f"/v1/admin/feedback/{report.id}",
+                        json={"status": "resolved"},
+                        headers=api.headers(admin),
+                    )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+
+            async with AsyncSession(bind=db_engine) as reader:
+                row = (
+                    await reader.execute(
+                        select(FeedbackReport).where(FeedbackReport.id == report.id)
+                    )
+                ).scalar_one()
+            assert body["status"] == "resolved"
+            assert body["resolved_by"] == str(admin.id)
+            assert datetime.fromisoformat(body["resolved_at"]) == row.resolved_at
+            assert body["user_email"] == reporter.email
+            served_updated_at = datetime.fromisoformat(body["updated_at"])
+            assert served_updated_at > pre_patch_updated_at
+            assert served_updated_at == row.updated_at
+        finally:
+            await _purge(db_engine, report.id, [reporter.id, admin.id])
+
+    async def test_statement_budget(self, db_engine: AsyncEngine) -> None:
+        """T3 — one locking SELECT and one UPDATE touch feedback_reports; no re-read."""
+        reporter, admin, report = await self._seed(db_engine)
+        statements: list[str] = []
+
+        def _record(_conn: Any, _cursor: Any, statement: str, *_args: Any, **_kwargs: Any) -> None:
+            statements.append(" ".join(statement.split()))
+
+        try:
+            async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+                api = Api(session)
+                headers = api.headers(admin)
+                async with api.client() as client:
+                    event.listen(db_engine.sync_engine, "before_cursor_execute", _record)
+                    try:
+                        resp = await client.patch(
+                            f"/v1/admin/feedback/{report.id}",
+                            json={"status": "resolved"},
+                            headers=headers,
+                        )
+                    finally:
+                        event.remove(db_engine.sync_engine, "before_cursor_execute", _record)
+            assert resp.status_code == 200, resp.text
+
+            touching = [
+                st for st in statements if re.search(r"\bfeedback_reports\b", st, re.IGNORECASE)
+            ]
+            selects = [st for st in touching if st.upper().startswith("SELECT")]
+            updates = [st for st in touching if st.upper().startswith("UPDATE")]
+            assert len(touching) == 2, touching
+            assert len(selects) == 1
+            assert re.search(r"FOR UPDATE OF feedback_reports\b", selects[0])
+            assert len(updates) == 1
+            assert updates[0].startswith("UPDATE feedback_reports")
+        finally:
+            await _purge(db_engine, report.id, [reporter.id, admin.id])
 
 
 # ---------------------------------------------------------------------------
