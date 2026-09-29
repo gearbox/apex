@@ -61,10 +61,14 @@ class AdminAuditLog(Base):
         ForeignKey("users.id"),
         nullable=False,
     )
-    # Who was affected
+    # Who was affected. NULL when not user-specific or after the user is purged.
     target_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("users.id"),
+        ForeignKey(
+            "users.id",
+            name="fk_admin_audit_log_target_user_id",
+            ondelete="SET NULL",
+        ),
         nullable=True,
     )
     product_id: Mapped[str] = mapped_column(String(32), nullable=False)

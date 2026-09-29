@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from structlog.testing import capture_logs
 
 from src.api.routes.content import _is_view_start
 from src.api.services.feedback import (
@@ -165,24 +164,20 @@ class TestRecordAssetView:
         assert entry.detail == f"report {target.report_id} asset output:{target.asset_id}"
         session.commit.assert_not_awaited()
 
-    async def test_log_event_carries_ids_only(self) -> None:
-        """T11 — no message, note, path or UA in the captured events."""
+    async def test_does_not_log_before_the_caller_commits(self) -> None:
+        """The stream-opening caller logs only after its commit succeeds."""
         report = _report(asset_source="output", asset_id=uuid4())
         service, _ = _service(report)
 
-        with capture_logs() as logs, patch(f"{_MODULE}.AdminRepository") as repo_cls:
+        with (
+            patch(f"{_MODULE}.logger") as service_logger,
+            patch(f"{_MODULE}.AdminRepository") as repo_cls,
+        ):
             repo_cls.return_value.write_audit = AsyncMock()
             target = await service.get_asset_target_for_admin(report.id, product_id="vex")
             await service.record_asset_view(target, admin_id=uuid4(), product_id="vex")
 
-        viewed = next(e for e in logs if e["event"] == "content.feedback_asset.viewed")
-        assert set(viewed) - {"event", "log_level"} == {
-            "report_id",
-            "asset_ref",
-            "admin_id",
-            "owner_id",
-            "product_id",
-        }
-        rendered = repr(logs) + repr(repo_cls.return_value.write_audit.await_args)
+        service_logger.info.assert_not_called()
+        rendered = repr(repo_cls.return_value.write_audit.await_args)
         for secret in (SECRET_MESSAGE, "4242", SECRET_PATH, SECRET_UA, SECRET_NOTE):
             assert secret not in rendered

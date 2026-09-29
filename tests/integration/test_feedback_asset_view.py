@@ -12,16 +12,19 @@ A5 (``asset_url``), A6 (error codes), T8 (owner routes unchanged).
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 from litestar import Litestar
 from litestar.datastructures import State
 from litestar.di import Provide
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 
 from src.api.dependencies.common import get_product_config, get_product_id
 from src.api.middleware.product import ProductMiddleware
@@ -31,23 +34,26 @@ from src.api.security import JWTConfig, JWTService
 from src.api.services.content_proxy import ContentProxyService
 from src.api.services.feedback import FeedbackService
 from src.api.services.media import FEEDBACK_ASSET_PATH
+from src.api.services.storage.exceptions import StorageError, StorageRangeNotSatisfiableError
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import get_settings
 from src.core.enums import FeedbackCategory, FeedbackStatus, UserRole
 from src.core.uid import new_id
 from src.db.models.admin import AdminAuditLog
 from src.db.models.feedback import FeedbackReport
+from src.db.models.user import User
 from src.db.repositories.output import OutputRepository
 from tests.integration.test_content_range_streaming import PAYLOAD, _StubR2
 from tests.legal_support import make_legal_registry
 
 if TYPE_CHECKING:
     import contextlib
+    from collections.abc import AsyncIterator
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.api.services.storage.r2 import ObjectStream
     from src.db.models.storage import GenerationOutput
-    from src.db.models.user import User
     from tests.integration.conftest import JobFactory, UserFactory, UserImageFactory
 
 JWT_SECRET = "integration-feedback-asset-secret-key-32b"
@@ -388,6 +394,136 @@ class TestAudit:
             assert row.detail == f"report {report.id} asset output:{output.id}"
             assert MESSAGE not in row.detail
             assert CLIENT_PATH not in row.detail
+
+    async def test_open_failures_and_304_are_not_audited(
+        self, db_session: AsyncSession, make_user: UserFactory, make_job: JobFactory
+    ) -> None:
+        """Only a successfully opened R2 stream starts an auditable view."""
+        api = Api(db_session)
+        admin, reporter = await _user(make_user, admin=True), await _user(make_user)
+        report, output = await _reported_output(api, make_job, reporter)
+        headers = api.bearer(admin)
+
+        @asynccontextmanager
+        async def storage_failure(
+            _key: str, *, range_header: str | None = None
+        ) -> AsyncIterator[ObjectStream]:
+            del range_header
+            raise StorageError("R2 unavailable")
+            yield  # pragma: no cover - makes this an async generator
+
+        api.r2.stream_object = storage_failure  # type: ignore[method-assign]
+        with patch("src.api.routes.content.logger") as route_logger:
+            async with api.client() as client:
+                failed = await client.get(_url(report), headers=headers)
+                not_modified = await client.get(
+                    _url(report), headers={**headers, "If-None-Match": f'"{output.id}"'}
+                )
+
+        assert failed.status_code == 502
+        assert not_modified.status_code == 304
+        assert await _audit_rows(db_session) == []
+        route_logger.info.assert_not_called()
+
+    async def test_stale_size_r2_range_rejection_is_not_audited(
+        self, db_session: AsyncSession, make_user: UserFactory, make_job: JobFactory
+    ) -> None:
+        api = Api(db_session)
+        admin, reporter = await _user(make_user, admin=True), await _user(make_user)
+        report, _ = await _reported_output(api, make_job, reporter)
+
+        @asynccontextmanager
+        async def range_failure(
+            _key: str, *, range_header: str | None = None
+        ) -> AsyncIterator[ObjectStream]:
+            del range_header
+            raise StorageRangeNotSatisfiableError("stale size")
+            yield  # pragma: no cover - makes this an async generator
+
+        api.r2.stream_object = range_failure  # type: ignore[method-assign]
+        async with api.client() as client:
+            response = await client.get(
+                _url(report), headers={**api.bearer(admin), "Range": "bytes=0-99"}
+            )
+
+        assert response.status_code == 416
+        assert await _audit_rows(db_session) == []
+
+    async def test_reporter_purge_keeps_view_audit_and_nulls_its_target(
+        self, db_session: AsyncSession, make_user: UserFactory, make_job: JobFactory
+    ) -> None:
+        """The view trail survives reporter erasure while its personal target does not."""
+        api = Api(db_session)
+        admin, reporter = await _user(make_user, admin=True), await _user(make_user)
+        report, _ = await _reported_output(api, make_job, reporter)
+
+        async with api.client() as client:
+            response = await client.get(_url(report), headers=api.bearer(admin))
+        assert response.status_code == 200
+        audit = (await _audit_rows(db_session))[0]
+        audit_id, report_id, admin_id = audit.id, report.id, admin.id
+
+        await db_session.execute(delete(User).where(User.id == reporter.id))
+        await db_session.flush()
+        db_session.expire_all()
+
+        surviving_audit = await db_session.get(AdminAuditLog, audit_id)
+        surviving_report = await db_session.get(FeedbackReport, report_id)
+        assert surviving_audit is not None
+        assert surviving_audit.target_user_id is None
+        assert surviving_audit.actor_id == admin_id
+        assert surviving_report is not None
+        assert surviving_report.user_id is None
+
+    async def test_target_purge_nulls_a_preexisting_role_audit_row(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """The migration also fixes the pre-existing role/permission audit trap."""
+        actor, target = await _user(make_user, admin=True), await _user(make_user)
+        audit = AdminAuditLog(
+            id=new_id(),
+            actor_id=actor.id,
+            target_user_id=target.id,
+            product_id="vex",
+            action="role.grant",
+            detail="role changed from user to admin",
+            source="api",
+        )
+        db_session.add(audit)
+        await db_session.flush()
+        audit_id, actor_id = audit.id, actor.id
+
+        await db_session.execute(delete(User).where(User.id == target.id))
+        await db_session.flush()
+        db_session.expire_all()
+
+        surviving_audit = await db_session.get(AdminAuditLog, audit_id)
+        assert surviving_audit is not None
+        assert surviving_audit.target_user_id is None
+        assert surviving_audit.actor_id == actor_id
+
+    async def test_actor_purge_remains_blocked_by_audit_rows(
+        self, db_session: AsyncSession, make_user: UserFactory
+    ) -> None:
+        """Actor deletion stays deliberate: accountability rows retain their actor FK."""
+        actor, target = await _user(make_user, admin=True), await _user(make_user)
+        db_session.add(
+            AdminAuditLog(
+                id=new_id(),
+                actor_id=actor.id,
+                target_user_id=target.id,
+                product_id="vex",
+                action="role.grant",
+                detail="role changed from user to admin",
+                source="api",
+            )
+        )
+        await db_session.flush()
+
+        with pytest.raises(IntegrityError):
+            await db_session.execute(delete(User).where(User.id == actor.id))
+            await db_session.flush()
+        await db_session.rollback()
 
 
 class TestOwnerRoutesUnchanged:

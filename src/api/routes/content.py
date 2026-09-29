@@ -37,6 +37,7 @@ media send `private, no-store` so an admin device never keeps them in HTTP cache
 from __future__ import annotations
 
 import sys
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -235,10 +236,11 @@ class ContentProxyController(Controller):
         """Stream the asset a feedback report points at — ADMIN/SUPERADMIN, report-scoped.
 
         Order is security-relevant: admin role (dependency) → report, scoped to
-        the request's product → *owner-scoped* resolve as the reporter → audit
-        → stream. Nothing touches R2 before every check has passed, and the
-        audit row is committed before the response starts streaming (the
-        session must not be relied on once the body is being yielded).
+        the request's product → *owner-scoped* resolve as the reporter → open
+        R2 stream → audit (commit) → stream body. Nothing touches R2 before
+        every check has passed, and the audit row is committed before the
+        response starts streaming (the session must not be relied on once the
+        body is being yielded).
         """
         try:
             target = await feedback_service.get_asset_target_for_admin(
@@ -265,11 +267,24 @@ class ContentProxyController(Controller):
             return Response(content=_ASSET_NOT_FOUND, status_code=HTTP_404_NOT_FOUND)
 
         range_header = request.headers.get("range")
+        on_stream_opened: Callable[[], Awaitable[None]] | None = None
         if _is_view_start(parse_range(range_header, size_bytes)):
-            await feedback_service.record_asset_view(
-                target, admin_id=admin.id, product_id=product_id
-            )
-            await session.commit()
+
+            async def record_view_on_stream_opened() -> None:
+                await feedback_service.record_asset_view(
+                    target, admin_id=admin.id, product_id=product_id
+                )
+                await session.commit()
+                logger.info(
+                    "content.feedback_asset.viewed",
+                    report_id=str(target.report_id),
+                    asset_ref=target.asset_ref,
+                    admin_id=str(admin.id),
+                    owner_id=str(target.owner_id),
+                    product_id=product_id,
+                )
+
+            on_stream_opened = record_view_on_stream_opened
 
         return await self._stream_from_r2(
             r2_storage,
@@ -280,6 +295,7 @@ class ContentProxyController(Controller):
             range_header=range_header,
             if_none_match=request.headers.get("if-none-match"),
             cache_control=_NO_STORE,
+            on_stream_opened=on_stream_opened,
         )
 
     @staticmethod
@@ -293,8 +309,9 @@ class ContentProxyController(Controller):
         range_header: str | None,
         if_none_match: str | None,
         cache_control: str | None = None,
+        on_stream_opened: Callable[[], Awaitable[None]] | None = None,
     ) -> Stream | Response[ErrorEnvelope]:
-        """Resolve ownership → conditional GET → single ranged/full R2 GET → response.
+        """Resolve ownership → conditional GET → single R2 GET → callback → response.
 
         Ordering is deliberate and security-relevant: this runs strictly
         after the caller has already resolved ownership (storage_key/etag
@@ -304,7 +321,10 @@ class ContentProxyController(Controller):
         size_bytes (immutable once written) lets an unsatisfiable Range be
         rejected with zero R2 traffic too (D1). Only a genuinely servable
         request reaches R2, and it does so with exactly one GetObject call
-        (D2) — ranged or full, decided before the call is made.
+        (D2) — ranged or full, decided before the call is made. Once R2 has
+        produced a stream, ``on_stream_opened`` runs (for example, to commit
+        an audit row) before the response is returned, so no body byte is
+        yielded before it completes.
         """
         quoted_etag = f'"{etag}"'
         if cache_control is None:
@@ -362,6 +382,15 @@ class ContentProxyController(Controller):
                 ),
                 status_code=HTTP_502_BAD_GATEWAY,
             )
+
+        if on_stream_opened is not None:
+            try:
+                await on_stream_opened()
+            except BaseException:
+                # The R2 context was successfully opened, so close it with
+                # the real callback exception before propagating the failure.
+                await stream_ctx.__aexit__(*sys.exc_info())
+                raise
 
         async def _streaming_body() -> AsyncIterator[bytes]:
             try:

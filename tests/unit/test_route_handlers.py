@@ -9,7 +9,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -495,6 +495,43 @@ class TestContentRouteHandlers:
             r2_storage=MagicMock(),
         )
         assert response.status_code == HTTP_404_NOT_FOUND
+
+    async def test_feedback_continuation_does_not_construct_audit_callback(self) -> None:
+        """Later video chunks never stage or commit another view audit row."""
+        from src.api.routes.content import ContentProxyController
+        from src.api.services.feedback import FeedbackAssetTarget
+        from src.core.library_ref import LibraryAssetSource
+
+        target = FeedbackAssetTarget(
+            report_id=uuid4(),
+            source=LibraryAssetSource.OUTPUT,
+            asset_id=uuid4(),
+            owner_id=uuid4(),
+        )
+        content_proxy = AsyncMock()
+        content_proxy.resolve_output = AsyncMock(return_value=("key/file.png", "etag123", 1234))
+        content_proxy.ttl = 3600
+        feedback_service = AsyncMock()
+        feedback_service.get_asset_target_for_admin = AsyncMock(return_value=target)
+        self_mock = MagicMock()
+        self_mock._stream_from_r2 = AsyncMock(return_value=MagicMock())
+        request = self._make_request()
+        request.headers.get.side_effect = lambda name: "bytes=100-" if name == "range" else None
+
+        await ContentProxyController.proxy_feedback_asset.fn(  # type: ignore[attr-defined]
+            self_mock,
+            request=request,
+            admin=SimpleNamespace(id=uuid4()),
+            product_id="vex",
+            report_id=target.report_id,
+            session=AsyncMock(),
+            content_proxy=content_proxy,
+            r2_storage=MagicMock(),
+            feedback_service=feedback_service,
+        )
+
+        feedback_service.record_asset_view.assert_not_awaited()
+        assert self_mock._stream_from_r2.await_args.kwargs["on_stream_opened"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -3470,3 +3507,97 @@ class TestContentStreamFromR2:
             if_none_match='"some-other-etag"',
         )
         assert isinstance(result, Stream)
+
+    async def test_stream_opened_callback_runs_before_the_body_is_iterated(self) -> None:
+        """A view is durable before a caller can receive its first body byte."""
+        from src.api.routes.content import ContentProxyController
+        from src.api.services.storage.r2 import ObjectStream
+
+        calls: list[str] = []
+
+        @asynccontextmanager
+        async def stream_object(
+            _storage_key: str, *, range_header: str | None = None
+        ) -> AsyncIterator[ObjectStream]:
+            del range_header
+            calls.append("r2_enter")
+
+            async def chunks() -> AsyncIterator[bytes]:
+                calls.append("chunk")
+                yield b"chunk"
+
+            yield ObjectStream(
+                chunks=chunks(),
+                content_type="image/png",
+                content_length=5,
+                content_range=None,
+            )
+
+        r2_mock = MagicMock()
+        r2_mock.stream_object = stream_object
+
+        async def on_stream_opened() -> None:
+            calls.extend(("stage", "commit", "log"))
+
+        result = await ContentProxyController._stream_from_r2(
+            r2_mock,
+            "some/key",
+            "etag123",
+            5,
+            3600,
+            range_header=None,
+            if_none_match=None,
+            on_stream_opened=on_stream_opened,
+        )
+
+        assert isinstance(result, Stream)
+        assert calls == ["r2_enter", "stage", "commit", "log"]
+        iterator = cast("AsyncIterator[bytes]", result.iterator)
+        assert [chunk async for chunk in iterator] == [b"chunk"]
+        assert calls == ["r2_enter", "stage", "commit", "log", "chunk"]
+
+    async def test_stream_opened_callback_failure_closes_r2_and_propagates(self) -> None:
+        """A failed audit commit must prevent the content response from starting."""
+        from src.api.routes.content import ContentProxyController
+        from src.api.services.storage.r2 import ObjectStream
+
+        exit_args: list[tuple[object, object, object]] = []
+
+        class StreamContext:
+            async def __aenter__(self) -> ObjectStream:
+                async def chunks() -> AsyncIterator[bytes]:
+                    yield b"chunk"
+
+                return ObjectStream(
+                    chunks=chunks(),
+                    content_type="image/png",
+                    content_length=5,
+                    content_range=None,
+                )
+
+            async def __aexit__(
+                self, exc_type: object, exc_value: object, traceback: object
+            ) -> None:
+                exit_args.append((exc_type, exc_value, traceback))
+
+        r2_mock = MagicMock()
+        r2_mock.stream_object.return_value = StreamContext()
+
+        async def on_stream_opened() -> None:
+            raise RuntimeError("commit failed")
+
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await ContentProxyController._stream_from_r2(
+                r2_mock,
+                "some/key",
+                "etag123",
+                5,
+                3600,
+                range_header=None,
+                if_none_match=None,
+                on_stream_opened=on_stream_opened,
+            )
+
+        assert len(exit_args) == 1
+        assert exit_args[0][0] is RuntimeError
+        assert isinstance(exit_args[0][1], RuntimeError)

@@ -294,10 +294,12 @@ class FeedbackService:
     async def record_asset_view(
         self, target: FeedbackAssetTarget, *, admin_id: UUID, product_id: str
     ) -> None:
-        """Stage one durable audit row for an admin viewing a reported asset.
+        """Stage one audit row for an admin viewing a reported asset.
 
-        Does NOT commit. IDs only — never the report's message, note, client
-        path or user agent.
+        Does NOT commit or log: once the R2 stream is open, the caller commits
+        and then logs. A row means the server began serving the asset, not that
+        the client received every byte. IDs only — never the report's message,
+        note, client path or user agent.
         """
         await AdminRepository(self._session).write_audit(
             AdminAuditLog(
@@ -309,14 +311,6 @@ class FeedbackService:
                 detail=f"report {target.report_id} asset {target.asset_ref}",
                 source="api",
             )
-        )
-        logger.info(
-            "content.feedback_asset.viewed",
-            report_id=str(target.report_id),
-            asset_ref=target.asset_ref,
-            admin_id=str(admin_id),
-            owner_id=str(target.owner_id),
-            product_id=product_id,
         )
 
     async def update_by_admin(

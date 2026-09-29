@@ -1499,8 +1499,9 @@ Errors:   401 (not authenticated / not an admin),
           416 range_not_satisfiable, 502 upstream_error
 Note:     Streams the asset a feedback report points at, resolved as the reporter (owner-scoped)
           within the request's product. Cache-Control is `private, no-store`. Writes one
-          admin_audit_log row (`feedback.asset.view`, IDs only) when a view starts (no Range, or
-          a Range starting at byte 0). Use FeedbackReportAdmin.asset_url; never the owner URL.
+          admin_audit_log row (`feedback.asset.view`, IDs only) when the server starts serving the
+          asset (no Range, or a Range starting at byte 0); `304`, `404`, `416`, and `502` are not
+          audited. Use FeedbackReportAdmin.asset_url; never the owner URL.
 ```
 
 > **Removed (2026-07-22):** `DELETE /v1/content/{content_id}` — deletion is now typed via

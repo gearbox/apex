@@ -138,7 +138,7 @@ Streams the asset a report points at. It requires an **ADMIN or SUPERADMIN** cre
 
 - `Cache-Control: private, no-store` (the owner routes use `immutable`), so an admin device does not keep other users' media in its HTTP cache.
 - The asset is resolved as the **reporter**, not the admin. A report pointing at an asset its reporter does not own returns `404 asset_not_found`.
-- One `admin_audit_log` row (`action: feedback.asset.view`, IDs only) is written when a view starts: a request without `Range`, or a `Range` that starts at byte 0. Later range chunks of the same playback are not logged again.
+- One `admin_audit_log` row (`action: feedback.asset.view`, IDs only) is written when the server starts serving the asset: a request without `Range`, or a `Range` that starts at byte 0. Later range chunks of the same playback are not logged again. `304`, `404`, `416`, and `502` responses are not audited.
 
 | Status | `error` | Meaning |
 |---|---|---|
